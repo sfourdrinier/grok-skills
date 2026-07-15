@@ -318,6 +318,9 @@ Compatibility notes and versions tested: [docs/COMPATIBILITY.md](docs/COMPATIBIL
 
 Tests, pin revalidation, and PR notes: [CONTRIBUTING.md](CONTRIBUTING.md).
 
+**Cutting a release** (version bump, tests, tag, GitHub Release, post-smoke):
+[docs/RELEASE.md](docs/RELEASE.md).
+
 ```bash
 cd plugin/wrapper/scripts && python3 -m unittest discover -s tests -q
 cd plugin/scripts && node --test tests/*.test.mjs

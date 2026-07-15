@@ -19,6 +19,7 @@ Dual-host **plugin** (Claude Code + Codex) that runs **Grok** as a second coding
 13. **Dual-host parity.** Claude + Codex manifests/skills stay aligned; document both install paths (`sfourdrinier/grok-skills` preferred; local path = dev only).
 14. **Version pin is sacred.** Never edit `accepted-version.json` because a laptop CLI updated. Full revalidation only (`CONTRIBUTING.md` / cli-reference): probe suite, pin rewrite, live preflight, CHANGELOG note.
 15. **Trusted-input model.** Document limits honestly; do not claim read/network sandbox beyond the pin.
+16. **Releases follow the checklist.** Tag/publish only via [docs/RELEASE.md](docs/RELEASE.md): bump all packaging versions, CHANGELOG, tests, annotated `vX.Y.Z` tag, GitHub Release, dual-host post-smoke.
 
 ## Layout (cheat sheet)
 
@@ -37,3 +38,9 @@ Dual-host **plugin** (Claude Code + Codex) that runs **Grok** as a second coding
 - [ ] Proper unit tests for the change; suites green  
 - [ ] No secret-shaped contiguous literals; no private paths  
 - [ ] `claude plugin validate ./plugin --strict` if packaging changed  
+- [ ] If shipping a public version: follow [docs/RELEASE.md](docs/RELEASE.md)  
+
+## Releases
+
+Maintainer publish path (version files, tag, `gh release`, Codex/Claude smoke):
+**[docs/RELEASE.md](docs/RELEASE.md)**.

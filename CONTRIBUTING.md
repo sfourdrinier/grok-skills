@@ -96,6 +96,11 @@ Never hand-edit the pin without re-probing sandbox and auth behavior.
 - Add or update unit tests for any contract change.
 - Do not weaken fail-closed checks without an explicit security discussion.
 
+## Releases
+
+Maintainer checklist for version bump, tag, GitHub Release, and dual-host smoke:
+**[docs/RELEASE.md](docs/RELEASE.md)**.
+
 ## License
 
 By contributing, you agree your contributions are licensed under the MIT License
