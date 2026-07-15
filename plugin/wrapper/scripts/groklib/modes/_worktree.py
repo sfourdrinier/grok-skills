@@ -425,7 +425,14 @@ def _run_worktree_mode_body(
                 detect_unexpected_edits=False,
             )
             result, sandbox_obj, effective_model = _execute_and_verify(
-                mode_run, home, policy, prompt_path, run_paths, progress, result_holder
+                mode_run,
+                home,
+                policy,
+                prompt_path,
+                run_paths,
+                progress,
+                result_holder,
+                acc.warnings,
             )
             finalize(
                 FinalizeStage(

@@ -310,6 +310,7 @@ Compatibility notes and versions tested: [docs/COMPATIBILITY.md](docs/COMPATIBIL
 | Codex agents missing from picker | Open a **new session** after install (SessionStart installs them). Confirm `~/.codex/agents/grok-*.toml` exist and `companion:` points at the current plugin cache. Re-run optional `/grok:setup` or `setup --force-codex-agents` if you customized those files. |
 | Codex agent: `plugin root not set` | Stale agent from pre-1.2.1. Delete or force-refresh managed agents (new session or `setup --force-codex-agents`) so the absolute companion path is rewritten. |
 | Model invents wrong cache paths | Ignore invented paths. Skills use `PLUGIN_ROOT` / `CLAUDE_PLUGIN_ROOT` from the host; Codex agents use the absolute `GROK_COMPANION` in the installed TOML. |
+| Review notes files changed during the run | Informational only (dev servers, logs, other editors, or Grok listing paths). Review still **succeeds**; findings apply. Not a failure. See [over-conservatism audit](docs/reviews/2026-07-15-over-conservatism-audit.md). |
 
 ---
 

@@ -288,73 +288,85 @@ def _run_record(run: ModeRun, run_paths: runstate.RunPaths, status_value: str) -
     )
 
 
-def _capture_review_fs_baseline(run: "ModeRun") -> Optional["frozenset"]:
-    """Snapshot the repo's changed-file set BEFORE a read-only run, for the FS defense-in-depth check.
+def _capture_review_fs_baseline(
+    run: "ModeRun",
+    warnings: Optional[List[str]] = None,
+) -> Optional["frozenset"]:
+    """Snapshot dirty paths BEFORE a read-only run, for an informational drift note only.
 
-    Only applies to a mode that both forbids edits (``detect_unexpected_edits``)
-    and names a repository (review); returns None when the check does not apply.
-    Grok dogfood-3 #7: if the mode DOES require the check but the fingerprint
-    cannot be captured (git error, index lock, weird worktree state), this now
-    FAILS CLOSED (re-raises) instead of returning None and silently no-oping the
-    filesystem layer. That layer exists precisely because Grok's self-reported
-    JSON is untrusted; skipping it on a capture error would be fail-OPEN, so an
-    unverifiable baseline is a cannot-verify failure, not a passing clean review.
+    Only when ``detect_unexpected_edits`` and a repository are set. Capture failures
+    never block the review: they append an informational note (when ``warnings`` is
+    provided) and return None so Grok still runs. Drift is not a success gate.
     """
     if not run.detect_unexpected_edits or not run.repository:
         return None
     try:
         return worktree_escape.repo_change_fingerprint(pathlib.Path(run.repository))
     except GrokWrapperError as exc:
+        msg = (
+            "Could not snapshot the tree before this review "
+            "(informational only; review continues): {}".format(exc)
+        )
         _log(
             "_capture_review_fs_baseline",
-            "could not capture repo baseline; failing closed (FS write check unverifiable): {}".format(exc),
+            "baseline capture failed (soft-skip drift note): {}".format(exc),
         )
-        raise
+        if warnings is not None:
+            warnings.append(msg)
+        return None
 
 
-def _assert_no_repo_writes(run: "ModeRun", baseline: Optional["frozenset"], progress: ProgressWriter) -> None:
-    """Fail closed (unexpected-edits) if a read-only run actually wrote to the real checkout.
+def _report_repo_fs_drift(
+    run: "ModeRun",
+    baseline: Optional["frozenset"],
+    progress: ProgressWriter,
+    warnings: List[str],
+) -> None:
+    """Note checkout FS drift during a read-only run; never fail for it.
 
-    Grok dogfood #10 / dogfood-2 #9: the read-only "no edits" guarantee was only
-    checked against Grok's SELF-REPORTED JSON output. This adds a FOURTH,
-    filesystem-observing layer: compare the repo's changed-file fingerprint after
-    the run to the pre-run baseline; any NEWLY changed path (tracked edit or new
-    untracked file) means the sandbox write-confinement was bypassed or
-    mis-applied AND Grok did not report it, so fail closed. gitignored build
-    artifacts are excluded by the fingerprint, so this never false-positives on
-    them; a git error during the after-capture is itself a fail-closed
-    unexpected-edits (the check must not be silently skippable once a baseline
-    exists).
+    Product: a finished review is always kept. If paths changed while Grok ran
+    (dev servers, logs, other editors, etc.), append a short informational note
+    so the operator knows findings may be slightly stale. Do not raise.
 
-    Grok dogfood-4 #2 review-fs-content: the fingerprint is CONTENT-based
-    (``(path, hash)`` pairs), so a REWRITE of a file that was ALREADY dirty at
-    entry -- invisible to a path-only set diff -- is caught as a changed
-    ``(path, hash)`` pair. Every path whose ``(path, hash)`` pair differs from the
-    baseline is reported.
-
-    PR968 codex #2 vanished-baseline: comparing only ``after - baseline`` misses
-    a baseline entry that DISAPPEARED. If the run restores a pre-existing dirty
-    tracked file back to HEAD, or deletes a pre-existing untracked/ignored file,
-    that ``(path, hash)`` pair vanishes from ``after``, ``after - baseline`` is
-    empty, and the run would wrongly pass despite mutating the operator's
-    checkout. So the diff is taken in BOTH directions: any path whose ``(path,
-    hash)`` pair was ADDED, REMOVED, or CHANGED (tracked, untracked, or ignored)
-    is a run-attributable modification and is reported.
+    Separate from Grok *reporting* edits in JSON (still unexpected-edits) and from
+    code/verify worktree escape checks. Fingerprints are content/mode based and
+    compare both directions so the note stays accurate when it fires.
     """
     if baseline is None:
         return
-    after = worktree_escape.repo_change_fingerprint(pathlib.Path(run.repository))
+    try:
+        after = worktree_escape.repo_change_fingerprint(pathlib.Path(run.repository))
+    except GrokWrapperError as exc:
+        msg = (
+            "Could not check whether files changed during this review "
+            "(informational only): {}".format(exc)
+        )
+        _log("_report_repo_fs_drift", msg)
+        warnings.append(msg)
+        progress.safe_emit("validate", msg, level="warning")
+        return
     added_or_changed = {relative for relative, _fingerprint in (after - baseline)}
     removed_or_changed = {relative for relative, _fingerprint in (baseline - after)}
     new_changes = sorted(added_or_changed | removed_or_changed)
     if new_changes:
-        _log("_assert_no_repo_writes", "read-only run wrote to the real checkout: {}".format(new_changes))
-        raise GrokWrapperError(
-            "unexpected-edits",
-            "a read-only run modified files in the repository checkout",
-            {"changedFiles": new_changes},
+        # Cap the list so a huge concurrent build does not blow the envelope.
+        shown = new_changes[:20]
+        more = len(new_changes) - len(shown)
+        detail = ", ".join(shown) + (" (+{} more)".format(more) if more > 0 else "")
+        msg = (
+            "Files changed during this review (informational only; findings still apply): "
+            "{}".format(detail)
         )
-    progress.safe_emit("validate", "read-only run left the repository checkout unchanged")
+        _log("_report_repo_fs_drift", "FS drift (informational): {}".format(new_changes))
+        warnings.append(msg)
+        progress.safe_emit(
+            "validate",
+            msg,
+            level="warning",
+            data={"changedFiles": new_changes, "failClosed": False},
+        )
+        return
+    progress.safe_emit("validate", "no file changes detected during this review")
 
 
 def _grok_reported_changes(parsed: Optional[dict]) -> List[str]:
@@ -413,17 +425,19 @@ def _execute_and_verify(
     run_paths: runstate.RunPaths,
     progress: ProgressWriter,
     result_holder: Optional[List[Optional[grokcli.GrokRunResult]]] = None,
+    warnings: Optional[List[str]] = None,
 ) -> Tuple[grokcli.GrokRunResult, dict, str]:
-    """Run Grok, enforce the model family, verify sandbox write-confinement, and (review) reject edits.
+    """Run Grok, enforce model family and sandbox write-confinement.
 
     F1-execute-and-verify-drops-result: ``grokcli.execute`` produces a REAL result
-    before the post-run checks (model family, sandbox enforcement, unexpected
-    edits) run; any of those checks may raise. Because the caller assigns the
-    return tuple in a single statement, a raise here would leave the caller's
-    ``result`` local at None and DROP the completed answer from the post-run
-    failure envelope. ``result_holder`` (a one-element list) is populated the
-    instant the result exists, so the caller can recover it on the failure path
-    and still carry the redacted grok/usage/response fields.
+    before post-run checks (model family, sandbox). ``result_holder`` is populated
+    immediately so a later raise still carries the redacted answer on the failure
+    envelope.
+
+    Review/read-only product rule: never fail solely because the tree moved or
+    because Grok listed paths under change-shaped JSON keys. Those become
+    informational ``warnings`` when provided. Write confinement for code/verify
+    remains elsewhere (worktree escape checks).
     """
     leader_socket = runstate.allocate_leader_socket(home.home_dir, run_paths.run_id)
     spec = GrokRunSpec(
@@ -461,13 +475,27 @@ def _execute_and_verify(
     if run.detect_unexpected_edits:
         changes = _grok_reported_changes(result.parsed)
         if changes:
-            _log("_execute_and_verify", "grok reported {} file change(s) in a read-only run".format(len(changes)))
-            raise GrokWrapperError(
-                "unexpected-edits",
-                "grok reported file changes during a read-only review run",
-                {"changedFiles": changes},
+            shown = changes[:20]
+            more = len(changes) - len(shown)
+            detail = ", ".join(shown) + (" (+{} more)".format(more) if more > 0 else "")
+            msg = (
+                "Grok listed file-change fields during this read-only review "
+                "(informational only; findings still apply): {}".format(detail)
             )
-        progress.safe_emit("validate", "read-only run reported no file changes")
+            _log(
+                "_execute_and_verify",
+                "grok reported {} file change(s) in a read-only run (informational)".format(len(changes)),
+            )
+            if warnings is not None:
+                warnings.append(msg)
+            progress.safe_emit(
+                "validate",
+                msg,
+                level="warning",
+                data={"changedFiles": changes, "failClosed": False},
+            )
+        else:
+            progress.safe_emit("validate", "read-only run reported no file changes")
 
     return result, sandbox_obj, effective
 
@@ -578,12 +606,9 @@ def _run_grok_mode_body(
     repo_write_checked = False
 
     try:
-        # Filesystem defense-in-depth baseline for read-only modes (review),
-        # captured BEFORE Grok runs so a post-run write to the real checkout is
-        # observable. Grok dogfood-3 #7: captured INSIDE the classified try so a
-        # capture failure fails closed as a classified GrokWrapperError (this
-        # review cannot be verified clean), never a silently skipped FS check.
-        review_fs_baseline = _capture_review_fs_baseline(run)
+        # Informational FS baseline for read-only modes (review). Capture soft-fails
+        # so a git glitch never blocks the actual review.
+        review_fs_baseline = _capture_review_fs_baseline(run, warnings)
 
         # Wave 1 auto-preflight: version-keyed short cache; miss re-checks pin + auth.
         from groklib import preflight_cache
@@ -619,12 +644,18 @@ def _run_grok_mode_body(
             progress.safe_emit("authhome", "private home created", data={"home": str(home.home_dir)})
             prompt_path = _write_prompt_file(run_paths, run.prompt_text)
             _, sandbox_obj, effective_model = _execute_and_verify(
-                run, home, policy, prompt_path, run_paths, progress, result_holder
+                run,
+                home,
+                policy,
+                prompt_path,
+                run_paths,
+                progress,
+                result_holder,
+                warnings,
             )
-            # FS defense-in-depth (Grok dogfood #10 / dogfood-2 #9): a read-only
-            # run must not have written to the real checkout, even if it reported
-            # no edits in its JSON output.
-            _assert_no_repo_writes(run, review_fs_baseline, progress)
+            # FS drift audit (warn-only): concurrent processes / editors may touch
+            # the tree during review; never discard a completed review for that.
+            _report_repo_fs_drift(run, review_fs_baseline, progress, warnings)
             repo_write_checked = True
         finally:
             destroy_result = home_cleanup.destroy_once()
@@ -637,26 +668,10 @@ def _run_grok_mode_body(
     finally:
         _clean_extra_temp_dirs(run.extra_temp_dirs, warnings)
 
-    # PR968 codex #2 write-check-on-failure: the read-only checkout write-check was
-    # previously reached ONLY after a successful _execute_and_verify. A run that timed
-    # out / was cancelled / produced malformed output / failed validation AFTER a
-    # sandbox bypass already wrote to the operator's REAL checkout jumped straight to
-    # the error handler, so the baseline was never compared and the mutation was
-    # hidden behind the non-edit failure. Re-run the check on every terminal path that
-    # did NOT already run it; a detected mutation (or an unverifiable after-capture)
-    # fails closed and takes precedence, so the on-disk mutation is the surfaced
-    # outcome rather than the original non-edit failure.
+    # Same FS drift audit on failure paths (timeout/malformed/etc.) so concurrent
+    # dirt is still visible in warnings, without overriding the real error class.
     if review_fs_baseline is not None and not repo_write_checked:
-        try:
-            _assert_no_repo_writes(run, review_fs_baseline, progress)
-        except GrokWrapperError as exc:
-            outcome_error = exc
-            _log(
-                "run_grok_mode",
-                "{} failed-path repo write-check flagged a checkout mutation: {} ({})".format(
-                    run.mode, exc.error_class, exc
-                ),
-            )
+        _report_repo_fs_drift(run, review_fs_baseline, progress, warnings)
 
     # S4 / Grok dogfood-2 #2: a FAILED auth-material teardown is FAIL-CLOSED, never
     # a silent exit-0-as-if-clean. Retry the teardown once (the first failure may

@@ -409,8 +409,8 @@ def _scenario_secret_in_output(control: "dict") -> int:
 
 def _scenario_writes_into_cwd(control: "dict") -> int:
     # A read-only run that ACTUALLY writes a file into its cwd (the repo target)
-    # while reporting NO edits in its JSON output. The FS defense-in-depth check
-    # must catch this even though _grok_reported_changes sees nothing.
+    # while reporting NO edits in its JSON output. The FS drift audit should WARN
+    # (not fail) so a completed review is not discarded.
     try:
         with open("grok_sneaky_write.txt", "w", encoding="utf-8") as handle:
             handle.write("sneaky\n")
@@ -422,10 +422,8 @@ def _scenario_writes_into_cwd(control: "dict") -> int:
 
 
 def _scenario_writes_into_cwd_then_malformed(control: "dict") -> int:
-    # PR968 codex #2: a read-only run that ACTUALLY writes into its cwd AND THEN
-    # emits malformed output, so _execute_and_verify FAILS (output-malformed) before
-    # the success-path write-check runs. The failure-path write-check must still
-    # surface the checkout mutation instead of hiding it behind the malformed failure.
+    # A read-only run that writes into its cwd AND THEN emits malformed output.
+    # Failure class must remain output-malformed; FS drift is only a warning.
     try:
         with open("grok_sneaky_write.txt", "w", encoding="utf-8") as handle:
             handle.write("sneaky\n")
@@ -440,9 +438,8 @@ def _scenario_writes_into_cwd_then_malformed(control: "dict") -> int:
 
 
 def _scenario_reports_file_change(control: "dict") -> int:
-    # A read-only review reply that nonetheless reports a file change in its
-    # output (streamed on the terminal event); the review mode must classify
-    # this as unexpected-edits.
+    # A read-only review reply that lists a change-shaped JSON key; review must
+    # stay success with an informational note (not unexpected-edits).
     payload = _load_base_payload()
     payload["changedFiles"] = ["pkg/module.txt"]
     _emit_result(payload)

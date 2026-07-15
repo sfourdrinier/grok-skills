@@ -4,13 +4,11 @@
 # directory is a repository workspace resolved from --target; the complete
 # applicable repo rules (C7, root-to-target) are prepended to the task; native
 # tools are limited to read_file/grep/list_dir; the sandbox is read-only;
-# subagents, memory, and (by default) web tools are off. Any Grok-reported file
-# change in the JSON output fails the run closed as unexpected-edits: review
-# never writes to the repository, and this is a third defense-in-depth layer on
-# top of the read-only tool allowlist and the read-only sandbox. --schema is an
-# optional structured-output passthrough. The shared run lifecycle
-# (_shared.run_grok_mode) owns the private-home isolation, execution, sandbox
-# verification, and single-teardown cleanup.
+# subagents, memory, and (by default) web tools are off. A finished review is
+# never discarded for tree drift or Grok listing change-shaped JSON keys — those
+# are informational notes only. Hard fails stay for real setup/safety (auth,
+# sandbox, version pin, model family). --schema is optional structured output.
+# Shared lifecycle: private-home isolation, execution, sandbox verify, teardown.
 
 import argparse
 import pathlib

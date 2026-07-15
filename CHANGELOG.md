@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
+## [1.2.2] - 2026-07-15
+
+### Fixed
+
+- **Review UX: stop discarding finished reviews for purity checks.**
+  - Tree drift during the run → informational warning only
+  - Grok listing change-shaped JSON keys → informational warning only
+  - Pre-run FS baseline capture failure → soft-skip; review still runs
+  - Findings always kept when Grok completed successfully
+  - `unexpected-edits` remains for `code`/`verify` worktree escapes only
+  - Audit: `docs/reviews/2026-07-15-over-conservatism-audit.md`
+
 ## [1.2.1] - 2026-07-15
 
 ### Fixed

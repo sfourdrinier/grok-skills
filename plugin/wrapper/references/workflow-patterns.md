@@ -23,7 +23,7 @@ python3 plugin/wrapper/scripts/grok_agent.py review \
 **Check:** `response.text` / `response.structured` for findings;
 `instructions[]` lists every `AGENTS.md`/`CLAUDE.md` level actually included
 (with byte counts and SHA-256 hashes); `warnings` for anything Grok
-flagged in stderr; confirm no `unexpected-edits` failure (review is
+flagged in stderr; review may note concurrent file churn as a warning (not a failure). Confirm no
 read-only by construction).
 
 ## 2. Full-context cross-file or subsystem review

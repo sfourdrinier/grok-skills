@@ -221,7 +221,7 @@ class ReviewModeTests(ModeHarness):
         def _sigterm(*args, **kwargs):
             raise SystemExit(143)
 
-        with mock.patch.object(_shared, "_assert_no_repo_writes", _sigterm):
+        with mock.patch.object(_shared, "_report_repo_fs_drift", _sigterm):
             exit_code, out = self.drive(
                 ["review", "--target", "pkg", "--task", "Review"], repo_root=repo
             )
@@ -293,10 +293,9 @@ class ReviewModeTests(ModeHarness):
         self.assertGreater(entry["bytes"], 0)
         self.assertEqual(len(entry["sha256"]), 64)
 
-    def test_review_filesystem_write_is_unexpected_edits_even_without_json_report(self) -> None:
-        # Grok dogfood #10 / dogfood-2 #9: a read-only run that ACTUALLY writes a
-        # file into the real checkout while reporting NO edits in its JSON output
-        # must still fail closed via the FS defense-in-depth layer.
+    def test_review_filesystem_write_is_warn_not_failure(self) -> None:
+        # Concurrent FS drift (or even a sneaky cwd write) must NOT discard a
+        # completed review. Product: warn-only; hard-fail only when Grok reports edits.
         repo = gitfixtures.make_repo(pathlib.Path(self.tmp_root))
         exit_code, out = self.drive(
             ["review", "--target", "pkg", "--task", "Review"],
@@ -304,15 +303,17 @@ class ReviewModeTests(ModeHarness):
             repo_root=repo,
         )
         envelope = json.loads(out)
-        self.assertEqual(exit_code, 1, out)
-        self.assertEqual(envelope["status"], "failure")
-        self.assertEqual(envelope["error"]["class"], "unexpected-edits")
+        self.assertEqual(exit_code, 0, out)
+        self.assertEqual(envelope["status"], "success")
+        warnings = envelope.get("warnings") or []
+        self.assertTrue(
+            any("Files changed during this review" in str(w) for w in warnings),
+            warnings,
+        )
+        self.assertIsNotNone(envelope.get("response"))
 
-    def test_review_checkout_mutation_on_failed_run_is_surfaced_not_hidden(self) -> None:
-        # PR968 codex #2: a read-only run that WRITES into the real checkout and THEN
-        # fails (malformed output, so _execute_and_verify raises before the success-path
-        # write-check) must still be flagged unexpected-edits. The mutation must not be
-        # hidden behind the non-edit (output-malformed) failure.
+    def test_review_checkout_mutation_does_not_override_real_failure(self) -> None:
+        # Malformed output stays the failure class; FS drift is only a note.
         repo = gitfixtures.make_repo(pathlib.Path(self.tmp_root))
         exit_code, out = self.drive(
             ["review", "--target", "pkg", "--task", "Review"],
@@ -322,34 +323,42 @@ class ReviewModeTests(ModeHarness):
         envelope = json.loads(out)
         self.assertEqual(exit_code, 1, out)
         self.assertEqual(envelope["status"], "failure")
-        self.assertEqual(envelope["error"]["class"], "unexpected-edits")
+        self.assertEqual(envelope["error"]["class"], "output-malformed")
+        warnings = envelope.get("warnings") or []
+        self.assertTrue(
+            any("Files changed during this review" in str(w) for w in warnings),
+            warnings,
+        )
 
-    def test_review_fs_baseline_capture_failure_fails_closed(self) -> None:
-        # Grok dogfood-3 #7: if the pre-run FS baseline cannot be captured (git
-        # error / index lock), the review must FAIL CLOSED (the filesystem "no
-        # writes" layer is unverifiable), not silently skip the check and report a
-        # clean review.
+    def test_review_fs_baseline_capture_failure_does_not_block_review(self) -> None:
+        # Baseline is informational only: git glitches must not block a review.
         repo = self._repo()
+        call_count = {"n": 0}
 
         def _boom(_repo_root):
-            raise GrokWrapperError(
-                "worktree-failure", "simulated git fingerprint failure", {"reason": "index-lock"}
-            )
+            call_count["n"] += 1
+            # Fail the pre-run capture only; post-run drift check may still run.
+            if call_count["n"] == 1:
+                raise GrokWrapperError(
+                    "worktree-failure", "simulated git fingerprint failure", {"reason": "index-lock"}
+                )
+            return frozenset()
 
         with mock.patch.object(_shared.worktree_escape, "repo_change_fingerprint", _boom):
             exit_code, out = self.drive(
                 ["review", "--target", "pkg", "--task", "Review"], repo_root=repo
             )
         envelope = json.loads(out)
-        self.assertEqual(exit_code, 1, out)
-        self.assertEqual(envelope["status"], "failure")
-        self.assertEqual(envelope["error"]["class"], "worktree-failure")
+        self.assertEqual(exit_code, 0, out)
+        self.assertEqual(envelope["status"], "success")
+        warnings = envelope.get("warnings") or []
+        self.assertTrue(
+            any("Could not snapshot the tree before this review" in str(w) for w in warnings),
+            warnings,
+        )
 
-    def test_review_post_run_failure_carries_completed_result(self) -> None:
-        # Grok dogfood-3 #4: a POST-run failure (here: the FS-observed
-        # unexpected-edits, which fires AFTER Grok produced its answer) must carry
-        # the completed grok/response onto the failure envelope, so the operator
-        # is not forced to recover it from the unredacted progress.jsonl.
+    def test_review_fs_drift_success_still_carries_completed_result(self) -> None:
+        # FS drift after a completed Grok answer: success envelope keeps the body.
         repo = gitfixtures.make_repo(pathlib.Path(self.tmp_root))
         exit_code, out = self.drive(
             ["review", "--target", "pkg", "--task", "Review"],
@@ -357,9 +366,8 @@ class ReviewModeTests(ModeHarness):
             repo_root=repo,
         )
         envelope = json.loads(out)
-        self.assertEqual(exit_code, 1, out)
-        self.assertEqual(envelope["error"]["class"], "unexpected-edits")
-        # The completed answer rides on the failure envelope (redacted response).
+        self.assertEqual(exit_code, 0, out)
+        self.assertEqual(envelope["status"], "success")
         self.assertIsNotNone(envelope.get("response"))
         self.assertEqual(envelope["response"]["text"], "PONG")
         self.assertIsNotNone(envelope.get("grok"))
@@ -383,7 +391,8 @@ class ReviewModeTests(ModeHarness):
         # The rest of the body is preserved (not dropped).
         self.assertIn("rotate it", text)
 
-    def test_review_file_change_in_output_is_unexpected_edits(self) -> None:
+    def test_review_file_change_in_output_is_informational(self) -> None:
+        # Grok listing change-shaped JSON keys must not discard the review body.
         repo = self._repo()
         exit_code, out = self.drive(
             ["review", "--target", "pkg", "--task", "Review"],
@@ -391,16 +400,16 @@ class ReviewModeTests(ModeHarness):
             repo_root=repo,
         )
         envelope = json.loads(out)
-        self.assertEqual(exit_code, 1)
-        self.assertEqual(envelope["status"], "failure")
-        self.assertEqual(envelope["error"]["class"], "unexpected-edits")
-        # F1-execute-and-verify-drops-result: this unexpected-edits fires INSIDE
-        # _execute_and_verify (grok produced its answer, THEN the JSON change-key
-        # check raised). The completed (redacted) answer must still ride on the
-        # failure envelope via the result holder, not be dropped to None.
+        self.assertEqual(exit_code, 0, out)
+        self.assertEqual(envelope["status"], "success")
         self.assertIsNotNone(envelope.get("response"))
         self.assertEqual(envelope["response"]["text"], "PONG")
         self.assertIsNotNone(envelope.get("grok"))
+        warnings = envelope.get("warnings") or []
+        self.assertTrue(
+            any("file-change fields" in str(w) for w in warnings),
+            warnings,
+        )
 
     def test_review_schema_passthrough_sets_json_schema_flag(self) -> None:
         repo = self._repo()
@@ -600,8 +609,8 @@ class _RecordingProgress:
         self.emitted.append((args, kwargs))
 
 
-class AssertNoRepoWritesTests(unittest.TestCase):
-    """PR968 codex #2: the read-only no-writes check flags VANISHED baseline dirt too."""
+class ReportRepoFsDriftTests(unittest.TestCase):
+    """FS drift during review is warn-only (never unexpected-edits)."""
 
     def setUp(self) -> None:
         self.tmp_root = tempfile.mkdtemp(prefix="grok-cli-norepowrites-test-")
@@ -615,19 +624,21 @@ class AssertNoRepoWritesTests(unittest.TestCase):
     def _run(self):
         return types.SimpleNamespace(repository=str(self.repo))
 
-    def test_restored_and_deleted_pre_existing_dirt_are_flagged(self) -> None:
+    def test_restored_and_deleted_pre_existing_dirt_are_warned(self) -> None:
         baseline = _shared.worktree_escape.repo_change_fingerprint(self.repo)
         # The run restores the dirty tracked file back to HEAD and deletes the
         # pre-existing untracked file: both baseline entries VANISH from `after`.
         gitfixtures._git(self.repo, ["checkout", "--", "a.txt"])
         (self.repo / "dirty.txt").unlink()
 
-        with self.assertRaises(GrokWrapperError) as caught:
-            _shared._assert_no_repo_writes(self._run(), baseline, _RecordingProgress())
-        self.assertEqual(caught.exception.error_class, "unexpected-edits")
-        changed = caught.exception.detail["changedFiles"]
-        self.assertIn("a.txt", changed)
-        self.assertIn("dirty.txt", changed)
+        warnings: list = []
+        progress = _RecordingProgress()
+        _shared._report_repo_fs_drift(self._run(), baseline, progress, warnings)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("a.txt", warnings[0])
+        self.assertIn("dirty.txt", warnings[0])
+        self.assertIn("Files changed during this review", warnings[0])
+        self.assertIn("informational only", warnings[0])
 
     def test_untouched_pre_existing_dirt_passes(self) -> None:
         # Control: when the run leaves the operator's pre-existing dirt exactly as
@@ -635,7 +646,9 @@ class AssertNoRepoWritesTests(unittest.TestCase):
         # baseline dirt in either diff direction).
         baseline = _shared.worktree_escape.repo_change_fingerprint(self.repo)
         progress = _RecordingProgress()
-        _shared._assert_no_repo_writes(self._run(), baseline, progress)
+        warnings: list = []
+        _shared._report_repo_fs_drift(self._run(), baseline, progress, warnings)
+        self.assertEqual(warnings, [])
         self.assertEqual(len(progress.emitted), 1)
 
 
