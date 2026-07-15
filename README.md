@@ -52,7 +52,7 @@ skill names on Codex for later job output.
 | What | Claude Code | Codex (CLI / ChatGPT desktop) |
 |------|-------------|-------------------------------|
 | Install plugin | `/plugin marketplace add sfourdrinier/grok-skills` then `/plugin install grok@grok-skills` | `codex plugin marketplace add sfourdrinier/grok-skills` then `codex plugin add grok@grok-skills` |
-| Skills | Slash commands: `/grok:review`, `/grok:code`, `/grok:setup`, … | Skill picker / `$skill` style (build-dependent) — same skill **names** (`review`, `code`, `setup`, …) |
+| Skills | Slash commands **or** Skill tool: `/grok:review`, `/grok:code`, ... (model invocation enabled) | Skill picker / Skill tool - same skill **names** (`review`, `code`, `setup`, `dual-lens`, ...) |
 | Subagents | Auto-loaded from plugin: `grok-engineer-coder`, `grok-rescue` | Auto-installed on SessionStart into `~/.codex/agents/` (absolute companion path) |
 | Implement with Grok | Spawn **grok-engineer-coder**, or `/grok:code` | Spawn **grok-engineer-coder**, or run **code** skill |
 | Stop gate hooks | Claude hooks | Same hooks; may require **trust** via `/hooks` |
