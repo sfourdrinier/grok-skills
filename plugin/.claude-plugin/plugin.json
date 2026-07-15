@@ -1,0 +1,19 @@
+{
+  "name": "grok",
+  "version": "1.2.0",
+  "description": "Use Grok as a coding assistant from Claude Code: review, reason, implement, and verify through a hardened sandboxed wrapper. Not affiliated with xAI.",
+  "author": {
+    "name": "Stephane Fourdrinier"
+  },
+  "homepage": "https://github.com/sfourdrinier/grok-skills",
+  "repository": "https://github.com/sfourdrinier/grok-skills",
+  "license": "MIT",
+  "keywords": [
+    "grok",
+    "xai",
+    "code-review",
+    "agent",
+    "sandbox"
+  ],
+  "displayName": "Grok Skills"
+}

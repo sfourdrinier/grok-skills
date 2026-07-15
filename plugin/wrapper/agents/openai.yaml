@@ -1,0 +1,91 @@
+# wrapper/agents/openai.yaml
+#
+# Reference-only Grok agent-profile document for the "grok-cli" wrapper
+# integration. Task 0 proved that "--tools" plus "--permission-mode auto"
+# alone are sufficient to control which built-in tools a headless Grok run
+# can use (scripts/tests/fixtures/probe-report.md, Steps 4-5); no
+# "--agent-profile" flag exists anywhere in the C6 invocation baseline or the
+# C8 operator surface (scripts/grok_agent.py). This file is therefore NOT
+# read, parsed, or passed to any grok_agent.py invocation in version 1 - the
+# CLI flags built by groklib/grokcli.py are the enforced surface. It exists
+# only as a reviewed, human-readable record of the same non-always-approve,
+# tools-allowlist-driven policy, for a human comparing it against the wrapper
+# code and for a possible future Phase 2 ACP-based plugin (spec section 17)
+# that may need an on-disk profile for parity with a later Grok CLI release.
+# See references/cli-reference.md ("Why agents/openai.yaml exists") for the
+# full explanation. Field names below mirror the verified `grok --help` flag
+# names (Task 0 Step 2); this file does not claim to match any
+# "--agent-profile" YAML schema, because that schema was never live-probed.
+#
+# Non-always-approve permission stance (explicit, load-bearing): the pinned
+# HEADLESS_PERMISSION_MODE is "auto", never "bypassPermissions" and never any
+# blanket-approval stance. Under "auto" a tool call outside the allowlist
+# below is hard-denied (stopReason Cancelled), not queued and not silently
+# allowed; see references/cli-reference.md, "Permission-mode evidence".
+
+name: grok-cli-wrapper-reference
+description: >-
+  Reference record of the grok-skills wrapper's tool and permission
+  policy. Not consumed by scripts/grok_agent.py; documentation only.
+
+permission-mode: auto
+
+# No blanket-approval mode is ever selected. "bypassPermissions" tested
+# functionally identical to "auto" for allowlisted writes (probe-report.md
+# Step 4) but is intentionally NOT used: it removes the hard-deny boundary
+# for anything outside --tools, which is this wrapper's whole security
+# argument under permission-mode auto.
+never-use-permission-modes:
+  - bypassPermissions
+  - dontAsk
+  - acceptEdits
+
+no-subagents: true
+no-memory: true
+no-plan: true
+
+# --disable-web-search is present by default and omitted only when the
+# operator passes --web on review/reason/code (decision D-WEB); verify never
+# omits it. This reference profile documents the default (web disabled).
+disable-web-search: true
+
+# Per-mode tool allowlists actually built by groklib (mirrors
+# groklib/grokcli.py effective_tools() and the mode modules' _TOOLS
+# constants). An empty list means --tools is omitted and every built-in is
+# denied via --disallowed-tools instead (never a silent "no restriction").
+tools-by-mode:
+  review:
+    - read_file
+    - grep
+    - list_dir
+  reason-with-inputs:
+    - read_file
+  reason-without-inputs: []
+  code:
+    - read_file
+    - list_dir
+    - grep
+    - write
+    - search_replace
+    - run_terminal_command
+    - get_command_or_subagent_output
+  verify:
+    - read_file
+    - list_dir
+    - grep
+    - run_terminal_command
+    - get_command_or_subagent_output
+
+# Folded into the mode's allowlist only when --web is passed (review,
+# reason, code); verify never receives these (spec section 5.4).
+web-tools-opt-in:
+  - web_search
+  - web_fetch
+  - open_page
+  - open_page_with_find
+
+sandbox-by-mode:
+  review: read-only
+  reason: read-only
+  code: workspace
+  verify: workspace

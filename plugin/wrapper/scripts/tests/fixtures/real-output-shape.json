@@ -1,0 +1,23 @@
+{
+    "text": "PONG",
+    "stopReason": "EndTurn",
+    "sessionId": "c1c87161-4616-474d-8029-4b8b7e1ca9c2",
+    "requestId": "bcedfd69-64f8-4fcc-a2b4-acaa5706b70c",
+    "thought": "The user wants me to reply with exactly \"PONG\". This is a simple request with no tools needed.",
+    "usage": {
+        "input_tokens": 2272,
+        "cache_read_input_tokens": 10496,
+        "output_tokens": 31,
+        "reasoning_tokens": 25,
+        "total_tokens": 12799
+    },
+    "num_turns": 1,
+    "modelUsage": {
+        "grok-4.5": {
+            "inputTokens": 2272,
+            "outputTokens": 31,
+            "cacheReadInputTokens": 10496,
+            "modelCalls": 1
+        }
+    }
+}

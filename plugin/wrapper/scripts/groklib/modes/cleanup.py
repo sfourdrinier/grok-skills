@@ -1,0 +1,248 @@
+# wrapper/scripts/groklib/modes/cleanup.py
+#
+# `cleanup --run-id [--confirm]` mode: verifies the run directory's ownership
+# marker, rebuilds the Task 8 ExternalWorktree from the C2 run.json record when
+# one is recorded, and then either reports (dry-run, no --confirm) or removes
+# (--confirm) the run dir plus the external worktree and its branch. With
+# --confirm, an OWNER-MARKED worktree is removed even when dirty (code mode leaves
+# it dirty by design; Grok dogfood-2 #8) -- the marker plus --confirm are the
+# authority. A worktree without a valid owner marker is still refused
+# (state-ownership-violation), and any other worktree-failure retains everything
+# and reports it. An unknown run id is `invalid-target`.
+
+import argparse
+import pathlib
+import shutil
+from typing import List, Optional
+
+from groklib import GrokWrapperError, log_stderr, runstate
+from groklib import envelope as envelope_mod
+from groklib.worktree import ExternalWorktree, remove_external_worktree
+
+
+def _log(function: str, message: str) -> None:
+    log_stderr("modes.cleanup", function, message)
+
+
+def _worktree_fields(worktree: Optional[ExternalWorktree]) -> dict:
+    if worktree is None:
+        return {}
+    return {
+        "worktreePath": str(worktree.path),
+        "worktreeBranch": worktree.branch,
+        "baseRevision": worktree.base_revision,
+        "repository": str(worktree.repo_root),
+    }
+
+
+def _fail(run_id: str, exc: GrokWrapperError, worktree: Optional[ExternalWorktree] = None) -> dict:
+    _log("run", "cleanup failed for {!r}: {} ({})".format(run_id, exc.error_class, exc))
+    return envelope_mod.failure_envelope(
+        run_id=str(run_id),
+        mode="cleanup",
+        error_class=exc.error_class,
+        message=str(exc),
+        detail=exc.detail or None,
+        **_worktree_fields(worktree),
+    )
+
+
+def _rebuild_worktree(record: dict) -> Optional[ExternalWorktree]:
+    path = record.get("worktreePath")
+    branch = record.get("worktreeBranch")
+    base = record.get("baseRevision")
+    repository = record.get("repository")
+    if not (isinstance(path, str) and isinstance(branch, str) and isinstance(base, str) and isinstance(repository, str)):
+        return None
+    return ExternalWorktree(
+        path=pathlib.Path(path), branch=branch, base_revision=base, repo_root=pathlib.Path(repository)
+    )
+
+
+def _remove_run_dir(run_dir: pathlib.Path) -> None:
+    failed_paths: List[str] = []
+
+    def _on_error(_func: object, path: str, _exc_info: object) -> None:
+        failed_paths.append(path)
+
+    shutil.rmtree(str(run_dir), onerror=_on_error)
+    if failed_paths:
+        _log("_remove_run_dir", "failed to remove {} path(s) under {}".format(len(failed_paths), run_dir))
+        raise GrokWrapperError(
+            "cleanup-failure",
+            "failed to remove run directory {}".format(run_dir),
+            {"runDir": str(run_dir), "failedEntries": len(failed_paths)},
+        )
+
+
+def _dry_run(run_id: str, run_dir: pathlib.Path, worktree: Optional[ExternalWorktree]) -> dict:
+    worktree_report = None
+    if worktree is not None:
+        worktree_report = remove_external_worktree(worktree, confirmed=False, expected_run_id=run_id)
+    response = {"dryRun": True, "runDir": str(run_dir), "worktree": worktree_report}
+    return envelope_mod.build_envelope(
+        run_id=run_id,
+        mode="cleanup",
+        status="success",
+        response=response,
+        cleanup={"status": "retained", "detail": "dry-run: nothing removed; pass --confirm to remove"},
+        **_worktree_fields(worktree),
+    )
+
+
+def _confirmed(run_id: str, run_dir: pathlib.Path, worktree: Optional[ExternalWorktree]) -> dict:
+    worktree_report = None
+    if worktree is not None:
+        try:
+            worktree_report = remove_external_worktree(worktree, confirmed=True, expected_run_id=run_id)
+        except GrokWrapperError as exc:
+            if exc.error_class != "worktree-failure":
+                raise
+            # Dirty or otherwise unremovable worktree: retain everything
+            # (worktree AND run dir) and report the refusal. Fail closed rather
+            # than remove the run dir while its worktree is stranded.
+            _log("_confirmed", "worktree retained for {}: {}".format(run_id, exc))
+            return envelope_mod.failure_envelope(
+                run_id=run_id,
+                mode="cleanup",
+                error_class="worktree-failure",
+                message=str(exc),
+                detail=exc.detail or None,
+                response={"runDir": str(run_dir), "worktreeRemoved": False, "runDirRemoved": False},
+                cleanup={"status": "retained", "detail": "worktree retained (dirty or unremovable); run dir retained"},
+                **_worktree_fields(worktree),
+            )
+
+    try:
+        _remove_run_dir(run_dir)
+    except GrokWrapperError as exc:
+        # F5: the worktree (when present) was already removed above; only the
+        # run-dir removal failed. Report the partial state honestly instead of a
+        # "not-applicable" cleanup that hides the removed worktree + retained run
+        # dir. This returns (does not raise), so run()'s handler is bypassed.
+        worktree_removed = worktree is not None
+        _log("_confirmed", "run dir removal failed after worktree removal for {}: {}".format(run_id, exc))
+        detail = (
+            "worktree removed; run dir removal failed and is retained"
+            if worktree_removed
+            else "run dir removal failed and is retained"
+        )
+        return envelope_mod.failure_envelope(
+            run_id=run_id,
+            mode="cleanup",
+            error_class=exc.error_class,
+            message=str(exc),
+            detail=exc.detail or None,
+            response={
+                "runDir": str(run_dir),
+                "worktree": worktree_report,
+                "worktreeRemoved": worktree_removed,
+                "runDirRemoved": False,
+            },
+            cleanup={"status": "failed", "detail": detail},
+            **_worktree_fields(worktree),
+        )
+
+    # S5: when the worktree was removed but its branch could NOT be deleted
+    # (unmerged Grok commits), the branch is orphaned -- the top-level cleanup
+    # status must say "retained", not falsely claim "clean".
+    branch_retained = bool(worktree_report and worktree_report.get("branchRetained"))
+    response = {
+        "runDir": str(run_dir),
+        "worktree": worktree_report,
+        "worktreeRemoved": worktree is not None,
+        "runDirRemoved": True,
+    }
+    if branch_retained:
+        cleanup_field = {
+            "status": "retained",
+            "detail": "run dir and worktree removed; branch {} retained: {}".format(
+                worktree_report.get("worktreeBranch"), worktree_report.get("branchRetainReason")
+            ),
+        }
+    else:
+        detail = "run dir removed" + (" and worktree removed" if worktree is not None else "")
+        cleanup_field = {"status": "clean", "detail": detail}
+    return envelope_mod.build_envelope(
+        run_id=run_id,
+        mode="cleanup",
+        status="success",
+        response=response,
+        cleanup=cleanup_field,
+        **_worktree_fields(worktree),
+    )
+
+
+def _reap_partial_create_debris(run_id: str, run_dir: pathlib.Path, confirmed: bool) -> dict:
+    """Report (dry-run) or remove (--confirm) a create_run partial-failure run directory.
+
+    Round5 unreapable-run-dir-on-create-run-partial-failure / Grok dogfood-3 #3: a
+    run dir whose create_run failed before a valid owner.json/run.json existed is
+    unreachable by the normal cleanup path (load_run_record fails first). This
+    reaps that debris, delegating the actual removal (with a re-checked ownership
+    guard) to runstate.remove_partial_run_dir so a foreign dir is never removed.
+    """
+    if not confirmed:
+        return envelope_mod.build_envelope(
+            run_id=run_id,
+            mode="cleanup",
+            status="success",
+            response={"partialCreate": True, "runDir": str(run_dir), "runDirRemoved": False},
+            cleanup={
+                "status": "retained",
+                "detail": "partial-create run dir (no run record); pass --confirm to remove",
+            },
+        )
+    try:
+        runstate.remove_partial_run_dir(run_id)
+    except GrokWrapperError as exc:
+        return _fail(run_id, exc)
+    return envelope_mod.build_envelope(
+        run_id=run_id,
+        mode="cleanup",
+        status="success",
+        response={"partialCreate": True, "runDir": str(run_dir), "runDirRemoved": True},
+        cleanup={"status": "clean", "detail": "partial-create run dir removed"},
+    )
+
+
+def run(args: argparse.Namespace) -> dict:
+    """Verify ownership, then dry-run report or (with --confirm) remove the run's artifacts."""
+    run_id = args.run_id
+    confirmed = bool(getattr(args, "confirm", False))
+    run_dir = runstate.state_root() / "runs" / run_id
+
+    try:
+        record = runstate.load_run_record(run_id)
+    except GrokWrapperError as exc:
+        # A create_run that failed before a valid run.json/owner.json existed
+        # leaves an orphan dir that load_run_record can never reach; reap it here
+        # so the wrapper's own tooling can clean up its own partial state.
+        if runstate.is_orphaned_partial_run_dir(run_id):
+            return _reap_partial_create_debris(run_id, run_dir, confirmed)
+        return _fail(run_id, exc)
+    try:
+        owner_run_id = runstate.verify_owner_marker(run_dir / "owner.json")
+    except GrokWrapperError as exc:
+        return _fail(run_id, exc)
+    # S6: cross-check the marker names the requested run id (as write_run_record
+    # does), so a marker for a different run can never authorize removing this
+    # run's directory.
+    if owner_run_id != run_id:
+        _log("run", "run dir marker run id {!r} does not match requested {!r}".format(owner_run_id, run_id))
+        return _fail(
+            run_id,
+            GrokWrapperError(
+                "state-ownership-violation",
+                "run dir ownership marker run id does not match the requested run id",
+                {"markerRunId": owner_run_id, "requestedRunId": run_id},
+            ),
+        )
+
+    worktree = _rebuild_worktree(record)
+    try:
+        if not confirmed:
+            return _dry_run(run_id, run_dir, worktree)
+        return _confirmed(run_id, run_dir, worktree)
+    except GrokWrapperError as exc:
+        return _fail(run_id, exc, worktree)

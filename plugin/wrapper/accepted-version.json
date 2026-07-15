@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "version": "grok 0.2.101 (5bc4b5dfadcf) [stable]",
+  "validatedAtUtc": "2026-07-14T17:31:02Z",
+  "probeEvidence": "scripts/tests/fixtures/probe-report.md"
+}

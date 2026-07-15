@@ -1,0 +1,28 @@
+{
+  "name": "grok-skills",
+  "owner": {
+    "name": "Stephane Fourdrinier"
+  },
+  "metadata": {
+    "description": "Use Grok as a coding assistant from Claude Code through a hardened, sandboxed wrapper. Not affiliated with xAI.",
+    "version": "1.2.0"
+  },
+  "plugins": [
+    {
+      "name": "grok",
+      "description": "Grok review, reason, code, and verify via a self-contained sandboxed wrapper.",
+      "version": "1.2.0",
+      "author": {
+        "name": "Stephane Fourdrinier"
+      },
+      "source": "./plugin",
+      "license": "MIT",
+      "keywords": [
+        "grok",
+        "xai",
+        "code-review",
+        "agent"
+      ]
+    }
+  ]
+}

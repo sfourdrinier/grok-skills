@@ -1,0 +1,34 @@
+{
+  "title": "Grok review output",
+  "type": "object",
+  "required": ["summary", "findings"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "Short overall assessment"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["severity", "title"],
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": ["critical", "high", "medium", "low", "info"]
+          },
+          "title": { "type": "string" },
+          "file": { "type": "string" },
+          "line": { "type": "integer" },
+          "detail": { "type": "string" },
+          "reproduction": { "type": "string" },
+          "fixHint": { "type": "string" }
+        }
+      }
+    },
+    "residualRisks": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

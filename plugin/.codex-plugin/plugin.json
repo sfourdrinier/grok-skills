@@ -1,0 +1,42 @@
+{
+  "name": "grok",
+  "version": "1.2.0",
+  "description": "Use Grok as a coding assistant from Codex / ChatGPT: review, reason, implement, and verify through a hardened sandboxed wrapper. Not affiliated with xAI.",
+  "author": {
+    "name": "Stephane Fourdrinier"
+  },
+  "homepage": "https://github.com/sfourdrinier/grok-skills",
+  "repository": "https://github.com/sfourdrinier/grok-skills",
+  "license": "MIT",
+  "keywords": [
+    "grok",
+    "xai",
+    "code-review",
+    "agent",
+    "sandbox",
+    "claude-code"
+  ],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Grok Skills",
+    "shortDescription": "Hardened Grok companion for review, reason, code, verify",
+    "longDescription": "Ship-ready Grok CLI integration for Codex CLI and the ChatGPT desktop app (Codex). Every mode runs in a private auth home under a verified OS sandbox, emits exactly one machine-readable JSON result envelope, and keeps write-capable work in isolated git worktrees. The Python engine is bundled inside the plugin install tree so marketplace cache installs work without env hacks. Not affiliated with xAI.",
+    "developerName": "Stephane Fourdrinier",
+    "category": "Development & Workflow",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "websiteURL": "https://github.com/sfourdrinier/grok-skills",
+    "defaultPrompt": [
+      "Run the grok preflight skill and summarize readiness.",
+      "Use the grok review skill on the current change set and report correctness bugs.",
+      "Use the grok reason skill to critique this architecture decision."
+    ],
+    "brandColor": "#7CFFB2",
+    "composerIcon": "./assets/icon.svg",
+    "logo": "./assets/logo.svg",
+    "screenshots": []
+  }
+}

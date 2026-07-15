@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Grok Skills">
+  <rect width="128" height="128" rx="28" fill="#0B0F14"/>
+  <circle cx="64" cy="64" r="36" fill="none" stroke="#7CFFB2" stroke-width="8"/>
+  <path d="M44 72 L64 40 L84 72 Z" fill="#7CFFB2"/>
+  <rect x="58" y="68" width="12" height="22" rx="3" fill="#7CFFB2"/>
+</svg>

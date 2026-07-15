@@ -1,0 +1,29 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
+for marketplace / package tags.
+
+## [1.2.0] - 2026-07-15
+
+First public release of **grok-skills**: dual-host Grok companion for Claude Code and Codex.
+
+### Added
+
+- Hardened Python wrapper (7 modes, envelope, progress stream, worktree isolation)
+- Dual packaging: Claude marketplace + Codex `.agents` marketplace; wrapper under `plugin/wrapper/`
+- Skills: preflight, setup, review, adversarial-review, reason, code, verify, debate, dual-lens, jobs, result, cancel, transfer, status, cleanup
+- **Agents:** `grok-engineer-coder` (implementer; host orchestrates) and `grok-rescue` (diagnosis)
+- Setup installs Codex agents into `~/.codex/agents/`; Claude loads `plugin/agents/` automatically
+- Job registry, dual run modes (hardened / direct), optional fail-closed stop-review gate
+- Preflight cache, citations, web defaults, transfer allowlist, workspace session stamps
+- SECURITY.md, AGENTS.md, CONTRIBUTING.md, CI (Python 3.11/3.12, Node 20/22, packaging checks)
+
+### Security
+
+- Fail-closed stop gate (structured findings / verify pass; forces hardened)
+- Progress redact-on-write; secret patterns + injected-auth denylist
+- Gate-scripts-modified hard fail; git hooks disabled on worktree ops
+- Honest trusted-input model and residual limits (D-SECRETREAD, D-NET, D3)

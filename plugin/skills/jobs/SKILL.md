@@ -1,0 +1,24 @@
+---
+name: "jobs"
+description: "List recent Grok jobs for this workspace"
+argument-hint: ""
+disable-model-invocation: "true"
+allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
+---
+
+## Harness compatibility (Claude Code + Codex / ChatGPT)
+
+Resolve plugin root and run the companion with Node:
+
+```bash
+GROK_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:?plugin root not set}}"
+```
+
+Use the shell/Bash tool. Return companion stdout verbatim unless the skill says otherwise.
+Never put free-text in `--task "..."`; use `--task-file -` + single-quoted heredoc.
+
+```bash
+node "${GROK_PLUGIN_ROOT}/scripts/grok-companion.mjs" jobs
+```
+
+Show the table as returned.

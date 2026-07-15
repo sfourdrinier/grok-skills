@@ -1,0 +1,23 @@
+{
+  "name": "grok-skills",
+  "interface": {
+    "displayName": "Grok Skills"
+  },
+  "plugins": [
+    {
+      "name": "grok",
+      "displayName": "Grok Skills",
+      "description": "Hardened Grok companion for review, reason, code, and verify — private auth home, OS sandbox, isolated worktrees, one JSON result envelope.",
+      "source": {
+        "source": "local",
+        "path": "./plugin"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Development & Workflow",
+      "icon": "./plugin/assets/icon.svg"
+    }
+  ]
+}

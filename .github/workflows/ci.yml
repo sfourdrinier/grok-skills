@@ -1,0 +1,92 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  wrapper:
+    name: wrapper unit tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Run wrapper tests
+        working-directory: plugin/wrapper/scripts
+        # Tests patch current_platform to macos so sandbox/live-mode suites
+        # exercise enforcement logic on Linux CI; production still probe-requires
+        # unprobed platforms (see tests/probedplatform.py).
+        run: python3 -m unittest discover -s tests -q
+
+  plugin:
+    name: plugin unit tests
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Run plugin tests
+        working-directory: plugin/scripts
+        run: node --test tests/*.test.mjs
+
+  packaging:
+    name: packaging manifests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate marketplace and plugin JSON
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          def load(p):
+              data = json.loads(Path(p).read_text())
+              print(f"ok {p} keys={list(data)[:8]}")
+              return data
+
+          claude_m = load(".claude-plugin/marketplace.json")
+          assert claude_m.get("plugins"), "claude marketplace missing plugins"
+          assert claude_m["plugins"][0]["source"] == "./plugin"
+
+          agents_m = load(".agents/plugins/marketplace.json")
+          assert agents_m["plugins"][0]["source"]["path"] == "./plugin"
+
+          load("plugin/.claude-plugin/plugin.json")
+          codex = load("plugin/.codex-plugin/plugin.json")
+          assert codex.get("skills") == "./skills/"
+          assert codex.get("hooks") == "./hooks/hooks.json"
+          assert (Path("plugin") / "wrapper" / "scripts" / "grok_agent.py").is_file()
+          assert (Path("plugin") / "skills" / "review" / "SKILL.md").is_file()
+          assert (Path("plugin") / "agents" / "grok-engineer-coder.md").is_file()
+          assert (Path("plugin") / "agents" / "grok-rescue.md").is_file()
+          assert (Path("plugin") / "codex-agents" / "grok-engineer-coder.toml").is_file()
+          assert (Path("plugin") / "codex-agents" / "grok-rescue.toml").is_file()
+          print("packaging layout ok")
+          PY
+      - name: Install Claude Code CLI (optional validate)
+        run: |
+          curl -fsSL https://claude.ai/install.sh | bash || true
+          export PATH="$HOME/.local/bin:$PATH"
+          if command -v claude >/dev/null 2>&1; then
+            claude plugin validate ./plugin --strict
+            claude plugin validate .
+          else
+            echo "claude CLI not available in this runner; JSON packaging checks already passed"
+          fi

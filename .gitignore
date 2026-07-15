@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Node
+node_modules/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Local env / secrets (never commit)
+.env
+.env.*
+!.env.example
+
+# Test / coverage artifacts
+.coverage
+htmlcov/
+coverage/
+*.log
