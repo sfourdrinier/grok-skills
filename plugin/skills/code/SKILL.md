@@ -16,7 +16,9 @@ GROK_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:?plugin root not set}}"
 ```
 2. Run the companion with **Node** (required). The hardened Python wrapper is
    bundled at `"$GROK_PLUGIN_ROOT/wrapper/scripts/grok_agent.py"` and is resolved
-   automatically — do not invent alternate paths.
+   automatically. **Never invent cache paths** under `~/.claude/plugins/cache` or
+   `~/.codex/plugins/cache` - only use `CLAUDE_PLUGIN_ROOT` / `PLUGIN_ROOT` from the
+   host (see `plugin/references/plugin-root.md`).
 3. Use a **shell / terminal / Bash tool** to execute the documented command.
    - Claude Code: `Bash` tool (and `AskUserQuestion` when this skill asks for
      wait-vs-background).

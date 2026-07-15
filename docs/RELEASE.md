@@ -103,6 +103,8 @@ Paste CHANGELOG bullets if easier; keep upgrade steps for both hosts.
 - [ ] Codex: new session → `~/.codex/agents/grok-*.toml` present with
       `# managed-by: grok-skills` and `companion:` under the **new** cache path
 - [ ] Optional: `/grok:preflight` or setup skill once
+- [ ] Confirm skills/agents still say never invent cache paths
+  ([plugin/references/plugin-root.md](../plugin/references/plugin-root.md))
 
 ## What not to do
 

@@ -1,7 +1,7 @@
 ---
 name: "setup"
 description: "Check Grok readiness and optionally toggle stop gate / run mode (Codex agents auto-install on SessionStart)"
-argument-hint: "[--enable-review-gate | --disable-review-gate] [--run-mode hardened|direct] [--force-codex-agents] [--skip-codex-agents]"
+argument-hint: "[--enable-review-gate | --disable-review-gate] [--run-mode hardened|direct] [--force-codex-agents] [--skip-codex-agents] [--remove-codex-agents]"
 disable-model-invocation: "true"
 allowed-tools: "Bash(node:*)"
 ---
@@ -16,7 +16,9 @@ GROK_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:?plugin root not set}}"
 ```
 2. Run the companion with **Node** (required). The hardened Python wrapper is
    bundled at `"$GROK_PLUGIN_ROOT/wrapper/scripts/grok_agent.py"` and is resolved
-   automatically — do not invent alternate paths.
+   automatically. **Never invent cache paths** under `~/.claude/plugins/cache` or
+   `~/.codex/plugins/cache` - only use `CLAUDE_PLUGIN_ROOT` / `PLUGIN_ROOT` from the
+   host (see `plugin/references/plugin-root.md`).
 3. Use a **shell / terminal / Bash tool** to execute the documented command.
    - Claude Code: `Bash` tool.
    - Codex / ChatGPT: the shell tool (`Bash` / terminal). If no structured
@@ -52,8 +54,9 @@ Supported flags:
 | `--run-mode direct` | Persist direct (installed Grok CLI home) |
 | `--enable-review-gate` | Opt-in stop-time review gate |
 | `--disable-review-gate` | Turn gate off |
-| `--force-codex-agents` | Overwrite user-owned `~/.codex/agents/grok-*.toml` |
+| `--force-codex-agents` | Overwrite user-owned `~/.codex/agents/grok-*.toml` (writes `*.bak` first) |
 | `--skip-codex-agents` | Skip agent ensure for this run only |
+| `--remove-codex-agents` | Remove **managed** agents only (backups as `*.toml.bak`); user-owned kept |
 
 Examples:
 
@@ -61,6 +64,7 @@ Examples:
 node "${GROK_PLUGIN_ROOT}/scripts/grok-companion.mjs" setup
 node "${GROK_PLUGIN_ROOT}/scripts/grok-companion.mjs" setup --run-mode hardened
 node "${GROK_PLUGIN_ROOT}/scripts/grok-companion.mjs" setup --force-codex-agents
+node "${GROK_PLUGIN_ROOT}/scripts/grok-companion.mjs" setup --remove-codex-agents
 node "${GROK_PLUGIN_ROOT}/scripts/grok-companion.mjs" setup --enable-review-gate
 ```
 
@@ -82,9 +86,14 @@ node "${GROK_PLUGIN_ROOT}/scripts/grok-companion.mjs" setup --enable-review-gate
 
 - **Claude Code:** loads `plugin/agents/` from the install automatically.
 - **Codex:** SessionStart auto-installs managed agents (Codex cannot register plugin
-  agents natively yet). Managed files refresh when the plugin cache path or
-  templates change. User-edited files without the `managed-by: grok-skills`
+  agents natively yet — [openai/codex#18988](https://github.com/openai/codex/issues/18988)).
+  Managed files refresh when the plugin cache path or templates change (with
+  `*.bak` backup). User-edited files without the `managed-by: grok-skills`
   header are left alone unless `--force-codex-agents`.
+- **Uninstall managed Codex agents:** disable/uninstall the plugin first (or they
+  reappear on SessionStart), then
+  `setup --remove-codex-agents` (or delete `~/.codex/agents/grok-*.toml` that have
+  the managed header). See `plugin/references/plugin-root.md`.
 
 ## Gate behavior (if enabled)
 

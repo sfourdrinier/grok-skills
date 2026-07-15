@@ -19,6 +19,7 @@ const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
 const MANAGED_BY = "grok-skills";
 const COMPANION_PLACEHOLDER = "__GROK_COMPANION_Q__";
+const MANAGED_NAME_PREFIX = "grok-";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_TEMPLATES_DIR = path.resolve(SCRIPT_DIR, "..", "..", "codex-agents");
@@ -87,11 +88,7 @@ export function materializeAgentBody(sourceBody, companionAbs) {
     `# auto-installed by SessionStart / setup - re-runs update managed agents only`,
     "",
   ].join("\n");
-  // Drop stale install comments from the template top so the managed header wins.
-  const withoutOldInstallComments = rewritten.replace(
-    /^(?:#.*\n)*?(?=name\s*=)/m,
-    ""
-  );
+  const withoutOldInstallComments = rewritten.replace(/^(?:#.*\n)*?(?=name\s*=)/m, "");
   return header + withoutOldInstallComments;
 }
 
@@ -114,16 +111,31 @@ function writePrivate(filePath, content) {
 }
 
 /**
+ * Backup existing file to path.bak (and path.bak.N if needed). Returns backup path or null.
+ */
+export function backupAgentFile(filePath) {
+  if (!fs.existsSync(filePath)) {
+    return null;
+  }
+  let backup = `${filePath}.bak`;
+  let n = 0;
+  while (fs.existsSync(backup)) {
+    n += 1;
+    backup = `${filePath}.bak.${n}`;
+  }
+  fs.copyFileSync(filePath, backup);
+  try {
+    fs.chmodSync(backup, FILE_MODE);
+  } catch {
+    /* best-effort */
+  }
+  return backup;
+}
+
+/**
  * Copy / refresh shipped Codex agent templates into the user's Codex agents dir.
  *
- * @param {object} [opts]
- * @param {string} [opts.templatesDir]
- * @param {string|null} [opts.destDir]
- * @param {NodeJS.ProcessEnv} [opts.env]
- * @param {boolean} [opts.force] - overwrite unmanaged user files
- * @param {boolean} [opts.updateManaged] - refresh managed files when path/sha drift (default true)
- * @param {string} [opts.pluginRoot] - install tree; used to absolute-path the companion
- * @returns {{ ok: boolean, destDir: string, companion: string, installed: string[], updated: string[], skipped: string[], skippedUser: string[], errors: string[] }}
+ * @returns {{ ok: boolean, destDir: string, companion: string, installed: string[], updated: string[], skipped: string[], skippedUser: string[], backedUp: string[], errors: string[] }}
  */
 export function installCodexAgents({
   templatesDir = DEFAULT_TEMPLATES_DIR,
@@ -132,6 +144,7 @@ export function installCodexAgents({
   force = false,
   updateManaged = true,
   pluginRoot = null,
+  backup = true,
 } = {}) {
   const root =
     (pluginRoot && String(pluginRoot).trim()) ||
@@ -143,6 +156,7 @@ export function installCodexAgents({
   const updated = [];
   const skipped = [];
   const skippedUser = [];
+  const backedUp = [];
   const errors = [];
   const templates = listTemplateAgents(templatesDir);
 
@@ -155,6 +169,7 @@ export function installCodexAgents({
       updated,
       skipped,
       skippedUser,
+      backedUp,
       errors: [`no .toml templates in ${templatesDir}`],
     };
   }
@@ -167,6 +182,7 @@ export function installCodexAgents({
       updated,
       skipped,
       skippedUser,
+      backedUp,
       errors: [`companion not found at ${companion}`],
     };
   }
@@ -182,13 +198,13 @@ export function installCodexAgents({
       updated,
       skipped,
       skippedUser,
+      backedUp,
       errors: [`cannot create ${dest}: ${err.message}`],
     };
   }
 
   for (const t of templates) {
     const target = path.join(dest, `${t.name}.toml`);
-    // Fail-closed: basename only
     if (path.basename(target) !== `${t.name}.toml`) {
       errors.push(`${t.name}: invalid template name`);
       continue;
@@ -210,22 +226,24 @@ export function installCodexAgents({
       }
 
       const managed = isManagedAgentBody(existing);
-      if (managed && updateManaged) {
-        writePrivate(target, body);
-        updated.push(t.name);
+      const shouldWrite = (managed && updateManaged) || force;
+      if (!shouldWrite) {
+        if (managed && !updateManaged) {
+          skipped.push(t.name);
+        } else {
+          skippedUser.push(t.name);
+        }
         continue;
       }
-      if (force) {
-        writePrivate(target, body);
-        updated.push(t.name);
-        continue;
+
+      if (backup) {
+        const bak = backupAgentFile(target);
+        if (bak) {
+          backedUp.push(path.basename(bak));
+        }
       }
-      if (managed && !updateManaged) {
-        skipped.push(t.name);
-        continue;
-      }
-      // Unmanaged / user-owned: do not clobber
-      skippedUser.push(t.name);
+      writePrivate(target, body);
+      updated.push(t.name);
     } catch (err) {
       errors.push(`${t.name}: ${err.message}`);
     }
@@ -239,19 +257,102 @@ export function installCodexAgents({
     updated,
     skipped,
     skippedUser,
+    backedUp,
+    errors,
+  };
+}
+
+/**
+ * Remove managed grok-skills agents only (files with managed-by header).
+ * Leaves user-owned TOML alone. Optional backup before delete.
+ *
+ * @returns {{ ok: boolean, destDir: string, removed: string[], skippedUser: string[], backedUp: string[], errors: string[] }}
+ */
+export function uninstallCodexAgents({
+  destDir = null,
+  env = process.env,
+  backup = true,
+  onlyNames = null,
+} = {}) {
+  const dest = destDir || codexAgentsDir(env);
+  const removed = [];
+  const skippedUser = [];
+  const backedUp = [];
+  const errors = [];
+
+  if (!fs.existsSync(dest)) {
+    return { ok: true, destDir: dest, removed, skippedUser, backedUp, errors };
+  }
+
+  let names;
+  try {
+    names = fs
+      .readdirSync(dest)
+      .filter((n) => n.endsWith(".toml") && n.startsWith(MANAGED_NAME_PREFIX))
+      .map((n) => n.replace(/\.toml$/, ""));
+  } catch (err) {
+    return {
+      ok: false,
+      destDir: dest,
+      removed,
+      skippedUser,
+      backedUp,
+      errors: [`cannot list ${dest}: ${err.message}`],
+    };
+  }
+
+  if (onlyNames && onlyNames.length) {
+    const allow = new Set(onlyNames);
+    names = names.filter((n) => allow.has(n));
+  }
+
+  for (const name of names) {
+    const target = path.join(dest, `${name}.toml`);
+    if (path.basename(target) !== `${name}.toml`) {
+      errors.push(`${name}: invalid name`);
+      continue;
+    }
+    try {
+      if (!fs.existsSync(target)) {
+        continue;
+      }
+      const body = fs.readFileSync(target, "utf8");
+      if (!isManagedAgentBody(body)) {
+        skippedUser.push(name);
+        continue;
+      }
+      if (backup) {
+        const bak = backupAgentFile(target);
+        if (bak) {
+          backedUp.push(path.basename(bak));
+        }
+      }
+      fs.unlinkSync(target);
+      removed.push(name);
+    } catch (err) {
+      errors.push(`${name}: ${err.message}`);
+    }
+  }
+
+  return {
+    ok: errors.length === 0,
+    destDir: dest,
+    removed,
+    skippedUser,
+    backedUp,
     errors,
   };
 }
 
 /**
  * Silent, best-effort ensure for SessionStart. Never throws.
- * Always updates managed agents when the plugin cache path or template changes.
  */
 export function ensureCodexAgents(opts = {}) {
   try {
     return installCodexAgents({
       updateManaged: true,
       force: false,
+      backup: true,
       ...opts,
     });
   } catch (err) {
@@ -263,6 +364,7 @@ export function ensureCodexAgents(opts = {}) {
       updated: [],
       skipped: [],
       skippedUser: [],
+      backedUp: [],
       errors: [err.message || String(err)],
     };
   }

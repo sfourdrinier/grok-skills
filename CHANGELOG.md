@@ -11,6 +11,15 @@ for marketplace / package tags.
 ### Added
 
 - Release process checklist: [docs/RELEASE.md](docs/RELEASE.md) (linked from README, AGENTS.md, CONTRIBUTING.md)
+- [plugin/references/plugin-root.md](plugin/references/plugin-root.md): never invent cache paths; Codex agent uninstall
+- Setup `--remove-codex-agents` (managed agents only, with `*.bak` backups)
+
+### Fixed / improved
+
+- Claude agents: `tools: Bash(node:*)` only; clearer rescue vs engineer-coder routing
+- Codex agent TOML: `sandbox_mode = "read-only"`, never-invent-paths, absolute companion
+- Managed agent updates create backups before overwrite
+- Injection tests cover all Claude agents + Codex TOML templates
 
 ## [1.2.2] - 2026-07-15
 

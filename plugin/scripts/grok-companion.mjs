@@ -53,7 +53,7 @@ import {
   resolveTransferSource,
   writeTransferPack,
 } from "./lib/session-stamp.mjs";
-import { installCodexAgents } from "./lib/codex-agents.mjs";
+import { installCodexAgents, uninstallCodexAgents } from "./lib/codex-agents.mjs";
 
 const PYTHON = process.env.GROK_PYTHON?.trim() || "python3";
 const WRAPPER_NOT_FOUND_EXIT = 3;
@@ -540,6 +540,7 @@ function cmdSetup(cwd, args) {
   const disable = args.includes("--disable-review-gate");
   const skipCodexAgents = args.includes("--skip-codex-agents");
   const forceCodexAgents = args.includes("--force-codex-agents");
+  const removeCodexAgents = args.includes("--remove-codex-agents");
   if (args.includes("--run-mode") || args.includes("direct") || args.includes("hardened")) {
     const idx = args.indexOf("--run-mode");
     const mode = idx >= 0 ? args[idx + 1] : args.find((a) => a === "direct" || a === "hardened");
@@ -590,14 +591,28 @@ function cmdSetup(cwd, args) {
     hints.push("Hardened mode is default. For installed-CLI posture: companion setup --run-mode direct");
   }
 
-  // Ensure Codex custom agents (also auto-run on SessionStart; setup is optional).
+  // Codex agents: remove managed, or ensure (also auto-run on SessionStart).
   let agentsResult = null;
-  if (!skipCodexAgents) {
+  let agentsOk = true;
+  if (removeCodexAgents) {
+    agentsResult = uninstallCodexAgents({ env: process.env, backup: true });
+    const detail = agentsResult.ok
+      ? `removed=[${agentsResult.removed.join(", ") || "none"}] user-owned-kept=[${agentsResult.skippedUser.join(", ") || "none"}] backups=[${agentsResult.backedUp.join(", ") || "none"}] → ${agentsResult.destDir}`
+      : `errors: ${agentsResult.errors.join("; ")}`;
+    rows.push({ name: "codex agents", ok: agentsResult.ok, detail });
+    agentsOk = agentsResult.ok;
+    if (agentsResult.removed.length) {
+      hints.push(
+        "Removed managed Codex agents (backups as *.toml.bak). SessionStart will reinstall while the plugin is enabled."
+      );
+    }
+  } else if (!skipCodexAgents) {
     agentsResult = installCodexAgents({
       env: process.env,
       force: forceCodexAgents,
       updateManaged: true,
       pluginRoot: PLUGIN_ROOT,
+      backup: true,
     });
     const parts = [
       `installed=[${agentsResult.installed.join(", ") || "none"}]`,
@@ -606,6 +621,7 @@ function cmdSetup(cwd, args) {
       agentsResult.skippedUser?.length
         ? `user-owned=[${agentsResult.skippedUser.join(", ")}]`
         : null,
+      agentsResult.backedUp?.length ? `backups=[${agentsResult.backedUp.join(", ")}]` : null,
       `→ ${agentsResult.destDir}`,
     ].filter(Boolean);
     const detail = agentsResult.ok
@@ -616,13 +632,14 @@ function cmdSetup(cwd, args) {
       ok: agentsResult.ok,
       detail,
     });
+    agentsOk = agentsResult.ok;
     if (agentsResult.installed.length || agentsResult.updated.length) {
       hints.push(
         "Codex agents ready (absolute companion path): grok-engineer-coder, grok-rescue. Also auto-installed on SessionStart."
       );
     } else if (agentsResult.skippedUser?.length) {
       hints.push(
-        "Some ~/.codex/agents/grok-*.toml look user-owned (no managed-by header). Use setup --force-codex-agents to overwrite."
+        "Some ~/.codex/agents/grok-*.toml look user-owned (no managed-by header). Use setup --force-codex-agents to overwrite (creates .bak)."
       );
     } else if (agentsResult.skipped.length && !agentsResult.installed.length) {
       hints.push(
@@ -630,8 +647,6 @@ function cmdSetup(cwd, args) {
       );
     }
   }
-
-  const agentsOk = skipCodexAgents || !agentsResult || agentsResult.ok;
 
   // Also run hardened preflight when wrapper exists and mode is hardened
   if (wrapper && runMode === "hardened") {

@@ -15,6 +15,7 @@ import {
   materializeAgentBody,
   resolveCompanionPath,
   shellSingleQuote,
+  uninstallCodexAgents,
 } from "../lib/codex-agents.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -28,7 +29,7 @@ test("listTemplateAgents finds shipped TOML agents", () => {
   assert.ok(names.includes("grok-rescue"));
 });
 
-test("shipped templates use absolute companion placeholder", () => {
+test("shipped templates use absolute companion placeholder and sandbox_mode", () => {
   for (const t of listTemplateAgents(TEMPLATES)) {
     const body = fs.readFileSync(t.source, "utf8");
     assert.ok(
@@ -40,6 +41,11 @@ test("shipped templates use absolute companion placeholder", () => {
       !body.includes("${CLAUDE_PLUGIN_ROOT"),
       `${t.name} still uses CLAUDE_PLUGIN_ROOT`
     );
+    assert.ok(
+      body.includes("Never invent cache paths") || body.includes("NEVER invent cache paths"),
+      `${t.name} missing never-invent-paths guidance`
+    );
+    assert.match(body, /sandbox_mode\s*=\s*"read-only"/);
   }
 });
 
@@ -53,7 +59,7 @@ test("materializeAgentBody injects absolute companion and managed header", () =>
     path.join(TEMPLATES, "grok-engineer-coder.toml"),
     "utf8"
   );
-  const companion = "/cache/grok/1.2.1/scripts/grok-companion.mjs";
+  const companion = "/cache/grok/1.2.2/scripts/grok-companion.mjs";
   const body = materializeAgentBody(src, companion);
   assert.ok(isManagedAgentBody(body));
   assert.ok(body.includes(`companion: ${companion}`));
@@ -82,27 +88,11 @@ test("installCodexAgents writes managed agents with absolute companion", () => {
   assert.ok(fs.existsSync(companion));
 });
 
-test("installCodexAgents skips identical managed files; updates on companion drift", () => {
+test("installCodexAgents backs up before updating managed agents", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-"));
   const env = { CODEX_HOME: home };
-  const first = installCodexAgents({
-    templatesDir: TEMPLATES,
-    env,
-    pluginRoot: PLUGIN_ROOT,
-  });
-  assert.equal(first.ok, true);
+  installCodexAgents({ templatesDir: TEMPLATES, env, pluginRoot: PLUGIN_ROOT });
 
-  const second = installCodexAgents({
-    templatesDir: TEMPLATES,
-    env,
-    pluginRoot: PLUGIN_ROOT,
-  });
-  assert.equal(second.ok, true);
-  assert.equal(second.installed.length, 0);
-  assert.equal(second.updated.length, 0);
-  assert.ok(second.skipped.includes("grok-engineer-coder"));
-
-  // Simulate plugin upgrade to a new cache root with a real companion binary.
   const fakeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "plugin-root-"));
   const scriptsDir = path.join(fakeRoot, "scripts");
   fs.mkdirSync(scriptsDir, { recursive: true });
@@ -113,14 +103,14 @@ test("installCodexAgents skips identical managed files; updates on companion dri
     env,
     pluginRoot: fakeRoot,
     updateManaged: true,
+    backup: true,
   });
   assert.equal(third.ok, true);
   assert.ok(third.updated.includes("grok-engineer-coder"));
-  const body = fs.readFileSync(
-    path.join(home, "agents", "grok-engineer-coder.toml"),
-    "utf8"
+  assert.ok(third.backedUp.some((b) => b.includes("grok-engineer-coder")));
+  assert.ok(
+    fs.existsSync(path.join(home, "agents", "grok-engineer-coder.toml.bak"))
   );
-  assert.ok(body.includes(path.join(fakeRoot, "scripts", "grok-companion.mjs")));
 });
 
 test("installCodexAgents does not overwrite unmanaged user agents without force", () => {
@@ -149,13 +139,36 @@ test("installCodexAgents does not overwrite unmanaged user agents without force"
     env,
     pluginRoot: PLUGIN_ROOT,
     force: true,
+    backup: true,
   });
   assert.ok(forced.updated.includes("grok-engineer-coder"));
+  assert.ok(forced.backedUp.length >= 1);
   assert.ok(
     isManagedAgentBody(
       fs.readFileSync(path.join(agentsDir, "grok-engineer-coder.toml"), "utf8")
     )
   );
+});
+
+test("uninstallCodexAgents removes managed only and keeps user-owned", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-"));
+  const env = { CODEX_HOME: home };
+  installCodexAgents({ templatesDir: TEMPLATES, env, pluginRoot: PLUGIN_ROOT });
+
+  const agentsDir = path.join(home, "agents");
+  fs.writeFileSync(
+    path.join(agentsDir, "grok-custom.toml"),
+    "# not managed\nname = \"grok-custom\"\n"
+  );
+
+  const result = uninstallCodexAgents({ env, backup: true });
+  assert.equal(result.ok, true);
+  assert.ok(result.removed.includes("grok-engineer-coder"));
+  assert.ok(result.removed.includes("grok-rescue"));
+  assert.ok(result.skippedUser.includes("grok-custom"));
+  assert.ok(!fs.existsSync(path.join(agentsDir, "grok-engineer-coder.toml")));
+  assert.ok(fs.existsSync(path.join(agentsDir, "grok-engineer-coder.toml.bak")));
+  assert.ok(fs.existsSync(path.join(agentsDir, "grok-custom.toml")));
 });
 
 test("ensureCodexAgents never throws", () => {

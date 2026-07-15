@@ -66,9 +66,11 @@ the Grok CLI is ready.
 - [ ] `/grok:verify --worktree <path> --task "confirm tests"` → verifier verdict; `--web` refused
 - [ ] `/grok:status --run-id <id>` → prior envelope
 - [ ] `/grok:cleanup --run-id <id>` dry-run, then `--confirm`
-- [ ] `grok-engineer-coder` routes implementation to companion `code` (one shell call)
-- [ ] `grok-rescue` routes diagnosis to `reason` with one Bash call
+- [ ] `grok-engineer-coder` routes implementation to companion `code` (one shell call; no unrestricted Bash)
+- [ ] `grok-rescue` routes diagnosis to `reason` (not pure implement); one Bash(node) call
 - [ ] Codex: after SessionStart, `~/.codex/agents/grok-*.toml` present with absolute companion
+- [ ] Model does not invent `~/.claude/plugins/cache/...` paths (uses PLUGIN_ROOT / GROK_COMPANION)
+- [ ] Optional: `setup --remove-codex-agents` removes managed agents only
 
 ## Cache-layout check (critical)
 

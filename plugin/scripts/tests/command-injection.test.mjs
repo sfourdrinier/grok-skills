@@ -16,8 +16,30 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const SKILLS_DIR = path.resolve(SCRIPT_DIR, "..", "..", "skills");
-const RESCUE_AGENT = path.resolve(SCRIPT_DIR, "..", "..", "agents", "grok-rescue.md");
+const PLUGIN_DIR = path.resolve(SCRIPT_DIR, "..", "..");
+const SKILLS_DIR = path.join(PLUGIN_DIR, "skills");
+const AGENTS_DIR = path.join(PLUGIN_DIR, "agents");
+const CODEX_AGENTS_DIR = path.join(PLUGIN_DIR, "codex-agents");
+
+function agentAndTomlFiles() {
+  const agents = fs.existsSync(AGENTS_DIR)
+    ? fs
+        .readdirSync(AGENTS_DIR)
+        .filter((n) => n.endsWith(".md"))
+        .map((n) => path.join(AGENTS_DIR, n))
+    : [];
+  const tomls = fs.existsSync(CODEX_AGENTS_DIR)
+    ? fs
+        .readdirSync(CODEX_AGENTS_DIR)
+        .filter((n) => n.endsWith(".toml"))
+        .map((n) => path.join(CODEX_AGENTS_DIR, n))
+    : [];
+  return [...agents, ...tomls];
+}
+
+function allInvocationDocs() {
+  return [...skillFiles(), ...agentAndTomlFiles()];
+}
 
 // A companion INVOCATION line (the model-driven Bash call that runs the wrapper).
 const COMPANION_INVOCATION = /grok-companion\.mjs/;
@@ -100,13 +122,13 @@ test("no companion invocation documents a shell-evaluated --task free-text argum
   // single-quoted heredoc (stdin), never a `--task "<text>"` the shell would
   // command-substitute. Scans the commands AND the rescue agent (which builds the
   // call from an untrusted natural-language request).
-  const files = [...skillFiles(), RESCUE_AGENT];
+  const files = allInvocationDocs();
   const offenders = [];
   for (const file of files) {
     const lines = fs.readFileSync(file, "utf8").split("\n");
     lines.forEach((line, index) => {
       if (COMPANION_INVOCATION.test(line) && SHELL_EVALUATED_TASK.test(line)) {
-        offenders.push(`${path.basename(path.dirname(file))}/${path.basename(file)}:${index + 1}: ${line.trim()}`);
+        offenders.push(`${path.relative(PLUGIN_DIR, file)}:${index + 1}: ${line.trim()}`);
       }
     });
   }
@@ -125,7 +147,7 @@ test("companion/bang invocation lines single-quote every user-controlled flag va
   // path). Every such value in a shell-evaluable position (companion invocation
   // or bang line) MUST be single-quoted so a value containing $(...) or backticks
   // reaches the wrapper literally instead of running in the operator's shell.
-  const files = [...skillFiles(), RESCUE_AGENT];
+  const files = allInvocationDocs();
   const offenders = [];
   for (const file of files) {
     const lines = fs.readFileSync(file, "utf8").split("\n");
@@ -137,7 +159,9 @@ test("companion/bang invocation lines single-quote every user-controlled flag va
         if (value === "-") continue;
         // Safe: a single-quoted value cannot be command-substituted by the shell.
         if (value.startsWith("'")) continue;
-        offenders.push(`${path.basename(path.dirname(file))}/${path.basename(file)}:${index + 1}: ${match[0]}`);
+        // Template placeholders in docs (e.g. $GROK_COMPANION) are not user values.
+        if (value.startsWith("$") || value.startsWith('"') || value === "\\") continue;
+        offenders.push(`${path.relative(PLUGIN_DIR, file)}:${index + 1}: ${match[0]}`);
       }
     });
   }
@@ -152,4 +176,37 @@ test("companion/bang invocation lines single-quote every user-controlled flag va
 test("every skill markdown is present to scan", () => {
   // Sanity: the guardrail is only meaningful if it actually scanned files.
   assert.ok(skillFiles().length >= 1, "expected at least one skill SKILL.md to scan");
+  assert.ok(agentAndTomlFiles().length >= 2, "expected Claude agents and Codex TOML templates");
+});
+
+test("Claude agents restrict tools to Bash(node:*)", () => {
+  for (const file of fs.readdirSync(AGENTS_DIR).filter((n) => n.endsWith(".md"))) {
+    const body = fs.readFileSync(path.join(AGENTS_DIR, file), "utf8");
+    assert.match(
+      body,
+      /^tools:\s*Bash\(node:\*\)\s*$/m,
+      `${file} must set tools: Bash(node:*) (not unrestricted Bash)`
+    );
+    assert.ok(
+      /never invent cache paths/i.test(body),
+      `${file} must forbid inventing cache paths`
+    );
+  }
+});
+
+test("grok-rescue description does not steal pure implementation work", () => {
+  const body = fs.readFileSync(path.join(AGENTS_DIR, "grok-rescue.md"), "utf8");
+  const fm = body.split("---")[1] || "";
+  assert.ok(
+    /engineer-coder/i.test(body),
+    "rescue must point implementation work at grok-engineer-coder"
+  );
+  assert.ok(
+    !/substantial coding task/i.test(fm),
+    "rescue frontmatter should not claim substantial coding as primary"
+  );
+  assert.ok(
+    /not\s+for pure implementation|prefer for investigation/i.test(fm),
+    "rescue description should deprioritize pure implementation"
+  );
 });
