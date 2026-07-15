@@ -60,7 +60,7 @@ trust marketing; direct is one flag away for people who already live in Grok.
 |------|-------|--------|
 | Rescue resume | `--resume` / `--fresh` last rescue thread | **shipped** (agent template) |
 | Transfer | Claude transcript → Grok task pack | **shipped** |
-| SessionStart hook | stash transcript path for transfer | **shipped** |
+| SessionStart hook | stash transcript path for transfer + auto-ensure Codex agents | **shipped** (1.2.1) |
 
 ### D. Setup (parity)
 
@@ -68,6 +68,7 @@ trust marketing; direct is one flag away for people who already live in Grok.
 |------|-------|--------|
 | Rich setup report | CLI present, version pin, auth, mode | **shipped** |
 | Install guidance | Grok CLI + **git marketplace install** (no silent binary install) | **shipped** |
+| Zero post-install Codex agents | SessionStart materializes `~/.codex/agents` with absolute companion | **shipped** (1.2.1) |
 | Toggle run mode | hardened vs direct persisted per workspace | **shipped** |
 | Preflight cache | version-keyed short-circuit (`preflight-cache.json`) | **shipped** |
 

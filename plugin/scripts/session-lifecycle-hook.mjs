@@ -1,8 +1,14 @@
 #!/usr/bin/env node
-// Records Claude session path for /grok:transfer (SessionStart).
-// Workspace-keyed stamp (not a single global latest.json).
+// SessionStart: stamp for /grok:transfer + auto-ensure Codex agents.
+// SessionEnd: keep last stamp for transfer.
+// Codex does not register plugin agents natively (openai/codex#18988), so we
+// materialize ~/.codex/agents/*.toml here — zero post-install step for users.
 
+import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
+
+import { ensureCodexAgents } from "./lib/codex-agents.mjs";
 import { readAllStdinSync } from "./lib/read-stdin.mjs";
 import { writeSessionStamp } from "./lib/session-stamp.mjs";
 
@@ -16,6 +22,8 @@ try {
 }
 
 const cwd = input.cwd || process.env.CLAUDE_PROJECT_DIR || process.cwd();
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const FALLBACK_PLUGIN_ROOT = path.resolve(SCRIPT_DIR, "..");
 
 if (event === "SessionStart") {
   const sessionPath =
@@ -24,19 +32,34 @@ if (event === "SessionStart") {
     input.session_path ||
     process.env.CLAUDE_SESSION_PATH ||
     null;
-  writeSessionStamp(
-    cwd,
-    {
-      event,
-      at: new Date().toISOString(),
+  try {
+    writeSessionStamp(
       cwd,
-      transcript_path: sessionPath,
-    },
-    process.env
-  );
+      {
+        event,
+        at: new Date().toISOString(),
+        cwd,
+        transcript_path: sessionPath,
+      },
+      process.env
+    );
+  } catch {
+    /* never block session start */
+  }
   if (sessionPath) {
     process.env.GROK_CLAUDE_SESSION_PATH = sessionPath;
   }
+
+  // Auto-install / refresh managed Codex agents (absolute companion path).
+  // Silent: failures must not block the host session.
+  const pluginRoot =
+    (process.env.CLAUDE_PLUGIN_ROOT || process.env.PLUGIN_ROOT || "").trim() ||
+    FALLBACK_PLUGIN_ROOT;
+  ensureCodexAgents({
+    pluginRoot,
+    env: process.env,
+    updateManaged: true,
+    force: false,
+  });
 }
-// SessionEnd: keep last stamp for transfer
 process.exit(0);

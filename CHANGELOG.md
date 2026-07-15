@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
+## [1.2.1] - 2026-07-15
+
+### Fixed
+
+- **Zero post-install for Codex agents:** `SessionStart` auto-installs managed
+  agents into `~/.codex/agents/` with an **absolute** path to `grok-companion.mjs`
+  (no `PLUGIN_ROOT` required at spawn). Manual `/grok:setup` is optional (readiness /
+  gate / mode only).
+- Managed agents refresh when the plugin cache path or templates change; user-owned
+  TOML (no `managed-by: grok-skills` header) is left alone unless `--force-codex-agents`.
+- Setup exit code fails when agent ensure fails (unless `--skip-codex-agents`).
+
 ## [1.2.0] - 2026-07-15
 
 First public release of **grok-skills**: dual-host Grok companion for Claude Code and Codex.

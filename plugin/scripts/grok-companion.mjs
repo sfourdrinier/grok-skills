@@ -590,27 +590,48 @@ function cmdSetup(cwd, args) {
     hints.push("Hardened mode is default. For installed-CLI posture: companion setup --run-mode direct");
   }
 
-  // Install Codex custom agents (engineer-coder + rescue) into ~/.codex/agents.
+  // Ensure Codex custom agents (also auto-run on SessionStart; setup is optional).
+  let agentsResult = null;
   if (!skipCodexAgents) {
-    const agents = installCodexAgents({ env: process.env, force: forceCodexAgents });
-    const detail = agents.ok
-      ? `installed=[${agents.installed.join(", ") || "none"}] skipped=[${agents.skipped.join(", ") || "none"}] → ${agents.destDir}`
-      : `errors: ${agents.errors.join("; ")}`;
+    agentsResult = installCodexAgents({
+      env: process.env,
+      force: forceCodexAgents,
+      updateManaged: true,
+      pluginRoot: PLUGIN_ROOT,
+    });
+    const parts = [
+      `installed=[${agentsResult.installed.join(", ") || "none"}]`,
+      `updated=[${agentsResult.updated.join(", ") || "none"}]`,
+      `skipped=[${agentsResult.skipped.join(", ") || "none"}]`,
+      agentsResult.skippedUser?.length
+        ? `user-owned=[${agentsResult.skippedUser.join(", ")}]`
+        : null,
+      `→ ${agentsResult.destDir}`,
+    ].filter(Boolean);
+    const detail = agentsResult.ok
+      ? parts.join(" ")
+      : `errors: ${agentsResult.errors.join("; ")}`;
     rows.push({
       name: "codex agents",
-      ok: agents.ok,
+      ok: agentsResult.ok,
       detail,
     });
-    if (agents.installed.length) {
+    if (agentsResult.installed.length || agentsResult.updated.length) {
       hints.push(
-        "Codex agents installed: grok-engineer-coder (implementer) and grok-rescue. Spawn them from Codex agent picker."
+        "Codex agents ready (absolute companion path): grok-engineer-coder, grok-rescue. Also auto-installed on SessionStart."
       );
-    } else if (agents.skipped.length && !agents.installed.length) {
+    } else if (agentsResult.skippedUser?.length) {
       hints.push(
-        "Codex agents already present under ~/.codex/agents (use setup --force-codex-agents to overwrite)."
+        "Some ~/.codex/agents/grok-*.toml look user-owned (no managed-by header). Use setup --force-codex-agents to overwrite."
+      );
+    } else if (agentsResult.skipped.length && !agentsResult.installed.length) {
+      hints.push(
+        "Codex agents already up to date under ~/.codex/agents (SessionStart keeps managed agents in sync)."
       );
     }
   }
+
+  const agentsOk = skipCodexAgents || !agentsResult || agentsResult.ok;
 
   // Also run hardened preflight when wrapper exists and mode is hardened
   if (wrapper && runMode === "hardened") {
@@ -628,7 +649,7 @@ function cmdSetup(cwd, args) {
   }
 
   process.stdout.write(renderSetupReport({ rows, runMode, hints }));
-  return binary.ok && wrapper ? 0 : 1;
+  return binary.ok && wrapper && agentsOk ? 0 : 1;
 }
 
 function cmdDebate(cwd, wrapper, args, runMode) {

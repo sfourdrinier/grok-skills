@@ -1,6 +1,6 @@
 ---
 name: "setup"
-description: "Check Grok readiness, toggle stop gate / run mode, and install Codex agents (engineer-coder + rescue)"
+description: "Check Grok readiness and optionally toggle stop gate / run mode (Codex agents auto-install on SessionStart)"
 argument-hint: "[--enable-review-gate | --disable-review-gate] [--run-mode hardened|direct] [--force-codex-agents] [--skip-codex-agents]"
 disable-model-invocation: "true"
 allowed-tools: "Bash(node:*)"
@@ -26,9 +26,12 @@ GROK_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:?plugin root not set}}"
 
 <!-- plugin/skills/setup/SKILL.md -->
 
-`/grok:setup` (or Codex skill `setup`) runs readiness reporting, optional gate/mode
-toggles, and **installs Codex custom agents** into `~/.codex/agents/` by default
-(`grok-engineer-coder`, `grok-rescue`).
+`/grok:setup` (or Codex skill `setup`) is **optional**. It reports readiness and can
+toggle the stop gate / run mode.
+
+**Codex agents install automatically** on `SessionStart` (hook writes managed
+TOML under `~/.codex/agents/` with an absolute path to `grok-companion.mjs`).
+You should not need a manual setup step after installing the plugin.
 
 Raw arguments:
 `$ARGUMENTS`
@@ -49,8 +52,8 @@ Supported flags:
 | `--run-mode direct` | Persist direct (installed Grok CLI home) |
 | `--enable-review-gate` | Opt-in stop-time review gate |
 | `--disable-review-gate` | Turn gate off |
-| `--force-codex-agents` | Overwrite existing `~/.codex/agents/grok-*.toml` |
-| `--skip-codex-agents` | Do not install Codex agent templates |
+| `--force-codex-agents` | Overwrite user-owned `~/.codex/agents/grok-*.toml` |
+| `--skip-codex-agents` | Skip agent ensure for this run only |
 
 Examples:
 
@@ -67,19 +70,21 @@ node "${GROK_PLUGIN_ROOT}/scripts/grok-companion.mjs" setup --enable-review-gate
 - Bundled wrapper path
 - Run mode (hardened vs direct)
 - Stop-review gate on/off
-- **Codex agents** install result (dest `~/.codex/agents/`)
+- **Codex agents** ensure result (dest `~/.codex/agents/`, absolute companion)
 - Hardened preflight checks when wrapper is available
 
-## Agents after setup
+## Agents (zero post-install)
 
 | Agent | Host | Role |
 |-------|------|------|
 | `grok-engineer-coder` | Claude (`plugin/agents/`) + Codex (`~/.codex/agents/`) | Grok implements code in an isolated worktree; host orchestrates |
 | `grok-rescue` | Claude + Codex | Diagnosis / second opinion via Grok `reason` (or `code` if target+base given) |
 
-Claude Code loads plugin agents from the install automatically after
-`/reload-plugins`. Codex needs the TOML files under `~/.codex/agents/` (this
-setup step installs them).
+- **Claude Code:** loads `plugin/agents/` from the install automatically.
+- **Codex:** SessionStart auto-installs managed agents (Codex cannot register plugin
+  agents natively yet). Managed files refresh when the plugin cache path or
+  templates change. User-edited files without the `managed-by: grok-skills`
+  header are left alone unless `--force-codex-agents`.
 
 ## Gate behavior (if enabled)
 

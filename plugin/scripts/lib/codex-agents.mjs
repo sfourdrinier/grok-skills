@@ -1,9 +1,15 @@
 // plugin/scripts/lib/codex-agents.mjs
 //
 // Install Codex custom-agent TOML templates shipped under plugin/codex-agents/
-// into ~/.codex/agents/ (or CODEX_HOME/agents). One-command setup path for
-// grok-engineer-coder and grok-rescue.
+// into ~/.codex/agents/ (or CODEX_HOME/agents).
+//
+// Codex does not yet register plugin-bundled agents (openai/codex#18988), so we
+// materialize them into the global agents dir. Prefer ensureCodexAgents() from
+// SessionStart so install is zero-step for the user. Templates use the
+// __GROK_COMPANION_Q__ placeholder; install rewrites an absolute, single-quoted
+// path to grok-companion.mjs so agents never depend on PLUGIN_ROOT at spawn.
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,9 +17,12 @@ import { fileURLToPath } from "node:url";
 
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
+const MANAGED_BY = "grok-skills";
+const COMPANION_PLACEHOLDER = "__GROK_COMPANION_Q__";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_TEMPLATES_DIR = path.resolve(SCRIPT_DIR, "..", "..", "codex-agents");
+const DEFAULT_PLUGIN_ROOT = path.resolve(SCRIPT_DIR, "..", "..");
 
 export function codexHome(env = process.env) {
   const fromEnv = (env.CODEX_HOME ?? "").trim();
@@ -33,12 +42,57 @@ export function listTemplateAgents(templatesDir = DEFAULT_TEMPLATES_DIR) {
   }
   return fs
     .readdirSync(templatesDir)
-    .filter((name) => name.endsWith(".toml"))
+    .filter((name) => name.endsWith(".toml") && !name.includes(path.sep) && !name.includes("/"))
     .map((name) => ({
       name: name.replace(/\.toml$/, ""),
       source: path.join(templatesDir, name),
     }))
+    .filter((t) => t.name && !t.name.includes("..") && !t.name.includes(path.sep))
     .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export function resolveCompanionPath(pluginRoot = DEFAULT_PLUGIN_ROOT) {
+  return path.resolve(pluginRoot, "scripts", "grok-companion.mjs");
+}
+
+/** POSIX single-quote for embedding absolute paths in agent shell recipes. */
+export function shellSingleQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+export function isManagedAgentBody(body) {
+  return /(?:^|\n)#\s*managed-by:\s*grok-skills\b/m.test(String(body || ""));
+}
+
+function templateSha(sourceBody) {
+  return crypto.createHash("sha256").update(sourceBody, "utf8").digest("hex").slice(0, 16);
+}
+
+/**
+ * Build the installed TOML body: managed header + absolute companion path.
+ */
+export function materializeAgentBody(sourceBody, companionAbs) {
+  const quoted = shellSingleQuote(companionAbs);
+  if (!String(sourceBody).includes(COMPANION_PLACEHOLDER)) {
+    throw new Error(
+      `template missing ${COMPANION_PLACEHOLDER} placeholder (refusing to install without absolute companion path)`
+    );
+  }
+  const rewritten = String(sourceBody).split(COMPANION_PLACEHOLDER).join(quoted);
+  const sha = templateSha(sourceBody);
+  const header = [
+    `# managed-by: ${MANAGED_BY}`,
+    `# companion: ${companionAbs}`,
+    `# template-sha256: ${sha}`,
+    `# auto-installed by SessionStart / setup - re-runs update managed agents only`,
+    "",
+  ].join("\n");
+  // Drop stale install comments from the template top so the managed header wins.
+  const withoutOldInstallComments = rewritten.replace(
+    /^(?:#.*\n)*?(?=name\s*=)/m,
+    ""
+  );
+  return header + withoutOldInstallComments;
 }
 
 function mkdirPrivate(dir) {
@@ -60,59 +114,156 @@ function writePrivate(filePath, content) {
 }
 
 /**
- * Copy all shipped Codex agent templates into the user's Codex agents dir.
- * @returns {{ ok: boolean, destDir: string, installed: string[], skipped: string[], errors: string[] }}
+ * Copy / refresh shipped Codex agent templates into the user's Codex agents dir.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.templatesDir]
+ * @param {string|null} [opts.destDir]
+ * @param {NodeJS.ProcessEnv} [opts.env]
+ * @param {boolean} [opts.force] - overwrite unmanaged user files
+ * @param {boolean} [opts.updateManaged] - refresh managed files when path/sha drift (default true)
+ * @param {string} [opts.pluginRoot] - install tree; used to absolute-path the companion
+ * @returns {{ ok: boolean, destDir: string, companion: string, installed: string[], updated: string[], skipped: string[], skippedUser: string[], errors: string[] }}
  */
 export function installCodexAgents({
   templatesDir = DEFAULT_TEMPLATES_DIR,
   destDir = null,
   env = process.env,
   force = false,
+  updateManaged = true,
+  pluginRoot = null,
 } = {}) {
+  const root =
+    (pluginRoot && String(pluginRoot).trim()) ||
+    (env.CLAUDE_PLUGIN_ROOT || env.PLUGIN_ROOT || "").trim() ||
+    DEFAULT_PLUGIN_ROOT;
+  const companion = resolveCompanionPath(root);
   const dest = destDir || codexAgentsDir(env);
   const installed = [];
+  const updated = [];
   const skipped = [];
+  const skippedUser = [];
   const errors = [];
   const templates = listTemplateAgents(templatesDir);
+
   if (!templates.length) {
     return {
       ok: false,
       destDir: dest,
+      companion,
       installed,
+      updated,
       skipped,
+      skippedUser,
       errors: [`no .toml templates in ${templatesDir}`],
     };
   }
+  if (!fs.existsSync(companion)) {
+    return {
+      ok: false,
+      destDir: dest,
+      companion,
+      installed,
+      updated,
+      skipped,
+      skippedUser,
+      errors: [`companion not found at ${companion}`],
+    };
+  }
+
   try {
     mkdirPrivate(dest);
   } catch (err) {
     return {
       ok: false,
       destDir: dest,
+      companion,
       installed,
+      updated,
       skipped,
+      skippedUser,
       errors: [`cannot create ${dest}: ${err.message}`],
     };
   }
+
   for (const t of templates) {
     const target = path.join(dest, `${t.name}.toml`);
+    // Fail-closed: basename only
+    if (path.basename(target) !== `${t.name}.toml`) {
+      errors.push(`${t.name}: invalid template name`);
+      continue;
+    }
     try {
-      if (fs.existsSync(target) && !force) {
+      const sourceBody = fs.readFileSync(t.source, "utf8");
+      const body = materializeAgentBody(sourceBody, companion);
+
+      if (!fs.existsSync(target)) {
+        writePrivate(target, body);
+        installed.push(t.name);
+        continue;
+      }
+
+      const existing = fs.readFileSync(target, "utf8");
+      if (existing === body) {
         skipped.push(t.name);
         continue;
       }
-      const body = fs.readFileSync(t.source, "utf8");
-      writePrivate(target, body);
-      installed.push(t.name);
+
+      const managed = isManagedAgentBody(existing);
+      if (managed && updateManaged) {
+        writePrivate(target, body);
+        updated.push(t.name);
+        continue;
+      }
+      if (force) {
+        writePrivate(target, body);
+        updated.push(t.name);
+        continue;
+      }
+      if (managed && !updateManaged) {
+        skipped.push(t.name);
+        continue;
+      }
+      // Unmanaged / user-owned: do not clobber
+      skippedUser.push(t.name);
     } catch (err) {
       errors.push(`${t.name}: ${err.message}`);
     }
   }
+
   return {
     ok: errors.length === 0,
     destDir: dest,
+    companion,
     installed,
+    updated,
     skipped,
+    skippedUser,
     errors,
   };
+}
+
+/**
+ * Silent, best-effort ensure for SessionStart. Never throws.
+ * Always updates managed agents when the plugin cache path or template changes.
+ */
+export function ensureCodexAgents(opts = {}) {
+  try {
+    return installCodexAgents({
+      updateManaged: true,
+      force: false,
+      ...opts,
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      destDir: opts.destDir || codexAgentsDir(opts.env || process.env),
+      companion: "",
+      installed: [],
+      updated: [],
+      skipped: [],
+      skippedUser: [],
+      errors: [err.message || String(err)],
+    };
+  }
 }

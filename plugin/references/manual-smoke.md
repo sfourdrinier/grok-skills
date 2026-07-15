@@ -36,7 +36,11 @@ Preferred:
 
 1. `codex plugin marketplace add sfourdrinier/grok-skills`
 2. `codex plugin add grok@grok-skills` (or install from the app plugin directory)
-3. Invoke preflight / review from the plugin skill surface.
+3. Start a **new session** (SessionStart auto-installs agents - no setup skill required).
+4. Confirm `~/.codex/agents/grok-engineer-coder.toml` and `grok-rescue.toml` exist,
+   each with `# managed-by: grok-skills` and a `companion:` absolute path under the
+   current plugin cache.
+5. Invoke preflight / review from the plugin skill surface; spawn engineer-coder once.
 
 Local checkout (dev only): `codex plugin marketplace add /absolute/path/to/grok-skills`.
 
@@ -55,14 +59,16 @@ the Grok CLI is ready.
 ## Command checklist (Claude Code)
 
 - [ ] `/grok:preflight` → one readiness envelope
-- [ ] `/grok:setup` → preflight + gate status; enable/disable toggles work
+- [ ] `/grok:setup` → optional readiness + gate status; enable/disable toggles work (not required for agents)
 - [ ] `/grok:reason --task "Reply with exactly: PONG"` → success envelope
 - [ ] `/grok:review --target . --task "list top risks"` → one review envelope
 - [ ] `/grok:code --target . --base HEAD --task "trivial helper"` → worktree retained, no auto-commit
 - [ ] `/grok:verify --worktree <path> --task "confirm tests"` → verifier verdict; `--web` refused
 - [ ] `/grok:status --run-id <id>` → prior envelope
 - [ ] `/grok:cleanup --run-id <id>` dry-run, then `--confirm`
+- [ ] `grok-engineer-coder` routes implementation to companion `code` (one shell call)
 - [ ] `grok-rescue` routes diagnosis to `reason` with one Bash call
+- [ ] Codex: after SessionStart, `~/.codex/agents/grok-*.toml` present with absolute companion
 
 ## Cache-layout check (critical)
 

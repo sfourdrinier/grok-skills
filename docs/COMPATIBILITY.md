@@ -37,7 +37,10 @@ What we match:
   `source: { "source": "local", "path": "./plugin" }`, `policy`, `category`,
   `displayName`, `icon`
 - Plugin dual-manifest: `plugin/.codex-plugin/plugin.json` with `skills`,
-  `hooks`, Figma-style `interface` (displayName, logos, defaultPrompt, category
+  `hooks`, Figma-style `interface` (displayName, logos, defaultPrompt, category).
+  Codex does not yet register plugin-bundled custom agents (openai/codex#18988);
+  we materialize `plugin/codex-agents/*.toml` into `~/.codex/agents/` on SessionStart
+  with an absolute companion path (v1.2.1+).
   **Development & Workflow**)
 - Install sources (both hosts):
 

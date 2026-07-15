@@ -33,14 +33,14 @@ implementation in an isolated worktree.
    ```
 
    Full URL `https://github.com/sfourdrinier/grok-skills.git` works too; GitHub
-   shorthand is equivalent. Then `/reload-plugins` (Claude) or restart if needed.
-3. Setup (readiness + install Codex agents into `~/.codex/agents/`):
+   shorthand is equivalent. Then `/reload-plugins` (Claude) or start a new session
+   (Codex agents materialize on **SessionStart** - no manual setup).
+3. Optional readiness check (gate/mode toggles only; agents already auto-install):
 
    ```text
    /grok:setup
    ```
 
-   Codex: run the **setup** skill the same way your build exposes plugin skills.
 4. Try a review or ask the host to use **grok-engineer-coder** for implementation.
 
 You should see one JSON envelope on stdout with `"status": "success"` for live
@@ -53,7 +53,7 @@ skill names on Codex for later job output.
 |------|-------------|-------------------------------|
 | Install plugin | `/plugin marketplace add sfourdrinier/grok-skills` then `/plugin install grok@grok-skills` | `codex plugin marketplace add sfourdrinier/grok-skills` then `codex plugin add grok@grok-skills` |
 | Skills | Slash commands: `/grok:review`, `/grok:code`, `/grok:setup`, … | Skill picker / `$skill` style (build-dependent) — same skill **names** (`review`, `code`, `setup`, …) |
-| Subagents | Auto-loaded from plugin: `grok-engineer-coder`, `grok-rescue` | After `/grok:setup` (or setup skill): TOML agents under `~/.codex/agents/` |
+| Subagents | Auto-loaded from plugin: `grok-engineer-coder`, `grok-rescue` | Auto-installed on SessionStart into `~/.codex/agents/` (absolute companion path) |
 | Implement with Grok | Spawn **grok-engineer-coder**, or `/grok:code` | Spawn **grok-engineer-coder**, or run **code** skill |
 | Stop gate hooks | Claude hooks | Same hooks; may require **trust** via `/hooks` |
 
@@ -128,9 +128,9 @@ codex plugin list   # expect grok@grok-skills installed, enabled
 
 Also accepted: `https://github.com/sfourdrinier/grok-skills.git`, SSH URLs, or a local clone path for development.
 
-Skills ship with the plugin. Invoke them the way your Codex build exposes plugin skills (skill picker / `$skill` style, depending on version). The agent should run the companion via Node with `PLUGIN_ROOT` set by the install; you should not hand-edit paths.
+Skills ship with the plugin. Invoke them the way your Codex build exposes plugin skills (skill picker / `$skill` style, depending on version). Skills use `PLUGIN_ROOT` from the install; custom agents get an **absolute companion path** on SessionStart - do not invent cache paths by hand.
 
-Ask for preflight first, then review/reason/code/verify the same way you would in Claude. Prefer tasks via `--task-file` / stdin heredoc so nothing shell-expands.
+After install, start a new Codex session (or reload) so **SessionStart** can write `~/.codex/agents/grok-*.toml`. Then spawn **grok-engineer-coder** / **grok-rescue**, or run skills the same way you would in Claude. Prefer tasks via `--task-file` / stdin heredoc so nothing shell-expands.
 
 ### ChatGPT desktop (Codex)
 
@@ -139,8 +139,9 @@ Same package as the CLI (marketplace name `grok-skills`, plugin `grok`).
 1. Prefer adding the marketplace from git the same way as Codex CLI
    (`sfourdrinier/grok-skills` or the HTTPS URL).
 2. Open **Plugins** → **Grok Skills** marketplace → install **grok**.
-3. Restart if the app asks; trust hooks only if you enable the optional stop gate
-   (`/hooks` in CLI). Leave the gate off unless you want that.
+3. Restart / open a new session so SessionStart can install Codex agents.
+   Trust hooks only if you enable the optional stop gate (`/hooks` in CLI).
+   Leave the gate off unless you want that. No separate setup skill is required.
 
 If the desktop build only offers “open as project,” open a clone of this repo once
 so it discovers `.agents/plugins/marketplace.json`, then install **grok** from there.
@@ -161,7 +162,7 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 | Skill | What it does |
 |-------|----------------|
 | `/grok:preflight` | Readiness only: binary pin, auth, sandbox policy, private-home lifecycle. No task. |
-| `/grok:setup` | Readiness, gate/mode toggles, install Codex agents (`grok-engineer-coder`, `grok-rescue`). |
+| `/grok:setup` | Optional readiness report + gate/mode toggles. Codex agents auto-install on SessionStart. |
 | `/grok:review` | Read-only review. Target defaults to `.`; optional `--base` for branch review. |
 | `/grok:adversarial-review` | Hostile review that challenges design; web on by default. |
 | `/grok:dual-lens` | Adversarial pass, then ordinary review on the same target. |
@@ -184,12 +185,11 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 | **`grok-rescue`** | Second opinion / diagnosis via Grok `reason` (or `code` if target+base are already known). |
 
 - **Claude Code:** agents ship in the plugin (`plugin/agents/`). Reload plugins after install.
-- **Codex:** run setup once so templates are copied to `~/.codex/agents/`:
-
-  ```bash
-  node "${PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/scripts/grok-companion.mjs" setup
-  # overwrite templates: … setup --force-codex-agents
-  ```
+- **Codex:** agents auto-install on **SessionStart** into `~/.codex/agents/` with an
+  absolute path to `grok-companion.mjs` (Codex cannot register plugin agents natively
+  yet — [openai/codex#18988](https://github.com/openai/codex/issues/18988)). Managed
+  files refresh on plugin upgrade; user-owned TOML is left alone unless
+  `setup --force-codex-agents`.
 
 
 ### Run modes (security posture)
@@ -284,10 +284,11 @@ grok-skills/
   .agents/plugins/marketplace.json   # Codex / ChatGPT marketplace
   plugin/                            # install unit (cache-safe)
     skills/                          # /grok:* definitions
-    scripts/                         # companion, gate, relay
+    scripts/                         # companion, gate, relay, SessionStart
     wrapper/                         # Python engine (bundled)
-    agents/                          # Claude grok-rescue
-    hooks/                           # optional stop-review gate
+    agents/                          # Claude: grok-engineer-coder, grok-rescue
+    codex-agents/                    # Codex TOML templates (auto -> ~/.codex/agents)
+    hooks/                           # SessionStart agent ensure + optional stop gate
     assets/
   docs/                              # security, provenance, compatibility
 ```
@@ -306,6 +307,9 @@ Compatibility notes and versions tested: [docs/COMPATIBILITY.md](docs/COMPATIBIL
 | `probe-required` on Linux/Windows | Expected until that platform’s sandbox is live-probed. |
 | Skills missing after install | Claude: `/reload-plugins`. Codex: check `codex plugin list`. Desktop: restart after install. |
 | Codex install: which name? | Use `grok@grok-skills` (plugin@marketplace). |
+| Codex agents missing from picker | Open a **new session** after install (SessionStart installs them). Confirm `~/.codex/agents/grok-*.toml` exist and `companion:` points at the current plugin cache. Re-run optional `/grok:setup` or `setup --force-codex-agents` if you customized those files. |
+| Codex agent: `plugin root not set` | Stale agent from pre-1.2.1. Delete or force-refresh managed agents (new session or `setup --force-codex-agents`) so the absolute companion path is rewritten. |
+| Model invents wrong cache paths | Ignore invented paths. Skills use `PLUGIN_ROOT` / `CLAUDE_PLUGIN_ROOT` from the host; Codex agents use the absolute `GROK_COMPANION` in the installed TOML. |
 
 ---
 
