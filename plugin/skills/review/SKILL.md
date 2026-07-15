@@ -2,7 +2,6 @@
 name: "review"
 description: "Run a full-context, read-only Grok code review over a workspace path"
 argument-hint: "[--target <path>] [--base <ref>] (--task <text> | --task-file <path>) [--web] [--schema <path>] [--model <id>] [--timeout <s>] [--max-turns <n>] [--wait|--background]"
-disable-model-invocation: "true"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
 

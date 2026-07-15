@@ -2,7 +2,6 @@
 name: "status"
 description: "Read back a prior Grok run's stored envelope and progress by run id (read-only)"
 argument-hint: "[--run-id <run-id>]"
-disable-model-invocation: "true"
 allowed-tools: "Bash(node:*)"
 ---
 

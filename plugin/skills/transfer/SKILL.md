@@ -2,7 +2,6 @@
 name: "transfer"
 description: "Package the current Claude session into a Grok task pack"
 argument-hint: "[--source <claude-jsonl>]"
-disable-model-invocation: "true"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
 

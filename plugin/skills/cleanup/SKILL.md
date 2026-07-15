@@ -2,7 +2,6 @@
 name: "cleanup"
 description: "Report (dry-run) or remove a Grok run's owned session state and worktree by run id"
 argument-hint: "--run-id <run-id> [--confirm]"
-disable-model-invocation: "true"
 allowed-tools: "Bash(node:*)"
 ---
 

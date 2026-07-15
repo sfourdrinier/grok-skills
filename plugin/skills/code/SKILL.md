@@ -2,7 +2,6 @@
 name: "code"
 description: "Have Grok implement code in an isolated external worktree (nothing is committed or pushed)"
 argument-hint: "--target <path> --base <revision> (--task <text> | --task-file <path>) [--web] [--model <id>] [--timeout <s>] [--max-turns <n>]"
-disable-model-invocation: "true"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
 

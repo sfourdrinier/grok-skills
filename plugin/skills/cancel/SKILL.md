@@ -2,7 +2,6 @@
 name: "cancel"
 description: "Cancel a running Grok job"
 argument-hint: "[job-id]"
-disable-model-invocation: "true"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
 

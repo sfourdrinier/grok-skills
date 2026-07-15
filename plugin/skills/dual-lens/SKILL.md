@@ -2,7 +2,6 @@
 name: "dual-lens"
 description: "Run adversarial-review then review on the same target (dual-lens harden recipe)"
 argument-hint: "[--target <path>] [--task <text> | --task-file <path>]"
-disable-model-invocation: "true"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
 

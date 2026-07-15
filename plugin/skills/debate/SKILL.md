@@ -2,7 +2,6 @@
 name: "debate"
 description: "Bounded Grok debate: two opposing reason passes, then synthesis"
 argument-hint: "(--task <text> | --task-file <path>)"
-disable-model-invocation: "true"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
 

@@ -2,7 +2,6 @@
 name: "jobs"
 description: "List recent Grok jobs for this workspace"
 argument-hint: ""
-disable-model-invocation: "true"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
 

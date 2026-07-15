@@ -2,7 +2,6 @@
 name: "setup"
 description: "Check Grok readiness and optionally toggle stop gate / run mode (Codex agents auto-install on SessionStart)"
 argument-hint: "[--enable-review-gate | --disable-review-gate] [--run-mode hardened|direct] [--force-codex-agents] [--skip-codex-agents] [--remove-codex-agents]"
-disable-model-invocation: "true"
 allowed-tools: "Bash(node:*)"
 ---
 

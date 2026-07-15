@@ -2,7 +2,6 @@
 name: "reason"
 description: "Get a cold, isolated Grok second opinion on named artifacts (architecture, debugging, plan critique)"
 argument-hint: "(--task <text> | --task-file <path>) [--input <path> ...] [--rules-file <path> ...] [--web] [--schema <path>] [--model <id>] [--timeout <s>] [--max-turns <n>]"
-disable-model-invocation: "true"
 allowed-tools: "Bash(node:*)"
 ---
 

@@ -2,7 +2,6 @@
 name: "adversarial-review"
 description: "Adversarial Grok review that challenges design and hunts failure modes"
 argument-hint: "[--wait|--background] [--base <ref>] [--target <path>] [--web] [focus text]"
-disable-model-invocation: "true"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
 

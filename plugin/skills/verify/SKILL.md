@@ -2,7 +2,6 @@
 name: "verify"
 description: "Have Grok independently verify a change in an existing worktree (no source edits, hermetic)"
 argument-hint: "--worktree <absolute-path> (--task <text> | --task-file <path>) [--model <id>] [--timeout <s>] [--max-turns <n>]"
-disable-model-invocation: "true"
 allowed-tools: "Bash(node:*)"
 ---
 

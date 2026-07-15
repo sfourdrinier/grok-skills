@@ -2,7 +2,6 @@
 name: "result"
 description: "Show stored output for a finished Grok job"
 argument-hint: "[job-id] [--pretty]"
-disable-model-invocation: "true"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
 

@@ -20,6 +20,9 @@ for marketplace / package tags.
 - Codex agent TOML: `sandbox_mode = "read-only"`, never-invent-paths, absolute companion
 - Managed agent updates create backups before overwrite
 - Injection tests cover all Claude agents + Codex TOML templates
+- **Skills allow model invocation by default:** removed `disable-model-invocation`
+  from all `/grok:*` skills so Codex (and Claude Skill tool) can invoke them.
+  Users still control when Grok runs; slash commands keep working.
 
 ## [1.2.2] - 2026-07-15
 
