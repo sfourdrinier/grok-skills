@@ -1,6 +1,6 @@
 {
   "name": "grok",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Use Grok as a coding assistant from Claude Code: review, reason, implement, and verify through a hardened sandboxed wrapper. Not affiliated with xAI.",
   "author": {
     "name": "Stephane Fourdrinier"

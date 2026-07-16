@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
+## [1.6.0] - 2026-07-16
+
+### Added
+
+- **Verified implementation handoff (PR4):** optional `--contract-file` on `code`
+  (writeScopes, requiredValidation argv, operator-trusted / no OS FS sandbox claim).
+- Ordered post-Grok finalization with unexpected-commit and scope blockers;
+  phase-1 immutable `git-binary-full-index-v1` patch; phase-2
+  `implementation-handoff.json` with `integration.ready` from in-memory
+  `terminalOutcome`.
+- **`/grok:handoff --run-id`:** read-only dual-condition ready (manifest + success
+  envelope + patch rehash). Companion thin passthrough (no job/notify/Grok).
+- Command evidence: sha256 + 4096 redacted tails on wrapper commands.
+- Skills/agents dual-host parent protocol (notify ≠ ready; never auto-apply).
+- Cleanup factual warning when removing an integration-ready handoff.
+
+### Changed
+
+- Packaging triple **1.6.0**.
+- Seven new ERROR_CLASSES for handoff/contract.
+
 ## [1.5.0] - 2026-07-16
 
 ### Added

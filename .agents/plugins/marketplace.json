@@ -7,7 +7,7 @@
     {
       "name": "grok",
       "displayName": "Grok Skills",
-      "description": "Hardened Grok companion for review, reason, code, and verify — private auth home, OS sandbox, isolated worktrees, one JSON result envelope.",
+      "description": "Hardened Grok companion for review, reason, code, and verify \u2014 private auth home, OS sandbox, isolated worktrees, one JSON result envelope.",
       "source": {
         "source": "local",
         "path": "./plugin"
