@@ -1,6 +1,6 @@
 ---
 name: "status"
-description: "Read back a prior Grok run's stored envelope and progress by run id (read-only)"
+description: "Read a Grok run by id: finished envelope, or running progress if still in progress (read-only)"
 argument-hint: "[--run-id <run-id>]"
 allowed-tools: "Bash(node:*)"
 ---
@@ -29,10 +29,12 @@ use `--task-file -` with a single-quoted heredoc.
 
 <!-- plugin/skills/status.md -->
 
-Read back a prior Grok run's stored envelope and progress by run id through the
-hardened wrapper and relay its result envelope. `status` is strictly read-only:
-it prints exactly one JSON result envelope and never writes to the run it
-inspects.
+Read a Grok run by id through the hardened wrapper and relay its result
+envelope. Finished runs return `"status": "success"` with
+`response.storedEnvelope`. In-progress runs return `"status": "running"` with
+progress events and `response.target` (elapsed, process, lastEvent) — not a
+missing-envelope warning. `status` is strictly read-only: one JSON envelope on
+stdout, nothing written to the run it inspects.
 
 Raw slash-command arguments:
 `$ARGUMENTS`

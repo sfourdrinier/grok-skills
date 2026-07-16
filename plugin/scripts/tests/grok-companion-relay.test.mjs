@@ -115,10 +115,11 @@ test("degrade (iii) run fails: failure envelope delivered verbatim, exit 1", () 
   assert.equal(envelope.error.class, "cli-failure");
 });
 
-test("status renders a prior run's progress on stderr with a verbatim envelope on stdout", () => {
-  // Pre-create the run the status read-back will inspect.
+test("status stdout is only the envelope (no post-hoc progress dump on stderr)", () => {
+  // Hosts that merge streams must still see a single relayable JSON document.
+  // Progress is inside response.events — not re-printed after the envelope.
   const runId = "20260715T050000Z-abcdef";
-  const xdg = fs.mkdtempSync(path.join(os.tmpdir(), "grok-relay-status-"));
+  const xdg = fs.mkdtempSync(path.join(os.tmpdir(), "grok-relay-status-clean-"));
   const runDir = path.join(xdg, "grok-skills", "runs", runId);
   fs.mkdirSync(runDir, { recursive: true });
   fs.writeFileSync(
@@ -143,11 +144,10 @@ test("status renders a prior run's progress on stderr with a verbatim envelope o
   const lines = stdoutJsonLines(result.stdout);
   assert.equal(lines.length, 1, "status stdout stays the verbatim envelope");
   assert.equal(JSON.parse(lines[0]).mode, "status");
-
-  assert.match(result.stderr, /reason run created/);
-  assert.match(result.stderr, /recalling the answer/);
+  // No second-pass [grok] progress dump after the envelope (Codex merges streams)
+  assert.doesNotMatch(result.stderr || "", /\[grok\] start: reason run created/);
+  assert.doesNotMatch(result.stderr || "", /recalling the answer/);
 });
-
 test("status: an invalid/partial run renders NO progress, only the wrapper's failure envelope", () => {
   // PR968 codex status-render-order: a strict-shaped run dir holding ONLY a
   // progress file (no valid/owned run.json) is one the wrapper rejects as

@@ -79,6 +79,80 @@ class StatusModeTests(unittest.TestCase):
         self.assertEqual(len(response["events"]), 2)
         self.assertEqual(response["events"][0]["phase"], "start")
         self.assertIsInstance(response["eventWarnings"], list)
+        self.assertTrue(response["target"]["hasStoredEnvelope"])
+        self.assertEqual(response["target"]["recordStatus"], "success")
+
+    def test_status_in_progress_is_running_not_success(self) -> None:
+        # Live run: no envelope.json yet, run.json status=running, process lease alive.
+        paths = runstate.create_run("review")
+        record = {
+            "schemaVersion": 1,
+            "runId": paths.run_id,
+            "mode": "review",
+            "createdAtUtc": "2026-07-14T00:00:00+00:00",
+            "status": "running",
+            "requestedModel": "grok-4.5",
+            "repository": "/tmp/repo",
+            "targetWorkspace": None,
+            "worktreePath": None,
+            "worktreeBranch": None,
+            "baseRevision": None,
+            "progressStreamPath": str(paths.progress_path),
+            "envelopePath": str(paths.envelope_path),
+        }
+        runstate.write_run_record(paths, record)
+        writer = ProgressWriter(paths.run_id, paths.progress_path)
+        writer.emit("start", "review run created", data={"mode": "review"})
+        writer.emit("grok", "spawning grok cli", data={"model": "grok-4.5"})
+        # Keep this test process as the "alive" owner for owner.pid
+        runstate.write_home_liveness_marker(paths.run_dir, os.getpid())
+
+        exit_code, out = _run_status(paths.run_id)
+        envelope = json.loads(out)
+
+        self.assertEqual(exit_code, 0, out)
+        self.assertEqual(envelope["status"], "running")
+        self.assertEqual(envelope["mode"], "status")
+        response = envelope["response"]
+        self.assertIsNone(response["storedEnvelope"])
+        self.assertFalse(any("stored envelope not found" in str(w) for w in envelope.get("warnings") or []))
+        self.assertEqual(response["target"]["recordStatus"], "running")
+        self.assertEqual(response["target"]["process"], "alive")
+        self.assertEqual(response["target"]["eventCount"], 2)
+        self.assertIsNotNone(response["target"]["lastEvent"])
+        self.assertIn("still in progress", response.get("summary", "").lower())
+        self.assertEqual(len(response["events"]), 2)
+
+    def test_status_finished_without_envelope_warns(self) -> None:
+        # Dead process + no envelope: interrupted run, not "still running"
+        paths = runstate.create_run("review")
+        record = {
+            "schemaVersion": 1,
+            "runId": paths.run_id,
+            "mode": "review",
+            "createdAtUtc": "2026-07-14T00:00:00+00:00",
+            "status": "running",
+            "requestedModel": "grok-4.5",
+            "repository": None,
+            "targetWorkspace": None,
+            "worktreePath": None,
+            "worktreeBranch": None,
+            "baseRevision": None,
+            "progressStreamPath": str(paths.progress_path),
+            "envelopePath": str(paths.envelope_path),
+        }
+        runstate.write_run_record(paths, record)
+        # Stale pid that is not alive
+        runstate.write_home_liveness_marker(paths.run_dir, 999999999)
+
+        exit_code, out = _run_status(paths.run_id)
+        envelope = json.loads(out)
+        self.assertEqual(exit_code, 0, out)
+        self.assertEqual(envelope["status"], "success")
+        self.assertTrue(
+            any("no stored envelope" in str(w) for w in envelope.get("warnings") or []),
+            envelope.get("warnings"),
+        )
 
     def test_status_unknown_run_id_fails_with_invalid_target(self) -> None:
         missing_id = "20200101T000000Z-abcdef"

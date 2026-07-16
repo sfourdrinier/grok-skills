@@ -1,14 +1,20 @@
 # wrapper/scripts/groklib/modes/status.py
 #
 # `status --run-id` mode: a strictly READ-ONLY inspector that loads a stored
-# run's run.json, its stored C4 envelope, and its C3 progress stream, and
-# returns a fresh envelope whose `response` embeds
-# {storedEnvelope, events, eventWarnings}. It writes NOTHING to the target run
-# directory. An unknown or malformed run id is `invalid-target`; a stored
-# envelope that is unreadable, not JSON, or not a valid C4 document is
-# `output-malformed` (the malformed document is never re-emitted verbatim).
+# run's run.json, its stored C4 envelope (if finished), and its C3 progress
+# stream, and returns a fresh envelope whose `response` embeds
+# {storedEnvelope, events, eventWarnings, target}. It writes NOTHING to the
+# target run directory.
+#
+# Outcome of the status *query* (top-level envelope status):
+#   - success: target finished (stored envelope present and valid)
+#   - running: target still in progress (no stored envelope; process/record alive)
+#   - failure: unknown/unowned run, or unreadable/invalid stored envelope
+#
+# Missing envelope.json is normal while a run is in progress — not a warning.
 
 import argparse
+import datetime
 import json
 import pathlib
 from typing import List, Optional, Tuple
@@ -23,17 +29,15 @@ def _log(function: str, message: str) -> None:
 
 
 def _load_stored_envelope(
-    run_id: str, stored_path: pathlib.Path, warnings: List[str]
+    run_id: str, stored_path: pathlib.Path
 ) -> Tuple[Optional[dict], Optional[dict]]:
     """Return (stored_envelope, failure_envelope).
 
-    Exactly one is non-None: a readable, valid C4 stored envelope (or None with
-    a warning when the file is simply absent), or a classified
-    `output-malformed` failure envelope when the file is unreadable, not JSON,
-    or fails C4 validation (obligation b: never re-emit a malformed doc).
+    - File absent → (None, None)  # caller decides running vs incomplete
+    - Unreadable / not JSON / invalid C4 → (None, failure_envelope)
+    - Valid C4 → (stored, None)
     """
     if not stored_path.exists():
-        warnings.append("stored envelope not found for run {}".format(run_id))
         return None, None
 
     try:
@@ -66,15 +70,7 @@ def _load_stored_envelope(
 
 
 def _stream_redact_event_text(events: List[dict]) -> List[dict]:
-    """Redact each event's ``data.text`` as one continuous stream (cross-event secret split).
-
-    The streaming coalescer writes Grok's raw tokens into event ``data.text``
-    chunks; a secret can be split across two consecutive chunks. Collect those
-    text values in event order, redact them as a single joined stream via
-    ``envelope.redact_secret_text_stream`` (so a boundary-spanning secret is
-    masked in both halves), and return NEW event dicts with the redacted text.
-    Events without a string ``data.text`` are passed through unchanged.
-    """
+    """Redact each event's ``data.text`` as one continuous stream (cross-event secret split)."""
     texts: List[str] = [
         event["data"]["text"]
         for event in events
@@ -97,11 +93,83 @@ def _stream_redact_event_text(events: List[dict]) -> List[dict]:
     return rebuilt
 
 
+def _parse_utc(ts: Optional[str]) -> Optional[datetime.datetime]:
+    if not isinstance(ts, str) or not ts.strip():
+        return None
+    text = ts.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def _event_summary(event: dict) -> dict:
+    """Compact summary of one progress event for operators (no full thought dumps)."""
+    data = event.get("data") if isinstance(event.get("data"), dict) else {}
+    summary = {
+        "seq": event.get("seq"),
+        "phase": event.get("phase"),
+        "level": event.get("level"),
+        "message": event.get("message"),
+        "ts": event.get("ts"),
+    }
+    if isinstance(data.get("event"), str):
+        summary["event"] = data.get("event")
+    if isinstance(data.get("chars"), int):
+        summary["chars"] = data.get("chars")
+    # Short preview of stream text (already redacted when called after stream redact)
+    text = data.get("text")
+    if isinstance(text, str) and text.strip():
+        preview = text.strip().replace("\n", " ")
+        if len(preview) > 160:
+            preview = preview[:157] + "..."
+        summary["textPreview"] = preview
+    return summary
+
+
+def _build_target_info(
+    *,
+    record: dict,
+    run_dir: pathlib.Path,
+    events: List[dict],
+    process_liveness: str,
+    has_stored_envelope: bool,
+) -> dict:
+    created = record.get("createdAtUtc")
+    created_dt = _parse_utc(created if isinstance(created, str) else None)
+    now = datetime.datetime.now(datetime.timezone.utc)
+    elapsed = None
+    if created_dt is not None:
+        if created_dt.tzinfo is None:
+            created_dt = created_dt.replace(tzinfo=datetime.timezone.utc)
+        elapsed = max(0, int((now - created_dt).total_seconds()))
+
+    last_event = _event_summary(events[-1]) if events else None
+    recent = [_event_summary(ev) for ev in events[-8:]] if events else []
+
+    return {
+        "mode": record.get("mode"),
+        "recordStatus": record.get("status"),
+        "process": process_liveness,  # alive | dead | unknown
+        "hasStoredEnvelope": has_stored_envelope,
+        "createdAtUtc": created,
+        "elapsedSeconds": elapsed,
+        "requestedModel": record.get("requestedModel"),
+        "repository": record.get("repository"),
+        "eventCount": len(events),
+        "lastEvent": last_event,
+        "recentEvents": recent,
+        "runDir": str(run_dir),
+    }
+
+
 def run(args: argparse.Namespace) -> dict:
     """Load and report the stored run identified by ``args.run_id`` (read-only)."""
     run_id = args.run_id
     try:
-        runstate.load_run_record(run_id)
+        record = runstate.load_run_record(run_id)
     except GrokWrapperError as exc:
         _log("run", "cannot load run record for {!r}: {} ({})".format(run_id, exc.error_class, exc))
         return envelope_mod.failure_envelope(
@@ -114,13 +182,6 @@ def run(args: argparse.Namespace) -> dict:
         )
 
     run_dir = runstate.state_root() / "runs" / run_id
-    # PR968 codex status-ownership: a valid run.json is NOT proof the run dir is a
-    # genuine wrapper-owned target -- cleanup verifies the owner.json marker (and that
-    # it names the requested run id) before acting, and status must too. Without it a
-    # corrupt/strict-shaped dir with a valid run.json but a missing/mismatched owner
-    # marker would return a SUCCESS envelope the companion then renders. Fail closed as
-    # invalid-target (an unknown/malformed target, same class the unknown-run path uses)
-    # so the companion renders nothing.
     try:
         owner_run_id = runstate.verify_owner_marker(run_dir / "owner.json")
     except GrokWrapperError as exc:
@@ -148,28 +209,75 @@ def run(args: argparse.Namespace) -> dict:
     progress_path = run_dir / "progress.jsonl"
 
     warnings: List[str] = []
-    stored, failure = _load_stored_envelope(run_id, stored_path, warnings)
+    stored, failure = _load_stored_envelope(run_id, stored_path)
     if failure is not None:
         return failure
 
     events, event_warnings = read_events(progress_path)
-    # Grok dogfood-3 #6: the streaming coalescer batches raw thought/text tokens
-    # into ~480-char event `data.text` chunks, so a credential can be SPLIT across
-    # two consecutive events -- no single event matches a secret pattern, but the
-    # concatenation is the secret. Per-event redaction alone would miss it. Redact
-    # the event `data.text` values as ONE continuous stream FIRST (so a boundary-
-    # spanning secret is caught), then run the per-leaf redactor below over the
-    # whole response for every other embedded string.
     safe_events = _stream_redact_event_text(events)
-    response = {"storedEnvelope": stored, "events": safe_events, "eventWarnings": event_warnings}
-    # D-STREAM regression fix (F-STATUS-SECRET): progress.jsonl now carries Grok's
-    # raw thought/text tokens, so an embedded event whose text mentions a
-    # "bearer "/JWT/sk- shape would otherwise trip build_envelope's
-    # assert_no_secret_material and PERMANENTLY fail readback of that run. Redact
-    # the secret-shaped substrings in the EMBEDDED (stdout) copy only, using the
-    # same patterns the scanner enforces (envelope.redact_secret_material). The
-    # on-disk progress.jsonl stays raw inside the private 0700 run dir; this
-    # inspector still writes nothing to the run directory.
+    process_liveness = runstate._home_owner_liveness(run_dir)
+    record_status = record.get("status") if isinstance(record.get("status"), str) else None
+
+    target = _build_target_info(
+        record=record,
+        run_dir=run_dir,
+        events=safe_events,
+        process_liveness=process_liveness,
+        has_stored_envelope=stored is not None,
+    )
+
+    # Still in progress: no final envelope yet, and the owner process is still
+    # alive (or lease unknown while the record claims running). A dead process
+    # with no envelope is incomplete/interrupted — not "running".
+    in_progress = stored is None and (
+        process_liveness == runstate._LIVENESS_ALIVE
+        or (
+            process_liveness == runstate._LIVENESS_UNKNOWN
+            and record_status == "running"
+        )
+    )
+
+    if in_progress:
+        response = {
+            "storedEnvelope": None,
+            "events": safe_events,
+            "eventWarnings": event_warnings,
+            "target": target,
+            "summary": (
+                "Run is still in progress (no final envelope yet). "
+                "recordStatus={!r}, process={!r}, events={}, elapsedSeconds={!r}."
+            ).format(
+                record_status,
+                process_liveness,
+                len(safe_events),
+                target.get("elapsedSeconds"),
+            ),
+        }
+        safe_response = envelope_mod.redact_secret_material(response)
+        return envelope_mod.build_envelope(
+            run_id=run_id,
+            mode="status",
+            status="running",
+            progressStreamPath=str(progress_path),
+            warnings=warnings,
+            response=safe_response,
+        )
+
+    if stored is None:
+        # Finished or abandoned without writing envelope.json
+        warnings.append(
+            "run {} has no stored envelope (recordStatus={!r}, process={!r}); "
+            "run may have been interrupted before completion".format(
+                run_id, record_status, process_liveness
+            )
+        )
+
+    response = {
+        "storedEnvelope": stored,
+        "events": safe_events,
+        "eventWarnings": event_warnings,
+        "target": target,
+    }
     safe_response = envelope_mod.redact_secret_material(response)
     return envelope_mod.build_envelope(
         run_id=run_id,

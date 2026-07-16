@@ -201,9 +201,11 @@ class BuildEnvelopeTests(unittest.TestCase):
 class ExitCodeForTests(unittest.TestCase):
     def test_exit_semantics_helper(self) -> None:
         success = build_envelope(run_id=_RUN_ID, mode="status", status="success")
+        running = build_envelope(run_id=_RUN_ID, mode="status", status="running")
         failure = failure_envelope(run_id=_RUN_ID, mode="status", error_class="usage-error", message="bad args")
 
         self.assertEqual(exit_code_for(success), 0)
+        self.assertEqual(exit_code_for(running), 0)
         self.assertEqual(exit_code_for(failure), 1)
 
 

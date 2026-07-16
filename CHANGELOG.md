@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
+## [1.2.10] - 2026-07-15
+
+### Fixed
+
+- **`/grok:status` in-progress UX:** when a run is still going (no
+  `envelope.json` yet, owner process alive), status returns top-level
+  `"status": "running"` with `response.target` (elapsedSeconds, process,
+  eventCount, lastEvent, recentEvents) instead of pretending success and
+  warning about a missing stored envelope. Exit 0 for both `success` and
+  `running`. Companion no longer re-dumps progress to stderr after the JSON
+  (hosts that merge streams were gluing `[grok] …` onto the envelope).
+
 ## [1.2.9] - 2026-07-15
 
 ### Fixed

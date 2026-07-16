@@ -402,18 +402,10 @@ function runWithLiveRelay(wrapper, args, track) {
 }
 
 function runStatus(wrapper, args) {
-  const code = runPassthrough(wrapper, args);
-  if (code === 0) {
-    try {
-      const runId = parseRunIdArg(args);
-      if (runId) {
-        renderRunProgress({ runsDir: runsDirFor(process.env), runId, sink: stderrLine });
-      }
-    } catch (err) {
-      stderrLine(`[grok-relay] status progress render failed: ${err.message}`);
-    }
-  }
-  return code;
+  // One stdout envelope only. Do NOT re-dump progress to stderr after status:
+  // hosts that merge stdout/stderr (Codex terminal) would glue [grok] lines onto
+  // the JSON. Progress already lives in response.events / response.target.
+  return runPassthrough(wrapper, args);
 }
 
 function cmdJobs(cwd) {

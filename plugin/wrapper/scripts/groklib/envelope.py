@@ -29,7 +29,9 @@ MODES: Tuple[str, ...] = (
     "cleanup",
 )
 
-STATUSES: Tuple[str, ...] = ("success", "failure")
+# "running" is for status-mode inspection of an in-progress target run (no
+# stored envelope yet). Other modes use only success/failure.
+STATUSES: Tuple[str, ...] = ("success", "failure", "running")
 
 CLEANUP_STATUSES: Tuple[str, ...] = ("clean", "retained", "failed", "not-applicable")
 
@@ -874,8 +876,12 @@ def failure_envelope(
 
 
 def exit_code_for(envelope: dict) -> int:
-    """Return 0 iff envelope["status"] == "success", else 1, per C4's exit-code rule."""
-    return 0 if envelope.get("status") == "success" else 1
+    """Return 0 for a non-failure envelope, else 1.
+
+    ``success`` and ``running`` (status-mode: target still in progress) both
+    exit 0 so a successful poll of a live run is not treated as a command error.
+    """
+    return 0 if envelope.get("status") in ("success", "running") else 1
 
 
 def emit_envelope(envelope: dict, envelope_path: Optional[pathlib.Path]) -> None:
