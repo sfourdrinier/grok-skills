@@ -1,16 +1,16 @@
-# Run lifecycle program — Implementation Plan (revision 6)
+# Run lifecycle program — Implementation Plan (revision 7)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Checkboxes track progress.
 
-**Goal:** Full run lifecycle with CAS, read-only status, process finalize worker, isolated review, at-most-once notify attempts, and verified `code` implementation handoff — **four PRs**, zero open decisions.
+**Goal:** Full run lifecycle with CAS, crash-consistent terminal persistence, read-only status, process finalize worker, isolated review, at-most-once notify attempts, and verified `code` implementation handoff — **four PRs**, zero open decisions.
 
-**Design:** [docs/superpowers/specs/2026-07-15-run-lifecycle-design.md](../specs/2026-07-15-run-lifecycle-design.md) **revision 6**.
+**Design:** [docs/superpowers/specs/2026-07-15-run-lifecycle-design.md](../specs/2026-07-15-run-lifecycle-design.md) **revision 7**.
 
 **Baseline:** v1.2.10. **Versions:** 1.3.0 → 1.4.0 → 1.5.0 → **1.6.0**.
 
 **Rule:** Do not invent alternatives. Design §4–§14 are authority. Every step below is mandatory as written.
 
-**Do not execute until the user approves revision 6.**
+**Do not execute until the user approves revision 7.**
 
 ---
 
@@ -45,7 +45,7 @@
 | `plugin/wrapper/scripts/groklib/modes/preflight.py` | preserve seed lifecycle under CAS after `create_run` |
 | `plugin/wrapper/scripts/groklib/modes/finalize_worker.py` | **New** — `finalize_worker_main` |
 | `plugin/wrapper/scripts/groklib/modes/status.py` | Read-only projection + derived interrupted; **zero writes** |
-| `plugin/wrapper/scripts/groklib/envelope.py` | `finalization-timeout` in ERROR_CLASSES |
+| `plugin/wrapper/scripts/groklib/envelope.py` | `finalization-timeout`, `finalization-worker-missing-result` in ERROR_CLASSES |
 | `plugin/wrapper/scripts/tests/test_runstate.py` | **Existing** — extend for seed + CAS |
 | `plugin/wrapper/scripts/tests/test_mode_status.py` | Projection + byte-identical run dir |
 | `plugin/wrapper/scripts/tests/test_mode_cleanup.py` | Fixture migration for seed/CAS |
@@ -92,22 +92,31 @@
 |------|------|
 | `plugin/scripts/lib/jobs.mjs` | notificationMode + webhookUrl defaults |
 | `plugin/scripts/lib/notify.mjs` | **New** — at-most-once **attempt** |
-| `plugin/scripts/grok-companion.mjs` | execution context; notify hooks; never forward context to wrapper |
-| `plugin/skills/code/SKILL.md`, `review/SKILL.md`, `reason/SKILL.md`, `adversarial-review/SKILL.md`, `verify/SKILL.md` | Prefix `GROK_COMPANION_EXECUTION_CONTEXT` on companion invocations for wait vs background |
-| `plugin/scripts/lib/skill-run.mjs` | Optional env merge helper only if needed; must not default to guessing background |
-| Codex agent docs/paths that spawn companion for live modes | Same env signal |
+| `plugin/scripts/grok-companion.mjs` | read `GROK_COMPANION_EXECUTION_CONTEXT`; notify hooks; never forward context to wrapper |
+| `plugin/scripts/lib/skill-run.mjs` | **No functional change** (skills/agents set env in shell before `node …/run.mjs`) |
+| `plugin/skills/code/SKILL.md` | Prefix env on wait vs background companion invocations |
+| `plugin/skills/review/SKILL.md` | same |
+| `plugin/skills/reason/SKILL.md` | same |
+| `plugin/skills/adversarial-review/SKILL.md` | same |
+| `plugin/skills/verify/SKILL.md` | same |
+| `plugin/agents/grok-engineer-coder.md` | Prefix env when spawning `agents/run.mjs` for live modes that notify |
+| `plugin/agents/grok-rescue.md` | Prefix env if it runs live modes that can notify (else document N/A for reason-only) |
+| `plugin/codex-agents/grok-engineer-coder.toml` | Document/env prefix parity for Codex materialization path |
+| `plugin/codex-agents/grok-rescue.toml` | same |
 | `plugin/scripts/tests/notify.test.mjs` | **New** |
 | `plugin/scripts/tests/jobs.test.mjs` | prefs |
-| `plugin/scripts/tests/grok-companion.test.mjs` | context + notify paths |
+| `plugin/scripts/tests/grok-companion.test.mjs` | context + notify paths (foreground + background) |
 | `plugin/skills/setup/SKILL.md` | notification flags |
 | `README.md` | notify |
-| `docs/RELEASE.md` | |
-| `plugin/references/manual-smoke.md` | |
-| `docs/COMPATIBILITY.md` | |
+| `docs/RELEASE.md` | notify smoke |
+| `plugin/references/manual-smoke.md` | notify |
+| `docs/COMPATIBILITY.md` | notify + execution context |
 | `docs/roadmap.md` | 1.5.0 |
-| `SECURITY.md` | webhook surface if present |
+| `SECURITY.md` | webhook notify surface |
 | `CHANGELOG.md` | 1.5.0 |
 | Packaging triple | **1.5.0** |
+
+**Not in PR3:** changes to `plugin/scripts/lib/skill-run.mjs` behavior (locked no-op).
 
 ### PR4 → 1.6.0
 
@@ -177,26 +186,28 @@ def test_emit_run_id_only_after_seed_exists(self):
 - [ ] Concurrent CAS conflict raises / returns conflict (tests).  
 - [ ] **Commit** `runstate: CAS recordRevision and run.lock`
 
-### Task 1.3 — Single terminal writer `persist_terminal_envelope`
+### Task 1.3 — Crash-consistent `persist_terminal_envelope`
+
+Implement design §7.1 exactly (envelope-first; idempotent lifecycle finish).
 
 ```python
 def persist_terminal_envelope(
     paths: RunPaths,
     expected_revision: int,
-    envelope: dict,
+    envelope: dict | None,
     *,
-    lifecycle: str,
+    lifecycle: str | None,
 ) -> None:
-    # under lock: refuse if valid envelope exists or lifecycle terminal
-    # validate envelope; write envelope.json once; CAS lifecycle completed|failed|canceled
+    # under lock per §7.1:
+    # if valid envelope exists → finish lifecycle only; never replace body
+    # else write envelope.json FIRST, then CAS lifecycle SECOND
 ```
 
-- [ ] Success: `lifecycle="completed"`.  
-- [ ] Failure: `lifecycle="failed"`.  
-- [ ] Cancel: `lifecycle="canceled"`.  
-- [ ] Test: second terminal write does not replace first.  
-- [ ] Test: lifecycle argument never inferred from envelope status alone.  
-- [ ] **Commit** `runstate: single terminal envelope writer with CAS`
+- [ ] Success / failure / cancel paths.  
+- [ ] Test: second different envelope does not replace first.  
+- [ ] Test: crash after envelope before lifecycle → recovery finishes lifecycle; envelope unchanged.  
+- [ ] Test: lifecycle argument never inferred from envelope alone when writing **new** envelope (caller still passes it).  
+- [ ] **Commit** `runstate: envelope-first crash-consistent terminal persist`
 
 ### Task 1.4 — Progress `elapsedMs` (monotonic owner)
 
@@ -211,12 +222,14 @@ def persist_terminal_envelope(
 
 **Files:** `modes/finalize_worker.py`, `_shared.py`, `_worktree.py`, `envelope.py`, `tests/test_finalize_watchdog.py`
 
-Implement design §9 exactly:
+Implement design §9 and §9.4 exactly:
 
 - Serializable `finalize-payload.json` only.  
-- Worker owns auth-home cleanup + envelope build + `persist_terminal_envelope`.  
-- Parent owns progress + timeout path after terminate(5s)/kill(5s)/join + re-read under lock.  
-- Preserve already-valid terminal envelope on timeout path.  
+- Worker = normal terminal writer via `persist_terminal_envelope`.  
+- Parent = recovery writer only after worker dead/killed + join + re-read.  
+- Parent-authorized **new** failure classes only: `finalization-timeout`, `cli-failure`, `finalization-worker-missing-result`.  
+- Parent never writes success envelopes.  
+- Idempotent lifecycle finish when envelope already valid.  
 
 Tests:
 
@@ -224,19 +237,23 @@ Tests:
 - [ ] Worker completes during kill window → envelope preserved.  
 - [ ] Worker completes after parent would have written timeout → no replacement.  
 - [ ] True hang → finalization-timeout once; lifecycle failed.  
+- [ ] Nonzero worker exit without envelope → cli-failure.  
+- [ ] Exit 0 without envelope → finalization-worker-missing-result.  
+- [ ] Parent cannot write while worker alive.  
 - [ ] Spawn payload has no non-serializable fields.  
-- [ ] **Commit** `modes: process finalize worker with race-safe terminal write`
+- [ ] **Commit** `modes: process finalize worker with parent recovery writer`
 
 ### Task 1.6 — Status projection (read-only)
 
 **Files:** `status.py`, `test_mode_status.py`, `plugin/skills/status/SKILL.md`
 
-- [ ] Projection table exactly.  
-- [ ] Dead owner + no envelope → **derived** `interrupted` in response only; **no** `set_lifecycle`.  
+- [ ] Projection table + effective lifecycle resolution design §6 (record / envelope / derived).  
+- [ ] Dead owner + no envelope → **derived** `interrupted`; **no** writes.  
+- [ ] Valid envelope + non-terminal record → effective lifecycle from envelope; **no** writes.  
 - [ ] Test: recursive content hash of run dir identical before/after status.  
 - [ ] Valid failure envelope → top-level failure, exit 1, envelope relayed.  
 - [ ] Skill text: exit 1 can mean inspected failed target; always relay JSON; distinguish parse failure.  
-- [ ] **Commit** `status: read-only projection with derived interrupted`
+- [ ] **Commit** `status: read-only projection with envelope-aware effective lifecycle`
 
 ### Task 1.7 — Docs + tag 1.3.0
 
@@ -260,7 +277,7 @@ Implement design §10 exactly:
 
 - Owner marker sibling `{worktree_path}.owner.json`.  
 - Never reuse existing path.  
-- Dirty: `git diff --binary --full-index HEAD --` from repo root; apply in worktree; reject dirty submodules.  
+- Dirty: `git diff --binary --full-index --ita-invisible-in-index HEAD --` from repo root; apply in worktree; reject dirty submodules.  
 - Cleanup always: remove worktree, prune, marker, diff.  
 
 - [ ] **Commit** `review: isolation helper with ownership`
@@ -275,7 +292,8 @@ Implement design §10 exactly:
 ### Task 2.4 — Tests
 
 - [ ] worktree add fail → isolation-unavailable.  
-- [ ] Tracked dirty appears; untracked does not.  
+- [ ] Tracked dirty (staged+unstaged) appears; untracked does not.  
+- [ ] `git add -N` intent-to-add does **not** appear in isolated tree.  
 - [ ] Submodule dirty rejected.  
 - [ ] Apply failure → isolation-unavailable.  
 - [ ] Concurrent runs; partial cleanup.  
@@ -309,11 +327,12 @@ Design §11:
 
 ### Task 3.3 — Companion execution context + hooks
 
-- [ ] Skills set `GROK_COMPANION_EXECUTION_CONTEXT=foreground|background`.  
-- [ ] Companion never forwards to wrapper argv/env for Grok.  
+- [ ] Update each PR3 skill/agent path in the file map to prefix `GROK_COMPANION_EXECUTION_CONTEXT=foreground|background` on wait vs background.  
+- [ ] **Do not** change `skill-run.mjs` behavior.  
+- [ ] Companion never forwards context to wrapper.  
 - [ ] `auto` only background; `native` both; `off` never.  
 - [ ] Never on status/handoff/result/jobs/setup alone.  
-- [ ] Claude + Codex tests both contexts.  
+- [ ] Tests: foreground + background for Claude skill path and Codex/agent path.  
 - [ ] **Commit** `companion: execution context and notify hooks`
 
 ### Task 3.4 — Docs + 1.5.0
@@ -358,23 +377,28 @@ verify sentinel → remove exact sentinel → HEAD check → changed files
 
 ### Task 4.4 — Phase-1 forensic patch
 
-**Create** `implementation_handoff.py` phase 1: temp index uniquely named; finally remove; binary full-index patch; size limit; secret scan; permissions 0600/0700.
+**Create** `implementation_handoff.py` phase 1: temp index uniquely named; `finally` delete + post-check per design §14.7; binary full-index patch; size limit; secret scan; permissions 0600/0700.
 
-- [ ] Tests: add/modify/delete/rename/binary/symlink/mode; untracked in; ignored out; sentinel out; spaces/tabs/newlines/non-ASCII via `-z`.  
+- [ ] If index still exists after cleanup → blocker `temp-index-retained`, ready false.  
+- [ ] If delete errors but path absent → warning only.  
+- [ ] Tests: add/modify/delete/rename/binary/symlink/mode; untracked in; ignored out; sentinel out; spaces/tabs/newlines/non-ASCII via `-z`; both cleanup cases.  
 - [ ] Apply to base → resultTreeOid.  
 - [ ] **Commit** `handoff: phase-1 immutable git patch`
 
-### Task 4.5 — Execute contract validation
+### Task 4.5 — Execute contract validation (operator-trusted)
 
-**Dedicated task** (design §14.9):
+**Dedicated task** (design §14.3, §14.9):
 
 - [ ] Run each requiredValidation after scopes + HEAD.  
 - [ ] cwd inside worktree; reject escape.  
-- [ ] shell=False; same write confinement as code.  
+- [ ] shell=False; **no OS FS sandbox claim**.  
+- [ ] Post-command original-checkout unmodified assertion.  
 - [ ] Record evidence before interpreting exit.  
 - [ ] Nonzero → blocker; ready false.  
-- [ ] Test: validation command cannot write outside worktree.  
-- [ ] **Commit** `code: execute sandboxed contract requiredValidation`
+- [ ] trustModel string `operator-contract-trusted-no-os-sandbox`.  
+- [ ] Tests: cwd escape rejected; shell not used; original-checkout dirty after validation blocks ready.  
+- [ ] **Do not** test or document “cannot write outside worktree” as OS guarantee.  
+- [ ] **Commit** `code: execute operator-trusted contract requiredValidation`
 
 ### Task 4.6 — Command evidence tails
 
@@ -382,24 +406,26 @@ verify sentinel → remove exact sentinel → HEAD check → changed files
 - [ ] Never full logs on envelope stdout.  
 - [ ] **Commit** `commands: bounded redacted evidence`
 
-### Task 4.7 — Phase-2 handoff + ready after shared gates
+### Task 4.7 — Phase-2 handoff + ready from terminalOutcome
 
-- [ ] Final `implementation-handoff.json` only after sandbox, auth-home, build gate, validation, lifecycle resolution.  
+- [ ] After gates: decide in-memory `terminalOutcome`; compute ready per §14.12 (not disk lifecycle).  
+- [ ] Write final `implementation-handoff.json` **before** `persist_terminal_envelope`.  
+- [ ] Then envelope-first terminal persist.  
 - [ ] `validate_implementation_handoff` single function used by writer.  
-- [ ] `integration.ready` only per design §14.12.  
 - [ ] validation.sources authority fields (§14.10).  
-- [ ] Never rewrite ready true after terminal publication.  
-- [ ] Tests: cleanup fail, sandbox fail, build fail, validation fail, success ready, multi-blocker list, empty no-changes.  
-- [ ] **Commit** `handoff: phase-2 manifest after all gates`
+- [ ] Never rewrite ready-true manifest after terminal envelope published.  
+- [ ] Tests: sandbox/build/validation fail; success ready; multi-blocker; empty no-changes; crash between manifest and envelope; crash between envelope and lifecycle.  
+- [ ] **Commit** `handoff: phase-2 manifest from terminalOutcome`
 
 ### Task 4.8 — Mode `handoff` (non-streaming)
 
 - [ ] WRAPPER_MODES only; not STREAMING_MODES.  
 - [ ] `runHandoff()` like status.  
 - [ ] Same validator as writer.  
-- [ ] Rehash patch; integrity failure; unavailable.  
+- [ ] Observed ready requires manifest ready **and** completed terminal envelope (§14.12).  
+- [ ] Rehash patch; integrity failure; unavailable; `terminal-envelope-incomplete` when manifest ready but envelope missing.  
 - [ ] Skill + run.mjs.  
-- [ ] Tests: no Grok process; no companion job; read-only; job id not required.  
+- [ ] Tests: no Grok process; no companion job; read-only; job id not required; dual-condition ready.  
 - [ ] **Commit** `handoff: read-only non-streaming /grok:handoff`
 
 ### Task 4.9 — Cleanup factual warning
@@ -425,16 +451,17 @@ Exact meaning design §14.17 — no “unacknowledged.”
 |-------------|-----------|
 | Seed + recordRevision 0 | PR1 / 1.1 |
 | CAS + lock + no full-replace clobber | PR1 / 1.2–1.3 |
-| Single terminal writer; never replace envelope | PR1 / 1.3, 1.5 |
-| Finalize protocol complete | PR1 / 1.5 |
-| Status read-only; derived interrupted | PR1 / 1.6 |
+| Envelope-first crash-consistent terminal persist | PR1 / 1.3 |
+| Worker normal writer; parent recovery §9.4 | PR1 / 1.5 |
+| Status read-only; envelope-aware effective lifecycle | PR1 / 1.6 |
 | Status exit 1 skill handling | PR1 / 1.6 |
 | Monotonic elapsed | PR1 / 1.4 |
-| Review ownership + dirty rules | PR2 |
-| Execution context + notify attempt | PR3 |
+| Review ownership + `--ita-invisible-in-index` | PR2 |
+| Execution context + notify attempt; skill-run no-op | PR3 |
 | Contract + scopes + order | PR4 / 4.1–4.3 |
-| Execute validation sandboxed | PR4 / 4.5 |
-| Two-phase handoff + ready | PR4 / 4.4, 4.7 |
+| Operator-trusted validation (no OS FS sandbox claim) | PR4 / 4.5 |
+| terminalOutcome ready + dual-condition handoff | PR4 / 4.7–4.8 |
+| Temp-index post-check blocker | PR4 / 4.4 |
 | Non-streaming handoff mode | PR4 / 4.8 |
 | Factual cleanup warning | PR4 / 4.9 |
 | `-z` path tests | PR4 / 4.4 |
@@ -447,17 +474,19 @@ Exact meaning design §14.17 — no “unacknowledged.”
 | Topic | Decision |
 |-------|----------|
 | Status writes | **Never** |
-| Interrupted durable | Not from status; derived display only |
-| Terminal writer | Worker; parent timeout only after kill+join+re-read |
+| Effective lifecycle | record / envelope / derived (§6) |
+| Terminal persist | Envelope-first; idempotent lifecycle finish (§7.1) |
+| Terminal writers | Worker normal; parent recovery only §9.4 classes |
 | CAS | `recordRevision` + `run.lock` |
 | write_run_record public API | Deleted after PR1 migration; CAS only |
 | Elapsed | Monotonic in owner process; UTC for status |
-| Dirty isolation | `git diff --binary --full-index HEAD --`; no untracked; reject dirty submodules |
+| Dirty isolation | `git diff --binary --full-index --ita-invisible-in-index HEAD --` |
 | Notify | At-most-once **attempt**; no auto-retry pending |
-| Background | `GROK_COMPANION_EXECUTION_CONTEXT` |
+| Background | `GROK_COMPANION_EXECUTION_CONTEXT` via skill/agent SKILL/md; skill-run **no-op** |
 | Handoff streaming | **No** |
-| Contract validation | Executed sandboxed after scopes/HEAD |
-| Handoff ready timing | After all shared gates (phase 2) |
+| Contract validation | Operator-trusted; no OS FS sandbox claim |
+| Handoff ready | `terminalOutcome` at write; dual-condition at `/grok:handoff` |
+| Temp index | Post-check; `temp-index-retained` blocks ready |
 | Multi-workspace gate | Out of PR4; one target |
 | Releases | Four minors 1.3–1.6 |
 | PROVENANCE.md | No edit in PR1–PR4 |
@@ -477,9 +506,9 @@ No parallel tracks. No alternate designs during implementation.
 
 ## Handoff
 
-Revision **6** incorporates all 24 review findings (4 critical, 9 high, 8 medium, 3 low). Paths:
+Revision **7** closes residual findings on rev 6 (crash-consistent terminal persist, non-circular ready, validation trust honesty, parent recovery authority, ITA exclusion, exact PR3 paths, mechanical temp-index cleanup). Paths:
 
 - `docs/superpowers/specs/2026-07-15-run-lifecycle-design.md`  
 - `docs/superpowers/plans/2026-07-15-run-lifecycle.md`  
 
-**Approve revision 6 before any implementation.**
+**Approve revision 7 before any implementation.**

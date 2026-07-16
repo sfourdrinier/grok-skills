@@ -1,6 +1,6 @@
 # Run lifecycle, isolated review, completion signals, and implementation handoff
 
-**Status:** design revision 6 (PR1–PR4 locked; all 24 review findings incorporated — no open decisions)  
+**Status:** design revision 7 (PR1–PR4 locked; rev-6 residual findings 1–7 closed — no open decisions)  
 **Date:** 2026-07-15  
 **Product:** grok-skills (Claude Code + Codex)  
 **Baseline:** v1.2.10  
@@ -33,7 +33,7 @@ Background and long-running Grok modes (especially `review`) are hard to trust:
 - Dual-host: same core; harnesses only present.
 - Docs follow code on every shippable PR (AGENTS.md rule #1).
 - Verified immutable `code` handoff: contract scopes, unexpected-commit check,
-  sandboxed contract validation execution, two-phase handoff readiness,
+  operator-trusted contract validation execution, two-phase handoff readiness,
   git-binary patch, `integration.ready`, read-only `/grok:handoff --run-id`.
 
 ## 3. Non-goals
@@ -57,10 +57,11 @@ Background and long-running Grok modes (especially `review`) are hard to trust:
 | Lifecycle representation | `run.json.lifecycle` is durable truth for **persisted** state. Status may **derive** a display lifecycle (e.g. `interrupted`) without persisting it. Top-level envelope `status` is a projection (§6). |
 | Seed record | `lifecycle: "created"`, compatible `status: "running"`, `recordRevision: 0`. |
 | Status mode | **Strictly read-only.** Never writes under the target run directory. Byte-for-byte unchanged after every status query (test-enforced). |
-| Interrupted durable write | **Not from status.** If a durable recovery operation is ever added, it is a separate authorized mode (out of this program unless explicitly scheduled). Status only **derives** `response.target.lifecycle: "interrupted"`. |
-| Terminal writer | **Finalization worker only** for normal terminal envelopes. Parent may write `finalization-timeout` **only after** terminate/kill + successful join **and** re-read under lock shows no valid terminal envelope yet. |
+| Interrupted durable write | **Not from status.** Status only **derives** display lifecycle (§6.3). |
+| Terminal writer roles | **Worker** = normal terminal writer. **Parent** = recovery writer only after worker is proven exited or killed, successfully joined, and state re-read under lock (§9.4). All terminal writes go through `persist_terminal_envelope` CAS API only. |
+| Envelope vs lifecycle crash | **Envelope-first** under lock; then lifecycle. Idempotent finish if matching valid envelope already exists. Status derives effective terminal lifecycle from valid envelope when record is still non-terminal (§7.1). |
 | CAS | `run.json.recordRevision` monotonic integer; every lifecycle/record mutation requires expected revision; lock file §7. |
-| Terminal immutability | A valid terminal envelope is **never** replaced by another terminal envelope. Terminal lifecycle never overwritten. |
+| Terminal immutability | A valid terminal envelope is **never** replaced by another terminal envelope. Terminal lifecycle never overwritten once set (except CAS completing non-terminal → terminal matching existing envelope). |
 | Progress elapsed | Owning process uses **monotonic** clock for `elapsedMs` on events it writes. Cross-process/status uses UTC timestamps; clamp negative elapsed to 0. |
 | Finalization | Child via `multiprocessing.get_context("spawn")`; fully specified payload and ownership (§9). |
 | Review isolation | §10; ownership markers; no silent live-checkout fallback. |
@@ -69,8 +70,8 @@ Background and long-running Grok modes (especially `review`) are hard to trust:
 | Notify contract | **At-most-once attempt:** prioritize no duplicate attempts over guaranteed delivery. **Not** exactly-once. No automatic retry of `pending`. |
 | Background signal | Companion-only `GROK_COMPANION_EXECUTION_CONTEXT=foreground\|background` set by skills; never forwarded to wrapper; never inferred from TTY. |
 | Handoff mode | `WRAPPER_MODES` only; **not** `STREAMING_MODES`; `runHandoff()` like status passthrough. |
-| Contract validation | Explicit execution task; sandboxed; after scopes + HEAD check; trust model §14.3. |
-| Handoff readiness | Two-phase: forensic patch first; final handoff JSON only after all shared finalization evidence (§14.5–14.7). |
+| Contract validation | Explicit execution after scopes + HEAD; **operator-trusted argv, not OS-filesystem-sandboxed** (§14.3, §14.9). |
+| Handoff readiness | Computed from in-memory `terminalOutcome`, not persisted lifecycle. Manifest then envelope. `/grok:handoff` requires ready manifest **and** completed envelope (§14.6–14.12, §14.14). |
 | Code target scope | **One** cohesive `--target` workspace per `code` run in PR4. |
 | PR versions | PR1 **1.3.0**, PR2 **1.4.0**, PR3 **1.5.0**, PR4 **1.6.0** (four minor releases for independent dogfood). |
 | Packaging version paths | Exactly three: `plugin/.claude-plugin/plugin.json`, `plugin/.codex-plugin/plugin.json`, `.claude-plugin/marketplace.json`. |
@@ -123,10 +124,22 @@ finalizing → completed | failed | canceled
 Terminal persisted lifecycles `completed`, `failed`, `canceled` are **immutable**.
 Further CAS transitions that would overwrite them **fail closed** (no write).
 
+### Effective lifecycle resolution (read path, status and handoff)
+
+Compute **in memory** (never write from status):
+
+1. If `run.json.lifecycle` is terminal (`completed` | `failed` | `canceled`) → use it; `lifecycleSource: "record"`.  
+2. Else if a **valid** stored terminal envelope exists → derive from envelope:  
+   - envelope top-level `status == "success"` → effective lifecycle `completed`  
+   - else → effective lifecycle `failed`  
+   - `lifecycleSource: "envelope"` (crash-recovery display: envelope written, lifecycle not yet).  
+3. Else if owner provably dead and lifecycle non-terminal → effective `interrupted`; `lifecycleSource: "derived"`.  
+4. Else → use persisted non-terminal lifecycle; `lifecycleSource: "record"`.
+
 ### Top-level status projection (status mode and status-shaped envelopes)
 
-| Effective lifecycle (persisted or derived) | Top-level `status` | Status-mode exit |
-|--------------------------------------------|--------------------|------------------|
+| Effective lifecycle | Top-level `status` | Status-mode exit |
+|---------------------|--------------------|------------------|
 | `created`, `running`, `finalizing` | `running` | 0 |
 | `completed` | `success` | 0 |
 | `failed`, `canceled` | `failure` | 1 |
@@ -139,27 +152,15 @@ Further CAS transitions that would overwrite them **fail closed** (no write).
 
 1. Loads run record and optional envelope **without** opening the run for write.
 2. Never creates, truncates, renames, or chmods files under the target run directory.
-3. Never calls `set_lifecycle`, `write_run_record`, or any CAS mutator.
-4. Derives display fields only in memory.
+3. Never calls `set_lifecycle`, CAS mutators, or recovery writers.
+4. Derives display fields only in memory using §6 effective lifecycle resolution.
 
-**Derived interrupted rule** (display only):
+**Derived interrupted rule** (display only): step 3 of effective lifecycle resolution.  
+**Do not** persist `interrupted` into `run.json`.
 
-When **all** of:
+**Crash window (envelope present, record non-terminal):** status reports effective terminal lifecycle from the envelope (§6 step 2). Status still writes nothing. Durable lifecycle completion is the recovery path in §7.1 / §9.4.
 
-- persisted lifecycle is non-terminal (`created` | `running` | `finalizing`),
-- no valid stored terminal envelope exists,
-- owner process is provably dead (existing owner.pid / liveness rules),
-
-then:
-
-- `response.target.lifecycle` = `"interrupted"` (derived),
-- top-level `status` = `"failure"`,
-- exit = 1,
-- **do not** persist `interrupted` into `run.json`.
-
-If durable reconciliation is required later, it is a **separate authorized recovery operation**, not status.
-
-**Test:** after every status query, the target run directory is **byte-for-byte unchanged** (recursive hash of all files + metadata as practical for the suite).
+**Test:** after every status query, the target run directory is **byte-for-byte unchanged**.
 
 **Skill / harness:** `plugin/skills/status/SKILL.md` must state that exit 1 can mean “successfully inspected a failed/interrupted **target**,” not “status command malfunctioned.” Harness must relay the JSON envelope regardless of exit status. Distinguish envelope parse failure (tool broken) from target failure (useful envelope present).
 
@@ -210,7 +211,7 @@ Tests (must update fixtures for seed + CAS):
 | `create_run` | Creates run dir, owner marker, **seed `run.json`**, then `emit_run_id_marker`. Seed is the first write. |
 | `cas_update_run_record(paths, expected_revision, patch)` | **Only** mutator for non-terminal record fields. Under exclusive lock: load, require `recordRevision == expected_revision`, apply **validated merge patch**, set `recordRevision = expected + 1`, atomic write. Reject unknown keys and lifecycle fields unless caller is `set_lifecycle` / terminal path. |
 | `set_lifecycle(paths, expected_revision, lifecycle)` | CAS graph transition only. |
-| `persist_terminal_envelope(paths, expected_revision, envelope, *, lifecycle)` | Terminal writer path: validate envelope; write `envelope.json` once; CAS lifecycle to `completed`\|`failed`\|`canceled`. Refuse if envelope already valid or lifecycle already terminal. |
+| `persist_terminal_envelope(paths, expected_revision, envelope, *, lifecycle)` | Single CAS terminal API (§7.1). Envelope-first; idempotent lifecycle finish. |
 | `write_run_record` (public) | **Deleted** after all call sites migrate in PR1. Internal helper `_write_run_json_unlocked` may exist only for CAS paths under lock. No public full-replacement API. |
 
 Later field updates (model, repository, worktree paths, etc.) use `cas_update_run_record` merge patches only. Merge **preserves** `runId`, `createdAtUtc`, and never silently resets `lifecycle` or `recordRevision`.
@@ -220,12 +221,46 @@ Later field updates (model, repository, worktree paths, etc.) use `cas_update_ru
 ## 7. Durable invariants
 
 1. `[grok-run-id]` is emitted only after atomic seed `run.json` exists.  
-2. Finished only after atomic validated `envelope.json` from the terminal writer rules.  
-3. `persist_terminal_envelope` always receives explicit terminal lifecycle + expected revision.  
+2. Terminal publication uses `persist_terminal_envelope` only (§7.1).  
+3. `persist_terminal_envelope` always receives explicit terminal lifecycle + expected revision (or idempotent complete-from-existing path).  
 4. JSON writes: temp sibling `path.name + ".tmp." + pid` then `os.replace`, file mode 0600.  
 5. Progress: only `progress.jsonl` (append).  
-6. **Lock:** exclusive `run.lock` (POSIX `fcntl.flock` where available; Windows `msvcrt.locking` or portalocker-equivalent stdlib pattern already used in repo if any — **locked: use `portalocker`-free stdlib**: `fcntl` on Unix, `msvcrt` on Windows for a lock byte file) held for every CAS record or envelope mutation.  
+6. **Lock:** exclusive `run.lock` (`fcntl` on Unix, `msvcrt` on Windows) held for every CAS record or envelope mutation.  
 7. Terminal envelope never replaced once validated.  
+
+### 7.1 Crash-consistent terminal persistence (exact)
+
+Under `run.lock`, `persist_terminal_envelope` performs:
+
+```text
+1. Load run.json; verify expected_revision (unless idempotent-complete path).
+2. If a valid terminal envelope.json already exists:
+   a. Refuse to replace it with a different envelope body.
+   b. If run.json.lifecycle is still non-terminal: CAS lifecycle to the lifecycle
+      implied by the existing envelope (success→completed, else→failed) and
+      bump recordRevision. Return success (idempotent finish).
+   c. If lifecycle already terminal and matches envelope: no-op success.
+   d. If lifecycle terminal conflicts with envelope class: fail closed (corrupt state).
+3. Else (no valid envelope yet):
+   a. Validate the new envelope object.
+   b. Write envelope.json atomically (FIRST).
+   c. CAS lifecycle to completed|failed|canceled (SECOND).
+   d. Bump recordRevision.
+```
+
+**Crash between 3b and 3c:** disk has valid envelope + non-terminal lifecycle.  
+- Status/handoff **read path** uses effective lifecycle from envelope (§6).  
+- Next **authorized recovery writer** (§9.4) must call `persist_terminal_envelope` (or an internal `complete_lifecycle_from_envelope` used only by that API) to finish step 2b.  
+- Tests: simulate crash after envelope write before lifecycle write; assert status derives completed/failed; assert recovery call finishes lifecycle; assert second envelope write cannot replace.
+
+### 7.2 Authorized recovery writers (durable lifecycle only)
+
+| Writer | When allowed | What it may write |
+|--------|--------------|-------------------|
+| Finalization **worker** | Normal path | Any terminal envelope for the mode outcome via `persist_terminal_envelope` |
+| Finalization **parent** | Only after worker process is proven not running (exited or kill attempted), `join` returned, re-read under lock | (1) Idempotent lifecycle completion for existing valid envelope; (2) **new** failure envelope only if no valid envelope yet, and only classes in §9.4 |
+
+Status, handoff, cleanup dry-run: **never** recovery writers.
 
 ## 8. Progress
 
@@ -271,7 +306,7 @@ Do **not** pass monotonic start values across processes (clock domains are not g
 }
 ```
 
-- `lifecycleSource`: `"record"` | `"derived"` (derived only for interrupted display).  
+- `lifecycleSource`: `"record"` | `"envelope"` | `"derived"`.  
 - `recentEvents`: last **8** events as compact summaries.  
 - `resultAvailable`: true iff valid stored envelope exists.
 
@@ -285,8 +320,8 @@ Do **not** pass monotonic start values across processes (clock domains are not g
 | Progress enter/timeout/success around join | Parent only |
 | Auth-home cleanup | **Worker** (same as today’s post-Grok finalize path moved into worker) |
 | Sandbox verify / drift / mode envelope build | Worker |
-| Terminal envelope + terminal lifecycle CAS | **Worker** on success path |
-| `finalization-timeout` envelope | **Parent only**, after kill+join+re-read |
+| Normal terminal envelope + lifecycle | **Worker** via `persist_terminal_envelope` |
+| Parent recovery terminal writes | **Parent only** under §9.4 after worker dead+joined+reread |
 | progress.jsonl during finalize | Parent only |
 
 ### Worker input (`finalize-payload.json`, mode 0600)
@@ -339,13 +374,37 @@ On success: envelope already persisted; `ok: true`.
 5. If still alive:  
    - `proc.terminate()`; `proc.join(5)` (terminate grace **5s**).  
    - If still alive: `proc.kill()`; `proc.join(5)` (kill grace **5s**).  
-   - If kill unavailable / still alive: treat as timeout; log; proceed to re-read (do not assume worker dead for filesystem purposes — still re-read under lock).  
-6. **Under lock, re-read** `envelope.json` + `run.json`:  
-   - If valid terminal envelope already present → **preserve it**; return it; do **not** write timeout.  
-   - Else write `finalization-timeout` failure envelope via parent terminal path with CAS; lifecycle `failed`.  
-7. If process exited 0: require valid envelope + matching finalize-result; return envelope.  
-8. If process exited non-zero without valid envelope: parent writes failure (`cli-failure` or worker-reported class) under lock only if no terminal envelope yet.  
-9. Worker wrote envelope but died before result file: step 6 re-read preserves envelope (success path for parent).
+   - If kill unavailable / still alive after kill join: log; still proceed to §9.4 re-read (filesystem is source of truth).  
+6. Enter **parent recovery** (§9.4) — never write terminal state before this point after spawn.
+
+### 9.4 Parent recovery writer (exact authority)
+
+**Preconditions (all required):**
+
+1. Worker process is not alive **or** kill/terminate sequence completed and `join` returned (including timeout joins).  
+2. Exclusive `run.lock` acquired.  
+3. Fresh re-read of `envelope.json` + `run.json`.
+
+**Actions under lock (ordered):**
+
+1. If valid terminal envelope exists:  
+   - Call `persist_terminal_envelope` idempotent path to finish lifecycle if needed.  
+   - **Never** replace the envelope.  
+   - Return that envelope to the parent caller.  
+2. Else if worker exit code was 0 but no envelope: parent may write **one** new failure envelope via `persist_terminal_envelope` with class `finalization-worker-missing-result`, lifecycle `failed`.  
+3. Else if worker was timed out / still not producing envelope: parent may write **one** new failure envelope with class `finalization-timeout`, lifecycle `failed`.  
+4. Else if worker exited non-zero without envelope: parent may write **one** new failure envelope with class `cli-failure` (detail from `finalize-worker.stderr` / finalize-result if present), lifecycle `failed`.  
+5. No other parent-authored error classes. No parent success envelopes. No parent writes while worker still running.
+
+**Parent-authorized new failure classes (complete list):**
+
+```text
+finalization-timeout
+cli-failure
+finalization-worker-missing-result
+```
+
+All through `persist_terminal_envelope` only.
 
 ### Budgets
 
@@ -363,8 +422,11 @@ Env `GROK_FINALIZE_TIMEOUT_SECONDS`: integer, clamp **30..600**, overrides table
 - Worker completion **during** timeout/kill window.  
 - Worker completion **after** kill attempt (envelope preserved).  
 - Terminal envelope never replaced by another terminal envelope.  
+- Crash after envelope write before lifecycle write: status derives terminal; recovery finishes lifecycle; envelope body unchanged.  
 - Spawn works on macOS; Windows spawn tested when CI/platform available (skip with explicit marker only if platform lacks spawn — prefer run).  
-- No non-serializable objects in payload.
+- No non-serializable objects in payload.  
+- Parent cannot write success envelope.  
+- Parent cannot write while worker still alive (unit test of guard).
 
 ## 10. Isolated review
 
@@ -389,18 +451,19 @@ Env `GROK_FINALIZE_TIMEOUT_SECONDS`: integer, clamp **30..600**, overrides table
 1. From **repository root** (git toplevel of original checkout):  
 
 ```text
-git diff --binary --full-index HEAD --
+git diff --binary --full-index --ita-invisible-in-index HEAD --
 ```
 
-2. This combines **staged and unstaged tracked** changes relative to HEAD.  
+2. This combines **staged and unstaged tracked** modifications relative to HEAD.  
 3. Ordinary untracked files: **never** included.  
-4. Intent-to-add / untracked: treated as untracked → excluded.  
-5. Dirty submodules or unsupported gitlinks: **reject** with `isolation-unavailable` unless a future version implements and tests them (PR2 rejects).  
+4. **Intent-to-add** (`git add -N`): excluded by `--ita-invisible-in-index` (not treated as tracked additions in the isolation patch).  
+5. Dirty submodules or unsupported gitlinks: **reject** with `isolation-unavailable` (PR2 does not support them).  
 6. Write patch to `{worktree_path}.diff` mode 0600.  
 7. If size > 0: `git -C {worktree_path} apply --whitespace=nowarn {diff_path}` from isolated repo root.  
 8. Any patch-generation or apply failure → `isolation-unavailable` (cleanup first).  
 9. Empty diff: continue.  
-10. Preserve original `--base` for review comparison; isolation HEAD is **not** the comparison base.
+10. Preserve original `--base` for review comparison; isolation HEAD is **not** the comparison base.  
+11. **Test:** `git add -N` file does not appear in isolation worktree after apply; staged+unstaged tracked edits do.
 
 ### Cleanup (always)
 
@@ -500,12 +563,14 @@ Always `shell: false`. Title `Grok Skills`. Body `"{mode} {lifecycle} · {runId}
 |-------|-------------------------|-----|
 | `isolation-unavailable` | `failed` | PR2 |
 | `finalization-timeout` | `failed` | PR1 |
+| `finalization-worker-missing-result` | `failed` | PR1 |
 | `implementation-contract-invalid` | `failed` | PR4 |
 | `write-scope-violation` | `failed` | PR4 |
 | `unexpected-commit` | `failed` | PR4 |
 | `artifact-generation-failure` | `failed` | PR4 |
 | `artifact-integrity-failure` | `failed` (handoff mode) | PR4 |
 | `handoff-unavailable` | `failed` (handoff mode) | PR4 |
+| `terminal-envelope-incomplete` | reported by handoff as not ready / failure class when applicable | PR4 |
 
 Reuse existing: `validation-failure`, `secret-material`, `wrong-working-directory`, `worktree-failure`, `state-ownership-violation`, `cleanup-failure`, `cli-failure`.
 
@@ -549,14 +614,28 @@ Parent reviews and integrates. PR4 never auto-commits, merges, cherry-picks, pus
 
 Optional but recommended: `--contract-file <path>`. Keep `--task` / `--task-file`.
 
-#### Trust model (locked)
+#### Trust model (locked — explicit, not OS-sandbox)
 
-The contract is **trusted operator authority**: supplied by the parent harness or human operator who already has the right to run `code` on that repository. It is **not** untrusted model output. Even so:
+The contract is **trusted operator authority**: supplied by the parent harness or human operator who already has the right to run `code` on that repository. It is **not** untrusted model output.
 
-- Commands never run through a shell.  
-- `cwd` must resolve inside the **isolated worktree** under the single `--target` workspace; escapes rejected.  
-- Execution uses the same write-confinement / sandbox policy as code mode.  
-- Prefer `requiredValidation` entries that name **package/workspace scripts** resolved from the committed package manifest when possible; arbitrary argv remains allowed only under this trust + sandbox model and is documented as such.
+**Filesystem sandboxing claim (locked):** contract `requiredValidation` commands are **not** OS-filesystem-sandboxed. Arbitrary argv under this trust model **can** write outside the worktree if the operator points them at a capable binary. PR4 does **not** claim or test a hard “cannot write outside the worktree” guarantee for those commands.
+
+What **is** enforced:
+
+| Control | Behavior |
+|---------|----------|
+| Shell | Never; argv array only (`shell=False` / no shell string) |
+| `cwd` | Must resolve under the isolated worktree + single `--target`; reject escapes, absolute escapes, `..` |
+| Original checkout | After each validation command, run existing original-checkout unmodified assertion; violation → blocker / fail closed for readiness |
+| Worktree escape (code confinement) | Existing code-mode post-command / post-gate escape checks still apply to the Grok worktree and original checkout |
+| Prefer package scripts | Prefer argv that invoke committed package-manager scripts for the target workspace; arbitrary argv remains allowed under operator trust |
+| Parent duty | Parent always re-runs relevant validation after integration |
+
+`validation.sources.contractRequiredValidation.trustModel` value (exact string):
+
+```text
+operator-contract-trusted-no-os-sandbox
+```
 
 #### Schema
 
@@ -617,15 +696,23 @@ If not: append blocker `unexpected-commit` (see §14.8); ready false; **preserve
 4. compute changed files (sentinel must not appear)
 5. enforce write scopes (contract)
 6. capture forensic patch (phase 1) + provisional blockers
-7. execute requiredValidation (sandboxed, cwd confined)
+7. execute requiredValidation (operator-trusted; cwd confined; no OS FS sandbox claim)
 8. execute wrapper build gate (authoritative)
 9. complete shared safety checks (sandbox verify, auth-home cleanup, original-checkout)
-10. compute integration.ready
-11. persist final handoff JSON (phase 2) — never rewrite ready true after terminal publication
-12. persist terminal envelope (worker terminal writer)
+10. decide in-memory terminalOutcome ∈ {completed, failed} and blockers
+11. compute integration.ready from terminalOutcome + gates (§14.12) — NOT from persisted lifecycle
+12. persist final handoff JSON (phase 2) with that ready/blockers snapshot
+13. persist terminal envelope via persist_terminal_envelope (envelope-first, then lifecycle)
 ```
 
-Tests: sentinel never in changed files/patch; missing/symlinked/malformed sentinel fails; sentinel removal cannot delete user path with similar name.
+**Invariants for steps 10–13:**
+
+- At step 11, persisted lifecycle is still `finalizing`; readiness must **not** read `run.json.lifecycle`.  
+- `terminalOutcome === "completed"` means “this run will publish a success envelope,” not “lifecycle is already completed on disk.”  
+- Crash after step 12 before step 13 completes: see §14.14 handoff observation rules.  
+- Never rewrite an integration-ready manifest after a terminal envelope has been published.
+
+Tests: sentinel never in changed files/patch; missing/symlinked/malformed sentinel fails; sentinel removal cannot delete user path with similar name; crashes between manifest / envelope / lifecycle.
 
 ### 14.7 Two-phase handoff artifacts
 
@@ -639,14 +726,17 @@ Module: `plugin/wrapper/scripts/groklib/implementation_handoff.py`.
 4. Atomic `implementation.patch` mode 0600; SHA-256; re-read verify.  
 5. Max 25 MiB default; env `GROK_HANDOFF_PATCH_MAX_BYTES` clamp 1–100 MiB; never truncate.  
 6. Secret detector on patch; fail closed `secret-material`.  
-7. `finally`: remove temp index; cleanup failure logged; does not invalidate already verified patch unless sensitive temp state remains accessible.  
+7. **Temp-index cleanup (mechanical):** in `finally`, attempt delete of the temp index path.  
+   - After delete attempt, **post-check** `path.exists()`:  
+     - If path **still exists** → append blocker `temp-index-retained`; force `integration.ready` false (at phase-2 compute); log classified cleanup failure.  
+     - If delete raised but post-check shows path **absent** → record a non-blocking warning only; do **not** set `temp-index-retained`.  
+   - Temp index must never appear in the handoff patch.  
 8. Record provisional blockers accumulated so far.
 
-**Phase 2 — final handoff manifest** only after sandbox, auth-home, build gate, requiredValidation, and terminal lifecycle resolution:
+**Phase 2 — final handoff manifest** after steps 7–11 of §14.6 (all gates + `terminalOutcome` + ready compute), **before** terminal envelope:
 
-- Write `implementation-handoff.json` once with final `integration.ready` and complete `blockers`.  
-- Never rewrite an integration-ready manifest after terminal publication.  
-- Failed runs may keep forensic patch; manifest is terminal and permanently `ready: false`.
+- Write `implementation-handoff.json` once with `integration.ready` and complete `blockers` based on `terminalOutcome` (§14.12).  
+- Failed runs may keep forensic patch; if `terminalOutcome === "failed"`, manifest is permanently `ready: false`.
 
 ### 14.8 Blocker accumulator (not raise-and-abort for policy)
 
@@ -665,10 +755,11 @@ Dedicated step (plan Task 4.5):
 
 1. Only after scope + unexpected-commit checks (and sentinel removal).  
 2. For each `requiredValidation` entry: resolve `cwd` under isolated worktree; reject escapes.  
-3. Execute argv array with `shell=False` under code write-confinement/sandbox.  
-4. Record full command evidence (hashes + redacted tails) **before** interpreting exit status.  
-5. Nonzero exit → blocker; prevents `integration.ready`.  
-6. Test: validation command cannot write outside the worktree.
+3. Execute argv array with `shell=False` — **no OS filesystem sandbox** (§14.3).  
+4. After each command: original-checkout unmodified assertion (existing code-mode check).  
+5. Record full command evidence (hashes + redacted tails) **before** interpreting exit status.  
+6. Nonzero exit → blocker; prevents `integration.ready`.  
+7. **Tests (match contract):** cwd escape rejected; shell never used; original-checkout write after validation fails readiness; do **not** claim or assert OS-level “cannot write outside worktree.”
 
 ### 14.10 Validation authority in handoff schema
 
@@ -680,7 +771,11 @@ Dedicated step (plan Task 4.5):
     "allPassed": true,
     "sources": {
       "wrapperBuildGate": { "authoritative": true, "passed": true },
-      "contractRequiredValidation": { "authoritative": true, "passed": true, "trustModel": "operator-contract-sandboxed" },
+      "contractRequiredValidation": {
+        "authoritative": true,
+        "passed": true,
+        "trustModel": "operator-contract-trusted-no-os-sandbox"
+      },
       "modelClaimedCommands": { "authoritative": false, "note": "ignored for readiness" }
     }
   }
@@ -688,7 +783,7 @@ Dedicated step (plan Task 4.5):
 ```
 
 - Wrapper build gate: authoritative.  
-- Wrapper-executed contract validation: authoritative only under declared trust+sandbox.  
+- Wrapper-executed contract validation: authoritative for exit-status evidence under operator-trust model only (not OS FS sandbox).  
 - Grok-prose command claims: non-authoritative; never set readiness.  
 - Parent always reruns relevant validation after integration.
 
@@ -724,11 +819,13 @@ Full document shape:
 }
 ```
 
-### 14.12 `integration.ready`
+### 14.12 `integration.ready` (computed from `terminalOutcome`, not disk lifecycle)
 
-Wrapper-computed only. True only when all hold:
+Wrapper-computed only, using the in-memory decision from §14.6 step 10.
 
-1. Lifecycle `completed`  
+**Manifest write-time ready** may be true only when all hold:
+
+1. `terminalOutcome === "completed"` (in memory; persisted lifecycle may still be `finalizing`)  
 2. HEAD == baseRevision  
 3. Scopes OK (if contract)  
 4. No original-checkout escape  
@@ -737,8 +834,23 @@ Wrapper-computed only. True only when all hold:
 7. Contract requiredValidation all 0 (if present)  
 8. Build gate OK  
 9. Shared safety (sandbox/auth) OK  
-10. `blockers` empty  
+10. `blockers` empty (including no `temp-index-retained`)  
 11. At least one changed path (else blocker `no-changes`)
+
+**`/grok:handoff` observed ready** (what parents must use for integration) is true only when **all** of:
+
+1. Valid handoff manifest loads and passes `validate_implementation_handoff`.  
+2. Manifest `integration.ready === true`.  
+3. Patch re-hash matches.  
+4. A **valid completed terminal envelope** exists for the same `runId` (envelope success / effective lifecycle `completed` per §6).  
+
+If manifest says ready but envelope is missing or not success → handoff reports `integration.ready: false` with blocker `terminal-envelope-incomplete` (or equivalent exact string locked as `terminal-envelope-incomplete`). Status remains read-only; recovery finishes lifecycle via §7.1 when a writer runs.
+
+**Crash tests:**
+
+- Manifest written, envelope not written → handoff not integration-ready.  
+- Envelope written, lifecycle not written → handoff may observe ready if envelope success + manifest ready; status derives completed from envelope.  
+- Envelope + lifecycle complete → handoff ready true when manifest ready.
 
 ### 14.13 Command evidence
 
@@ -763,7 +875,9 @@ Companion:
 - Dedicated `runHandoff()` equivalent to `runStatus()` passthrough (no job creation, no live relay, no progress adoption).  
 - Stderr must not contaminate single JSON stdout (same discipline as status).  
 
-Behavior: read-only; `--run-id` only; rehash patch; same `validate_implementation_handoff`; `artifact-integrity-failure` / `handoff-unavailable`. No apply/commit/merge/push/cleanup. Tests: no Grok process; no companion job.
+Behavior: read-only; `--run-id` only; rehash patch; same `validate_implementation_handoff`; `artifact-integrity-failure` / `handoff-unavailable`. No apply/commit/merge/push/cleanup.
+
+**Observed integration.ready** for the returned envelope must apply §14.12 dual condition (manifest ready **and** completed terminal envelope). Tests: no Grok process; no companion job; ready false when manifest ready but envelope missing.
 
 ### 14.15 Parent protocol (document only)
 
@@ -800,8 +914,9 @@ As §12, §14.6–14.14 tests, dual-host smoke §14.19, packaging 1.6.0 on the t
 
 - [ ] PR1–PR3 criteria with CAS + read-only status  
 - [ ] Terminal envelope never replaced  
-- [ ] Code two-phase handoff + ready after all gates  
-- [ ] Contract validation executed under sandbox  
+- [ ] Crash-consistent envelope-first terminal persistence + recovery  
+- [ ] Code handoff ready from terminalOutcome; handoff dual-condition ready  
+- [ ] Contract validation under operator-trust (no false OS-sandbox claim)  
 - [ ] `/grok:handoff` non-streaming integrity  
 - [ ] Dual-host smoke including failed-target status envelope  
 
@@ -822,31 +937,22 @@ As §12, §14.6–14.14 tests, dual-host smoke §14.19, packaging 1.6.0 on the t
 
 Every new Python/JS/Markdown/skill file must follow repository path-header and skill-frontmatter rules (existing `modes/*.py` header style; skill YAML frontmatter; `run.mjs` self-locating pattern).
 
-## 18. Review findings map (rev 6)
+## 18. Review findings map
 
-| # | Severity | Resolution section |
-|---|----------|--------------------|
-| 1 | Critical | §6.3 read-only status |
-| 2 | Critical | §4, §7, §9 CAS + single writer |
-| 3 | Critical | §14.9 contract validation execution |
-| 4 | Critical | §14.7 two-phase handoff |
-| 5 | High | §6 create_run inventory + CAS merge |
-| 6 | High | §14.14 non-streaming handoff |
-| 7 | High | §14.6 order |
-| 8 | High | §14.8 blocker accumulator |
-| 9 | High | §9 full protocol |
-| 10 | High | §11 execution context |
-| 11 | High | §11 at-most-once attempt |
-| 12 | High | §10 ownership + cleanup |
-| 13 | High | §10 dirty patch rules |
-| 14 | Medium | §14.17 cleanup wording |
-| 15 | Medium | §4 packaging paths; plan file maps |
-| 16 | Medium | §14.10 validation sources |
-| 17 | Medium | §6.3 skill exit 1 |
-| 18 | Medium | §8 elapsed time |
-| 19 | Medium | §14.7 temp index finally |
-| 20 | Medium | §14.11 single validator |
-| 21 | Medium | §14.4 one target |
-| 22 | Low | §13 four minors |
-| 23 | Low | §17 conventions |
-| 24 | Low | §14.13 `-z` paths |
+### Original 24 (rev 5→6) — complete
+
+| # | Resolution |
+|---|------------|
+| 1–24 | As rev 6 map; residual gaps closed in rev 7 below |
+
+### Residual findings on rev 6 (closed in rev 7)
+
+| Residual # | Severity | Resolution |
+|------------|----------|------------|
+| R1 | Critical | §7.1 envelope-first; status §6 envelope-derived lifecycle; idempotent finish |
+| R2 | Critical | §14.6–14.12 `terminalOutcome`; handoff dual-condition ready |
+| R3 | High | §14.3 / §14.9 operator-trusted, no OS FS sandbox claim |
+| R4 | High | §9.4 parent recovery writer + enumerated classes |
+| R5 | High | §10 `--ita-invisible-in-index` + `git add -N` test |
+| R6 | Medium | Plan PR3 exact file list (no optional paths) |
+| R7 | Medium | §14.7 mechanical temp-index post-check + `temp-index-retained` |
