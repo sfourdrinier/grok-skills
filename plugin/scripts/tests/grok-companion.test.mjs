@@ -16,6 +16,7 @@ import {
   resolveWrapperPath,
   wrapperNotFoundMessage
 } from "../lib/wrapper.mjs";
+import { getNotificationConfig } from "../lib/jobs.mjs";
 import { wrapperChildEnv, NOTIFY_ELIGIBLE_MODES, shouldNotify } from "../lib/notify.mjs";
 import { RUN_ID_RE } from "../progress-relay.mjs";
 
@@ -154,8 +155,7 @@ function runSetup(args, envExtras = {}) {
   return { result, cwd, pdata };
 }
 
-test("setup rejects invalid --notification-mode without changing prefs", async () => {
-  const { getNotificationConfig } = await import("../lib/jobs.mjs");
+test("setup rejects invalid --notification-mode without changing prefs", () => {
   // setup exits 1 when grok CLI is missing (CI) even if notify prefs apply.
   // Assert durable prefs + report text, not overall process status.
   const first = runSetup(["--notification-mode", "auto", "--skip-codex-agents"]);
@@ -185,8 +185,7 @@ test("setup rejects invalid --notification-mode without changing prefs", async (
   );
 });
 
-test("setup redacts webhook URL query/userinfo from report", async () => {
-  const { getNotificationConfig } = await import("../lib/jobs.mjs");
+test("setup redacts webhook URL query/userinfo from report", () => {
   const secretUrl =
     "https://user:token@hooks.example.com/notify?secret=super-secret-token";
   const { result, cwd, pdata } = runSetup([

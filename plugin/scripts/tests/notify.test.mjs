@@ -3,6 +3,7 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import {
@@ -294,10 +295,7 @@ test("RUN_ID_RE rejects path-traversal shaped ids", () => {
   assert.equal(RUN_ID_RE.test("direct-123"), false);
 });
 
-test("skills declare execution context prefix (contract)", async () => {
-  const fs = await import("node:fs");
-  const path = await import("node:path");
-  const { fileURLToPath } = await import("node:url");
+test("skills declare execution context prefix (contract)", () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
   const files = [
     "skills/review/SKILL.md",
