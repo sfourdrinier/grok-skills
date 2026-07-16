@@ -2,7 +2,7 @@
 
 # Execution context for notifications (single pattern)
 
-**Canonical prefix** — every skill/agent that can run a live mode must set this
+**Canonical prefix** - every skill/agent that can run a live mode must set this
 **before** `node …/run.mjs` or `node …/agents/run.mjs`. Do not invent variants.
 
 ```bash

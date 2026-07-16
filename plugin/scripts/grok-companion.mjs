@@ -772,7 +772,10 @@ function cmdSetup(cwd, args) {
 
   // Also run hardened preflight when wrapper exists and mode is hardened
   if (wrapper && runMode === "hardened") {
-    const pre = spawnSync(PYTHON, [wrapper, "preflight"], { encoding: "utf8", env: process.env });
+    const pre = spawnSync(PYTHON, [wrapper, "preflight"], {
+      encoding: "utf8",
+      env: wrapperChildEnv(process.env),
+    });
     if (pre.stdout) {
       const env = tryParseEnvelope(pre.stdout);
       if (env?.response?.checks) {

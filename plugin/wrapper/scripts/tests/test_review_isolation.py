@@ -363,6 +363,58 @@ class ReviewIsolationHelperTests(unittest.TestCase):
         self.assertFalse(review_isolation._is_all_zero_oid("0" * 39))
         self.assertFalse(review_isolation._is_all_zero_oid("a" * 40))
 
+    def test_intent_to_add_detects_sha256_zero_oids(self) -> None:
+        """ITA parser must treat 64-zero OIDs as intent-to-add (SHA-256 repos)."""
+        zero64 = "0" * 64
+        line = "1 .A N... 000000 000000 100644 {z} {z} weird-ita.bin".format(z=zero64)
+        payload = (line + "\0").encode("utf-8")
+        fake = subprocess.CompletedProcess(
+            args=["git", "status"],
+            returncode=0,
+            stdout=payload,
+            stderr=b"",
+        )
+        with mock.patch.object(review_isolation, "_run_git_bytes", return_value=fake):
+            paths = review_isolation._intent_to_add_paths(self.repo)
+        self.assertEqual(paths, ["weird-ita.bin"])
+
+    def test_intent_to_add_status_uses_bytes_not_utf8_decode(self) -> None:
+        """Regression: status must not go through utf-8-decoding _run_git."""
+        # Non-UTF-8 bytes in a porcelain line must not raise UnicodeDecodeError.
+        bad_name = b"1 .A N... 000000 000000 100644 " + (b"0" * 40) + b" " + (b"0" * 40) + b" "
+        bad_name += b"file-\xff-ita.txt\0"
+        fake = subprocess.CompletedProcess(
+            args=["git", "status"],
+            returncode=0,
+            stdout=bad_name,
+            stderr=b"",
+        )
+        with mock.patch.object(review_isolation, "_run_git_bytes", return_value=fake):
+            paths = review_isolation._intent_to_add_paths(self.repo)
+        self.assertEqual(len(paths), 1)
+        self.assertTrue(paths[0].startswith("file-"))
+
+    def test_worktree_add_failure_removes_prewritten_marker(self) -> None:
+        """If worktree add fails after marker write, marker must not be left behind."""
+        run_id = runstate.new_run_id()
+        marker = (
+            runstate.state_root() / "worktrees" / "review" / (run_id + ".owner.json")
+        )
+        # marker path is sibling of worktree path: worktrees/review/<id>.owner.json
+        wt = runstate.state_root() / "worktrees" / "review" / run_id
+        expected_marker = worktree_mod.marker_path_for(wt)
+
+        with mock.patch.object(
+            worktree_mod,
+            "_git",
+            side_effect=GrokWrapperError("worktree-failure", "simulated worktree add failure"),
+        ):
+            with self.assertRaises(GrokWrapperError) as ctx:
+                review_isolation.prepare_review_isolation(repo_root=self.repo, run_id=run_id)
+        self.assertEqual(ctx.exception.error_class, "isolation-unavailable")
+        self.assertFalse(expected_marker.exists(), "orphan marker must be cleaned on add failure")
+        self.assertFalse(wt.exists())
+
 
 class ReviewIsolationModeTests(ModeHarness):
     """End-to-end mode wiring: live path default, isolated path, failure class."""

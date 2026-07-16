@@ -190,3 +190,93 @@ test("status mode is not notify-eligible", () => {
   assert.equal(NOTIFY_ELIGIBLE_MODES.has("setup"), false);
   assert.equal(NOTIFY_ELIGIBLE_MODES.has("review"), true);
 });
+
+test("attemptNotify refuses missing run dir without creating it", async () => {
+  const parent = fs.mkdtempSync(path.join(os.tmpdir(), "grok-run-parent-"));
+  const runDir = path.join(parent, "no-such-run");
+  const result = await attemptNotify({
+    runDir,
+    runId: "20260716T000099Z-abcdef",
+    mode: "review",
+    lifecycle: "completed",
+    notificationMode: "native",
+    env: { GROK_COMPANION_EXECUTION_CONTEXT: "background" },
+  });
+  assert.equal(result.attempted, false);
+  assert.equal(result.reason, "run-dir-missing");
+  assert.equal(fs.existsSync(runDir), false);
+});
+
+test("auto mode skips in foreground without writing marker", async () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-run-"));
+  const result = await attemptNotify({
+    runDir,
+    runId: "20260716T000100Z-abcdef",
+    mode: "review",
+    lifecycle: "completed",
+    notificationMode: "auto",
+    env: { GROK_COMPANION_EXECUTION_CONTEXT: "foreground" },
+  });
+  assert.equal(result.attempted, false);
+  assert.equal(result.reason, "auto-foreground");
+  assert.equal(fs.existsSync(path.join(runDir, "notified.json")), false);
+});
+
+test("ineligible mode never writes marker", async () => {
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-run-"));
+  const result = await attemptNotify({
+    runDir,
+    runId: "20260716T000101Z-abcdef",
+    mode: "status",
+    lifecycle: "completed",
+    notificationMode: "native",
+    env: { GROK_COMPANION_EXECUTION_CONTEXT: "background" },
+  });
+  assert.equal(result.attempted, false);
+  assert.equal(result.reason, "mode-not-eligible");
+  assert.equal(fs.existsSync(path.join(runDir, "notified.json")), false);
+});
+
+test("webhook non-2xx still completes marker as failed (no auto-retry)", async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(500);
+    res.end("nope");
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const { port } = server.address();
+  const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-run-"));
+  const runId = "20260716T000102Z-abcdef";
+  const first = await attemptNotify({
+    runDir,
+    runId,
+    mode: "review",
+    lifecycle: "failed",
+    notificationMode: "webhook",
+    webhookUrl: `http://127.0.0.1:${port}/hook`,
+    env: {},
+  });
+  server.close();
+  assert.equal(first.attempted, true);
+  assert.equal(first.sent, false);
+  const marker = JSON.parse(fs.readFileSync(path.join(runDir, "notified.json"), "utf8"));
+  assert.equal(marker.state, "completed");
+  assert.equal(marker.result, "failed");
+  const second = await attemptNotify({
+    runDir,
+    runId,
+    mode: "review",
+    lifecycle: "failed",
+    notificationMode: "webhook",
+    webhookUrl: `http://127.0.0.1:${port}/hook`,
+    env: {},
+  });
+  assert.equal(second.reason, "already-attempted");
+});
+
+test("wrapperChildEnv is pure and does not mutate input", () => {
+  const base = { GROK_COMPANION_EXECUTION_CONTEXT: "background", FOO: "1" };
+  const out = wrapperChildEnv(base);
+  assert.equal(out.GROK_COMPANION_EXECUTION_CONTEXT, undefined);
+  assert.equal(base.GROK_COMPANION_EXECUTION_CONTEXT, "background");
+  assert.equal(out.FOO, "1");
+});

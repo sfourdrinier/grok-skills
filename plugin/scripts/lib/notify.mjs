@@ -266,7 +266,6 @@ function sendWebhook(urlString, payload) {
  * @param {string} opts.notificationMode
  * @param {string|null} [opts.webhookUrl]
  * @param {NodeJS.ProcessEnv} [opts.env]
- * @param {boolean} [opts.force] - reserved PR5; ignored unless true (then still completes marker)
  * @returns {Promise<{ attempted: boolean, sent: boolean, reason: string, detail?: string }>}
  */
 export async function attemptNotify(opts) {
@@ -279,12 +278,15 @@ export async function attemptNotify(opts) {
     notificationMode,
     webhookUrl = null,
     env = process.env,
-    force = false,
   } = opts;
 
   try {
     if (!runDir || !runId) {
       return { attempted: false, sent: false, reason: "missing-run-dir-or-id" };
+    }
+    // Never create runs/<id>; only notify when the wrapper already materialised the dir.
+    if (!fs.existsSync(runDir) || !fs.statSync(runDir).isDirectory()) {
+      return { attempted: false, sent: false, reason: "run-dir-missing" };
     }
     if (!NOTIFY_ELIGIBLE_MODES.has(mode)) {
       return { attempted: false, sent: false, reason: "mode-not-eligible" };
@@ -296,36 +298,19 @@ export async function attemptNotify(opts) {
       executionContext,
       webhookUrl,
     });
-    if (!decision.notify && !force) {
+    if (!decision.notify) {
       return { attempted: false, sent: false, reason: decision.reason };
     }
 
-    // force (PR5) may re-attempt; automatic path never passes force=true
+    // Operator re-attempt (force overwrite) is PR5 only - not implemented here.
     const markerPath = markerPathFor(runDir);
-    try {
-      fs.mkdirSync(runDir, { recursive: true, mode: 0o700 });
-    } catch {
-      /* run dir should already exist */
+    const created = createPendingMarker(markerPath);
+    if (!created) {
+      return { attempted: false, sent: false, reason: "already-attempted" };
     }
 
-    if (!force) {
-      const created = createPendingMarker(markerPath);
-      if (!created) {
-        return { attempted: false, sent: false, reason: "already-attempted" };
-      }
-    } else {
-      // PR5 path: overwrite pending for a deliberate re-fire
-      writePrivate(
-        markerPath,
-        `${JSON.stringify(
-          { state: "pending", attemptedAt: nowIso(), adapter: null, result: null, force: true },
-          null,
-          2
-        )}\n`
-      );
-    }
-
-    const bodyText = `${mode} ${lifecycle} · ${runId} · ${durationSeconds}s`;
+    // ASCII body (AGENTS.md); design middle-dot rendered as " / "
+    const bodyText = `${mode} ${lifecycle} / ${runId} / ${durationSeconds}s`;
     const effectiveMode = NOTIFY_MODES.has(notificationMode) ? notificationMode : "off";
     let sendResult;
 

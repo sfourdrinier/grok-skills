@@ -12,7 +12,7 @@
 
 ---
 
-## A. Spec compliance — notifications
+## A. Spec compliance - notifications
 
 | Requirement | Verdict | Evidence |
 |-------------|---------|----------|
@@ -28,7 +28,7 @@
 | Not exactly-once; no operator retry product | Pass | docs + no force from companion |
 | Direct mode | Accepted residual | No durable `runs/<id>` → skip push; job still stored |
 
-## B. Spec compliance — isolation follow-ups (late PR2)
+## B. Spec compliance - isolation follow-ups (late PR2)
 
 | Finding | Verdict | Evidence |
 |---------|---------|----------|
