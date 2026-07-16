@@ -1,12 +1,12 @@
-# Run lifecycle program — Implementation Plan (revision 3)
+# Run lifecycle program — Implementation Plan (revision 4)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Checkboxes track progress.
 
-**Goal:** Full run lifecycle, status projection, process finalize watchdog, isolated review, at-most-once notifications — three PRs, zero open decisions.
+**Goal:** Full run lifecycle, status projection, process finalize watchdog, isolated review, at-most-once notifications, and verified `code` implementation handoff — **four PRs**, zero open decisions.
 
-**Design:** [docs/superpowers/specs/2026-07-15-run-lifecycle-design.md](../specs/2026-07-15-run-lifecycle-design.md) revision 3.
+**Design:** [docs/superpowers/specs/2026-07-15-run-lifecycle-design.md](../specs/2026-07-15-run-lifecycle-design.md) revision 4.
 
-**Baseline:** v1.2.10. **Versions:** 1.3.0 → 1.4.0 → 1.5.0.
+**Baseline:** v1.2.10. **Versions:** 1.3.0 → 1.4.0 → 1.5.0 → **1.6.0**.
 
 **Rule:** Do not invent alternatives. Every step below is mandatory as written.
 
@@ -281,31 +281,142 @@ def prepare_review_isolation(
 
 ---
 
-## Coverage matrix
+## PR4 — Verified implementation handoff (→ 1.6.0)
 
-| Requirement | Task |
-|-------------|------|
-| Seed before run-id; created+running | 1.1 |
-| Lifecycle graph + interrupted write | 1.2, 1.6 |
-| Explicit terminal lifecycle | 1.3 |
-| Progress elapsed + finalizing | 1.4 |
-| Process finalize watchdog | 1.5 |
-| Status projection failure for failed/canceled/interrupted | 1.6 |
-| Isolation HEAD worktree + base preserved | 2.2–2.3 |
-| Dirty tracked apply; no untracked | 2.2 |
-| isolation-unavailable | 2.2–2.4 |
-| Jobs config notify | 3.1 |
-| At-most-once + safe spawn | 3.2 |
-| Background/auto rules | 3.3 |
-| Full docs | 1.7, 2.5, 3.4 |
+### File map PR4
+
+| Path | Role |
+|------|------|
+| `plugin/wrapper/scripts/grok_agent.py` | `--contract-file`; register `handoff` mode |
+| `plugin/wrapper/scripts/groklib/implementation_contract.py` | **New** — parse/validate contract JSON |
+| `plugin/wrapper/scripts/groklib/implementation_handoff.py` | **New** — patch generation, handoff JSON, ready computation |
+| `plugin/wrapper/scripts/groklib/modes/code.py` | Contract, HEAD check, handoff after finalize gates |
+| `plugin/wrapper/scripts/groklib/modes/_worktree.py` | Pass through contract; commands tails |
+| `plugin/wrapper/scripts/groklib/modes/handoff.py` | **New** — read-only handoff mode |
+| `plugin/wrapper/scripts/groklib/envelope.py` | New error classes; MODES includes `handoff` |
+| `plugin/scripts/grok-companion.mjs` | WRAPPER_MODES / STREAMING if needed for handoff |
+| `plugin/skills/handoff/SKILL.md`, `run.mjs` | **New** skill |
+| `plugin/skills/code/SKILL.md` | contract-file, handoff pointer |
+| `plugin/wrapper/scripts/tests/test_implementation_contract.py` | **New** |
+| `plugin/wrapper/scripts/tests/test_implementation_handoff.py` | **New** |
+| `plugin/wrapper/scripts/tests/test_mode_handoff.py` | **New** |
+| `plugin/wrapper/scripts/tests/test_mode_code.py` | unexpected-commit, scope, ready |
+| Docs: `README.md`, `CHANGELOG.md`, `docs/roadmap.md`, `docs/COMPATIBILITY.md`, `docs/RELEASE.md`, `docs/PROVENANCE.md` (one line if needed), `plugin/references/README.md`, `plugin/references/manual-smoke.md`, `plugin/wrapper/references/authority-policies.md`, `plugin/wrapper/SKILL.md`, packaging **1.6.0**, Claude/Codex plugin.json if modes listed |
+
+### Task 4.1 — Contract module
+
+**Create** `implementation_contract.py` per design §14.3.
+
+- [ ] Parse JSON; require `schemaVersion == 1`.  
+- [ ] Validate taskId charset, target match, writeScopes non-empty, path rules, subtree component matching.  
+- [ ] `requiredValidation` argv must be non-empty string list; cwd relative without `..`.  
+- [ ] Raise/classify `implementation-contract-invalid`.  
+- [ ] Unit tests: exact file vs subtree; reject `..`, absolute, `a` matching `ab` as subtree false; empty scopes invalid.  
+- [ ] **Commit** `contract: parse and enforce write scopes schema`
+
+### Task 4.2 — Unexpected commit check
+
+**Files:** `code.py` post-Grok
+
+- [ ] After Grok: `rev-parse HEAD` must equal recorded full `baseRevision`.  
+- [ ] Else `unexpected-commit`, preserve worktree, `integration.ready` false path, no reset.  
+- [ ] Test with fake commit in worktree.  
+- [ ] **Commit** `code: fail unexpected-commit if HEAD moves`
+
+### Task 4.3 — Write-scope enforcement
+
+- [ ] After changed-files collection: every path must match contract scopes (when contract present).  
+- [ ] Violation → `write-scope-violation`, ready false, forensic patch still attempted if safe.  
+- [ ] Tests for file and subtree.  
+- [ ] **Commit** `code: enforce contract write scopes`
+
+### Task 4.4 — Patch + handoff artifact generation
+
+**Create** `implementation_handoff.py` implementing design §14.5–14.7 exactly (temp index, read-tree, add -A, write-tree, diff --cached --binary --full-index, 25 MiB default, secret scan, atomic 0600 under `runs/<id>/artifacts/`).
+
+- [ ] Tests for add/modify/delete/rename/binary/symlink/mode; untracked included; ignored excluded; sentinel excluded.  
+- [ ] Hash re-read verify.  
+- [ ] Size limit fail `artifact-generation-failure`.  
+- [ ] **Commit** `handoff: immutable git patch and handoff JSON`
+
+### Task 4.5 — Command evidence tails
+
+- [ ] Extend command records with sha256 + 4096-byte redacted tails flags.  
+- [ ] Tests redaction and bound.  
+- [ ] **Commit** `commands: bounded redacted output evidence`
+
+### Task 4.6 — Wire code success/failure to handoff + ready
+
+- [ ] On terminal code paths, build handoff; set `integration.ready` only per design checklist.  
+- [ ] Empty changes → ready false, blocker `no-changes`.  
+- [ ] Envelope may reference artifact paths via existing fields + handoff file on disk.  
+- [ ] **Commit** `code: attach implementation handoff on terminal`
+
+### Task 4.7 — Mode `handoff`
+
+- [ ] Register mode; `handoff.py` read-only load + rehash + schema validate.  
+- [ ] Skill `plugin/skills/handoff/`.  
+- [ ] Companion allows mode.  
+- [ ] Tests: happy path, tamper patch, missing artifact, non-code run, wrong ownership.  
+- [ ] **Commit** `handoff: read-only /grok:handoff mode`
+
+### Task 4.8 — Cleanup warning for ready handoff
+
+- [ ] cleanup dry-run/confirm: if `implementation-handoff.json` has `integration.ready` true, add warning string that handoff is unacknowledged; still allow confirm.  
+- [ ] **Commit** `cleanup: warn before removing integration-ready handoff run`
+
+### Task 4.9 — Docs + dual-host smoke + 1.6.0
+
+Mandatory docs list in file map. Document:
+
+- transfer = conversation context  
+- handoff = implementation output  
+- neither auto-integrates  
+- parent protocol §14.10  
+- parallel peer rules §14.11  
+
+Release evidence:
+
+```bash
+cd plugin/wrapper/scripts && python3 -m unittest discover -s tests -q
+cd plugin/scripts && node --test tests/*.test.mjs
+claude plugin validate ./plugin --strict
+```
+
+Manual: Claude code→status→handoff; Codex same; failed ready false; tamper integrity fail; cleanup after inspect.
+
+- [ ] Packaging **1.6.0**; tag `v1.6.0`.
+
+---
+
+## Coverage matrix (full program)
+
+| Requirement | PR / Task |
+|-------------|-----------|
+| Seed before run-id; created + status running | PR1 / 1.1 |
+| Lifecycle + interrupted | PR1 / 1.2, 1.6 |
+| Explicit terminal lifecycle | PR1 / 1.3 |
+| Progress elapsed + finalizing | PR1 / 1.4 |
+| Process finalize watchdog | PR1 / 1.5 |
+| Status projection (failure for failed/canceled/interrupted) | PR1 / 1.6 |
+| Isolation HEAD + base preserved | PR2 |
+| Dirty tracked apply; no untracked | PR2 |
+| isolation-unavailable | PR2 |
+| Jobs config notify | PR3 |
+| At-most-once + safe spawn | PR3 |
+| Contract + write scopes + unexpected-commit | PR4 |
+| Immutable patch + handoff JSON + ready | PR4 |
+| `/grok:handoff` integrity | PR4 |
+| Full docs each ship | all PRs |
 
 ---
 
 ## Execution order
 
-1. PR1 complete including `v1.3.0`  
-2. PR2 complete including `v1.4.0`  
-3. PR3 complete including `v1.5.0`  
+1. PR1 → `v1.3.0`  
+2. PR2 → `v1.4.0`  
+3. PR3 → `v1.5.0`  
+4. PR4 → `v1.6.0`  
 
 No parallel tracks. No alternate designs during implementation.
 
@@ -313,9 +424,9 @@ No parallel tracks. No alternate designs during implementation.
 
 ## Handoff
 
-Revision **3** locks all decisions. Paths:
+Revision **4** adds PR4 and keeps PR1–PR3 locked. Paths:
 
 - `docs/superpowers/specs/2026-07-15-run-lifecycle-design.md`  
 - `docs/superpowers/plans/2026-07-15-run-lifecycle.md`  
 
-Ready for approval then execution (subagent-driven or inline).
+Approve, then execute (subagent-driven or inline).

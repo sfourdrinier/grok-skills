@@ -1,6 +1,6 @@
 # Run lifecycle, isolated review, and completion signals
 
-**Status:** design revision 3 (fully locked — no open decisions)  
+**Status:** design revision 4 (PR1–PR4 fully locked — no open decisions)  
 **Date:** 2026-07-15  
 **Product:** grok-skills (Claude Code + Codex)  
 **Baseline:** v1.2.10  
@@ -51,7 +51,7 @@ Background and long-running Grok modes (especially `review`) are hard to trust:
 | Notifications default | `off`. Setup flags set mode. Setup copy recommends `auto`. |
 | Notify at-most-once | Exclusive `notified.json` with states `pending` then `sent` (§11). |
 | Native notify | argv-only spawn, `shell: false`, 5s timeout, platforms §11. |
-| PR versions | PR1 **1.3.0**, PR2 **1.4.0**, PR3 **1.5.0**. |
+| PR versions | PR1 **1.3.0**, PR2 **1.4.0**, PR3 **1.5.0**, PR4 **1.6.0**. |
 
 ## 5. Architecture
 
@@ -309,27 +309,121 @@ Always `shell: false`. Title fixed string `Grok Skills`. Body: `"{mode} {lifecyc
 
 Add both to `envelope.ERROR_CLASSES`.
 
-## 13. Three PRs
+## 13. Four PRs
 
 | PR | Version | Scope |
 |----|---------|--------|
 | PR1 | 1.3.0 | Lifecycle, seed, persist, status projection, progress, process finalize |
 | PR2 | 1.4.0 | Isolated review |
 | PR3 | 1.5.0 | Notifications |
+| PR4 | 1.6.0 | Verified implementation handoff for `code` |
 
-## 14. Success criteria
+## 14. PR4 — Verified implementation handoff
 
-- [ ] No run id without seed record (`lifecycle: created`, `status: running`)  
-- [ ] Status projection matches §6  
-- [ ] Explicit lifecycle on every terminal persist  
-- [ ] Finalize hang → `finalization-timeout`  
-- [ ] `--base` / `--isolated` never silent live fallback  
-- [ ] Notify default off; at-most-once; safe spawn  
-- [ ] Docs lists complete on each PR  
+### 14.1 Purpose
 
-## 15. Out of scope
+Make Grok `code` a peer implementer for Codex/Claude: verified, immutable handoff artifacts. Parent reviews and integrates. PR4 never auto-commits, merges, cherry-picks, pushes, or edits the parent checkout.
+
+- `/grok:transfer` = conversation context only (unchanged).  
+- `/grok:handoff` = implementation output; durable key is wrapper **`runId`**.
+
+### 14.2 Grounding
+
+Code already uses isolated worktree, sentinel, diff confinement, build gate, retained worktree, envelope fields `baseRevision`, `changedFiles`, `diffSummary`, `commands`, worktree metadata.
+
+### 14.3 `--contract-file` (optional)
+
+Strict JSON `schemaVersion: 1`. Fields: `taskId`, `objective`, `target`, `writeScopes[]` (`path` + `kind` file|subtree), `acceptanceCriteria[]`, `requiredValidation[]` (`argv`, `cwd`, `purpose`).
+
+| Rule | Locked behavior |
+|------|-----------------|
+| taskId | `[A-Za-z0-9][A-Za-z0-9._-]{0,127}` |
+| target | Must match CLI target after canonical normalization |
+| Paths | Repo-relative; reject absolute, `..`, empty, NUL, symlink escape |
+| file | Exact match |
+| subtree | Path-component prefix (not string prefix) |
+| Empty writeScopes | Invalid when contract present |
+| Post-Grok | Changed paths outside scopes → `write-scope-violation` |
+| Validation cmds | argv only, never shell |
+| Bad contract | `implementation-contract-invalid` before Grok |
+| No contract | Code runs as today; write-scope check uses existing worktree confinement only; `integration.ready` can still be true if all other gates pass |
+
+Keep `--task` / `--task-file` for prose.
+
+### 14.4 Unexpected commits
+
+After Grok: `git rev-parse HEAD` must equal recorded full `baseRevision`. Else `unexpected-commit`, preserve worktree, `integration.ready=false`, no reset. `--allow-commits` out of PR4.
+
+### 14.5 Immutable patch algorithm
+
+Module `implementation_handoff.py`. After sentinel + scopes:
+
+1. Remove validated sentinel `.grok-run-<run-id>`.  
+2. Temp index `runs/<run-id>/artifacts/handoff.idx`.  
+3. `GIT_INDEX_FILE` + worktree for artifact git only.  
+4. `git read-tree <baseRevision>`.  
+5. `git add -A`.  
+6. `resultTreeOid = git write-tree`.  
+7. `git diff --cached --binary --full-index --no-ext-diff <baseRevision>` → `artifacts/implementation.patch` (atomic 0600).  
+8. SHA-256 + bytes; re-read verify.  
+9. Max **25 MiB** default (`GROK_HANDOFF_PATCH_MAX_BYTES` clamp 1–100 MiB); exceed → `artifact-generation-failure`.  
+10. Secret detector on patch; fail closed.  
+11. Ignored files excluded; sentinel and artifacts not in patch.
+
+### 14.6 Handoff JSON
+
+`runs/<run-id>/artifacts/implementation-handoff.json` — schema in feedback (schemaVersion, runId, taskId, contractSha256, baseRevision, resultTreeOid, changedFiles, patch, validation, integration, worktree, createdAtUtc). Align values with C4 envelope fields; no divergent copies.
+
+### 14.7 `integration.ready`
+
+True only if: lifecycle completed; HEAD==base; scopes OK; no original-checkout escape; sentinel OK; patch+hash OK; requiredValidation all 0; build gate OK; sandbox/auth/cleanup OK; blockers empty. Forensic patch may exist with ready false.
+
+Empty changes: ready false, blocker `no-changes`.
+
+### 14.8 Command evidence
+
+Per command: stdout/stderr sha256 + redacted tails max **4096** bytes + truncated flags. Full logs optional under `artifacts/commands/`. Never full logs on stdout envelope.
+
+### 14.9 `/grok:handoff`
+
+Skill + `modes/handoff.py`. Read-only: `--run-id` only; rehash patch; validate schema; `artifact-integrity-failure` / `handoff-unavailable`. No apply/commit/merge/push/cleanup.
+
+### 14.10 Parent protocol
+
+Document only (no auto-apply in PR4): dispatch from base → wait terminal → handoff → require ready → hash check → inspect → apply --check → explicit apply → revalidate parent → record runId+hash.
+
+### 14.11 Parallel peers
+
+Document suitable/unsuitable tasks; disjoint write scopes; dependent tasks re-base after integrate A.
+
+### 14.12 Cleanup
+
+Retain worktree default. Artifacts in run dir. Warn on cleanup of ready handoff; confirm still allowed. No auto-cleanup after code success.
+
+### 14.13 Error classes
+
+`implementation-contract-invalid`, `write-scope-violation`, `unexpected-commit`, `artifact-generation-failure`, `artifact-integrity-failure`, `handoff-unavailable`.
+
+### 14.14 Tests
+
+Full matrix from agent feedback §11 (contract, scopes, patch shapes, unexpected-commit, integrity, ready blockers, handoff read-only, concurrency, secrets, suites).
+
+### 14.15 Docs PR4
+
+README, CHANGELOG, roadmap, COMPATIBILITY, RELEASE, references, code+handoff skills, authority-policies, wrapper SKILL, packaging 1.6.0, dual-host smoke.
+
+## 15. Success criteria (full program)
+
+- [ ] PR1–PR3 criteria (lifecycle, isolation, notify)  
+- [ ] Code handoff artifacts + ready gate  
+- [ ] `/grok:handoff` integrity  
+- [ ] Dual-host smoke code→status→handoff  
+
+## 16. Out of scope
 
 - Host chat completion APIs  
-- Untracked files in `--isolated`  
-- Windows native toasts (v1 no-op)  
+- Untracked under review `--isolated`  
+- Windows native notify  
 - Ignore-list review safety  
+- Auto-apply handoff  
+- `--allow-commits`  
