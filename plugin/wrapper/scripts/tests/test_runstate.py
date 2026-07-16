@@ -746,8 +746,12 @@ class CreateRunSeedTests(unittest.TestCase):
         self.assertEqual(r["lifecycle"], "running")
         r = runstate.set_lifecycle(paths, 1, "finalizing")
         self.assertEqual(r["lifecycle"], "finalizing")
-        r = runstate.set_lifecycle(paths, 2, "completed")
-        self.assertEqual(r["lifecycle"], "completed")
+        with self.assertRaises(runstate.LifecycleError):
+            runstate.set_lifecycle(paths, 2, "completed")
+        from groklib.envelope import build_envelope
+
+        env = build_envelope(run_id=paths.run_id, mode="review", status="success", response={"ok": True})
+        runstate.persist_terminal_envelope(paths, 2, env, lifecycle="completed")
         with self.assertRaises(runstate.LifecycleError):
             runstate.set_lifecycle(paths, 3, "running")
 
@@ -800,3 +804,38 @@ class CreateRunSeedTests(unittest.TestCase):
         self.assertNotIn(record.get("lifecycle"), ("completed", "failed", "canceled"))
         self.assertEqual(record.get("status"), "running")
         self.assertFalse(paths.envelope_path.is_file())
+
+    def test_persist_requires_revision_and_matching_lifecycle(self) -> None:
+        from groklib.envelope import build_envelope, failure_envelope
+
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.set_lifecycle(paths, 1, "finalizing")
+        env = build_envelope(run_id=paths.run_id, mode="review", status="success", response={"ok": True})
+        with self.assertRaises(runstate.LifecycleError):
+            runstate.persist_terminal_envelope(paths, None, env, lifecycle="completed")
+        with self.assertRaises(runstate.LifecycleError):
+            runstate.persist_terminal_envelope(paths, 2, env, lifecycle=None)
+        with self.assertRaises(runstate.LifecycleError):
+            runstate.persist_terminal_envelope(paths, 2, env, lifecycle="failed")
+        fail = failure_envelope(
+            run_id=paths.run_id, mode="review", error_class="cli-failure", message="x"
+        )
+        paths2 = runstate.create_run("code")
+        runstate.set_lifecycle(paths2, 0, "running")
+        runstate.persist_terminal_envelope(paths2, 1, fail, lifecycle="failed")
+        self.assertEqual(runstate.load_run_record(paths2.run_id)["lifecycle"], "failed")
+
+    def test_completed_from_running_refused(self) -> None:
+        from groklib.envelope import build_envelope
+
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        env = build_envelope(run_id=paths.run_id, mode="review", status="success", response={"ok": True})
+        with self.assertRaises(runstate.LifecycleError):
+            runstate.persist_terminal_envelope(paths, 1, env, lifecycle="completed")
+
+    def test_cas_rejects_unknown_keys(self) -> None:
+        paths = runstate.create_run("review")
+        with self.assertRaises(runstate.LifecycleError):
+            runstate.cas_update_run_record(paths, 0, {"notAField": 1})

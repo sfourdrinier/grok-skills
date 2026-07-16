@@ -34,7 +34,7 @@ class FinalizeWatchdogTests(unittest.TestCase):
 
     def test_worker_persists_terminal_envelope(self) -> None:
         paths, env, rev = self._prepare_finalizing()
-        out, ephemeral = finalize_worker.run_finalize_parent(
+        out, ephemeral, durable = finalize_worker.run_finalize_parent(
             paths,
             mode="review",
             envelope=env,
@@ -43,6 +43,7 @@ class FinalizeWatchdogTests(unittest.TestCase):
             budget_seconds=60,
         )
         self.assertIsNone(ephemeral)
+        self.assertTrue(durable)
         self.assertEqual(out["status"], "success")
         record = runstate.load_run_record(paths.run_id)
         self.assertEqual(record["lifecycle"], "completed")
@@ -76,7 +77,7 @@ class FinalizeWatchdogTests(unittest.TestCase):
                 return FakeProc()
 
         with mock.patch.object(finalize_worker.multiprocessing, "get_context", return_value=FakeCtx()):
-            out, ephemeral = finalize_worker.run_finalize_parent(
+            out, ephemeral, durable = finalize_worker.run_finalize_parent(
                 paths,
                 mode="review",
                 envelope=env,
@@ -85,6 +86,8 @@ class FinalizeWatchdogTests(unittest.TestCase):
                 budget_seconds=1,
             )
         self.assertEqual(ephemeral, "finalization-worker-unkillable")
+        self.assertFalse(durable)
+        self.assertTrue(out.get("doNotStore"))
         self.assertEqual(out["error"]["class"], "finalization-worker-unkillable")
         record = runstate.load_run_record(paths.run_id)
         self.assertEqual(record["lifecycle"], "finalizing")
@@ -109,4 +112,84 @@ class FinalizeWatchdogTests(unittest.TestCase):
         )
         # Recovery path with existing envelope must preserve body
         runstate.persist_terminal_envelope(paths, None, other, lifecycle="failed")
+        self.assertEqual(paths.envelope_path.read_bytes(), body)
+
+    def test_exit_0_without_envelope_is_missing_result(self) -> None:
+        paths, env, rev = self._prepare_finalizing()
+
+        class FakeProc:
+            def __init__(self):
+                self.exitcode = 0
+
+            def start(self):
+                return None
+
+            def join(self, timeout=None):
+                return None
+
+            def is_alive(self):
+                return False
+
+            def terminate(self):
+                return None
+
+            def kill(self):
+                return None
+
+        class FakeCtx:
+            def Process(self, **kwargs):
+                return FakeProc()
+
+        with mock.patch.object(finalize_worker.multiprocessing, "get_context", return_value=FakeCtx()):
+            out, ephemeral, durable = finalize_worker.run_finalize_parent(
+                paths,
+                mode="review",
+                envelope=env,
+                lifecycle="completed",
+                expected_revision=rev,
+                budget_seconds=5,
+            )
+        self.assertIsNone(ephemeral)
+        self.assertEqual(out["error"]["class"], "finalization-worker-missing-result")
+        self.assertEqual(runstate.load_run_record(paths.run_id)["lifecycle"], "failed")
+
+    def test_existing_envelope_not_replaced_by_timeout_stdout(self) -> None:
+        paths, env, rev = self._prepare_finalizing()
+        runstate.persist_terminal_envelope(paths, rev, env, lifecycle="completed")
+        body = paths.envelope_path.read_bytes()
+
+        class FakeProc:
+            def __init__(self):
+                self.exitcode = None
+
+            def start(self):
+                return None
+
+            def join(self, timeout=None):
+                return None
+
+            def is_alive(self):
+                return False
+
+            def terminate(self):
+                return None
+
+            def kill(self):
+                return None
+
+        class FakeCtx:
+            def Process(self, **kwargs):
+                return FakeProc()
+
+        with mock.patch.object(finalize_worker.multiprocessing, "get_context", return_value=FakeCtx()):
+            out, ephemeral, durable = finalize_worker.run_finalize_parent(
+                paths,
+                mode="review",
+                envelope=env,
+                lifecycle="completed",
+                expected_revision=rev + 10,
+                budget_seconds=1,
+            )
+        self.assertTrue(durable)
+        self.assertEqual(out["status"], "success")
         self.assertEqual(paths.envelope_path.read_bytes(), body)

@@ -268,5 +268,29 @@ class ReadEventsTests(unittest.TestCase):
         self.assertEqual(len(warnings), 1)
 
 
+class ElapsedMsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="grok-elapsed-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.path = pathlib.Path(self.tmp) / "progress.jsonl"
+
+    def test_elapsed_ms_on_events(self) -> None:
+        clock = {"t": 1000.0}
+
+        def mono():
+            return clock["t"]
+
+        with mock.patch("time.monotonic", side_effect=mono):
+            writer = ProgressWriter("20260716T000000Z-abcdef", self.path)
+            e1 = writer.emit("start", "a")
+            clock["t"] = 1000.5
+            e2 = writer.emit("done", "b")
+        self.assertIn("elapsedMs", e1)
+        self.assertIsInstance(e1["elapsedMs"], int)
+        self.assertGreaterEqual(e1["elapsedMs"], 0)
+        self.assertGreaterEqual(e2["elapsedMs"], e1["elapsedMs"])
+        self.assertGreaterEqual(e2["elapsedMs"], 500)
+
+
 if __name__ == "__main__":
     unittest.main()

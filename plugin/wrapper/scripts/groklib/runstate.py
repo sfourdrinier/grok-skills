@@ -101,11 +101,32 @@ class LifecycleError(GrokWrapperError):
 
 
 _TERMINAL_LIFECYCLES: Set[str] = frozenset({"completed", "failed", "canceled"})
-_ALLOWED_LIFECYCLE_TRANSITIONS: Dict[str, Set[str]] = {
-    "created": frozenset({"running", "failed", "canceled"}),
-    "running": frozenset({"finalizing", "failed", "canceled"}),
+# set_lifecycle: non-terminal edges only (terminal only via persist_terminal_envelope)
+_SET_LIFECYCLE_TRANSITIONS: Dict[str, Set[str]] = {
+    "created": frozenset({"running"}),
+    "running": frozenset({"finalizing"}),
+}
+# New envelope write: completed only from finalizing; failed/canceled from earlier stages
+_PERSIST_LIFECYCLE_TRANSITIONS: Dict[str, Set[str]] = {
+    "created": frozenset({"failed", "canceled"}),
+    "running": frozenset({"failed", "canceled"}),
     "finalizing": frozenset({"completed", "failed", "canceled"}),
 }
+_CAS_ALLOWED_KEYS: Set[str] = frozenset(
+    {
+        "schemaVersion",
+        "mode",
+        "requestedModel",
+        "repository",
+        "targetWorkspace",
+        "worktreePath",
+        "worktreeBranch",
+        "baseRevision",
+        "status",
+        "progressStreamPath",
+        "envelopePath",
+    }
+)
 _PRESERVE_ON_MERGE: Set[str] = frozenset({"runId", "createdAtUtc", "lifecycle", "recordRevision"})
 
 
@@ -279,16 +300,30 @@ def cas_update_run_record(
                     "foundRevision": current,
                 },
             )
-        if "lifecycle" in patch and patch["lifecycle"] != record.get("lifecycle"):
+        if "lifecycle" in patch:
             raise LifecycleError(
                 "use set_lifecycle or persist_terminal_envelope to change lifecycle",
                 {"runId": paths.run_id},
+            )
+        if record.get("lifecycle") in _TERMINAL_LIFECYCLES:
+            raise LifecycleError(
+                "refusing to mutate a terminal run record via cas_update_run_record",
+                {"runId": paths.run_id, "lifecycle": record.get("lifecycle")},
+            )
+        unknown = set(patch.keys()) - _CAS_ALLOWED_KEYS
+        if unknown:
+            raise LifecycleError(
+                "unknown run record fields: {}".format(sorted(unknown)),
+                {"unknownFields": sorted(unknown)},
             )
         merged = dict(record)
         for key, value in patch.items():
             if key in ("runId", "createdAtUtc", "recordRevision"):
                 continue
             merged[key] = value
+        # Non-terminal: never store success/failure status without envelope
+        if merged.get("status") in ("success", "failure"):
+            merged["status"] = "running"
         merged["runId"] = paths.run_id
         merged["createdAtUtc"] = record.get("createdAtUtc") or merged.get("createdAtUtc")
         merged["recordRevision"] = expected_revision + 1
@@ -297,8 +332,18 @@ def cas_update_run_record(
 
 
 def set_lifecycle(paths: RunPaths, expected_revision: int, lifecycle: str) -> dict:
-    """CAS lifecycle transition under lock (design §6 graph)."""
+    """CAS non-terminal lifecycle transition under lock (design §6).
+
+    Terminal lifecycles are **only** set by ``persist_terminal_envelope``.
+    """
     _verify_paths_owner(paths)
+    if lifecycle in _TERMINAL_LIFECYCLES:
+        raise LifecycleError(
+            "set_lifecycle cannot set terminal lifecycle {!r}; use persist_terminal_envelope".format(
+                lifecycle
+            ),
+            {"lifecycle": lifecycle, "runId": paths.run_id},
+        )
     with run_lock(paths):
         record = _load_run_json_unlocked(paths)
         current_rev = record.get("recordRevision", 0)
@@ -319,7 +364,7 @@ def set_lifecycle(paths: RunPaths, expected_revision: int, lifecycle: str) -> di
                 "refusing to overwrite terminal lifecycle {!r}".format(current_life),
                 {"runId": paths.run_id, "lifecycle": current_life},
             )
-        allowed = _ALLOWED_LIFECYCLE_TRANSITIONS.get(str(current_life), frozenset())
+        allowed = _SET_LIFECYCLE_TRANSITIONS.get(str(current_life), frozenset())
         if lifecycle not in allowed:
             raise LifecycleError(
                 "illegal lifecycle transition {!r} -> {!r}".format(current_life, lifecycle),
@@ -327,8 +372,7 @@ def set_lifecycle(paths: RunPaths, expected_revision: int, lifecycle: str) -> di
             )
         record = dict(record)
         record["lifecycle"] = lifecycle
-        if lifecycle in ("running", "finalizing"):
-            record["status"] = "running"
+        record["status"] = "running"
         record["recordRevision"] = expected_revision + 1
         write_json_atomic(paths.run_dir / "run.json", record)
         return record
@@ -346,6 +390,25 @@ def _lifecycle_from_envelope(envelope: dict) -> str:
     )
 
 
+def _envelope_matches_lifecycle(envelope: dict, lifecycle: str) -> bool:
+    status = envelope.get("status")
+    if lifecycle == "completed":
+        return status == "success"
+    if lifecycle in ("failed", "canceled"):
+        return status == "failure"
+    return False
+
+
+def _terminal_pair_compatible(lifecycle: str, envelope_status: str) -> bool:
+    if lifecycle == "completed" and envelope_status == "success":
+        return True
+    if lifecycle == "failed" and envelope_status == "failure":
+        return True
+    if lifecycle == "canceled" and envelope_status == "failure":
+        return True
+    return False
+
+
 def persist_terminal_envelope(
     paths: RunPaths,
     expected_revision: Optional[int],
@@ -356,7 +419,8 @@ def persist_terminal_envelope(
     """Envelope-first terminal persistence under lock (design §7.1).
 
     If a valid terminal envelope already exists, finish lifecycle only (never
-    replace the body). Otherwise write ``envelope.json`` first, then CAS lifecycle.
+    replace the body). Otherwise require ``expected_revision`` + ``lifecycle``,
+    write ``envelope.json`` first, then CAS lifecycle.
     """
     from groklib import envelope as envelope_mod
 
@@ -377,30 +441,46 @@ def persist_terminal_envelope(
 
         if existing_env is not None:
             implied = _lifecycle_from_envelope(existing_env)
+            # Prefer canceled recovery if already recorded
             current_life = record.get("lifecycle")
+            env_status = existing_env.get("status")
             if current_life in _TERMINAL_LIFECYCLES:
-                if current_life != implied and current_life != "canceled":
-                    # canceled may pair with failure-shaped envelopes in edge cases; allow match-or-cancel
-                    if not (current_life == "canceled" and implied == "failed"):
-                        raise LifecycleError(
-                            "terminal lifecycle {!r} conflicts with existing envelope".format(current_life),
-                            {"lifecycle": current_life, "implied": implied},
-                        )
+                if not _terminal_pair_compatible(str(current_life), str(env_status)):
+                    raise LifecycleError(
+                        "terminal lifecycle {!r} conflicts with existing envelope status {!r}".format(
+                            current_life, env_status
+                        ),
+                        {"lifecycle": current_life, "envelopeStatus": env_status},
+                    )
                 return record
-            # Finish lifecycle only
+            # Finish lifecycle only (recovery): success→completed, failure→failed
+            # (canceled not recoverable from envelope alone → failed)
+            finish = implied
             record = dict(record)
-            record["lifecycle"] = implied
-            record["status"] = "success" if implied == "completed" else "failure"
+            record["lifecycle"] = finish
+            record["status"] = "success" if finish == "completed" else "failure"
             record["recordRevision"] = current_rev + 1
             write_json_atomic(paths.run_dir / "run.json", record)
             return record
 
+        # New envelope path: refuse if already terminal without a valid envelope
+        current_life = record.get("lifecycle")
+        if current_life in _TERMINAL_LIFECYCLES:
+            raise LifecycleError(
+                "refusing new terminal envelope when lifecycle is already {!r}".format(current_life),
+                {"lifecycle": current_life, "runId": paths.run_id},
+            )
         if envelope is None:
             raise LifecycleError(
                 "no terminal envelope on disk and none provided to persist",
                 {"runId": paths.run_id},
             )
-        if expected_revision is not None and current_rev != expected_revision:
+        if expected_revision is None:
+            raise LifecycleError(
+                "expected_revision is required when writing a new terminal envelope",
+                {"runId": paths.run_id},
+            )
+        if current_rev != expected_revision:
             raise CasConflictError(
                 "recordRevision conflict for run {}: expected {}, found {}".format(
                     paths.run_id, expected_revision, current_rev
@@ -412,11 +492,27 @@ def persist_terminal_envelope(
                 },
             )
         if lifecycle is None:
-            lifecycle = _lifecycle_from_envelope(envelope)
+            raise LifecycleError(
+                "lifecycle is required when writing a new terminal envelope",
+                {"runId": paths.run_id},
+            )
         if lifecycle not in _TERMINAL_LIFECYCLES:
             raise LifecycleError(
                 "lifecycle must be completed|failed|canceled, got {!r}".format(lifecycle),
                 {"lifecycle": lifecycle},
+            )
+        if not _envelope_matches_lifecycle(envelope, lifecycle):
+            raise LifecycleError(
+                "lifecycle {!r} does not match envelope status {!r}".format(
+                    lifecycle, envelope.get("status")
+                ),
+                {"lifecycle": lifecycle, "envelopeStatus": envelope.get("status")},
+            )
+        allowed = _PERSIST_LIFECYCLE_TRANSITIONS.get(str(current_life), frozenset())
+        if lifecycle not in allowed:
+            raise LifecycleError(
+                "illegal terminal transition {!r} -> {!r}".format(current_life, lifecycle),
+                {"from": current_life, "to": lifecycle, "runId": paths.run_id},
             )
         violations = envelope_mod.validate_envelope(envelope)
         if violations:
@@ -676,13 +772,11 @@ def allocate_leader_socket(private_home: pathlib.Path, run_id: str) -> pathlib.P
 
 
 def write_run_record(paths: RunPaths, record: dict) -> None:
-    """Merge non-terminal bookkeeping into run.json under lock.
+    """Legacy merge helper for non-terminal bookkeeping only.
 
-    **Never** sets a terminal lifecycle (completed/failed/canceled). Terminal
-    state is only written by ``persist_terminal_envelope`` (envelope-first).
-    Status values ``success``/``failure`` in the patch are **not** applied while
-    lifecycle is non-terminal (stored as ``running`` instead). Prefer
-    ``cas_update_run_record`` / ``set_lifecycle`` / ``persist_terminal_envelope``.
+    Prefer ``cas_update_run_record`` / ``set_lifecycle`` / ``persist_terminal_envelope``.
+    Refuses to mutate terminal runs. Never sets terminal lifecycle. Never stores
+    status success/failure while non-terminal.
     """
     _verify_paths_owner(paths)
     with run_lock(paths):
@@ -693,34 +787,32 @@ def write_run_record(paths: RunPaths, record: dict) -> None:
                 existing = _load_run_json_unlocked(paths)
             except UnknownRunError:
                 existing = {}
+        if existing.get("lifecycle") in _TERMINAL_LIFECYCLES:
+            raise LifecycleError(
+                "refusing to mutate terminal run via write_run_record",
+                {"runId": paths.run_id, "lifecycle": existing.get("lifecycle")},
+            )
         merged = dict(existing)
         for key, value in record.items():
             if key in _PRESERVE_ON_MERGE and key in existing:
                 continue
             if key == "lifecycle":
-                continue  # never via this API
+                continue
+            if key not in _CAS_ALLOWED_KEYS and key not in ("schemaVersion", "mode"):
+                continue  # drop unknown keys
             merged[key] = value
         merged["runId"] = paths.run_id
         if "createdAtUtc" not in merged or not merged["createdAtUtc"]:
             merged["createdAtUtc"] = existing.get("createdAtUtc") or _utc_now_iso()
-        # Preserve lifecycle; only allow created -> running for in-flight bookkeeping
         life = existing.get("lifecycle") or "created"
-        if life not in _TERMINAL_LIFECYCLES and life == "created" and record.get("status") == "running":
+        if life == "created" and record.get("status") == "running":
             life = "running"
         merged["lifecycle"] = life
         status_value = record.get("status")
-        if life in _TERMINAL_LIFECYCLES:
-            # Already terminalized by persist_terminal_envelope — keep terminal status
-            if status_value in ("success", "failure"):
-                merged["status"] = status_value
-            elif "status" not in merged:
-                merged["status"] = "success" if life == "completed" else "failure"
+        if status_value in ("success", "failure", None):
+            merged["status"] = "running"
         else:
-            # Non-terminal: never store success/failure status without an envelope
-            if status_value in ("success", "failure", None):
-                merged["status"] = "running"
-            else:
-                merged["status"] = status_value
+            merged["status"] = status_value
         if existing:
             merged["recordRevision"] = int(existing.get("recordRevision", 0)) + 1
         else:

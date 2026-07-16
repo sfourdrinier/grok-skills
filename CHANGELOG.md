@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
+## [1.3.1] - 2026-07-16
+
+### Fixed
+
+- **Adversarial PR1 hardening:** terminal lifecycle only via envelope-first
+  `persist_terminal_envelope`; `set_lifecycle` cannot terminalize; entrypoint
+  never O_TRUNC-replaces a valid terminal envelope; unkillable finalize worker
+  is stdout-only (`doNotStore`); success-on-stdout without durable terminal
+  state is fail-closed; status wall-clock `elapsedMs` + failed-target tests.
+
 ## [1.3.0] - 2026-07-16
 
 ### Added

@@ -3,6 +3,7 @@
 import contextlib
 import io
 import json
+import pathlib
 import signal
 import unittest
 from unittest import mock
@@ -194,12 +195,24 @@ class EntrypointSuccessTests(PreflightHarness):
         return exit_code, buffer.getvalue()
 
     def test_stored_write_failure_reemits_original_envelope(self) -> None:
-        # F2: a fully SUCCESSFUL run whose stored-copy write fails must re-emit the
-        # SAME original success envelope (never a fabricated cli-failure); exactly
-        # one envelope reaches stdout, with an appended stored-write warning.
-        exit_code, out = self._drive_preflight_with_flaky_store(
-            ("models-ok", "inspect-ok"), self.grok_home
+        # F2: when the entrypoint still attempts a stored-copy write and that write
+        # fails, re-emit the original envelope (never fabricate cli-failure).
+        # PR1 modes may already persist via persist_terminal_envelope; main then
+        # skips re-store (doNotStore / existing valid envelope). Drive _emit
+        # directly for the flaky-store path.
+        from groklib.envelope import build_envelope
+
+        env = build_envelope(
+            run_id="20260716T000000Z-abcdef",
+            mode="preflight",
+            status="success",
+            response={"checks": []},
         )
+        buffer = io.StringIO()
+        with mock.patch.object(grok_agent, "emit_envelope", self._flaky_emit_factory()):
+            with contextlib.redirect_stdout(buffer):
+                exit_code = grok_agent._emit(env, pathlib.Path(self.tmp_root) / "env.json")
+        out = buffer.getvalue()
         non_empty = [line for line in out.splitlines() if line.strip()]
         self.assertEqual(len(non_empty), 1, "exactly one envelope must reach stdout")
         envelope = json.loads(out)

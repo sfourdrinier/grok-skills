@@ -157,9 +157,8 @@ class ReviewModeTests(ModeHarness):
         self.assertEqual(record["status"], "failure")
         self.assertEqual(record["runId"], run_id, "the envelope must carry the REAL run id")
 
-    def test_write_run_record_failure_preserves_success_outcome(self) -> None:
-        # If terminal finalize/persist fails, the already-determined success
-        # envelope must still be returned (with a warning), never reclassified.
+    def test_finalize_failure_fail_closed_not_success(self) -> None:
+        # Durable terminal publish failure must not exit 0 as success.
         repo = self._repo()
 
         def _fail_finalize(*_a, **_k):
@@ -173,15 +172,9 @@ class ReviewModeTests(ModeHarness):
                 ["review", "--target", "pkg", "--task", "Review"], repo_root=repo
             )
         env = json.loads(out)
-        self.assertEqual(exit_code, 0, out)
-        self.assertEqual(env["status"], "success")
-        self.assertTrue(
-            any(
-                "terminal finalize failed" in warning or "could not be persisted" in warning
-                for warning in env["warnings"]
-            ),
-            env["warnings"],
-        )
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(env["status"], "failure")
+        self.assertEqual(env["error"]["class"], "finalization-worker-missing-result")
 
     def test_sigterm_systemexit_midrun_terminalizes_and_emits_one_envelope(self) -> None:
         # Round4 F5-sigterm-bypasses-envelope: a SIGTERM-driven SystemExit

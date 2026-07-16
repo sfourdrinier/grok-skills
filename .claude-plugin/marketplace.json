@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "Use Grok as a coding assistant from Claude Code through a hardened, sandboxed wrapper. Not affiliated with xAI.",
-    "version": "1.3.0"
+    "version": "1.3.1"
   },
   "plugins": [
     {
       "name": "grok",
       "description": "Grok review, reason, code, and verify via a self-contained sandboxed wrapper.",
-      "version": "1.3.0",
+      "version": "1.3.1",
       "author": {
         "name": "Stephane Fourdrinier"
       },

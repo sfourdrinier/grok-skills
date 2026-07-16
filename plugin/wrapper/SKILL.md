@@ -15,7 +15,8 @@ process isolation, private authentication, sandboxing, and result reporting.
 It never trusts a Grok narrative in place of verified evidence.
 
 Every subcommand prints exactly one JSON result envelope to stdout, success
-or failure alike. Exit code is `0` iff the envelope's `status` is `"success"`.
+or failure alike. Exit code is `0` when the envelope's `status` is `"success"`
+or `"running"` (in-flight status polls); otherwise `1`.
 
 ## Hard rule: copy the command lines exactly
 

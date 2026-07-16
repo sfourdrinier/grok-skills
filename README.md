@@ -230,7 +230,11 @@ node "${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}/scripts/grok-companion.mjs" setup --ru
 
 ### Reading the result
 
-Every run prints **exactly one JSON envelope** on stdout (success or failure). Exit code is 0 only when `"status": "success"`. Treat that envelope as the source of truth; any prose after it is optional commentary.
+Every run prints **exactly one JSON envelope** on stdout (success, failure, or
+in-flight `running`). Exit code is 0 when `"status"` is `"success"` or
+`"running"`; otherwise 1. For `/grok:status`, exit 1 can mean a successfully
+inspected failed/interrupted **target** — still relay the JSON. Treat the
+envelope as the source of truth; any prose after it is optional commentary.
 
 For `code`, look for `worktreePath` / `changedFiles` in the envelope. For `verify`, look for the structured verdict.
 

@@ -8,6 +8,7 @@
 # exiting 0 iff success. Diagnostics go to stderr; emit_envelope owns stdout.
 
 import argparse
+import json
 import os
 import pathlib
 import signal
@@ -23,6 +24,7 @@ from groklib.envelope import (
     exit_code_for,
     failure_envelope,
     redact_secret_value_text,
+    validate_envelope,
 )
 from groklib.modes import MODES
 
@@ -355,8 +357,27 @@ def main(argv: Optional[List[str]] = None) -> int:
             "storing mode {!r} produced an envelope without a usable runId; emitting without a stored copy".format(mode),
         )
         return _emit(env, None)
+    # Modes that already terminalized via persist_terminal_envelope (or that
+    # must not write while a worker may still be alive) set doNotStore.
+    if env.get("doNotStore") is True:
+        clean = dict(env)
+        clean.pop("doNotStore", None)
+        return _emit(clean, None)
     envelope_path = runstate.state_root() / "runs" / run_id / "envelope.json"
-    return _emit(env, envelope_path)
+    # If a valid terminal envelope already exists, never O_TRUNC-replace it.
+    if envelope_path.is_file():
+        try:
+            existing = json.loads(envelope_path.read_text(encoding="utf-8"))
+            if isinstance(existing, dict) and not validate_envelope(existing):
+                clean = dict(env)
+                clean.pop("doNotStore", None)
+                return _emit(clean, None)
+        except (OSError, json.JSONDecodeError):
+            pass
+    # Strip non-C4 helper keys before store
+    clean = dict(env)
+    clean.pop("doNotStore", None)
+    return _emit(clean, envelope_path)
 
 
 if __name__ == "__main__":

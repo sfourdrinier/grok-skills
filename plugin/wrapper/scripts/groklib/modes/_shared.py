@@ -167,7 +167,13 @@ def _publish_terminal_envelope(
     progress: ProgressWriter,
     warnings: List[str],
 ) -> dict:
-    """Move to finalizing and persist terminal envelope via finalize worker."""
+    """Move to finalizing and persist terminal envelope via finalize worker.
+
+    Fail closed: if durable terminalization does not complete for a success
+    outcome, return a failure envelope with doNotStore rather than success-on-stdout.
+    """
+    from groklib.envelope import failure_envelope
+
     try:
         record = runstate.load_run_record(run_paths.run_id)
         rev = int(record.get("recordRevision", 0))
@@ -179,7 +185,7 @@ def _publish_terminal_envelope(
         if life == "running":
             record = runstate.set_lifecycle(run_paths, rev, "finalizing")
             rev = int(record["recordRevision"])
-        published, ephemeral = run_finalize_parent(
+        published, ephemeral, durable_ok = run_finalize_parent(
             run_paths,
             mode=mode,
             envelope=envelope,
@@ -194,14 +200,42 @@ def _publish_terminal_envelope(
                 published["warnings"] = list(published.get("warnings") or []) + [
                     "finalization worker unkillable; durable terminal state not written"
                 ]
+                published["doNotStore"] = True
+            return published
+        if not durable_ok:
+            # Prefer already-returned failure; mark no store
+            if isinstance(published, dict):
+                published = dict(published)
+                published["doNotStore"] = True
+                if published.get("status") == "success":
+                    fail = failure_envelope(
+                        run_id=run_paths.run_id,
+                        mode=mode,
+                        error_class="finalization-worker-missing-result",
+                        message="terminal publish did not complete durably",
+                        detail={"runId": run_paths.run_id},
+                        progressStreamPath=str(run_paths.progress_path),
+                    )
+                    fail["doNotStore"] = True
+                    return fail
+            return published
         return published
     except Exception as exc:
         _log("_publish_terminal_envelope", "finalize failed: {}".format(exc))
-        note = "terminal finalize failed (see stderr); returning in-memory envelope"
+        note = "terminal finalize failed (see stderr)"
         warnings.append(note)
-        repaired = dict(envelope)
-        repaired["warnings"] = list(envelope.get("warnings") or []) + [note]
-        return repaired
+        # Fail closed: never claim success without durable terminalization
+        fail = failure_envelope(
+            run_id=run_paths.run_id,
+            mode=mode,
+            error_class="finalization-worker-missing-result",
+            message=note + ": {}".format(exc),
+            detail={"runId": run_paths.run_id},
+            progressStreamPath=str(run_paths.progress_path),
+        )
+        fail["doNotStore"] = True
+        fail["warnings"] = list(fail.get("warnings") or []) + list(warnings)
+        return fail
 
 
 def resolve_binary(args: argparse.Namespace) -> pathlib.Path:

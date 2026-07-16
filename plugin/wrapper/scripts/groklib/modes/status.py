@@ -6,12 +6,12 @@
 # {storedEnvelope, events, eventWarnings, target}. It writes NOTHING to the
 # target run directory.
 #
-# Outcome of the status *query* (top-level envelope status):
-#   - success: target finished (stored envelope present and valid)
-#   - running: target still in progress (no stored envelope; process/record alive)
-#   - failure: unknown/unowned run, or unreadable/invalid stored envelope
-#
-# Missing envelope.json is normal while a run is in progress — not a warning.
+# Outcome of the status *query* (top-level envelope status projection, design §6):
+#   - running (exit 0): target lifecycle created|running|finalizing
+#   - success (exit 0): target lifecycle completed
+#   - failure (exit 1): failed|canceled|derived interrupted, or load/own/malformed
+# Target-failure projection has response.target (no error field). Command failure
+# uses failure_envelope with error.class. Status never writes the run directory.
 
 import argparse
 import datetime
@@ -148,17 +148,20 @@ def _build_target_info(
         if created_dt.tzinfo is None:
             created_dt = created_dt.replace(tzinfo=datetime.timezone.utc)
         delta = now - created_dt
+        # Wall-clock for status display (design §8); clamp negative to 0
         elapsed_seconds = max(0, int(delta.total_seconds()))
         elapsed_ms = max(0, int(delta.total_seconds() * 1000))
-    # Prefer last event's stored elapsedMs when present
-    if events:
-        last_em = events[-1].get("elapsedMs")
-        if isinstance(last_em, int) and last_em >= 0:
-            elapsed_ms = last_em
 
     last_event = _event_summary(events[-1]) if events else None
+    last_progress_at = None
     if last_event is not None and events:
-        last_event["elapsedMs"] = events[-1].get("elapsedMs", elapsed_ms)
+        # lastEvent may carry process-local elapsedMs from the progress writer
+        last_em = events[-1].get("elapsedMs")
+        if isinstance(last_em, int) and last_em >= 0:
+            last_event["elapsedMs"] = last_em
+        ts = events[-1].get("ts")
+        if isinstance(ts, str):
+            last_progress_at = ts
     recent = [_event_summary(ev) for ev in events[-8:]] if events else []
 
     return {
@@ -172,6 +175,7 @@ def _build_target_info(
         "createdAtUtc": created,
         "elapsedSeconds": elapsed_seconds,
         "elapsedMs": elapsed_ms,
+        "lastProgressAt": last_progress_at,
         "requestedModel": record.get("requestedModel"),
         "repository": record.get("repository"),
         "eventCount": len(events),

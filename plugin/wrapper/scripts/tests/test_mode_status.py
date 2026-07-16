@@ -374,5 +374,45 @@ class StatusModeTests(unittest.TestCase):
         self.assertEqual(envelope["response"]["target"]["lifecycleSource"], "envelope")
 
 
+
+    def test_status_failed_target_exit_1(self) -> None:
+        from groklib.envelope import failure_envelope
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.set_lifecycle(paths, 1, "finalizing")
+        env = failure_envelope(
+            run_id=paths.run_id, mode="review", error_class="cli-failure", message="boom"
+        )
+        runstate.persist_terminal_envelope(paths, 2, env, lifecycle="failed")
+        exit_code, out = _run_status(paths.run_id)
+        envelope = json.loads(out)
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(envelope["status"], "failure")
+        self.assertNotIn("error", envelope)
+        self.assertEqual(envelope["response"]["storedEnvelope"]["status"], "failure")
+        self.assertEqual(envelope["response"]["target"]["lifecycle"], "failed")
+
+    def test_status_interrupted_byte_identical(self) -> None:
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.write_home_liveness_marker(paths.run_dir, 999999999)
+        before = {}
+        for root, _d, files in os.walk(paths.run_dir):
+            for name in files:
+                fp = pathlib.Path(root) / name
+                before[str(fp.relative_to(paths.run_dir))] = fp.read_bytes()
+        life_before = runstate.load_run_record(paths.run_id)["lifecycle"]
+        exit_code, out = _run_status(paths.run_id)
+        envelope = json.loads(out)
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(envelope["response"]["target"]["lifecycle"], "interrupted")
+        self.assertEqual(runstate.load_run_record(paths.run_id)["lifecycle"], life_before)
+        after = {}
+        for root, _d, files in os.walk(paths.run_dir):
+            for name in files:
+                fp = pathlib.Path(root) / name
+                after[str(fp.relative_to(paths.run_dir))] = fp.read_bytes()
+        self.assertEqual(before, after)
+
 if __name__ == "__main__":
     unittest.main()

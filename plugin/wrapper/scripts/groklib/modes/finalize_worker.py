@@ -1,9 +1,13 @@
 # wrapper/scripts/groklib/modes/finalize_worker.py
 #
-# Spawn-only finalization worker: loads a JSON payload, persists the terminal
-# envelope via runstate.persist_terminal_envelope (envelope-first CAS), writes
-# finalize-result.json. Parent owns progress and recovery when the worker is
-# confirmed not alive (design §9 / §9.4).
+# Spawn finalization worker: loads JSON payload, persists terminal envelope via
+# runstate.persist_terminal_envelope (envelope-first CAS), writes finalize-result.
+# Parent owns progress and recovery only when the worker is confirmed not alive
+# (design §9 / §9.4).
+#
+# Note (locked PR1 deviation): envelope assembly remains in the parent process;
+# the worker owns durable terminal persist under a hang budget. Design §9 full
+# post-Grok finalize ownership is a future tighten, not silent scope creep.
 
 from __future__ import annotations
 
@@ -16,6 +20,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from groklib import log_stderr, runstate
 from groklib import envelope as envelope_mod
+from groklib import platformsupport
 
 _DEFAULT_BUDGETS = {
     "review": 120,
@@ -25,10 +30,18 @@ _DEFAULT_BUDGETS = {
 }
 _TERMINATE_GRACE = 5.0
 _KILL_GRACE = 5.0
+_FILE_MODE = 0o600
 
 
 def _log(function: str, message: str) -> None:
     log_stderr("modes.finalize_worker", function, message)
+
+
+def _write_private_text(path: pathlib.Path, text: str) -> None:
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _FILE_MODE)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(text)
+    platformsupport.restrict_file_permissions(path)
 
 
 def finalize_budget_seconds(mode: str) -> int:
@@ -53,6 +66,13 @@ def finalize_worker_main(payload_path: str) -> None:
 
     run_id = payload["runId"]
     run_dir = pathlib.Path(payload["runDir"])
+    # Fail closed if runDir is not under our state root
+    try:
+        run_dir.resolve().relative_to(runstate.state_root().resolve())
+    except ValueError as exc:
+        _log("finalize_worker_main", "runDir outside state root: {}".format(run_dir))
+        raise SystemExit(2) from exc
+
     paths = runstate.RunPaths(
         run_id=run_id,
         run_dir=run_dir,
@@ -67,6 +87,7 @@ def finalize_worker_main(payload_path: str) -> None:
     lifecycle = payload.get("lifecycle")
 
     try:
+        runstate.verify_owner_marker(paths.run_dir / "owner.json")
         record = runstate.persist_terminal_envelope(
             paths,
             int(expected) if expected is not None else None,
@@ -86,7 +107,7 @@ def finalize_worker_main(payload_path: str) -> None:
         raise SystemExit(0)
     except Exception as exc:
         try:
-            stderr_path.write_text(traceback.format_exc(), encoding="utf-8")
+            _write_private_text(stderr_path, traceback.format_exc())
         except OSError:
             pass
         error_class = getattr(exc, "error_class", None) or "cli-failure"
@@ -106,6 +127,20 @@ def finalize_worker_main(payload_path: str) -> None:
         raise SystemExit(1) from exc
 
 
+def _load_valid_envelope(paths: runstate.RunPaths) -> Optional[dict]:
+    if not paths.envelope_path.is_file():
+        return None
+    try:
+        raw = json.loads(paths.envelope_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    if envelope_mod.validate_envelope(raw):
+        return None
+    return raw
+
+
 def run_finalize_parent(
     paths: runstate.RunPaths,
     *,
@@ -115,9 +150,11 @@ def run_finalize_parent(
     expected_revision: int,
     progress: Any = None,
     budget_seconds: Optional[int] = None,
-) -> Tuple[dict, Optional[str]]:
-    """Spawn finalize worker; return (envelope_for_stdout, ephemeral_error_class_or_None).
+) -> Tuple[dict, Optional[str], bool]:
+    """Spawn finalize worker.
 
+    Returns ``(envelope_for_stdout, ephemeral_error_class_or_None, durable_ok)``.
+    When ``durable_ok`` is False, the entrypoint must not store envelope.json.
     Parent durable recovery only when ``proc.is_alive() is False``.
     """
     budget = budget_seconds if budget_seconds is not None else finalize_budget_seconds(mode)
@@ -157,7 +194,6 @@ def run_finalize_parent(
         proc.kill()
         proc.join(_KILL_GRACE)
 
-    # Liveness gate: no durable parent write while worker alive
     if proc.is_alive():
         if progress is not None:
             progress.safe_emit("finalizing", "finalization worker unkillable", level="error")
@@ -169,52 +205,43 @@ def run_finalize_parent(
             detail={"runId": paths.run_id},
             progressStreamPath=str(paths.progress_path),
         )
-        return ephemeral, "finalization-worker-unkillable"
+        # doNotStore: entrypoint must not write envelope.json
+        ephemeral["doNotStore"] = True
+        return ephemeral, "finalization-worker-unkillable", False
 
-    # Recovery under lock via persist API
-    if paths.envelope_path.is_file():
+    # Recovery under lock semantics via persist API
+    existing = _load_valid_envelope(paths)
+    if existing is not None:
         try:
             runstate.persist_terminal_envelope(paths, None, None)
-            if progress is not None:
-                progress.safe_emit("finalizing", "finalization succeeded")
-            raw = json.loads(paths.envelope_path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                return raw, None
         except Exception as exc:
             _log("run_finalize_parent", "idempotent finish failed: {}".format(exc))
+        # Always return the durable envelope, never a synthetic timeout
+        if progress is not None:
+            if existing.get("status") == "success":
+                progress.safe_emit("finalizing", "finalization succeeded")
+            else:
+                progress.safe_emit("finalizing", "finalization finished with durable failure")
+        return existing, None, True
 
     exitcode = proc.exitcode
-    if timed_out:
-        fail = envelope_mod.failure_envelope(
-            run_id=paths.run_id,
-            mode=mode,
-            error_class="finalization-timeout",
-            message="finalization worker timed out",
-            detail={"budgetSeconds": budget},
-            progressStreamPath=str(paths.progress_path),
-        )
+    result_meta: Dict[str, Any] = {}
+    if result_path.is_file():
         try:
-            record = runstate.load_run_record(paths.run_id)
-            rev = int(record.get("recordRevision", 0))
-            runstate.persist_terminal_envelope(paths, rev, fail, lifecycle="failed")
-        except Exception as exc:
-            _log("run_finalize_parent", "timeout persist failed: {}".format(exc))
-        if progress is not None:
-            progress.safe_emit("finalizing", "finalization timed out", level="error")
-        return fail, None
-
-    if exitcode == 0 and paths.envelope_path.is_file():
-        if progress is not None:
-            progress.safe_emit("finalizing", "finalization succeeded")
-        return json.loads(paths.envelope_path.read_text(encoding="utf-8")), None
+            loaded = json.loads(result_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                result_meta = loaded
+        except (OSError, json.JSONDecodeError):
+            pass
 
     if exitcode == 0:
+        # exit 0 but no valid envelope
         fail = envelope_mod.failure_envelope(
             run_id=paths.run_id,
             mode=mode,
             error_class="finalization-worker-missing-result",
             message="finalization worker exited 0 without a terminal envelope",
-            detail={"runId": paths.run_id},
+            detail={"runId": paths.run_id, "workerResult": result_meta or None},
             progressStreamPath=str(paths.progress_path),
         )
         try:
@@ -223,9 +250,34 @@ def run_finalize_parent(
             runstate.persist_terminal_envelope(paths, rev, fail, lifecycle="failed")
         except Exception as exc:
             _log("run_finalize_parent", "missing-result persist failed: {}".format(exc))
-        return fail, None
+            fail["doNotStore"] = True
+            return fail, None, False
+        return fail, None, True
 
-    detail: Dict[str, Any] = {"exitCode": exitcode}
+    if timed_out:
+        fail = envelope_mod.failure_envelope(
+            run_id=paths.run_id,
+            mode=mode,
+            error_class="finalization-timeout",
+            message="finalization worker timed out",
+            detail={"budgetSeconds": budget, "workerResult": result_meta or None},
+            progressStreamPath=str(paths.progress_path),
+        )
+        try:
+            record = runstate.load_run_record(paths.run_id)
+            rev = int(record.get("recordRevision", 0))
+            runstate.persist_terminal_envelope(paths, rev, fail, lifecycle="failed")
+        except Exception as exc:
+            _log("run_finalize_parent", "timeout persist failed: {}".format(exc))
+            fail["doNotStore"] = True
+            if progress is not None:
+                progress.safe_emit("finalizing", "finalization timed out", level="error")
+            return fail, None, False
+        if progress is not None:
+            progress.safe_emit("finalizing", "finalization timed out", level="error")
+        return fail, None, True
+
+    detail: Dict[str, Any] = {"exitCode": exitcode, "workerResult": result_meta or None}
     if stderr_path.is_file():
         try:
             detail["stderrTail"] = stderr_path.read_text(encoding="utf-8")[-4000:]
@@ -245,4 +297,6 @@ def run_finalize_parent(
         runstate.persist_terminal_envelope(paths, rev, fail, lifecycle="failed")
     except Exception as exc:
         _log("run_finalize_parent", "cli-failure persist failed: {}".format(exc))
-    return fail, None
+        fail["doNotStore"] = True
+        return fail, None, False
+    return fail, None, True
