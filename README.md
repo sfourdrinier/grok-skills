@@ -190,8 +190,8 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
   yet - [openai/codex#18988](https://github.com/openai/codex/issues/18988)). Managed
   files refresh on plugin upgrade (with `*.bak`); user-owned TOML is left alone unless
   `setup --force-codex-agents`.
-- **Never invent cache paths** - only `CLAUDE_PLUGIN_ROOT` / `PLUGIN_ROOT` or the
-  injected companion path ([plugin-root.md](plugin/references/plugin-root.md)).
+- **Plugin root:** env when set; else Skill tool base dir (`skills/<name>`). Never
+  invent versioned cache paths. See [plugin-root.md](plugin/references/plugin-root.md).
 - **Remove managed Codex agents:** disable/uninstall the plugin first, then
   `setup --remove-codex-agents` (or delete managed `~/.codex/agents/grok-*.toml`).
 

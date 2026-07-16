@@ -188,7 +188,7 @@ test("Claude agents restrict tools to Bash(node:*)", () => {
       `${file} must set tools: Bash(node:*) (not unrestricted Bash)`
     );
     assert.ok(
-      /never invent cache paths/i.test(body),
+      /never invent (versioned )?cache paths/i.test(body),
       `${file} must forbid inventing cache paths`
     );
   }

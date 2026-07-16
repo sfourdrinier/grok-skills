@@ -5,41 +5,40 @@ argument-hint: ""
 allowed-tools: "Bash(node:*)"
 ---
 
-## Harness compatibility (Claude Code + Codex / ChatGPT)
+## Resolve plugin root (required)
 
-This skill works in **Claude Code** and **Codex** (CLI + ChatGPT desktop).
+Host env is set for hooks/commands, **not** for Bash after a Skill-tool load.
+Use env when present; otherwise set `SKILL_DIR` to the absolute **Base directory
+for this skill** from the Skill tool (ends with `skills/<name>`).
 
-1. Resolve the plugin root (both harnesses export one of these):
+See `plugin/references/plugin-root.md`. Do **not** invent versioned cache paths.
+
 ```bash
-GROK_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:?plugin root not set}}"
+if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+  GROK_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT"
+elif [ -n "${PLUGIN_ROOT:-}" ]; then
+  GROK_PLUGIN_ROOT="$PLUGIN_ROOT"
+elif [ -n "${SKILL_DIR:-}" ]; then
+  GROK_PLUGIN_ROOT="$(cd "$SKILL_DIR/../.." && pwd)"
+else
+  echo "plugin root not set: set CLAUDE_PLUGIN_ROOT/PLUGIN_ROOT or SKILL_DIR (Skill tool base directory)" >&2
+  exit 127
+fi
+COMPANION="$GROK_PLUGIN_ROOT/scripts/grok-companion.mjs"
+if [ ! -f "$COMPANION" ]; then
+  echo "companion not found at $COMPANION (invalid plugin root)" >&2
+  exit 127
+fi
 ```
-2. Run the companion with **Node** (required). The hardened Python wrapper is
-   bundled at `"$GROK_PLUGIN_ROOT/wrapper/scripts/grok_agent.py"` and is resolved
-   automatically. **Never invent cache paths** under `~/.claude/plugins/cache` or
-   `~/.codex/plugins/cache` - only use `CLAUDE_PLUGIN_ROOT` / `PLUGIN_ROOT` from the
-   host (see `plugin/references/plugin-root.md`).
-3. Use a **shell / terminal / Bash tool** to execute the documented command.
-   - Claude Code: `Bash` tool (and `AskUserQuestion` when this skill asks for
-     wait-vs-background).
-   - Codex / ChatGPT: the shell tool (`Bash` / terminal). If no structured
-     question UI exists, ask the user in chat and then run foreground.
-4. Return the companion **stdout JSON envelope VERBATIM**. Progress may stream
-   on stderr; do not mix it into the envelope.
-5. Never put free-text tasks in `--task "..."` (shell injection). Always use
-   `--task-file -` with a single-quoted heredoc, or an existing `--task-file` path.
 
+## Run
 
-<!-- plugin/skills/preflight.md -->
+One Bash call (resolve root above, then):
 
-!`node "${GROK_PLUGIN_ROOT}/scripts/grok-companion.mjs" preflight`
+```bash
+node "$COMPANION" preflight
+```
 
-The block above ran the wrapper's read-only readiness check. It printed exactly
-one JSON result envelope.
+Return that stdout envelope VERBATIM. Do not paraphrase. Preserve exit status.
 
-Return that stdout envelope to the user VERBATIM. Do not paraphrase, summarize,
-reformat, or add commentary on top of it, and preserve its exit status. If you
-want to explain it in your own words, do that separately and clearly labeled as
-your own summary, AFTER relaying the raw envelope.
-
-If the companion printed an actionable "could not locate the Grok wrapper"
-message instead of an envelope, tell the user to run `/grok:setup`.
+If the companion printed "could not locate the Grok wrapper", tell the user to reinstall the plugin or run setup.

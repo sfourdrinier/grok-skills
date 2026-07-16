@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
+## [Unreleased]
+
+### Fixed
+
+- **Skill-tool plugin root:** Bash no longer relies only on `CLAUDE_PLUGIN_ROOT` /
+  `PLUGIN_ROOT` (unset after Skill-tool load). Skills resolve root from host env
+  **or** the Skill tool base directory (`…/skills/<name>` → plugin root via
+  layout). Shared library: `scripts/lib/resolve-plugin-root.mjs` + CLI. Docs:
+  `plugin/references/plugin-root.md`. Matches the Skill-tool path OpenAI's
+  codex-for-Claude plugin avoids by using harness-expanded `commands/` instead.
+
 ## [1.2.3] - 2026-07-15
 
 ### Added

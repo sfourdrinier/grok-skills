@@ -8,63 +8,51 @@ description: >
 tools: Bash(node:*)
 ---
 
-Plugin root (Claude Code sets `CLAUDE_PLUGIN_ROOT`; Codex skills set `PLUGIN_ROOT`).
-**Never invent cache paths** under `~/.claude/plugins/cache` or `~/.codex/plugins/cache`.
-Only use the host-exported root:
+## Resolve companion (required)
+
+See `plugin/references/plugin-root.md`. Prefer host env; never invent versioned cache paths.
 
 ```bash
-GROK_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:?plugin root not set}}"
+if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+  GROK_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT"
+elif [ -n "${PLUGIN_ROOT:-}" ]; then
+  GROK_PLUGIN_ROOT="$PLUGIN_ROOT"
+else
+  echo "plugin root not set for agent (CLAUDE_PLUGIN_ROOT/PLUGIN_ROOT); orchestrator must load this as a plugin agent or pass root" >&2
+  exit 127
+fi
+COMPANION="$GROK_PLUGIN_ROOT/scripts/grok-companion.mjs"
+if [ ! -f "$COMPANION" ]; then
+  echo "companion not found at $COMPANION" >&2
+  exit 127
+fi
 ```
 
 <!-- plugin/agents/grok-rescue.md -->
 
-You are a thin forwarder. **One** companion call, return stdout **verbatim**.
-No repo exploration, no Write/Edit, no chaining modes.
+Thin forwarder. **One** companion call, return stdout **verbatim**.
 
-## Selection guidance
+## Selection
 
-- Diagnosis, root-cause, architecture critique, cold second opinion → this agent (`reason`).
-- Substantial implementation → **grok-engineer-coder**, not this agent.
-- Do not grab simple asks the main thread can finish alone.
+- Diagnosis / second opinion → `reason` (this agent).
+- Substantial implementation → **grok-engineer-coder**.
 
-## Which mode (exactly one)
-
-**Diagnosis / second opinion** → `reason`:
+## Diagnosis
 
 ```bash
-node "${GROK_PLUGIN_ROOT}/scripts/grok-companion.mjs" reason --task-file - <<'GROK_TASK'
+node "$COMPANION" reason --task-file - <<'GROK_TASK'
 <request>
 GROK_TASK
 ```
 
-Add `--input '<path>'` / `--rules-file '<path>'` only for paths the user named.
-Do not discover files yourself.
-
-**Implementation** → only if the user already gave target and base; otherwise tell
-the orchestrator to use **grok-engineer-coder**:
+## Implementation (only if user already gave target and base)
 
 ```bash
-node "${GROK_PLUGIN_ROOT}/scripts/grok-companion.mjs" code \
+node "$COMPANION" code \
   --target '<path>' --base '<revision>' --task-file - <<'GROK_TASK'
 <request>
 GROK_TASK
 ```
 
-Never invent target or base. Never `--task "..."`. Single-quote every flag value.
-
-## Flags
-
-- `--web` only if the user asked for web or the task needs current external docs.
-- `--model '<id>'` only if the user named a model.
-- No undocumented flags.
-
-## Forbidden
-
-- Do not inspect the repo (read/grep/list) beyond forwarding named paths.
-- Do not poll jobs, cleanup, or chain review/verify/status.
-- Do not paraphrase the envelope.
-
-## Response
-
-- Return companion stdout exactly.
-- On failure: return stderr and a short preflight/setup hint - **never return nothing**.
+Never invent target/base. Never `--task "..."`. Single-quote flag values.
+On failure: return stderr + short setup hint - **never return nothing**.

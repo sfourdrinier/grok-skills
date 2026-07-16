@@ -5,19 +5,42 @@ argument-hint: "--worktree <absolute-path> (--task <text> | --task-file <path>) 
 allowed-tools: "Bash(node:*)"
 ---
 
+## Resolve plugin root (required)
+
+Host env is set for hooks/commands, **not** for Bash after a Skill-tool load.
+Use env when present; otherwise set `SKILL_DIR` to the absolute **Base directory
+for this skill** from the Skill tool (ends with `skills/<name>`).
+
+See `plugin/references/plugin-root.md`. Do **not** invent versioned cache paths.
+
+```bash
+if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
+  GROK_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT"
+elif [ -n "${PLUGIN_ROOT:-}" ]; then
+  GROK_PLUGIN_ROOT="$PLUGIN_ROOT"
+elif [ -n "${SKILL_DIR:-}" ]; then
+  GROK_PLUGIN_ROOT="$(cd "$SKILL_DIR/../.." && pwd)"
+else
+  echo "plugin root not set: set CLAUDE_PLUGIN_ROOT/PLUGIN_ROOT or SKILL_DIR (Skill tool base directory)" >&2
+  exit 127
+fi
+COMPANION="$GROK_PLUGIN_ROOT/scripts/grok-companion.mjs"
+if [ ! -f "$COMPANION" ]; then
+  echo "companion not found at $COMPANION (invalid plugin root)" >&2
+  exit 127
+fi
+```
+
+Then run: `node "$COMPANION" ...` (not a bare env-only root line).
+
 ## Harness compatibility (Claude Code + Codex / ChatGPT)
 
 This skill works in **Claude Code** and **Codex** (CLI + ChatGPT desktop).
 
-1. Resolve the plugin root (both harnesses export one of these):
-```bash
-GROK_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:?plugin root not set}}"
-```
-2. Run the companion with **Node** (required). The hardened Python wrapper is
-   bundled at `"$GROK_PLUGIN_ROOT/wrapper/scripts/grok_agent.py"` and is resolved
-   automatically. **Never invent cache paths** under `~/.claude/plugins/cache` or
-   `~/.codex/plugins/cache` - only use `CLAUDE_PLUGIN_ROOT` / `PLUGIN_ROOT` from the
-   host (see `plugin/references/plugin-root.md`).
+1. Resolve plugin root with the **Resolve plugin root** section above (env or `SKILL_DIR`).
+2. Run the companion with **Node**: `node "$COMPANION" ...`. The hardened Python
+   wrapper is under `$GROK_PLUGIN_ROOT/wrapper/scripts/grok_agent.py` and is
+   resolved by the companion automatically.
 3. Use a **shell / terminal / Bash tool** to execute the documented command.
    - Claude Code: `Bash` tool (and `AskUserQuestion` when this skill asks for
      wait-vs-background).
@@ -67,14 +90,14 @@ NO web access:
 Run it as one Bash call and relay the result. When the arguments carry a
 `--task <text>`, route that text through STDIN so it is never shell-evaluated:
 ```bash
-node "${GROK_PLUGIN_ROOT}/scripts/grok-companion.mjs" verify --worktree '<worktree from $ARGUMENTS>' [other non-task flags from $ARGUMENTS, each substituted value single-quoted] --task-file - <<'GROK_TASK'
+node "$COMPANION" verify --worktree '<worktree from $ARGUMENTS>' [other non-task flags from $ARGUMENTS, each substituted value single-quoted] --task-file - <<'GROK_TASK'
 <the --task text from $ARGUMENTS, verbatim>
 GROK_TASK
 ```
 When the arguments already use `--task-file <path>`, drop the heredoc and pass
 every flag as single-quoted argv tokens:
 ```bash
-node "${GROK_PLUGIN_ROOT}/scripts/grok-companion.mjs" verify --worktree '<worktree from $ARGUMENTS>' --task-file '<path from $ARGUMENTS>' [other non-task flags from $ARGUMENTS, each substituted value single-quoted]
+node "$COMPANION" verify --worktree '<worktree from $ARGUMENTS>' --task-file '<path from $ARGUMENTS>' [other non-task flags from $ARGUMENTS, each substituted value single-quoted]
 ```
 - Return the command stdout envelope VERBATIM. Do not paraphrase, summarize, or
   add commentary before or after it. Preserve the exit status. The verdict lives
