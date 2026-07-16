@@ -10,15 +10,13 @@ tools: Bash(node:*)
 
 ## Resolve companion (required)
 
-See `plugin/references/plugin-root.md`. Prefer host env; never invent versioned cache paths.
+Plugin agents should receive `CLAUDE_PLUGIN_ROOT` (or `PLUGIN_ROOT`) from the host.
+Never invent versioned cache paths. See `plugin/references/plugin-root.md`.
 
 ```bash
-if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
-  GROK_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT"
-elif [ -n "${PLUGIN_ROOT:-}" ]; then
-  GROK_PLUGIN_ROOT="$PLUGIN_ROOT"
-else
-  echo "plugin root not set for agent (CLAUDE_PLUGIN_ROOT/PLUGIN_ROOT); orchestrator must load this as a plugin agent or pass root" >&2
+GROK_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}"
+if [ -z "$GROK_PLUGIN_ROOT" ]; then
+  echo "plugin root not set: load as plugin agent (CLAUDE_PLUGIN_ROOT) or pass PLUGIN_ROOT" >&2
   exit 127
 fi
 COMPANION="$GROK_PLUGIN_ROOT/scripts/grok-companion.mjs"

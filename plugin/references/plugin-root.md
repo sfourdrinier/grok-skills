@@ -1,113 +1,64 @@
-# Plugin root resolution (Claude + Codex)
+# Plugin root and skill runners (transparent)
 
-## How OpenAI's Codex-for-Claude plugin does it
+## Goal
 
-That plugin's **user surface is `commands/`**, often with:
+Users and models should **not** invent `~/.claude/plugins/cache/.../1.2.x` paths or
+debug env vars. The host points at the skill; the skill finds the plugin.
 
-- harness bang lines / frontmatter that expand `${CLAUDE_PLUGIN_ROOT}` before shell
-- `disable-model-invocation: true` on those commands so the model does not drive Bash without env
+## How OpenAI codex-for-Claude does it
 
-Internal skills still mention `${CLAUDE_PLUGIN_ROOT}` and are mainly for plugin agents.
+Primary surface is **`commands/`** with harness expansion of
+`${CLAUDE_PLUGIN_ROOT}` (bang lines / command frontmatter). That is transparent for
+slash when the harness injects env. They largely avoid Skill-tool → bare Bash.
 
-**They avoid the Skill-tool gap** by not relying on model-driven Bash + env-only resolve.
+## How grok-skills does it (Skill-tool first)
 
-## Why grok-skills needs more
+### Transparent path (preferred)
 
-We **enable model invocation** of skills (Codex Skill tool / Claude Skill tool). The
-Skill tool injects `SKILL.md` into context; it does **not** put `CLAUDE_PLUGIN_ROOT`
-into later Bash tool environments. Env-only resolve then fails with:
-
-```text
-PLUGIN_ROOT: plugin root not set
-```
-
-## Contract (required)
-
-Resolve **plugin root** (directory that contains `scripts/` and `skills/`) in this order:
-
-| Priority | Source | Notes |
-|----------|--------|--------|
-| 1 | `CLAUDE_PLUGIN_ROOT` | Claude hooks, some command expansions, plugin agents |
-| 2 | `PLUGIN_ROOT` | Codex plugin hooks / dual-host |
-| 3 | Skill base directory | Skill tool **"Base directory for this skill"** = absolute `.../skills/<name>` |
-
-After resolve, the companion is always:
-
-```text
-$GROK_PLUGIN_ROOT/scripts/grok-companion.mjs
-```
-
-Validate that file exists before calling Node.
-
-### Skill-tool path (no env)
-
-1. Copy the absolute **Base directory for this skill** from the Skill tool into `SKILL_DIR`.
-2. Either:
-   - `GROK_PLUGIN_ROOT="$(cd "$SKILL_DIR/../.." && pwd)"`, or
-   - resolve companion:  
-     `COMPANION="$(cd "$SKILL_DIR/../.." && pwd)/scripts/grok-companion.mjs"`
-3. Or use the helper (same math, validates companion):
+1. Skill tool loads a skill and shows **Base directory for this skill**  
+   (absolute path to `…/skills/<name>/`).
+2. Model runs only:
 
 ```bash
-SKILL_DIR='<absolute Base directory for this skill from Skill tool>'
-COMPANION="$(node "$SKILL_DIR/../../scripts/resolve-plugin-root.mjs" --skill-dir "$SKILL_DIR" --companion)"
-node "$COMPANION" <mode> ...
+SKILL_BASE='<that absolute path>'
+node "$SKILL_BASE/run.mjs" <mode> [args...]
 ```
 
-`../../scripts/...` from `skills/<name>` is the **shipped layout**, not a guessed cache version.
+3. `skills/<name>/run.mjs` is **self-locating** (`import.meta.url` → plugin root →
+   `scripts/grok-companion.mjs`). No `CLAUDE_PLUGIN_ROOT` required in the shell.
 
-### Never invent versioned cache paths
+Shared logic: `plugin/scripts/lib/skill-run.mjs`.
 
-Do **not** construct:
+### Optional env path
 
-- `~/.claude/plugins/cache/grok-skills/grok/<version>/...` by guessing `<version>`
-- `~/.codex/plugins/cache/...` by guessing a revision folder
+If the host already set `CLAUDE_PLUGIN_ROOT` or `PLUGIN_ROOT` (hooks, some agents):
 
-Do **use**:
+```bash
+node "${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}/scripts/grok-companion.mjs" <mode> ...
+```
 
-- host env (`CLAUDE_PLUGIN_ROOT` / `PLUGIN_ROOT`), or
-- host-provided skill base directory (Skill tool), or
-- absolute `GROK_COMPANION` already written into managed Codex agents (`~/.codex/agents/*.toml`)
+Prefer `$SKILL_BASE/run.mjs` whenever the Skill tool loaded the skill.
 
 ### Codex custom agents
 
-SessionStart installs managed TOML with an **absolute** `GROK_COMPANION=...` path.
-Those agents do not need `PLUGIN_ROOT` at spawn.
+Managed agents under `~/.codex/agents/` already embed an absolute
+`GROK_COMPANION=…/grok-companion.mjs` at SessionStart. No skill base needed.
+
+### Never invent
+
+Do **not** construct versioned cache paths by guessing a plugin version.
+Do **use** Skill base + `run.mjs`, host env, or managed agent companion paths.
 
 ### Uninstall managed Codex agents
 
 ```bash
-# After resolving COMPANION as above:
-node "$COMPANION" setup --remove-codex-agents
+node "$SKILL_BASE/run.mjs" setup --remove-codex-agents
 ```
 
-Disable/uninstall the plugin first if you do not want SessionStart to reinstall them.
+(Disable/uninstall the plugin first if you do not want SessionStart to reinstall them.)
 
-## Canonical Bash resolve block
+## Resolver library (advanced / tests)
 
-Paste at the start of every skill Bash sequence:
-
-```bash
-# Prefer host env; else SKILL_DIR = Skill tool "Base directory for this skill" (absolute).
-if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
-  GROK_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT"
-elif [ -n "${PLUGIN_ROOT:-}" ]; then
-  GROK_PLUGIN_ROOT="$PLUGIN_ROOT"
-elif [ -n "${SKILL_DIR:-}" ]; then
-  GROK_PLUGIN_ROOT="$(cd "$SKILL_DIR/../.." && pwd)"
-else
-  echo "plugin root not set: set CLAUDE_PLUGIN_ROOT/PLUGIN_ROOT or SKILL_DIR (Skill tool base directory)" >&2
-  exit 127
-fi
-COMPANION="$GROK_PLUGIN_ROOT/scripts/grok-companion.mjs"
-if [ ! -f "$COMPANION" ]; then
-  echo "companion not found at $COMPANION (invalid plugin root)" >&2
-  exit 127
-fi
-# Then: node "$COMPANION" <mode> ...
-```
-
-## Resolver library
-
-- `plugin/scripts/lib/resolve-plugin-root.mjs` — pure resolve + validation
-- `plugin/scripts/resolve-plugin-root.mjs` — CLI (`--skill-dir`, `--companion`, `--json`)
+- `plugin/scripts/lib/resolve-plugin-root.mjs` — pure resolve helpers
+- `plugin/scripts/resolve-plugin-root.mjs` — CLI
+- `plugin/scripts/lib/skill-run.mjs` — spawn companion from skill entry

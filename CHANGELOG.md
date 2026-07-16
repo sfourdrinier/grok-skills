@@ -10,12 +10,11 @@ for marketplace / package tags.
 
 ### Fixed
 
-- **Skill-tool plugin root:** Bash no longer relies only on `CLAUDE_PLUGIN_ROOT` /
-  `PLUGIN_ROOT` (unset after Skill-tool load). Skills resolve root from host env
-  **or** the Skill tool base directory (`…/skills/<name>` → plugin root via
-  layout). Shared library: `scripts/lib/resolve-plugin-root.mjs` + CLI. Docs:
-  `plugin/references/plugin-root.md`. Matches the Skill-tool path OpenAI's
-  codex-for-Claude plugin avoids by using harness-expanded `commands/` instead.
+- **Transparent Skill-tool entry:** every skill ships `skills/<name>/run.mjs` that
+  self-locates the plugin root from its own path and spawns the companion.
+  Model contract is only `node "$SKILL_BASE/run.mjs" <mode> …` where `SKILL_BASE`
+  is the Skill tool base directory (no env, no invented cache versions).
+  Shared: `scripts/lib/skill-run.mjs`. Docs: `plugin/references/plugin-root.md`.
 
 ## [1.2.3] - 2026-07-15
 

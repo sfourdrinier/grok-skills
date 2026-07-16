@@ -5,52 +5,27 @@ argument-hint: "[--run-id <run-id>]"
 allowed-tools: "Bash(node:*)"
 ---
 
-## Resolve plugin root (required)
+## How to run (transparent)
 
-Host env is set for hooks/commands, **not** for Bash after a Skill-tool load.
-Use env when present; otherwise set `SKILL_DIR` to the absolute **Base directory
-for this skill** from the Skill tool (ends with `skills/<name>`).
-
-See `plugin/references/plugin-root.md`. Do **not** invent versioned cache paths.
+1. Take the absolute **Base directory for this skill** from the Skill tool
+   (the folder that contains this skill's `SKILL.md` and `run.mjs`).
+2. Set `SKILL_BASE` to that path. Do **not** invent versioned cache paths.
+3. Always invoke the companion **only** through this skill's runner:
 
 ```bash
-if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ]; then
-  GROK_PLUGIN_ROOT="$CLAUDE_PLUGIN_ROOT"
-elif [ -n "${PLUGIN_ROOT:-}" ]; then
-  GROK_PLUGIN_ROOT="$PLUGIN_ROOT"
-elif [ -n "${SKILL_DIR:-}" ]; then
-  GROK_PLUGIN_ROOT="$(cd "$SKILL_DIR/../.." && pwd)"
-else
-  echo "plugin root not set: set CLAUDE_PLUGIN_ROOT/PLUGIN_ROOT or SKILL_DIR (Skill tool base directory)" >&2
-  exit 127
-fi
-COMPANION="$GROK_PLUGIN_ROOT/scripts/grok-companion.mjs"
-if [ ! -f "$COMPANION" ]; then
-  echo "companion not found at $COMPANION (invalid plugin root)" >&2
-  exit 127
-fi
+SKILL_BASE='<Base directory for this skill - absolute path from Skill tool>'
+node "$SKILL_BASE/run.mjs" <mode> [args...]
 ```
 
-Then run: `node "$COMPANION" ...` (not a bare env-only root line).
+`run.mjs` finds the plugin install from its own location and runs
+`scripts/grok-companion.mjs`. No `CLAUDE_PLUGIN_ROOT` / `PLUGIN_ROOT` required.
 
-## Harness compatibility (Claude Code + Codex / ChatGPT)
+If the host already exported `CLAUDE_PLUGIN_ROOT` or `PLUGIN_ROOT`, you may call
+`node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs"` instead; prefer
+`"$SKILL_BASE/run.mjs"` whenever the Skill tool loaded this skill.
 
-This skill works in **Claude Code** and **Codex** (CLI + ChatGPT desktop).
-
-1. Resolve plugin root with the **Resolve plugin root** section above (env or `SKILL_DIR`).
-2. Run the companion with **Node**: `node "$COMPANION" ...`. The hardened Python
-   wrapper is under `$GROK_PLUGIN_ROOT/wrapper/scripts/grok_agent.py` and is
-   resolved by the companion automatically.
-3. Use a **shell / terminal / Bash tool** to execute the documented command.
-   - Claude Code: `Bash` tool (and `AskUserQuestion` when this skill asks for
-     wait-vs-background).
-   - Codex / ChatGPT: the shell tool (`Bash` / terminal). If no structured
-     question UI exists, ask the user in chat and then run foreground.
-4. Return the companion **stdout JSON envelope VERBATIM**. Progress may stream
-   on stderr; do not mix it into the envelope.
-5. Never put free-text tasks in `--task "..."` (shell injection). Always use
-   `--task-file -` with a single-quoted heredoc, or an existing `--task-file` path.
-
+Return companion **stdout verbatim**. Never put free-text in `--task "..."`;
+use `--task-file -` with a single-quoted heredoc.
 
 <!-- plugin/skills/status.md -->
 
@@ -76,7 +51,7 @@ containing `$(...)`/backticks is command-substituted locally BEFORE the wrapper
 ever validates it. Single quotes pass the bytes verbatim; the wrapper then
 rejects any run id that is not the strict `YYYYMMDDThhmmssZ-xxxxxx` run-id shape:
 ```bash
-node "$COMPANION" status --run-id '<run-id from $ARGUMENTS>'
+node "$SKILL_BASE/run.mjs" status --run-id '<run-id from $ARGUMENTS>'
 ```
 - Return the command stdout envelope to the user VERBATIM. Do not paraphrase,
   summarize, reformat, or add commentary before or after it, and preserve the
@@ -84,7 +59,6 @@ node "$COMPANION" status --run-id '<run-id from $ARGUMENTS>'
 
 If the companion prints an actionable "could not locate the Grok wrapper"
 message instead of an envelope, tell the user to run `/grok:setup`.
-
 
 Without `--run-id`, the companion prints the local **jobs table** for this workspace
 (recent companion-tracked runs). With `--run-id`, it returns the wrapper status envelope.
