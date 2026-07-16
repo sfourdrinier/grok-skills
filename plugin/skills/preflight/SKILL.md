@@ -1,6 +1,6 @@
 ---
 name: "preflight"
-description: "Check Grok wrapper readiness (binary, version pin, auth, sandbox, state) - no task is run"
+description: "Check Grok wrapper readiness (binary, auth, sandbox, state) - no task is run"
 argument-hint: ""
 allowed-tools: "Bash(node:*)"
 ---

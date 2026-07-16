@@ -25,7 +25,7 @@ Never fail a read-only review solely because:
 | Baseline capture failure before review | `worktree-failure` / blocked run | Soft-skip + note; review continues |
 
 Hard enforcement for review remains: private auth home, sandbox verification,
-version pin, model family, tool allowlist (read-only tools).
+runnable Grok CLI (`check_version`), model family, tool allowlist (read-only tools).
 
 ## Intentionally still hard-fail (not "too conservative")
 
@@ -33,7 +33,7 @@ version pin, model family, tool allowlist (read-only tools).
 |------|----------------------|
 | `code` / `verify` worktree escape / original-checkout mutation | Real write-safety boundary |
 | Sandbox verification failure | Write confinement not proven |
-| Auth missing / version mismatch / probe-required | Cannot run honestly |
+| Auth missing / unusable `grok --version` / probe-required | Cannot run honestly |
 | Model family mismatch | Wrong model ≠ requested product |
 | Auth home teardown failure after success | Credential residue risk |
 | Malformed / missing Grok output | No deliverable body |
@@ -46,7 +46,7 @@ version pin, model family, tool allowlist (read-only tools).
 | Area | Notes |
 |------|--------|
 | Codex agents need SessionStart install | Host limitation (openai/codex#18988); auto-ensure on SessionStart |
-| Skills inventing cache paths | Docs/skill: use `PLUGIN_ROOT` / absolute companion only |
+| Skills inventing cache paths | Docs/skill: Skill base + `run.mjs`, host env, or managed `GROK_AGENT_RUN` / `agents/run.mjs` — never invent cache paths |
 | Stop gate free-text allow | Already fail-closed structured (intentional) |
 
 ## Follow-ups (optional, not blocking)

@@ -74,7 +74,8 @@ node "$GROK_AGENT_RUN" code ...
 ### Never invent
 
 Do **not** construct versioned cache paths by guessing a plugin version.
-Do **use** Skill base + `run.mjs`, host env, or managed agent companion paths.
+Do **use** Skill base + `run.mjs`, host env, or managed `GROK_AGENT_RUN` /
+`agents/run.mjs` paths.
 
 ### Uninstall managed Codex agents
 

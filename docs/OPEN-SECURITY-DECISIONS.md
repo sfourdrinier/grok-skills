@@ -7,6 +7,11 @@ mechanical bug it found. Four remaining findings were design choices about the w
 security posture rather than mechanical defects. They are documented here for operators
 and auditors; the resolutions below are what shipped.
 
+**Fail-closed carve-out (v1.2.8):** Grok CLI **build-string mismatch** vs
+`accepted-version.json` is **not** fail-closed. Any working `grok --version` is
+accepted. Fail-closed still applies to unverified platform/sandbox/stream and to
+unusable `--version` output.
+
 ## Resolutions (2026-07-15)
 
 All four decisions are now resolved. The original analysis is preserved below unchanged for

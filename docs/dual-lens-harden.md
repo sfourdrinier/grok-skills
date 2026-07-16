@@ -24,20 +24,23 @@ high/critical attack. Prefer residual risks over re-stating praise.
 GROK_TASK
 ```
 
-## Codex / CLI companion
+## Codex / CLI (prefer skill runners)
 
 ```bash
-GROK_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}"
-
-node "$GROK_PLUGIN_ROOT/scripts/grok-companion.mjs" adversarial-review \
+# After Skill tool load (preferred):
+SKILL_BASE='…/skills/dual-lens'   # or adversarial-review / review skill dirs
+node "$SKILL_BASE/run.mjs" adversarial-review \
   --target . --task-file - <<'GROK_TASK'
 Focus on auth boundaries and data loss.
 GROK_TASK
 
-node "$GROK_PLUGIN_ROOT/scripts/grok-companion.mjs" review \
+node "$SKILL_BASE/run.mjs" review \
   --target . --task-file - <<'GROK_TASK'
 Confirm or refute high/critical attacks from the prior pass.
 GROK_TASK
+
+# Or known install (optional):
+# node "${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}/scripts/grok-companion.mjs" …
 ```
 
 ## How to read results

@@ -50,7 +50,7 @@ if (event === "SessionStart") {
     process.env.GROK_CLAUDE_SESSION_PATH = sessionPath;
   }
 
-  // Auto-install / refresh managed Codex agents (absolute companion path).
+  // Auto-install / refresh managed Codex agents (absolute GROK_AGENT_RUN → agents/run.mjs).
   // Silent: failures must not block the host session.
   // Prefer this script's install tree over stale env after plugin upgrade.
   const envRoot = (process.env.CLAUDE_PLUGIN_ROOT || process.env.PLUGIN_ROOT || "").trim();

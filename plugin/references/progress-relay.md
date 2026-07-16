@@ -2,6 +2,11 @@
 
 # T2-2 progress relay: chosen surfacing mechanism (grounding, T2-2.0)
 
+**Historical design snapshot (T2-2.0).** Production `grok-companion.mjs` is a
+multi-command harness (jobs, LiveRelay, direct mode, setup, entry-root force,
+etc.), not only a pure forwarder. The relay mechanism below still applies for
+live progress; read `plugin/scripts/grok-companion.mjs` for current behavior.
+
 The relay surfaces a Grok run's live progress (rich thought/tool activity from
 T2-0) as human-visible lines, without touching any safety boundary and without
 changing the hardened Python wrapper (`grok_agent.py`).

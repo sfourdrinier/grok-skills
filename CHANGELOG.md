@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
+## [1.2.9] - 2026-07-15
+
+### Fixed
+
+- **Docs vs code pass (adversarial):** aligned README, PROVENANCE, authority
+  policies, wrapper SKILL, checklists, roadmap, live probe docs, and setup
+  hints with current behavior — no hard CLI pin, repo-agnostic targets,
+  review drift as warnings, reason web default off, Codex `agents/run.mjs` /
+  `GROK_AGENT_RUN`, dual-host plugin surface.
+
 ## [1.2.8] - 2026-07-15
 
 ### Fixed
@@ -105,8 +115,9 @@ for marketplace / package tags.
 
 - **Zero post-install for Codex agents:** `SessionStart` auto-installs managed
   agents into `~/.codex/agents/` with an **absolute** path to `grok-companion.mjs`
-  (no `PLUGIN_ROOT` required at spawn). Manual `/grok:setup` is optional (readiness /
-  gate / mode only).
+  (no `PLUGIN_ROOT` required at spawn). *(Agent entry path superseded by 1.2.5:
+  absolute `agents/run.mjs` / `GROK_AGENT_RUN`.)* Manual `/grok:setup` is optional
+  (readiness / gate / mode only).
 - Managed agents refresh when the plugin cache path or templates change; user-owned
   TOML (no `managed-by: grok-skills` header) is left alone unless `--force-codex-agents`.
 - Setup exit code fails when agent ensure fails (unless `--skip-codex-agents`).

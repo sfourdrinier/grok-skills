@@ -3,7 +3,7 @@
 # `preflight` mode: a read-only readiness diagnostic that verifies, in order,
 # every precondition a live Grok run depends on, emitting one progress event
 # per check and recording the findings in the C4 envelope `response`. It never
-# spawns a task-bearing Grok run; it only exercises the binary version pin, the
+# spawns a task-bearing Grok run; it only exercises the runnable CLI check, the
 # auth material, a throwaway private home + login/inspect probes, the sandbox
 # policy resolver, the platform advisory (D-SECRETREAD: secret reads are not
 # denied, informational only), the state root permissions, and the stale-home

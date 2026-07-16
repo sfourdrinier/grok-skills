@@ -360,7 +360,7 @@ def _run_worktree_mode_body(
 
     try:
         grokcli.check_version(binary)
-        progress.safe_emit("validate", "grok version pin verified")
+        progress.safe_emit("validate", "grok version check verified")
 
         # Pre-spawn SECURITY GUARANTEE (D-PORT / SEC1): fail closed on any
         # platform without a captured Grok sandbox probe report BEFORE the

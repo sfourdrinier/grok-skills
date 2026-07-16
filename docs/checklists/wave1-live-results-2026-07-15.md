@@ -2,7 +2,11 @@
 
 # Wave 1 live results (2026-07-15)
 
-Throwaway repo under `/tmp/grok-dogfood-*` with intentional `buggy.py` (auth bypass + bare-except divide). Host: macOS. Grok pin: `grok 0.2.101 (5bc4b5dfadcf) [stable]`.
+**Historical snapshot** of a dogfood pass on 2026-07-15. Not a live contract —
+see `plugin/wrapper/scripts/groklib/web_defaults.py` and CHANGELOG for current
+defaults (notably: `reason` default web is **false** after a later flip).
+
+Throwaway repo under `/tmp/grok-dogfood-*` with intentional `buggy.py` (auth bypass + bare-except divide). Host: macOS. CLI at time of probe: `grok 0.2.101 (5bc4b5dfadcf) [stable]`.
 
 ## Outcomes
 
@@ -15,7 +19,7 @@ Throwaway repo under `/tmp/grok-dogfood-*` with intentional `buggy.py` (auth byp
 | Citations or no-sources warning | **`grounding-requested-no-sources`** (web on, no Sources/URLs harvested) |
 | `/grok:result --pretty` | pass (renders response + warnings) |
 | `reason --no-web` → webAccess false | pass |
-| `reason` default → webAccess true | pass |
+| `reason` default → webAccess true | pass **at probe time**; **current code: reason default is false** |
 | `review` default → webAccess false | pass |
 | Dual-lens second pass (review after adversarial) | pass |
 | Fail-closed envelope (no raw secrets observed) | pass |

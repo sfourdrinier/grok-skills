@@ -16,17 +16,19 @@ Two layers:
   machine-readable JSON result envelope on stdout, and a JSONL progress stream. It is the
   sole owner of all safety behavior. It is harness-agnostic: any agent, or a human, can
   shell out to it.
-- **The plugin** (`plugin/`): a thin Claude Code surface over that engine -
-  `/grok:{preflight,review,reason,code,verify,status,cleanup,setup}` commands, the
-  `grok-rescue` subagent, an opt-in Stop-review gate, and a live streaming relay. It adds
-  no safety logic; every command shells to the wrapper and relays its envelope verbatim.
+- **The plugin** (`plugin/`): a thin **dual-host** surface (Claude Code + Codex /
+  ChatGPT) over that engine — skills (`/grok:…` / skill picker), Claude agents
+  (`grok-engineer-coder`, `grok-rescue`), SessionStart-managed Codex agents, an
+  opt-in Stop-review gate, and a live streaming relay. Hardened live modes shell
+  to the wrapper and relay its envelope verbatim; companion-only commands and
+  direct mode author their own JSON/text (not the hardened C4 envelope contract).
 
 ## Design decisions (the D-log)
 
 - **D-NET (network permitted):** the wrapper allows Grok network egress. Grok is an
   internet-connected model; egress is intended, not a leak.
-- **D-WEB (web search):** Grok web/X search is available via `--web`. Wave 1 makes it
-  default-on for adversarial-review and reason (see D-W1-GROUND).
+- **D-WEB (web search):** Grok web/X search is available via `--web`. Default-on only
+  for `adversarial-review`; `reason` / `review` / `code` are opt-in (see D-W1-GROUND).
 - **D-SECRETREAD (accepted secret-read gap):** on the probed Grok CLI (0.2.101) the OS
   sandbox confines WRITES but cannot deny arbitrary READS. So a sandboxed run can read a
   secret file; it just cannot exfiltrate by writing outside the workspace, and the secret
@@ -43,19 +45,22 @@ Two layers:
 - **Last-validated CLI stamp (advisory):** Grok ships often. `accepted-version.json`
   records the last maintainer-probed build for evidence/docs. Runtime accepts any
   working `grok --version` so users are not blocked by normal CLI updates.
-- **Single envelope, wrapper is sole author:** the wrapper emits exactly one JSON result
-  envelope on stdout. The plugin never fabricates one. A pre-execution failure (for
-  example the wrapper binary not found) is a stderr + non-zero exit, not a fake success
+- **Single envelope for hardened live modes:** the wrapper emits exactly one JSON result
+  envelope on stdout; the companion relays it. Direct mode and companion-native commands
+  (`setup`, `jobs`, `result`, …) use companion-authored JSON/text. A pre-execution
+  failure (e.g. wrapper binary not found) is stderr + non-zero exit, not a fake success
   envelope.
-- **Fail closed, everywhere:** unknown platform, unenforceable sandbox, malformed stream,
-  missing/relative state root, secret-shaped output, a Stop-gate throw - all resolve to a
-  safe refusal, never a silent pass.
+- **Fail closed (with one carve-out):** unknown platform, unenforceable sandbox, malformed
+  stream, missing/relative state root, secret-shaped output, a Stop-gate throw - all
+  resolve to a safe refusal. **Not** fail-closed: Grok CLI build string differing from
+  `accepted-version.json` (any working CLI is accepted).
 - **Secret redaction policy:** secret-shaped material is redacted from everything that
   reaches stdout (the envelope) while raw text stays only inside the private 0700 run dir
   (progress.jsonl). `status` redacts the embedded copy on readback. The scanner remains a
   strict final fail-closed backstop after redaction.
-- **D-W1-GROUND (Wave 1 grounding default):** grounded-where-it-matters - live search
-  default-on for adversarial-review and reason, opt-in for review and code.
+- **D-W1-GROUND (Wave 1 grounding default):** live search default-on for
+  **adversarial-review only**; opt-in for review, reason, and code. Reason forces
+  no-web when `--input` is present unless `--web` is explicit.
 
 ## Hardening record: the dual-lens review loop
 

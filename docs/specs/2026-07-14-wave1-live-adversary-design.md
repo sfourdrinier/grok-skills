@@ -2,7 +2,10 @@
 
 # Grok Plugin - Wave 1: The Live Adversary (Design Spec)
 
-**Status:** Approved (brainstorm 2026-07-14). Ready for implementation planning.
+**Status:** Historical design (2026-07-14). **Not normative after v1.2.x.**
+Current contracts: `web_defaults.py`, `grokcli_version.py`, README, CHANGELOG.
+
+**Original status:** Approved (brainstorm 2026-07-14). Ready for implementation planning.
 
 **Goal:** Make the Grok plugin visibly better than a generic AI code-review plugin by
 leaning into what only Grok 4.5 can do: challenge your work AND ground every claim in

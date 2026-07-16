@@ -5,9 +5,9 @@
 `live_probes.py` is a MANUALLY invoked script, NOT a unittest module. It drives
 the finished wrapper (`scripts/grok_agent.py`) end to end against the REAL Grok
 CLI (the operator's real `~/.grok` auth material and `~/.grok/bin/grok` binary)
-and asserts on the returned C4 envelopes. It is the standing upgrade path for
-Grok's near-daily releases: `accepted-version.json` is a data pin that only a
-fully green `--revalidate` run may rewrite.
+and asserts on the returned C4 envelopes. Maintainers may use `--revalidate` to
+refresh the **advisory** last-validated stamp in `accepted-version.json`
+(`enforcement: none`). Runtime never hard-pins a CLI build.
 
 It lives under `tests/live/` with a non-`test_*` filename precisely so the unit
 suite never runs it:
@@ -30,17 +30,17 @@ Grok.
 
 ```bash
 # Run every probe, print a summary, exit 0 iff every GATING probe passed.
-# Does NOT touch the version pin.
+# Does NOT touch the last-validated stamp.
 python3 plugin/wrapper/scripts/tests/live/live_probes.py
 
 # Also dump the machine-readable evidence JSON somewhere.
 python3 plugin/wrapper/scripts/tests/live/live_probes.py \
   --evidence-out /tmp/grok-live-evidence.json
 
-# Revalidate the pin: re-run the full suite and, ONLY on a fully green gating
-# run, rewrite accepted-version.json with the installed version, a fresh UTC
-# timestamp, and the evidence pointer. A red run leaves the pin untouched and
-# the wrapper stays fail-closed with version-mismatch against the new binary.
+# Refresh the advisory stamp: re-run the full suite and, ONLY on a fully green
+# gating run, rewrite accepted-version.json with the installed version, a fresh
+# UTC timestamp, evidence pointer, and enforcement: none. A red run leaves the
+# stamp untouched. Users are never blocked on stamp mismatch.
 python3 plugin/wrapper/scripts/tests/live/live_probes.py --revalidate
 ```
 
@@ -54,8 +54,9 @@ guard fires.
 Gating probes (their collective pass/fail is the suite's exit code and the only
 thing `--revalidate` keys off):
 
-1. `preflight` -- success, version pin satisfied, `secretReadDenial:false`
-   advisory present, current platform macOS (probed), `start..done` progress.
+1. `preflight` -- success, runnable Grok CLI (any working build),
+   `secretReadDenial:false` advisory present, current platform macOS (probed),
+   `start..done` progress.
 2. `reason` isolated (`--task "Reply with exactly: PONG"`) -- success,
    `effectiveModel` starts with `grok-4.5`, no `changedFiles`, `start..done`
    progress, private home destroyed clean.
@@ -92,11 +93,10 @@ construction (`envelope.assert_no_secret_material`). The only in-repo cwd a real
 model ever runs against is the read-only `review` target, and that run is
 asserted to leave `git status` untouched.
 
-## Revalidating a new Grok release
+## Refreshing the last-validated stamp after a new Grok release
 
-`accepted-version.json` must never be hand-edited. When Grok ships a new build,
-run `--revalidate`. On a fully green gating run it re-pins to the installed
-`grok --version` first line; on any red run it leaves the old pin in place so the
-wrapper keeps failing closed until the new build's behavior is re-proven. If a
-probe fails against a new build, fix the WRAPPER's assumptions (or escalate),
-never the probe.
+`accepted-version.json` is advisory evidence only (`enforcement: none`). When
+Grok ships a new build, optionally run `--revalidate` after a green suite so the
+stamp matches what you just probed. On red runs, leave the stamp alone and fix
+wrapper assumptions (or escalate) — never fake-green the stamp. Runtime continues
+to accept any working CLI either way.

@@ -101,17 +101,19 @@ Paste CHANGELOG bullets if easier; keep upgrade steps for both hosts.
 - [ ] Refresh Claude and/or Codex marketplace; confirm installed plugin version
       is `X.Y.Z`
 - [ ] Codex: new session → `~/.codex/agents/grok-*.toml` present with
-      `# managed-by: grok-skills` and `companion:` under the **new** cache path
+      `# managed-by: grok-skills`, `# agent-run:`, and `GROK_AGENT_RUN` under the
+      **new** cache path (`…/agents/run.mjs`)
 - [ ] Optional: `/grok:preflight` or setup skill once
 - [ ] Confirm skills/agents still say never invent cache paths
   ([plugin/references/plugin-root.md](../plugin/references/plugin-root.md))
+- [ ] Confirm docs do **not** claim a hard Grok CLI version pin (any working CLI)
 
 ## What not to do
 
 - Do not tag without bumping the three version fields above (hosts show stale
   numbers).
-- Do not bump `accepted-version.json` in the same release without full pin
-  revalidation.
+- Do not reintroduce exact-match fail-closed on `accepted-version.json`.
+  Optional stamp updates after a probe suite are fine (`enforcement: none`).
 - Do not delete or rewrite published tags to “fix” a bad release; cut `X.Y.Z+1`.
 - Do not require a manual `/grok:setup` for Codex agents in release notes as if
   it were mandatory (SessionStart auto-installs; setup is optional).

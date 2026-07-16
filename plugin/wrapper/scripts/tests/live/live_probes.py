@@ -82,7 +82,7 @@ _RAW_CHECK_TIMEOUT_SECONDS = 240
 
 
 def probe_preflight() -> ProbeResult:
-    """Probe 1: preflight succeeds; version pin satisfied; secretReadDenial advisory present; macOS probed."""
+    """Probe 1: preflight succeeds; Grok CLI runnable; secretReadDenial advisory present; macOS probed."""
     command = "grok_agent.py preflight"
     exit_code, envelope, _stderr, duration = _run_wrapper(["preflight"], _PROBE_TIMEOUT_SECONDS)
     highlights = _envelope_highlights(envelope, duration)
@@ -111,7 +111,7 @@ def probe_preflight() -> ProbeResult:
         highlights["checkNames"] = sorted(by_name.keys())
         highlights["progressPhases"] = phases
         highlights["versionPin"] = version_detail
-        return ProbeResult("preflight", True, True, command, highlights, "preflight green; pin satisfied")
+        return ProbeResult("preflight", True, True, command, highlights, "preflight green; CLI runnable")
     except ProbeError as exc:
         highlights["error"] = envelope.get("error")
         return ProbeResult("preflight", True, False, command, highlights, str(exc))
@@ -682,7 +682,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             document = _rewrite_pin(installed)
             evidence["pinRewritten"] = True
             evidence["pin"] = document
-            print("Revalidation GREEN: accepted-version.json re-pinned to {!r}".format(installed))
+            print("Revalidation GREEN: accepted-version.json stamp refreshed to {!r}".format(installed))
         else:
             evidence["pinRewritten"] = False
             print("Revalidation RED: accepted-version.json left untouched (a gating probe failed).")

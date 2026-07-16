@@ -5,9 +5,10 @@
 Captured 2026-07-14 via two isolated live probes (v1 Task-0 discipline: private
 HOME 0700, 0600 auth copy, unique `--leader-socket`, isolated temp cwd OUTSIDE
 the host checkout, disposable git repo, auth removed FIRST in cleanup via
-`os.remove`, no auth printed). Grok binary `grok 0.2.101 (5bc4b5dfadcf) [stable]`
-(matches the accepted-version pin). No secrets are recorded here; the only
-content shown is Grok's own model output tokens.
+`os.remove`, no auth printed). Grok binary at capture time:
+`grok 0.2.101 (5bc4b5dfadcf) [stable]` (historical probe evidence; runtime does
+not require this exact build). No secrets are recorded here; the only content
+shown is Grok's own model output tokens.
 
 ## Probe 1: tool-using run (write-capable)
 

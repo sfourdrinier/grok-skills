@@ -639,7 +639,7 @@ function cmdSetup(cwd, args) {
     agentsOk = agentsResult.ok;
     if (agentsResult.installed.length || agentsResult.updated.length) {
       hints.push(
-        "Codex agents ready (absolute companion path): grok-engineer-coder, grok-rescue. Also auto-installed on SessionStart."
+        "Codex agents ready (absolute GROK_AGENT_RUN → agents/run.mjs): grok-engineer-coder, grok-rescue. Also auto-installed on SessionStart."
       );
     } else if (agentsResult.skippedUser?.length) {
       hints.push(

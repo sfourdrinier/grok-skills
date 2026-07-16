@@ -115,7 +115,8 @@ If the operator sets `--max-turns` and Grok stops at the budget (often as
 `stopReason: Cancelled` with `numTurns` at the cap), or stops mid-run as
 `Cancelled` with real text/structured findings, the wrapper returns
 `status: success` with `response` populated and a **warning** that findings may
-be incomplete. Empty shells (`findings: []` only) are not salvaged.
+be incomplete. Empty shells are not salvaged (`findings: []` / `null`,
+placeholder-only findings, blank text).
 
 ## Not required for core use
 

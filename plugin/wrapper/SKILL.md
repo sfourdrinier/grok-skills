@@ -34,9 +34,10 @@ Every invocation has this shape:
 python3 plugin/wrapper/scripts/grok_agent.py <mode> [flags...]
 ```
 
-Run all commands from the repository root (or any cwd - the wrapper resolves
-its own repository root from its on-disk location, never from the caller's
-cwd).
+You can run from any cwd. Relative `--target` / paths resolve against the
+**process cwd**; the repository root is the **git toplevel of the resolved
+target** (not the wrapper install tree). Marketplace installs live outside the
+repo under review.
 
 ## The verbatim relay rule
 
@@ -69,7 +70,9 @@ matter: reviewing an app, package, or subsystem before merging, or getting
 Grok's read on an existing area of the codebase. `review` walks the
 repository rules (`AGENTS.md`/`CLAUDE.md`) from repo root down to the target
 and includes them in the prompt; it can only read (`read_file`, `grep`,
-`list_dir`) and any reported file change fails the run closed.
+`list_dir`). Concurrent tree drift or change-shaped JSON keys become
+**informational warnings** (findings still returned); write escapes still fail
+on `code`/`verify` only.
 
 ```bash
 python3 plugin/wrapper/scripts/grok_agent.py review \
@@ -208,9 +211,9 @@ in every case; do not attempt to add web access to a verify run.
 - `references/authority-policies.md` - per-mode capability tables (tools,
   sandbox, cwd, network, subagents, web) and what every C4 error class means
   for you as the operator.
-- `references/cli-reference.md` - the pinned Grok version, the C6 invocation
-  baseline actually used, sandbox and permission-mode evidence, auth file
-  names, and the exact procedure for re-validating a new Grok CLI release.
+- `references/cli-reference.md` - last-validated Grok CLI evidence (advisory),
+  the C6 invocation baseline, sandbox and permission-mode evidence, auth file
+  names, and how maintainers refresh the stamp after a probe suite.
 - `references/workflow-patterns.md` - the tested recipes: which mode to use
   for full-context review, cross-file review, isolated diff review,
   multi-angle review, architecture consultation, plan critique, code

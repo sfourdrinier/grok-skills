@@ -117,7 +117,8 @@ every run and fails closed as `sandbox-failure` if the expected
 `read_write_paths` grants anything outside the run's legitimate writable
 roots.
 
-What is NOT enforced, on the pinned Grok version (decision D-SECRETREAD):
+What is NOT enforced, on the last-probed Grok CLI (0.2.101 evidence; residual
+may still apply on newer builds until re-probed) (decision D-SECRETREAD):
 neither built-in profile, nor any custom `sandbox.toml` profile the Task 6
 Step 5 live probe could construct (`deny_read_globs`, `deny_paths`, or even a
 narrow `read_only` allowlist with `extends` removed), denies a read of a

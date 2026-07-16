@@ -38,8 +38,9 @@ Preferred:
 2. `codex plugin add grok@grok-skills` (or install from the app plugin directory)
 3. Start a **new session** (SessionStart auto-installs agents - no setup skill required).
 4. Confirm `~/.codex/agents/grok-engineer-coder.toml` and `grok-rescue.toml` exist,
-   each with `# managed-by: grok-skills` and a `companion:` absolute path under the
-   current plugin cache.
+   each with `# managed-by: grok-skills`, `# agent-run:`, and
+   `GROK_AGENT_RUN=…/agents/run.mjs` under the current plugin cache
+   (`# companion:` is optional metadata only).
 5. Invoke preflight / review from the plugin skill surface; spawn engineer-coder once.
 
 Local checkout (dev only): `codex plugin marketplace add /absolute/path/to/grok-skills`.
@@ -68,8 +69,10 @@ the Grok CLI is ready.
 - [ ] `/grok:cleanup --run-id <id>` dry-run, then `--confirm`
 - [ ] `grok-engineer-coder` routes implementation to companion `code` (one shell call; no unrestricted Bash)
 - [ ] `grok-rescue` routes diagnosis to `reason` (not pure implement); one Bash(node) call
-- [ ] Codex: after SessionStart, `~/.codex/agents/grok-*.toml` present with absolute companion
-- [ ] Model does not invent `~/.claude/plugins/cache/...` paths (uses PLUGIN_ROOT / GROK_COMPANION)
+- [ ] Codex: after SessionStart, `~/.codex/agents/grok-*.toml` present with
+      `# managed-by: grok-skills`, `# agent-run:`, and `GROK_AGENT_RUN=…/agents/run.mjs`
+- [ ] Model does not invent `~/.claude/plugins/cache/...` paths (uses Skill base +
+      `run.mjs`, or host env / managed `GROK_AGENT_RUN`)
 - [ ] Optional: `setup --remove-codex-agents` removes managed agents only
 
 ## Cache-layout check (critical)

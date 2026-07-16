@@ -163,7 +163,7 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 
 | Skill | What it does |
 |-------|----------------|
-| `/grok:preflight` | Readiness only: binary pin, auth, sandbox policy, private-home lifecycle. No task. |
+| `/grok:preflight` | Readiness only: Grok CLI runnable (`grok --version`), auth, sandbox policy, private-home lifecycle. No task. No exact CLI build pin. |
 | `/grok:setup` | Optional readiness report + gate/mode toggles. Codex agents auto-install on SessionStart. |
 | `/grok:review` | Read-only review. Target defaults to `.`; optional `--base` for branch review. |
 | `/grok:adversarial-review` | Hostile review that challenges design; web on by default. |
@@ -284,7 +284,7 @@ What it actually enforces:
 
 What it does not do:
 
-- Block absolute-path **reads** of host secrets on the pinned Grok CLI
+- Block absolute-path **reads** of host secrets on the current Grok CLI
 - Block network egress (Grok is online by design)
 - Guarantee pattern redaction catches every secret shape
 - Replace host tool-approval UX (Claude/Codex still prompt for Bash as usual)

@@ -6,7 +6,7 @@ Run once against a disposable throwaway repo with a real Grok login. Not for CI.
 
 ## Preconditions
 
-- [ ] Grok CLI installed, authenticated, matches `plugin/wrapper/accepted-version.json`
+- [ ] Grok CLI installed, authenticated (`grok --version` works; any build)
 - [ ] Plugin installed from **git marketplace** (`sfourdrinier/grok-skills`) or local path
 - [ ] macOS (Seatbelt) for live modes
 
@@ -22,7 +22,7 @@ Run once against a disposable throwaway repo with a real Grok login. Not for CI.
 
 - [ ] First live command after preflight logs a cache refresh or hit (stderr)
 - [ ] Second live command within ~15 minutes hits the cache (no auth-missing)
-- [ ] After changing Grok CLI version pin, cache miss re-verifies
+- [ ] After installing a different Grok CLI build, preflight cache miss re-verifies
 
 ## Grounded adversarial review
 
@@ -35,8 +35,8 @@ Run once against a disposable throwaway repo with a real Grok login. Not for CI.
 
 ## Defaults table
 
-- [ ] `reason` without flags: web on (or companion injects `--web`)
-- [ ] `reason --no-web`: `policy.webAccess: false`
+- [ ] `reason` without flags: web **off** (`policy.webAccess: false`)
+- [ ] `reason --web`: `policy.webAccess: true`
 - [ ] `review` without flags: web off
 - [ ] `review --web`: web on
 - [ ] `verify` never accepts web

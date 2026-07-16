@@ -614,7 +614,7 @@ def _run_grok_mode_body(
         from groklib import preflight_cache
 
         preflight_cache.ensure_ready(run.binary)
-        progress.safe_emit("validate", "grok version pin verified (preflight cache)")
+        progress.safe_emit("validate", "grok version check verified (preflight cache)")
 
         # Pre-spawn SECURITY GUARANTEE (D-PORT / SEC1): fail closed on any
         # platform without a captured Grok sandbox probe report BEFORE a private

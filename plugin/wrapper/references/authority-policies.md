@@ -11,7 +11,7 @@ the underlying probe evidence.
 
 | Mode | Working directory | Tools (`--tools`) | Sandbox profile | Network | Subagents | Web (`--web`) | Permission mode |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `review` | Repo workspace resolved from `--target` (must exist inside the repo containing the wrapper) | `read_file`, `grep`, `list_dir` (read-only; any reported file change fails the run closed) | `read-only` (built-in; write denial only) | Permitted (D-NET) | Disabled (`--no-subagents` always) | Opt-in per run; adds `web_search`, `web_fetch`, `open_page`, `open_page_with_find` and omits `--disable-web-search` | `auto` |
+| `review` | Repo workspace from `--target` (existing dir inside a git repo; root = git toplevel of that target, not the wrapper install) | `read_file`, `grep`, `list_dir` (read-only; FS drift / change-shaped JSON keys → informational warnings, not hard fail) | `read-only` (built-in; write denial only) | Permitted (D-NET) | Disabled (`--no-subagents` always) | Opt-in per run; adds `web_search`, `web_fetch`, `open_page`, `open_page_with_find` and omits `--disable-web-search` | `auto` |
 | `reason` | Fresh private temp dir OUTSIDE the repo; no repository rule discovery | `read_file` only when at least one `--input` artifact is supplied, else no tools | `read-only` (built-in; write denial only) | Permitted (D-NET) | Disabled | Opt-in per run (same as `review`) | `auto` |
 | `code` | External git worktree the wrapper creates and verifies (never the current checkout) | Editing and terminal tools (`write`, `search_replace`, `run_terminal_command`, `get_command_or_subagent_output`) plus read tools (`read_file`, `list_dir`, `grep`), confined by the sandbox to the worktree | `workspace` (built-in; confines writes to cwd plus private temp) | Permitted (D-NET) | Disabled | Opt-in per run (same as `review`) | `auto` |
 | `verify` | An EXISTING external worktree named by `--worktree`; source-editing tools absent | Read-only set plus terminal tools for approved verification commands only; no `write`/`search_replace` | `workspace` (same base profile and confinement as `code`) | Permitted (D-NET) | Disabled | **Never** (hermetic by design; `verify` has no `--web` flag) | `auto` |
@@ -32,7 +32,7 @@ Notes:
 - **Sandbox profiles enforce WRITE confinement only.** Neither built-in
   profile (`read-only`, `workspace`) nor any custom `sandbox.toml` profile
   the wrapper has been able to construct denies reads of credential or
-  external-secret paths on the pinned Grok version (decision D-SECRETREAD).
+  external-secret paths on the last-probed Grok CLI (decision D-SECRETREAD).
   Every mode above therefore carries the same accepted read-gap residual
   described in `../SKILL.md` and `cli-reference.md`; the sandbox column above
   names the WRITE boundary that IS enforced and checked via
@@ -61,7 +61,7 @@ each class implies and what to do next.
 | `auth-missing` | `~/.grok/auth.json` is absent, or the private-home login probe (`grok models`) reports not logged in. | Log in with the real `grok` CLI, confirm `~/.grok/auth.json` exists, then retry. |
 | `version-mismatch` | `grok --version` could not run, exited nonzero, or printed no usable Grok version line. (Exact build mismatch is **not** an error.) | Install/fix the Grok CLI so `grok --version` works. |
 | `model-unavailable` | The requested model (default `grok-4.5`) is not in the selectable model list from `grok models`, or the run's effective model was not in the requested model family. | Check account/model access; do not silently switch models. |
-| `invalid-target` | `--target`, `--worktree`, `--input`, `--rules-file`, or `--task-file` resolved outside the repo, does not exist, or is otherwise malformed. | Fix the path argument; paths are always resolved relative to the repository the wrapper lives in, not your shell's cwd. |
+| `invalid-target` | `--target`, `--worktree`, `--input`, `--rules-file`, or `--task-file` does not exist, is outside the relevant repo, or is otherwise malformed. | Fix the path; relative paths resolve against the **process cwd**, and the git repo root is derived from the resolved path (not from where `grok_agent.py` is installed). |
 | `rules-parity-failure` | With `ruleFileParity` enabled, the `AGENTS.md`/`CLAUDE.md` pair at some directory level is missing one file, fails the path-header convention, or the bodies differ after line 1. | Fix the pair so both files exist with matching bodies (and valid headers), or disable `ruleFileParity` in `.grok-skills.json`; the wrapper will not guess which file is authoritative. |
 | `worktree-failure` | The wrapper could not create, verify, or remove the external git worktree (collision, missing metadata, dirty worktree on cleanup, etc). | Inspect `worktreePath`/`worktreeBranch` in the envelope; a dirty worktree on cleanup is preserved, never force-removed. |
 | `sandbox-failure` | Sandbox enforcement telemetry (`sandbox-events.jsonl`) is absent, the applied profile mismatches the requested one, `enforced` was not `true`, or a write escaped the run's legitimate writable roots. | Treat as a hard stop; do not retry without investigating - this is the wrapper's core write-confinement guarantee failing to verify. |

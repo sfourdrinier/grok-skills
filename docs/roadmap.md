@@ -66,11 +66,12 @@ trust marketing; direct is one flag away for people who already live in Grok.
 
 | Item | Notes | Status |
 |------|-------|--------|
-| Rich setup report | CLI present, version pin, auth, mode | **shipped** |
+| Rich setup report | CLI present (any working build), auth, mode | **shipped** |
 | Install guidance | Grok CLI + **git marketplace install** (no silent binary install) | **shipped** |
-| Zero post-install Codex agents | SessionStart materializes `~/.codex/agents` with absolute companion | **shipped** (1.2.1) |
+| Zero post-install Codex agents | SessionStart materializes `~/.codex/agents` with absolute `agents/run.mjs` (`GROK_AGENT_RUN`) | **shipped** (1.2.1; runner path 1.2.5+) |
 | Toggle run mode | hardened vs direct persisted per workspace | **shipped** |
-| Preflight cache | version-keyed short-circuit (`preflight-cache.json`) | **shipped** |
+| Preflight cache | installed-version-keyed short-circuit (`preflight-cache.json`; not a hard pin) | **shipped** |
+| No hard CLI version lock | any working `grok --version`; stamp advisory only | **shipped** (1.2.8) |
 
 ### E. Beyond OpenAI's plugin
 
@@ -95,7 +96,7 @@ trust marketing; direct is one flag away for people who already live in Grok.
 ## Out of scope for first open-source tag (explicit)
 
 - Auto-installing the Grok binary without user consent  
-- Claiming network/read sandbox beyond what the pinned Grok CLI enforces  
+- Claiming network/read sandbox beyond what the current Grok CLI + platform probe evidence enforce  
 - Full multi-agent supervisor (Wave 3 autonomy)  
 
 Those remain backlog, not silent promises.

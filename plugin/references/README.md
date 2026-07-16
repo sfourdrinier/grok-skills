@@ -88,16 +88,22 @@ If none exist, the companion fails closed with an actionable message.
 
 ## Skill surface
 
+Canonical table: root [README.md](../../README.md) (skills + agents). Summary:
+
 | Skill | Wrapper mode | Notes |
 |-------|--------------|-------|
-| `/grok:preflight` | `preflight` | Read-only readiness |
-| `/grok:review` | `review` | Full-context read-only; `--web` allowed |
-| `/grok:reason` | `reason` | Cold second opinion; `--web` allowed |
+| `/grok:preflight` | `preflight` | Readiness (runnable CLI, auth, sandbox) |
+| `/grok:setup` | companion setup | Optional gate/mode; Codex agents auto on SessionStart |
+| `/grok:review` | `review` | Full-context read-only; `--web` opt-in |
+| `/grok:adversarial-review` | `adversarial-review` | Hostile; web on by default |
+| `/grok:dual-lens` | companion | Adversarial then ordinary review |
+| `/grok:reason` | `reason` | Cold second opinion; web off by default |
 | `/grok:code` | `code` | Isolated worktree implementation |
 | `/grok:verify` | `verify` | Hermetic verify; never `--web` |
-| `/grok:status` | `status` | Prior run inspection |
+| `/grok:debate` | companion | Two reason passes + synthesis |
+| `/grok:status` / `jobs` / `result` / `cancel` | companion | Job inspection |
+| `/grok:transfer` | companion | Claude session → task pack |
 | `/grok:cleanup` | `cleanup` | Dry-run by default; `--confirm` removes |
-| `/grok:setup` | preflight + gate | Optional stop-review gate toggle |
 
 ## Optional stop-review gate
 
