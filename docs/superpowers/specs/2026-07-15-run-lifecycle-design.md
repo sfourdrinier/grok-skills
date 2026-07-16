@@ -1,249 +1,335 @@
 # Run lifecycle, isolated review, and completion signals
 
-**Status:** design (brainstorm approved; plan revision 2 after execution review)  
+**Status:** design revision 3 (fully locked — no open decisions)  
 **Date:** 2026-07-15  
 **Product:** grok-skills (Claude Code + Codex)  
-**Baseline:** v1.2.10
+**Baseline:** v1.2.10  
 
 ## 1. Problem
 
 Background and long-running Grok modes (especially `review`) are hard to trust:
 
-1. **Lifecycle truth is fuzzy.** Status can look like success while the target is unfinished or failed.
-2. **Run id is advertised early.** `create_run()` emits `[grok-run-id]` before a durable seed `run.json` exists.
-3. **Progress is uneven.** Post-Grok finalization is quiet; operators think the process is stuck.
-4. **Finalization can hang.** No guaranteed terminal envelope after model exit.
-5. **Review evidence can be poisoned** by concurrent writers on the live checkout.
-6. **No clean completion signal** for background jobs (optional notifications; never chat injection).
+1. Lifecycle truth is fuzzy (success vs unfinished vs failed).
+2. Run id is advertised before a durable seed `run.json` exists.
+3. Post-Grok finalization is quiet; operators think the process is stuck.
+4. Finalization can hang with no terminal envelope.
+5. Review evidence can be poisoned by concurrent writers on the live checkout.
+6. No clean completion signal for background jobs.
 
 ## 2. Goals
 
-- Durable **target lifecycle** for every live run.
-- **Atomic seed** `run.json` before the run id is published.
-- **Atomic, validated** terminal `envelope.json` before a run is considered finished.
-- Status projection that matches the **both, versioned** model (see §6).
-- Dense **phase progress** with elapsed time.
-- **Finalization watchdog** (process-based, cross-platform) that always leaves a classified terminal envelope.
-- **Isolated review** for `--base` and `--isolated`; fail closed if isolation fails.
-- Optional **notifications** after terminal envelope; at-most-once; never fail the run.
-- Dual-host: same core lifecycle; harnesses only adapt presentation.
-- **Docs follow code** (README, CHANGELOG, docs/\*\*, skills, references, roadmap) on every shippable PR.
+- Durable target lifecycle for every live run.
+- Atomic seed `run.json` before the run id is published.
+- Atomic, validated terminal `envelope.json` before a run is finished.
+- Status projection per §6 (both, versioned).
+- Phase progress with `elapsedMs`.
+- Process-based finalization watchdog with classified terminal failure.
+- Isolated review for `--base` and `--isolated`; fail closed on isolation failure.
+- Optional notifications after terminal envelope; at-most-once; never fail the run.
+- Dual-host: same core; harnesses only present.
+- Docs follow code on every shippable PR (AGENTS.md rule #1).
 
 ## 3. Non-goals
 
-- Injecting completions into Claude/Codex chat from the Python subprocess.
+- Chat injection into Claude or Codex from the wrapper or companion.
 - Broad ignore lists as the read-only safety model.
-- A second durable stream beside `progress.jsonl`.
+- A second durable stream besides `progress.jsonl`.
 - Failing a completed run because notification delivery failed.
+- Applying untracked files under `--isolated` (v1).
 
-## 4. Decisions (locked)
+## 4. Locked decisions
 
 | Topic | Decision |
 |-------|----------|
-| Lifecycle representation | **Both, versioned:** `run.json` / `response.target.lifecycle` is source of truth. Top-level envelope `status` is a **projection** (table in §6). |
-| Seed record | `lifecycle: "created"` and compatible `status: "running"` (not `status: "created"`). |
-| Terminal persist | `persist_terminal_envelope(paths, envelope, *, lifecycle)` — **caller passes** terminal lifecycle (`completed` \| `failed` \| `canceled`); never inferred only from envelope `status`. |
-| Finalization budget | **Process-based** deadline (not threads). See §9. |
-| Review isolation | `--base` ⇒ detached worktree at **HEAD**, keep original `--base` for comparison. `--isolated` ⇒ detached worktree at HEAD + apply **tracked** dirty changes. Fail: `isolation-unavailable`, no live fallback. |
-| Notifications | Default **off**. Setup opt-in: off \| auto \| native \| webhook. Recommend **auto**. Canonical storage: **jobs index config** (same family as `runMode`), not gate-state. **At-most-once** via per-run marker. |
-| Native notify safety | `spawn`/`spawnSync` with **argv array only**, no shell; bounded timeout; failures log only. |
-| Delivery | **Three PRs.** Versions: PR1 **1.3.0**, PR2 **1.4.0**, PR3 **1.5.0**. |
+| Lifecycle representation | `run.json.lifecycle` and `response.target.lifecycle` are source of truth. Top-level envelope `status` is a projection (§6 table only). |
+| Seed record | `lifecycle: "created"`, `status: "running"` (never `status: "created"`). |
+| Terminal persist | `persist_terminal_envelope(paths, envelope, *, lifecycle)` where `lifecycle` is exactly one of `completed`, `failed`, `canceled`. Caller always passes it. |
+| Interrupted | Status mode **always** best-effort atomic-writes `lifecycle: "interrupted"` when owner is dead and no valid envelope. If that write fails, response still reports `lifecycle: "interrupted"` and top-level `failure`. |
+| Finalization | Child process via `multiprocessing.get_context("spawn")`; parent `join(timeout)`; kill on timeout. Worker **writes** the terminal envelope. Parent does not re-promote. Progress during finalize: **parent-only** progress events around join (enter/timeout/success); worker does not append progress. |
+| Review isolation | See §10. No silent live-checkout fallback. |
+| Notifications storage | **Only** `plugin/scripts/lib/jobs.mjs` index `config` (with `runMode`). Never gate-state. |
+| Notifications default | `off`. Setup flags set mode. Setup copy recommends `auto`. |
+| Notify at-most-once | Exclusive `notified.json` with states `pending` then `sent` (§11). |
+| Native notify | argv-only spawn, `shell: false`, 5s timeout, platforms §11. |
+| PR versions | PR1 **1.3.0**, PR2 **1.4.0**, PR3 **1.5.0**. |
 
 ## 5. Architecture
 
 ```text
-Companion (Node): jobs, live relay, status passthrough, notify after terminal
-        │
-        ▼
-Wrapper (Python): runstate + modes + optional review isolation + process finalize budget
-        │
-        ▼
-~/.local/state/grok-skills/runs/<id>/{run.json, progress.jsonl, envelope.json, owner.json, owner.pid, notified.json}
+Companion → Wrapper → state_root/runs/<id>/
+  run.json, progress.jsonl, envelope.json, owner.json, owner.pid, notified.json
 ```
 
-## 6. Target lifecycle and status projection
+Worktrees for isolation: `state_root/worktrees/review/<runId>/` (absolute under `runstate.state_root()`).
 
-### Lifecycle (source of truth on `run.json.lifecycle`)
+## 6. Lifecycle and status projection
+
+### Lifecycle values on `run.json.lifecycle`
+
+| Value | Meaning |
+|-------|---------|
+| `created` | Seed written; run id may be published |
+| `running` | Active work before post-model finalize |
+| `finalizing` | After Grok exit; packaging terminal result |
+| `completed` | Valid success envelope persisted |
+| `failed` | Valid failure envelope persisted |
+| `canceled` | Operator cancel with terminal envelope |
+| `interrupted` | Written by status when process dead and no valid envelope |
+
+### Transition graph (allowed writes)
 
 ```text
-created → running → finalizing → completed
-                              ↘ failed
-                              ↘ canceled
-                              ↘ interrupted   (status-time classification only if process dead + no envelope)
+created → running | failed | canceled
+running → finalizing | failed | canceled
+finalizing → completed | failed | canceled
+(any non-terminal) → interrupted   # status-mode only, when process dead + no envelope
 ```
 
-| Lifecycle | Meaning |
-|-----------|---------|
-| `created` | Seed record written; run id may now be published |
-| `running` | Active work before post-model finalize |
-| `finalizing` | Model/main work finished; packaging / verify / write envelope |
-| `completed` | Valid success envelope persisted |
-| `failed` | Valid failure envelope persisted (incl. finalization-timeout, isolation-unavailable) |
-| `canceled` | Operator cancel with terminal envelope |
-| `interrupted` | Status-time only: owner process dead, no valid terminal envelope |
+Terminal lifecycles `completed`, `failed`, `canceled`, `interrupted` are **immutable** once set (further `set_lifecycle` raises or no-ops with log; tests require refuse overwrite).
 
-### Top-level `status` projection (both, versioned)
+### Top-level status projection
 
-| Target lifecycle | Top-level status | Exit (status mode) |
-|------------------|------------------|--------------------|
+| Target lifecycle | Top-level `status` | Status-mode exit |
+|------------------|--------------------|------------------|
 | `created`, `running`, `finalizing` | `running` | 0 |
 | `completed` | `success` | 0 |
 | `failed`, `canceled`, `interrupted` | `failure` | 1 |
-| Status cannot load/own run; or stored envelope unreadable/invalid C4 | `failure` | 1 |
+| Cannot load/own run; stored envelope unreadable or invalid C4 | `failure` | 1 |
 
-**Clarification:** Top-level `failure` for `failed` / `canceled` / `interrupted` means “the **target** did not complete successfully,” not “status CLI crashed.” Status mode still returns a well-formed status envelope with `mode: "status"` and `response.target.lifecycle` set. Live modes that *finish* still write their own terminal envelopes with `success`/`failure` as today.
+Status mode always emits `mode: "status"` with a well-formed envelope. Live modes still emit their own terminal envelopes with `success`/`failure` for the *run* result.
 
-Live-mode terminal envelopes (review/code/…): unchanged (`success` / `failure` on the run’s own envelope). Lifecycle on `run.json` carries `completed` / `failed` / `canceled`.
-
-### Seed record shape
+### Seed `run.json` (exact fields)
 
 ```json
 {
   "schemaVersion": 1,
-  "runId": "...",
-  "mode": "review",
-  "createdAtUtc": "...",
+  "runId": "<id>",
+  "mode": "<mode>",
+  "createdAtUtc": "<iso-z>",
   "lifecycle": "created",
   "status": "running",
-  "progressStreamPath": "...",
-  "envelopePath": "..."
+  "requestedModel": null,
+  "repository": null,
+  "targetWorkspace": null,
+  "worktreePath": null,
+  "worktreeBranch": null,
+  "baseRevision": null,
+  "progressStreamPath": "<absolute progress.jsonl>",
+  "envelopePath": "<absolute envelope.json>"
 }
 ```
 
-`status: "running"` remains the legacy-compatible “in flight” marker; `lifecycle` is authoritative for new clients.
-
 ## 7. Durable invariants
 
-1. Emit `[grok-run-id]` **only after** atomic seed `run.json` exists (`lifecycle: created`, `status: running`).
-2. Treat a run as finished only after atomic, validated `envelope.json`.
-3. `persist_terminal_envelope(paths, envelope, *, lifecycle)` requires explicit terminal lifecycle in `{completed, failed, canceled}`.
-4. Atomic writes: temp + `os.replace` / rename, mode 0600.
-5. Single progress stream: `progress.jsonl` with phase vocabulary + `elapsedMs`.
+1. `[grok-run-id]` is emitted only after atomic seed `run.json` exists.  
+2. Finished only after atomic validated `envelope.json`.  
+3. `persist_terminal_envelope` always receives explicit terminal lifecycle.  
+4. JSON writes: temp sibling `path.name + ".tmp." + pid` then `os.replace`, file mode 0600.  
+5. Progress: only `progress.jsonl`.
 
-## 8. Progress phases
+## 8. Progress
 
-`start` → `validate` → `authhome` → `prepare` → `grok` → `finalizing` → (`notify`) → `done`
+### Phases (exact order vocabulary)
 
-Status `response.target` includes: `lifecycle`, `process`, `elapsedMs`, `lastProgressAt`, `lastEvent`, `recentEvents`, `eventCount`, `resultAvailable`, `hasStoredEnvelope`.
+`start` | `validate` | `authhome` | `prepare` | `grok` | `finalizing` | `notify` | `done`
 
-## 9. Finalization watchdog (process-based)
+`notify` is companion-side only (optional); wrapper may omit it.
 
-**Do not use threads to interrupt blocked finalize.**
+### Event fields
 
-**Chosen mechanism:**
+Every event: `schemaVersion`, `runId`, `seq`, `ts`, `phase`, `level`, `message`, plus `elapsedMs` (int, from `createdAtUtc`).
 
-1. After Grok child exits, parent sets lifecycle `finalizing`, emits progress.
-2. Parent runs the **finalize package** (sandbox verify, drift, envelope build, atomic persist) in a **child process** (`multiprocessing` spawn, or a dedicated small entry invoked via `subprocess` with the same Python):
-   - Child receives run id / paths / needed context via temp JSON (0600) or argv + env.
-   - Child writes progress events to the same `progress.jsonl` (append-only, careful locking or parent-only progress if simpler).
-3. Parent waits with **`Process.join(timeout=budget)`** or **`subprocess.run(..., timeout=budget)`**.
-4. On timeout: parent **terminates** the child process tree, writes failure envelope `finalization-timeout` via `persist_terminal_envelope(..., lifecycle="failed")`, exits non-zero.
-5. On success: parent confirms envelope on disk + lifecycle terminal.
+### Status `response.target` (exact keys)
 
-**Budgets:** review/reason **120s**, code/verify **180s**; `GROK_FINALIZE_TIMEOUT_SECONDS` clamp 30–600.
+```json
+{
+  "lifecycle": "finalizing",
+  "process": "alive",
+  "elapsedMs": 181492,
+  "lastProgressAt": "2026-07-16T02:15:11+00:00",
+  "lastEvent": { "seq": 12, "phase": "finalizing", "message": "entering finalization", "ts": "2026-07-16T02:15:11+00:00", "elapsedMs": 181492 },
+  "recentEvents": [],
+  "eventCount": 42,
+  "resultAvailable": false,
+  "hasStoredEnvelope": false,
+  "recordStatus": "running",
+  "mode": "review",
+  "requestedModel": "grok-4.5",
+  "repository": "/path",
+  "runDir": "/path/to/run"
+}
+```
 
-**Cooperative logging** inside the child (step markers) remains required so status can show `finalizing` with recent events.
+`recentEvents`: last **8** events as compact summaries (same shape as `lastEvent`).  
+`resultAvailable`: true iff valid stored envelope exists.
+
+## 9. Finalization watchdog
+
+### Mechanism (exact)
+
+1. After Grok child exits, parent: `set_lifecycle(paths, "finalizing")`; progress `finalizing` / "entering finalization".  
+2. Parent writes worker payload JSON (0600) to `paths.run_dir / "finalize-payload.json"` containing run_id, paths, mode context needed to build the envelope.  
+3. Parent starts:
+
+```python
+ctx = multiprocessing.get_context("spawn")
+proc = ctx.Process(target=finalize_worker_main, args=(str(payload_path),), name="grok-finalize")
+proc.start()
+proc.join(timeout=budget_seconds)
+```
+
+4. If `proc.is_alive()`: `proc.terminate(); proc.join(5)`; if still alive `proc.kill(); proc.join(5)`. Parent builds failure envelope class `finalization-timeout`, calls `persist_terminal_envelope(..., lifecycle="failed")`, progress done, return failure.  
+5. If process exited 0 and `envelope.json` validates: parent returns that envelope (already persisted by worker).  
+6. If process exited non-zero without valid envelope: parent writes `finalization-timeout` or `cli-failure` with detail from worker stderr file `paths.run_dir / "finalize-worker.stderr"`; lifecycle `failed`.
+
+### Worker responsibilities
+
+- Load payload, perform sandbox verify, drift, build success/failure envelope for the mode, `persist_terminal_envelope` with correct lifecycle (`completed` or `failed`).  
+- Does **not** write progress.jsonl (parent owns progress around the join).  
+- Exit 0 only if envelope persisted and valid.
+
+### Budgets
+
+| Modes | Seconds |
+|-------|---------|
+| review, reason, adversarial-review (maps to review) | 120 |
+| code, verify | 180 |
+| preflight, status, cleanup | no finalize worker |
+
+Env `GROK_FINALIZE_TIMEOUT_SECONDS`: integer, clamp **30..600**, overrides table when set.
 
 ## 10. Isolated review
 
-### When required
+### When
 
-| Invocation | Isolation |
-|------------|-----------|
-| `--base <ref>` | **Required:** detached worktree at **HEAD**; keep operator’s `--base` for comparison semantics |
-| `--isolated` (no base) | **Required:** detached worktree at **HEAD**, then apply **tracked** dirty changes from the original checkout |
-| neither | Live checkout; FS drift remains informational warnings only |
+| Flags | Action |
+|-------|--------|
+| `--base` set | Isolation required |
+| `--isolated` set | Isolation required |
+| both | Isolation required (same as base path for worktree; still apply dirty if working tree differs from HEAD — **locked:** when both set, worktree at HEAD, apply tracked dirty, keep `--base` for comparison) |
+| neither | Live checkout; drift warnings only |
 
-### `--base` algorithm (locked)
+### Worktree path
 
-1. Resolve repo root from target.  
-2. Create detached worktree at **HEAD** under state-owned path (e.g. worktrees/review/`runId`).  
-3. Run review with cwd/workspace = worktree; **pass through original `--base`** so base-diff / prompt logic is unchanged.  
-4. On failure to create: `isolation-unavailable`, no live fallback.  
-5. Best-effort remove worktree on terminal.
+`{state_root}/worktrees/review/{run_id}` where `state_root = runstate.state_root()`.
 
-### `--isolated` without base (locked, no “pick one”)
+### `--base` (exact)
 
-1. Create detached worktree at **HEAD** (same layout as above).  
-2. From original checkout, capture **tracked** dirty state only:  
-   `git diff HEAD` (and include staged+unstaged tracked via `git diff HEAD` which covers both when used as `git diff HEAD` + ensure index; use `git write-tree`/`git diff HEAD` pipeline).  
-   Concrete implementation:  
-   - `git -C source diff HEAD --binary > /tmp/diff`  
-   - `git -C worktree apply --index` (or `git apply` then refresh)  
-3. **Untracked files are not applied** in v1 of `--isolated` (document; avoids copying secrets/build artifacts by surprise). Operators who need untracked in scope use commit/stash first or a later enhancement.  
-4. On apply failure: `isolation-unavailable`.  
-5. Cleanup as above.
+1. `git -C repo_root worktree add --detach {worktree_path} HEAD`  
+2. On non-zero: raise `isolation-unavailable`.  
+3. Review `cwd` / target workspace = worktree_path.  
+4. Pass original `--base` through unchanged to comparison/prompt logic.  
+5. `finally`: `git -C repo_root worktree remove --force {worktree_path}` then `rmtree` if needed; failures log only.
+
+### `--isolated` without `--base` (exact)
+
+1. Same worktree add at HEAD.  
+2. Diff file: `{worktree_path}.diff` under state temp next to worktree, mode 0600:  
+   `git -C repo_root diff HEAD --binary` → write file.  
+3. If file size > 0:  
+   `git -C worktree_path apply --whitespace=nowarn {diff_path}`  
+   Non-zero exit → `isolation-unavailable` (cleanup worktree first).  
+4. Empty diff: continue.  
+5. Untracked files: **never** copied.  
+6. Cleanup worktree + delete diff file in `finally`.
+
+### Return type when isolation not required
+
+`prepare_review_isolation` returns `None` when neither flag is set. Type is `Optional[ReviewIsolation]`.
 
 ## 11. Notifications
 
-### Canonical storage
+### Storage (exact)
 
-**Jobs index config** (same file family as `runMode` in `plugin/scripts/lib/jobs.mjs` index):
+File: jobs index used by `jobs.mjs` (`index.json` under jobs dir). Config object always includes:
 
 ```json
-"config": {
+{
   "runMode": "hardened",
   "notificationMode": "off",
   "notificationWebhookUrl": null
 }
 ```
 
-Gate state (`gate-state.json`) remains **gate-only**. Do not mix notification prefs into the gate file.
+Defaults when missing keys: `notificationMode: "off"`, `notificationWebhookUrl: null`.
 
-### Modes
+### Modes (exact)
 
 | Mode | Behavior |
 |------|----------|
-| `off` | Never (default) |
-| `auto` | Background jobs only; after terminal envelope; if native channel exists |
-| `native` | Attempt desktop notification when available |
-| `webhook` | POST minimal JSON; short timeout; never fail run |
+| `off` | No notify |
+| `auto` | Notify only if job was **background** and a native channel is available |
+| `native` | Always attempt native (foreground or background) when channel available |
+| `webhook` | POST to `notificationWebhookUrl` if non-null non-empty URL; else no-op log |
 
-### At-most-once
+### At-most-once (exact)
 
-After a successful notify attempt (or deliberate skip for `off`), create **`runs/<id>/notified.json`** with `os.open(..., O_CREAT|O_EXCL)` (or write-temp+rename of a “claimed” marker before send).  
+File: `{runDir}/notified.json`.
 
-- If marker exists → skip (no second notify).  
-- Crash **after** send but **before** marker → possible **one duplicate**; document as residual. Prefer: write marker with `status: "pending"` under exclusive create, then send, then update marker to `sent` — if pending and process dies, restart may retry once (document as at-most-twice under crash). **Policy locked:** exclusive create of `notified.json` with `{ "state": "pending" }` then send then update to `sent`. If state is `sent`, never notify. If `pending` and age &lt; 5m, skip retry (assume in-flight). If `pending` and age ≥ 5m, allow one retry.
+1. Try create exclusive with content `{"state":"pending","at":"<iso>"}`.  
+2. If file exists:  
+   - `state=="sent"` → return `{attempted:false, sent:false, reason:"already-sent"}`  
+   - `state=="pending"` and age &lt; 300s → return skip `pending-inflight`  
+   - `state=="pending"` and age ≥ 300s → proceed to send (retry)  
+3. Send.  
+4. Overwrite marker `{"state":"sent","at":"<iso>"}` via atomic write.  
+5. On send failure: leave `pending` (or rewrite pending with new `at`); return `{attempted:true, sent:false}`; never throw to fail the job.
 
-### Native adapter rules
+### Native adapters (exact)
 
-- **argv array only** (`spawnSync(cmd, args, { shell: false, timeout })`).  
-- No string shell, no interpolation of run id into shell scripts.  
-- Timeout e.g. 5s.  
-- Any failure → stderr log only; run already terminal.
+| Platform | Command argv | Timeout |
+|----------|--------------|---------|
+| Darwin | `["osascript", "-e", "display notification \"" + escape(body) + "\" with title \"" + escape(title) + "\""]` where escape only backslash-escapes `\` and `"` | 5000 ms |
+| Linux | `["notify-send", "--", title, body]` if `notify-send` on PATH | 5000 ms |
+| Windows | Skip native (no-op, reason `windows-native-unsupported` in v1) | n/a |
+| Other | no-op | n/a |
 
-### Payload (default)
+Always `shell: false`. Title fixed string `Grok Skills`. Body: `"{mode} {lifecycle} · {runId} · {durationSeconds}s"`.
 
-run id, mode, lifecycle/result, duration seconds — no prompt, model text, paths, secrets.
+### Webhook (exact)
+
+- Method POST, `Content-Type: application/json`  
+- Body: `{"runId","mode","lifecycle","durationSeconds"}` only  
+- Timeout 3000 ms  
+- URL from config only  
+
+### When companion notifies
+
+- After **background** job wrapper process closes, and run has terminal envelope or terminal lifecycle, if preference is `auto` or `native` or `webhook`.  
+- For `native` preference: also after **foreground** terminal (explicit user choice).  
+- Never on `status` / `result` / `jobs` / `setup` alone.  
+- Resolve `runDir` from `XDG_STATE_HOME`/state_root + runId from job record or envelope.
 
 ## 12. Error classes
 
-| Class | When |
-|-------|------|
-| `isolation-unavailable` | Required isolation could not be created or dirty apply failed |
-| `finalization-timeout` | Finalize child exceeded budget |
+| Class | Lifecycle when terminal |
+|-------|-------------------------|
+| `isolation-unavailable` | `failed` |
+| `finalization-timeout` | `failed` |
+
+Add both to `envelope.ERROR_CLASSES`.
 
 ## 13. Three PRs
 
 | PR | Version | Scope |
 |----|---------|--------|
-| **PR1** | **1.3.0** | Lifecycle core, seed-before-id, atomic envelope, status projection table, progress, process finalize watchdog |
-| **PR2** | **1.4.0** | Isolated review (`--base` / `--isolated`) |
-| **PR3** | **1.5.0** | Notifications + setup surface + dual-host docs |
+| PR1 | 1.3.0 | Lifecycle, seed, persist, status projection, progress, process finalize |
+| PR2 | 1.4.0 | Isolated review |
+| PR3 | 1.5.0 | Notifications |
 
 ## 14. Success criteria
 
-- [ ] No run id without seed `run.json` (`lifecycle: created`, `status: running`)  
-- [ ] Status projection matches §6 table  
-- [ ] `persist_terminal_envelope` always takes explicit terminal lifecycle  
-- [ ] Finalize hang → `finalization-timeout` envelope  
-- [ ] `--base` never silent-falls-back to live checkout  
-- [ ] Notifications default off; at-most-once marker; safe spawn  
-- [ ] Docs lists complete per AGENTS.md rule #1  
+- [ ] No run id without seed record (`lifecycle: created`, `status: running`)  
+- [ ] Status projection matches §6  
+- [ ] Explicit lifecycle on every terminal persist  
+- [ ] Finalize hang → `finalization-timeout`  
+- [ ] `--base` / `--isolated` never silent live fallback  
+- [ ] Notify default off; at-most-once; safe spawn  
+- [ ] Docs lists complete on each PR  
 
-## 15. Out of scope (listed)
+## 15. Out of scope
 
-- Host chat completion callbacks (until hosts provide APIs)  
-- Applying untracked files under `--isolated` v1  
-- Ignore-list-based review “safety”
+- Host chat completion APIs  
+- Untracked files in `--isolated`  
+- Windows native toasts (v1 no-op)  
+- Ignore-list review safety  
