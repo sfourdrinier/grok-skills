@@ -1,7 +1,7 @@
 ---
 name: "review"
 description: "Run a full-context, read-only Grok code review over a workspace path"
-argument-hint: "[--target <path>] [--base <ref>] (--task <text> | --task-file <path>) [--web] [--schema <path>] [--model <id>] [--timeout <s>] [--max-turns <n>] [--wait|--background]"
+argument-hint: "[--target <path>] [--base <ref>] [--isolated] (--task <text> | --task-file <path>) [--web] [--schema <path>] [--model <id>] [--timeout <s>] [--max-turns <n>] [--wait|--background]"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
 
@@ -41,7 +41,12 @@ Core constraint:
 
 Required wrapper flags (copy exactly, substitute only placeholder values):
 - `--target` defaults to `.` (repo root / working tree) when omitted.
-- `--base <ref>` frames a branch review against that base.
+- `--base <ref>` frames a branch review against that base (comparison text
+  only). It does **not** force worktree isolation.
+- `--isolated` (opt-in) runs the review in an owned external worktree at HEAD
+  with tracked dirty applied. Use when you need a clean snapshot without live
+  checkout noise. Setup failures fail closed as `isolation-unavailable` (no
+  silent fallback to the live tree). Default is **live checkout**.
 - Exactly one of `--task <text>` or `--task-file <path>` is required. Prefer
   `--task-file` for anything beyond a short one-line prompt.
 - Preserve the user's arguments exactly. Do not strip, add, or reorder flags.

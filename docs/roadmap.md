@@ -41,6 +41,7 @@ trust marketing; direct is one flag away for people who already live in Grok.
 | Track runs as jobs | automatic on live modes | **shipped** |
 | List jobs (table) | `/grok:status` without run-id, `/grok:jobs` | **shipped** |
 | Durable lifecycle + CAS + finalize worker | wrapper `run.json` / spawn finalize / status projection | **shipped (1.3.0), hardened (1.3.1)** |
+| Opt-in isolated review | `review --isolated` owned worktree + tracked dirty; `--base` stays live | **shipped (1.4.0)** |
 | Fetch finished output | `/grok:result [job-id]` | **shipped** |
 | Cancel running job | `/grok:cancel [job-id]` | **shipped** |
 | Human render | `/grok:result --pretty` / companion render | **shipped** |
@@ -50,7 +51,8 @@ trust marketing; direct is one flag away for people who already live in Grok.
 | Item | Notes | Status |
 |------|-------|--------|
 | Default target | working tree / `.` when `--target` omitted | **shipped** |
-| `--base <ref>` | branch-oriented review framing | **shipped** |
+| `--base <ref>` | branch-oriented review framing (does not force isolation) | **shipped** |
+| `--isolated` | opt-in owned worktree review (HEAD + tracked dirty) | **shipped (1.4.0)** |
 | `/grok:adversarial-review` | steerable challenge review + focus text | **shipped** |
 | Structured schema | `schemas/review-output.schema.json` optional | **shipped** |
 | Web-grounded adversary | `--web` default-on for adversarial (Wave 1) | **shipped** (live polish open) |

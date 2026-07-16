@@ -105,6 +105,10 @@ class ModeRun:
     target_workspace: Optional[str]
     detect_unexpected_edits: bool
     extra_temp_dirs: Tuple[pathlib.Path, ...] = ()
+    # Optional override for review tree-drift fingerprints (informational). When
+    # set (opt-in review isolation), fingerprints the isolation worktree so
+    # concurrent noise in the live checkout does not surface as drift warnings.
+    tree_fingerprint_root: Optional[pathlib.Path] = None
     # Elicit-only structured-output schema (verify): sends `--json-schema` to the
     # CLI without engaging grokcli's structured-output validation, so the mode
     # keeps its own missing/invalid classification.

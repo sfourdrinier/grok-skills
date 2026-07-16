@@ -323,8 +323,8 @@ Tests:
 
 ### Task 2.1 — Flag
 
-- [ ] `grok_agent.py`: `--isolated` store_true, **default false**.  
-- [ ] **Commit** `cli: add opt-in --isolated`
+- [x] `grok_agent.py`: `--isolated` store_true, **default false**.  
+- [x] **Commit** `cli: add opt-in --isolated`
 
 ### Task 2.2 — `review_isolation.py`
 
@@ -335,31 +335,31 @@ Implement design §10 exactly (only used when isolation is requested):
 - Dirty: `git diff --binary --full-index --ita-invisible-in-index HEAD --` from repo root; apply in worktree; reject dirty submodules.  
 - Cleanup always: remove worktree, prune, marker, diff.  
 
-- [ ] **Commit** `review: isolation helper with ownership`
+- [x] **Commit** `review: isolation helper with ownership`
 
 ### Task 2.3 — Wire review
 
-- [ ] Call isolation helper **iff** `args.isolated` (or equivalent) is true.  
-- [ ] `--base` without `--isolated` → **no** isolation path.  
-- [ ] Isolation failure → failure envelope via terminal writer (`isolation-unavailable`).  
-- [ ] finally cleanup always when isolation was started.  
-- [ ] **Commit** `review: opt-in isolation via --isolated only`
+- [x] Call isolation helper **iff** `args.isolated` (or equivalent) is true.  
+- [x] `--base` without `--isolated` → **no** isolation path.  
+- [x] Isolation failure → failure envelope via terminal writer (`isolation-unavailable`).  
+- [x] finally cleanup always when isolation was started.  
+- [x] **Commit** `review: opt-in isolation via --isolated only`
 
 ### Task 2.4 — Tests
 
-- [ ] Without `--isolated`: live review path unchanged (including with `--base`).  
-- [ ] With `--isolated`: worktree add fail → isolation-unavailable.  
-- [ ] Tracked dirty (staged+unstaged) appears; untracked does not.  
-- [ ] `git add -N` intent-to-add does **not** appear in isolated tree.  
-- [ ] Submodule dirty rejected.  
-- [ ] Apply failure → isolation-unavailable (no live fallback).  
-- [ ] Concurrent isolated runs; partial cleanup.  
-- [ ] Isolated run: original checkout noise does not force unexpected-edits.
+- [x] Without `--isolated`: live review path unchanged (including with `--base`).  
+- [x] With `--isolated`: worktree add fail → isolation-unavailable.  
+- [x] Tracked dirty (staged+unstaged) appears; untracked does not.  
+- [x] `git add -N` intent-to-add does **not** appear in isolated tree.  
+- [x] Submodule dirty rejected.  
+- [x] Apply failure → isolation-unavailable (no live fallback).  
+- [x] Concurrent isolated runs; partial cleanup.  
+- [x] Isolated run: original checkout noise does not force unexpected-edits.
 
 ### Task 2.5 — Docs + 1.4.0
 
-- [ ] All PR2 docs; packaging triple **1.4.0**; suites; tag `v1.4.0`.  
-- [ ] Explicit docs: opt-in only; when to use `--isolated` vs live `--base`.
+- [x] All PR2 docs; packaging triple **1.4.0**; suites; tag `v1.4.0` (tag on merge to main).  
+- [x] Explicit docs: opt-in only; when to use `--isolated` vs live `--base`.
 
 ---
 

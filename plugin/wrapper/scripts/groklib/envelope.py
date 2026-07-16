@@ -64,6 +64,7 @@ ERROR_CLASSES: Tuple[str, ...] = (
     "finalization-timeout",
     "finalization-worker-missing-result",
     "finalization-worker-unkillable",
+    "isolation-unavailable",
 )
 
 # Case-insensitive: a dict key CONTAINING any of these substrings, or ENDING

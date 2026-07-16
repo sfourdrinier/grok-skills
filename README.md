@@ -165,7 +165,7 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 |-------|----------------|
 | `/grok:preflight` | Readiness only: Grok CLI runnable (`grok --version`), auth, sandbox policy, private-home lifecycle. No task. No exact CLI build pin. |
 | `/grok:setup` | Optional readiness report + gate/mode toggles. Codex agents auto-install on SessionStart. |
-| `/grok:review` | Read-only review. Target defaults to `.`; optional `--base` for branch review. |
+| `/grok:review` | Read-only review. Target defaults to `.`; optional `--base` (framing only); opt-in `--isolated` for owned worktree snapshot. |
 | `/grok:adversarial-review` | Hostile review that challenges design; web on by default. |
 | `/grok:dual-lens` | Adversarial pass, then ordinary review on the same target. |
 | `/grok:reason` | Cold second opinion on files you name. No automatic repo crawl. Web off by default. |
