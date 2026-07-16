@@ -61,6 +61,10 @@ const SPAWN_FAILED_EXIT = 4;
 const SIGNAL_EXIT = 1;
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(SCRIPT_DIR, "..");
+// Always bind this process's plugin root before resolving the wrapper. Stale
+// CLAUDE_PLUGIN_ROOT from hooks after upgrade must not load an old wrapper tree.
+process.env.CLAUDE_PLUGIN_ROOT = PLUGIN_ROOT;
+process.env.PLUGIN_ROOT = PLUGIN_ROOT;
 const REVIEW_SCHEMA = path.join(PLUGIN_ROOT, "schemas", "review-output.schema.json");
 
 const STREAMING_MODES = new Set(["review", "reason", "code", "adversarial-review"]);

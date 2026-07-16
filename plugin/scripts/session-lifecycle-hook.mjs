@@ -52,12 +52,21 @@ if (event === "SessionStart") {
 
   // Auto-install / refresh managed Codex agents (absolute companion path).
   // Silent: failures must not block the host session.
-  const pluginRoot =
-    (process.env.CLAUDE_PLUGIN_ROOT || process.env.PLUGIN_ROOT || "").trim() ||
-    FALLBACK_PLUGIN_ROOT;
+  // Prefer this script's install tree over stale env after plugin upgrade.
+  const envRoot = (process.env.CLAUDE_PLUGIN_ROOT || process.env.PLUGIN_ROOT || "").trim();
+  const pluginRoot = FALLBACK_PLUGIN_ROOT;
+  if (envRoot && path.resolve(envRoot) !== path.resolve(pluginRoot)) {
+    process.stderr.write(
+      `[grok-session] using entry plugin root ${pluginRoot} (ignoring stale env ${envRoot})\n`
+    );
+  }
   ensureCodexAgents({
     pluginRoot,
-    env: process.env,
+    env: {
+      ...process.env,
+      CLAUDE_PLUGIN_ROOT: pluginRoot,
+      PLUGIN_ROOT: pluginRoot,
+    },
     updateManaged: true,
     force: false,
   });

@@ -29,6 +29,12 @@ node "$SKILL_BASE/run.mjs" <mode> [args...]
 
 Shared logic: `plugin/scripts/lib/skill-run.mjs`.
 
+**Stale env after upgrade:** `run.mjs` and `agents/run.mjs` always force
+`CLAUDE_PLUGIN_ROOT` / `PLUGIN_ROOT` on the child to the **entry-derived** install
+tree (not whatever the parent shell still has). `grok-companion.mjs` and the
+SessionStart hook do the same from their own path. That prevents a leftover env
+from an old cache version from loading a mixed old/new install.
+
 ### Optional env path
 
 If the host already set `CLAUDE_PLUGIN_ROOT` or `PLUGIN_ROOT` (hooks, some agents):
@@ -37,7 +43,8 @@ If the host already set `CLAUDE_PLUGIN_ROOT` or `PLUGIN_ROOT` (hooks, some agent
 node "${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}/scripts/grok-companion.mjs" <mode> ...
 ```
 
-Prefer `$SKILL_BASE/run.mjs` whenever the Skill tool loaded the skill.
+Prefer `$SKILL_BASE/run.mjs` whenever the Skill tool loaded the skill (it wins
+over a stale env).
 
 ### Claude plugin agents (aligned)
 
@@ -49,6 +56,11 @@ node "$PLUGIN_INSTALL/agents/run.mjs" code ...
 ```
 
 `agents/run.mjs` locates the companion from its own path (same family as skills).
+
+After a marketplace upgrade, reopen the session so the host reinjects the new
+plugin root into agent shells. Skills avoid that via Skill-tool base paths;
+Claude agents still need a fresh host env to *find* `agents/run.mjs` (once
+running, entry-forcing keeps the tree consistent).
 
 ### Codex custom agents
 

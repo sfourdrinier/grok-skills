@@ -6,7 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
-## [1.2.6] - 2026-07-16
+## [1.2.7] - 2026-07-15
+
+### Fixed
+
+- **Entry-derived plugin root wins over stale env:** `skills/*/run.mjs`,
+  `agents/run.mjs`, `grok-companion.mjs`, and SessionStart always bind
+  `CLAUDE_PLUGIN_ROOT` / `PLUGIN_ROOT` to the install tree they live in so a
+  leftover env after marketplace upgrade cannot mix old/new wrappers.
+- **Wrapper override is opt-in:** `GROK_AGENT_WRAPPER` is ignored unless
+  `GROK_ALLOW_WRAPPER_OVERRIDE=1` (tests/advanced only).
+- **Codex agent writes are atomic** (`*.tmp` + rename); SessionStart timeout
+  raised to 30s so agent materialize is less likely to be cut off.
+- **Incomplete-stop salvage hardened:** empty shells (`findings: []` /
+  `findings: null` / placeholder-only) are not salvaged; turn-exhaustion only
+  when the operator set `--max-turns`; schema-invalid structured on incomplete
+  runs is cleared and warned on the envelope (`incomplete_warnings` →
+  `warnings`); failure envelopes keep incomplete notes when `response` is kept.
+- Docs scrub: SessionStart zero post-install, `agents/run.mjs` /
+  `GROK_AGENT_RUN`, model-invocation note, unlimited max-turns defaults.
+
+## [1.2.6] - 2026-07-15
 
 ### Fixed
 
@@ -20,7 +40,7 @@ for marketplace / package tags.
   salvage if content exists), not a silent user-cancel.
 - Capture `num_turns` from more end-event field shapes into classification.
 
-## [1.2.5] - 2026-07-16
+## [1.2.5] - 2026-07-15
 
 ### Fixed
 
@@ -29,7 +49,7 @@ for marketplace / package tags.
   `$PLUGIN_INSTALL/agents/run.mjs`; Codex managed TOML injects absolute
   `GROK_AGENT_RUN` to that runner (not bare companion-only env).
 
-## [1.2.4] - 2026-07-16
+## [1.2.4] - 2026-07-15
 
 ### Fixed
 

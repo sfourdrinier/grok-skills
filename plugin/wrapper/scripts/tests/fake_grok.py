@@ -399,6 +399,33 @@ def _scenario_turn_exhaustion(control: "dict") -> int:
     return 0
 
 
+def _scenario_turn_exhaustion_with_text(control: "dict") -> int:
+    # Operator budget hit but findings already present — salvage as success.
+    payload = _load_base_payload()
+    payload["stopReason"] = "Cancelled"
+    payload["text"] = "PARTIAL finding: race on auth token refresh is still open."
+    max_turns = _arg_value("--max-turns")
+    if max_turns is not None:
+        try:
+            payload["num_turns"] = int(max_turns)
+        except ValueError:
+            sys.stderr.write("fake_grok: non-integer --max-turns {!r}\n".format(max_turns))
+    else:
+        payload["num_turns"] = 7
+    _emit_result(payload)
+    return 0
+
+
+def _scenario_cancelled_empty_findings(control: "dict") -> int:
+    # Cancelled with structured empty shell only — must hard-fail as cancelled.
+    payload = _load_base_payload()
+    payload["stopReason"] = "Cancelled"
+    payload["text"] = ""
+    payload["structuredOutput"] = {"findings": [], "summary": "Working..."}
+    _emit_result(payload)
+    return 0
+
+
 def _scenario_writes_outside(control: "dict") -> int:
     target = _control_value(control, "editTarget", "FAKE_GROK_EDIT_TARGET")
     if target:
@@ -490,6 +517,8 @@ _SCENARIOS = {
     "stream-no-terminal": _scenario_stream_no_terminal,
     "cancelled-stop": _scenario_cancelled_stop,
     "cancelled-with-text": _scenario_cancelled_with_text,
+    "cancelled-empty-findings": _scenario_cancelled_empty_findings,
+    "turn-exhaustion-with-text": _scenario_turn_exhaustion_with_text,
     "model-mismatch": _scenario_model_mismatch,
     "verifier-missing": _scenario_verifier_missing,
     "sandbox-fail-open": _scenario_sandbox_fail_open,

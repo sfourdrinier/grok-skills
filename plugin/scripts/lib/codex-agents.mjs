@@ -118,7 +118,16 @@ function mkdirPrivate(dir) {
 }
 
 function writePrivate(filePath, content) {
-  fs.writeFileSync(filePath, content, { encoding: "utf8", mode: FILE_MODE });
+  // Atomic replace: write temp then rename so a killed SessionStart cannot leave
+  // a truncated ~/.codex/agents/grok-*.toml.
+  const tmpPath = `${filePath}.tmp.${process.pid}`;
+  fs.writeFileSync(tmpPath, content, { encoding: "utf8", mode: FILE_MODE });
+  try {
+    fs.chmodSync(tmpPath, FILE_MODE);
+  } catch {
+    /* best-effort */
+  }
+  fs.renameSync(tmpPath, filePath);
   try {
     fs.chmodSync(filePath, FILE_MODE);
   } catch {

@@ -248,6 +248,7 @@ test("F-GATE-RECURSE: stop_hook_active short-circuits (allow) without running th
     ...process.env,
     CLAUDE_PLUGIN_DATA: pluginData,
     GROK_AGENT_WRAPPER: FAKE_WRAPPER,
+    GROK_ALLOW_WRAPPER_OVERRIDE: "1",
     GROK_PYTHON: "python3",
     XDG_STATE_HOME: xdg,
     // If the recursion guard were broken and the review DID run, this fake would
@@ -270,6 +271,7 @@ test("F-GATE-MAXBUF: a large wrapper stderr does not trip a spurious block", () 
     ...process.env,
     CLAUDE_PLUGIN_DATA: pluginData,
     GROK_AGENT_WRAPPER: FAKE_WRAPPER,
+    GROK_ALLOW_WRAPPER_OVERRIDE: "1",
     GROK_PYTHON: "python3",
     XDG_STATE_HOME: xdg,
     // ~3MB of stderr: well over Node's ~1MB default spawn buffer. The gate must
@@ -302,6 +304,7 @@ test("F-GATE-FAILCLOSED: a review run that dies with empty stdout blocks (never 
     ...process.env,
     CLAUDE_PLUGIN_DATA: pluginData,
     GROK_AGENT_WRAPPER: emptyWrapper,
+    GROK_ALLOW_WRAPPER_OVERRIDE: "1",
     GROK_PYTHON: "python3",
     XDG_STATE_HOME: xdg,
   };
@@ -329,6 +332,7 @@ test("F-GATE-E2BIG: a very large stop-gate task is passed via stdin and classifi
     ...process.env,
     CLAUDE_PLUGIN_DATA: pluginData,
     GROK_AGENT_WRAPPER: FAKE_WRAPPER,
+    GROK_ALLOW_WRAPPER_OVERRIDE: "1",
     GROK_PYTHON: "python3",
     XDG_STATE_HOME: xdg,
   };
@@ -353,6 +357,7 @@ test("F-GATE-ORPHAN: a gate timeout group-kills the wrapper grandchild (no orpha
     ...process.env,
     CLAUDE_PLUGIN_DATA: pluginData,
     GROK_AGENT_WRAPPER: FAKE_WRAPPER,
+    GROK_ALLOW_WRAPPER_OVERRIDE: "1",
     GROK_PYTHON: "python3",
     XDG_STATE_HOME: xdg,
     // The wrapper records its PID then ignores SIGTERM and sleeps well past the

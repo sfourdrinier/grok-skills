@@ -2,6 +2,7 @@
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -70,6 +71,52 @@ test("preflight run.mjs works with no CLAUDE_PLUGIN_ROOT/PLUGIN_ROOT", () => {
   });
   assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
   assert.match(result.stdout, /"status": "success"/);
+});
+
+test("run.mjs forces entry-derived root over stale CLAUDE_PLUGIN_ROOT", () => {
+  // Stale env pointing at a non-install path must not break self-locating entry
+  // or load a different wrapper tree.
+  const result = spawnSync(process.execPath, [PREFLIGHT_RUN, "preflight"], {
+    encoding: "utf8",
+    env: {
+      ...bareEnv,
+      CLAUDE_PLUGIN_ROOT: "/tmp/stale-grok-plugin-root-does-not-exist",
+      PLUGIN_ROOT: "/tmp/stale-grok-plugin-root-does-not-exist",
+    },
+  });
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+  assert.match(result.stdout, /"status": "success"/);
+  assert.doesNotMatch(`${result.stderr}\n${result.stdout}`, /plugin root not set/i);
+});
+
+test("run.mjs prefers entry tree over a second valid plugin root in env", () => {
+  // Upgrade skew: env still points at an older *valid* install. Entry must win.
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "grok-stale-plugin-"));
+  const staleScripts = path.join(tmp, "scripts");
+  fs.mkdirSync(staleScripts, { recursive: true });
+  // Minimal companion that would succeed but prove we did NOT use it: exits 42.
+  fs.writeFileSync(
+    path.join(staleScripts, "grok-companion.mjs"),
+    "#!/usr/bin/env node\nprocess.exit(42);\n",
+    "utf8"
+  );
+  fs.mkdirSync(path.join(tmp, "wrapper", "scripts"), { recursive: true });
+  fs.writeFileSync(path.join(tmp, "wrapper", "scripts", "grok_agent.py"), "# stale\n", "utf8");
+  try {
+    const result = spawnSync(process.execPath, [PREFLIGHT_RUN, "preflight"], {
+      encoding: "utf8",
+      env: {
+        ...bareEnv,
+        CLAUDE_PLUGIN_ROOT: tmp,
+        PLUGIN_ROOT: tmp,
+      },
+    });
+    // Real preflight succeeds (0). Stale companion would exit 42.
+    assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+    assert.match(result.stdout, /"status": "success"/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test("run.mjs invalid mode is not a plugin-root failure", () => {

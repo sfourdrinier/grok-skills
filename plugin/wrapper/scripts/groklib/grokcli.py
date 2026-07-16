@@ -261,6 +261,8 @@ class GrokRunResult:
     effective_model: "str|None"
     final_text: "str|None"
     structured: "object|None"
+    # Operator-visible incomplete-stop notes (Cancelled/turn-cap salvage).
+    incomplete_warnings: "tuple[str, ...]" = ()
 
 
 def effective_tools(tools: "tuple[str, ...]", web_access: bool) -> List[str]:
@@ -572,18 +574,22 @@ def _relay_stream(proc: "subprocess.Popen", spec: GrokRunSpec, progress: Progres
 def execute(spec: GrokRunSpec, progress: ProgressWriter) -> GrokRunResult:
     """Spawn Grok, relay its streaming-json events, enforce the timeout, and classify the outcome.
 
-    Returns a ``GrokRunResult`` only on a clean success. Every failure mode
-    raises ``GrokWrapperError`` with the exact C4 class:
+    Returns a ``GrokRunResult`` on a clean success **or** on an incomplete stop
+    (Cancelled / operator turn-cap) that still produced usable model output.
+    Incomplete successes set ``incomplete_warnings`` (also folded into the mode
+    envelope ``warnings``). Hard failure modes raise ``GrokWrapperError``:
 
       - wall-clock timeout           -> timeout (process TREE killed first)
       - empty stream, exit 0         -> output-missing
       - empty stream, exit != 0      -> cli-failure (stderr captured)
       - non-JSON/non-object line, OR
         a torn stream with no terminal event -> output-malformed
-      - stopReason Cancelled         -> cancelled (wins over the raw exit code)
-      - max-turn stop reason         -> turn-exhaustion
+      - stopReason Cancelled without usable output -> cancelled
+      - operator max-turn budget exhausted without usable output -> turn-exhaustion
       - any other nonzero exit       -> cli-failure (stderr captured)
       - structured output failing the caller schema -> schema-mismatch (pointer in detail)
+        (on incomplete stops with text findings, structured is cleared and a
+        warning is recorded instead of raising)
 
     D-STREAM (T2-0): Grok is run with ``--output-format streaming-json`` and its
     live thought/text tokens are relayed into the run's progress.jsonl AS THEY
@@ -738,15 +744,21 @@ def _relay_and_classify(
     structured = fields["structured"]
     usable = grokcli_output.has_usable_model_output(fields)
     incomplete_stop = False
+    incomplete_warnings: List[str] = []
 
     # Turn budget (only when operator set --max-turns). Grok often reports the
     # cap as stopReason "Cancelled"; check turn-exhaustion before plain cancel.
     if grokcli_output.is_turn_exhaustion(stop_reason, num_turns, spec.max_turns):
         if usable:
             incomplete_stop = True
+            msg = (
+                "grok hit turn budget (stopReason={!r}, numTurns={!r}, maxTurns={!r}) "
+                "but produced usable output; findings kept"
+            ).format(stop_reason, num_turns, spec.max_turns)
+            incomplete_warnings.append(msg)
             progress.safe_emit(
                 "grok",
-                "grok hit turn budget but produced usable output; continuing with findings",
+                msg,
                 level="warning",
                 data={"stopReason": stop_reason, "numTurns": num_turns, "maxTurns": spec.max_turns},
             )
@@ -767,9 +779,14 @@ def _relay_and_classify(
         # Incomplete stop with content: keep findings (do not response:null).
         if usable:
             incomplete_stop = True
+            msg = (
+                "grok stopReason={!r} (numTurns={!r}) with usable output; findings kept "
+                "(run may be incomplete)"
+            ).format(stop_reason, num_turns)
+            incomplete_warnings.append(msg)
             progress.safe_emit(
                 "grok",
-                "grok stopReason Cancelled with usable output; continuing with findings",
+                msg,
                 level="warning",
                 data={"stopReason": stop_reason, "numTurns": num_turns, "exitStatus": exit_status},
             )
@@ -805,11 +822,12 @@ def _relay_and_classify(
     if spec.output_schema is not None:
         if structured is None:
             if incomplete_stop and usable:
-                progress.safe_emit(
-                    "grok",
-                    "schema requested but structuredOutput missing on incomplete stop; keeping text findings",
-                    level="warning",
+                msg = (
+                    "schema requested but structuredOutput missing on incomplete stop; "
+                    "keeping text findings"
                 )
+                incomplete_warnings.append(msg)
+                progress.safe_emit("grok", msg, level="warning")
             else:
                 progress.safe_emit("grok", "grok returned no structured output for a schema run", level="error")
                 raise GrokWrapperError(
@@ -821,12 +839,18 @@ def _relay_and_classify(
             try:
                 grokcli_output.validate_structured_output(structured, spec.output_schema)
             except GrokWrapperError:
-                if incomplete_stop and fields["final_text"]:
-                    progress.safe_emit(
-                        "grok",
-                        "structuredOutput failed schema on incomplete stop; keeping final text findings",
-                        level="warning",
+                text_ok = isinstance(fields.get("final_text"), str) and bool(
+                    str(fields.get("final_text") or "").strip()
+                )
+                if incomplete_stop and text_ok:
+                    # Do not ship schema-invalid structured on a green incomplete run.
+                    structured = None
+                    msg = (
+                        "structuredOutput failed schema on incomplete stop; "
+                        "keeping final text findings only (structured cleared)"
                     )
+                    incomplete_warnings.append(msg)
+                    progress.safe_emit("grok", msg, level="warning")
                 else:
                     raise
 
@@ -858,4 +882,5 @@ def _relay_and_classify(
         effective_model=fields["effective_model"],
         final_text=fields["final_text"],
         structured=structured,
+        incomplete_warnings=tuple(incomplete_warnings),
     )

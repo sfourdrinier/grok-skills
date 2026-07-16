@@ -62,10 +62,13 @@ export function runFromPluginEntry(importMetaUrl, argv, env = process.env) {
     return 127;
   }
   const companion = companionPath(root);
+  // Always force entry-derived root into the child. Stale CLAUDE_PLUGIN_ROOT from
+  // hooks/session after a plugin upgrade would otherwise make the companion load
+  // the *old* wrapper while run.mjs is from the *new* install.
   const childEnv = {
     ...env,
-    CLAUDE_PLUGIN_ROOT: (env.CLAUDE_PLUGIN_ROOT || "").trim() || root,
-    PLUGIN_ROOT: (env.PLUGIN_ROOT || "").trim() || root,
+    CLAUDE_PLUGIN_ROOT: root,
+    PLUGIN_ROOT: root,
   };
 
   const result = spawnSync(process.execPath, [companion, ...argv], {

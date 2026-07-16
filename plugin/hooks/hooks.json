@@ -1,5 +1,5 @@
 {
-  "description": "Session transcript capture for transfer + optional stop-time Grok review gate.",
+  "description": "SessionStart: Codex agent ensure + transfer stamp; SessionEnd stamp; optional stop-time Grok review gate.",
   "hooks": {
     "SessionStart": [
       {
@@ -7,8 +7,8 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT}}/scripts/session-lifecycle-hook.mjs\" SessionStart",
-            "timeout": 5,
-            "statusMessage": "Grok session capture"
+            "timeout": 30,
+            "statusMessage": "Grok session capture + Codex agents"
           }
         ]
       }

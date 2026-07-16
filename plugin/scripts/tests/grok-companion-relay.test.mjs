@@ -27,6 +27,7 @@ function runCompanion(args, extraEnv) {
     env: {
       ...process.env,
       GROK_AGENT_WRAPPER: FAKE_WRAPPER,
+      GROK_ALLOW_WRAPPER_OVERRIDE: "1",
       GROK_PYTHON: "python3",
       XDG_STATE_HOME: xdg,
       ...extraEnv,
@@ -131,6 +132,7 @@ test("status renders a prior run's progress on stderr with a verbatim envelope o
     env: {
       ...process.env,
       GROK_AGENT_WRAPPER: FAKE_WRAPPER,
+      GROK_ALLOW_WRAPPER_OVERRIDE: "1",
       GROK_PYTHON: "python3",
       XDG_STATE_HOME: xdg,
       GROK_FAKE_BEHAVIOR: "norun",
@@ -168,6 +170,7 @@ test("status: an invalid/partial run renders NO progress, only the wrapper's fai
     env: {
       ...process.env,
       GROK_AGENT_WRAPPER: FAKE_WRAPPER,
+      GROK_ALLOW_WRAPPER_OVERRIDE: "1",
       GROK_PYTHON: "python3",
       XDG_STATE_HOME: xdg,
       GROK_FAKE_BEHAVIOR: "norun",

@@ -53,7 +53,7 @@ skill names on Codex for later job output.
 |------|-------------|-------------------------------|
 | Install plugin | `/plugin marketplace add sfourdrinier/grok-skills` then `/plugin install grok@grok-skills` | `codex plugin marketplace add sfourdrinier/grok-skills` then `codex plugin add grok@grok-skills` |
 | Skills | Slash commands **or** Skill tool: `/grok:review`, `/grok:code`, ... (model invocation enabled) | Skill picker / Skill tool - same skill **names** (`review`, `code`, `setup`, `dual-lens`, ...) |
-| Subagents | Auto-loaded from plugin: `grok-engineer-coder`, `grok-rescue` | Auto-installed on SessionStart into `~/.codex/agents/` (absolute companion path) |
+| Subagents | Auto-loaded from plugin: `grok-engineer-coder`, `grok-rescue` | Auto-installed on SessionStart into `~/.codex/agents/` (absolute `agents/run.mjs`) |
 | Implement with Grok | Spawn **grok-engineer-coder**, or `/grok:code` | Spawn **grok-engineer-coder**, or run **code** skill |
 | Stop gate hooks | Claude hooks | Same hooks; may require **trust** via `/hooks` |
 
@@ -128,7 +128,7 @@ codex plugin list   # expect grok@grok-skills installed, enabled
 
 Also accepted: `https://github.com/sfourdrinier/grok-skills.git`, SSH URLs, or a local clone path for development.
 
-Skills ship with the plugin. Invoke them the way your Codex build exposes plugin skills (skill picker / `$skill` style, depending on version). Skills use `PLUGIN_ROOT` from the install; custom agents get an **absolute companion path** on SessionStart - do not invent cache paths by hand.
+Skills ship with the plugin. Invoke them the way your Codex build exposes plugin skills (skill picker / `$skill` style, depending on version). Prefer each skill’s self-locating `run.mjs` (Skill base directory); custom agents get an absolute `agents/run.mjs` path on SessionStart — do not invent cache paths by hand.
 
 After install, start a new Codex session (or reload) so **SessionStart** can write `~/.codex/agents/grok-*.toml`. Then spawn **grok-engineer-coder** / **grok-rescue**, or run skills the same way you would in Claude. Prefer tasks via `--task-file` / stdin heredoc so nothing shell-expands.
 
@@ -150,7 +150,7 @@ then `codex plugin add grok@grok-skills`.
 
 ### Private repo / no public access
 
-While this repository is private (or if you fork it), git install only works for accounts that can clone it. Use a path or SSH remote you already have access to:
+If the repository or your fork is private, git install only works for accounts that can clone it. Use a path or SSH remote you already have access to:
 
 ```bash
 claude plugin marketplace add /absolute/path/to/grok-skills
@@ -186,10 +186,12 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 
 - **Claude Code:** agents ship in the plugin (`plugin/agents/`). Reload plugins after install.
 - **Codex:** agents auto-install on **SessionStart** into `~/.codex/agents/` with an
-  absolute path to `grok-companion.mjs` (Codex cannot register plugin agents natively
-  yet - [openai/codex#18988](https://github.com/openai/codex/issues/18988)). Managed
-  files refresh on plugin upgrade (with `*.bak`); user-owned TOML is left alone unless
-  `setup --force-codex-agents`.
+  absolute `GROK_AGENT_RUN` → `agents/run.mjs` (Codex cannot register plugin agents
+  natively yet - [openai/codex#18988](https://github.com/openai/codex/issues/18988)).
+  Managed files refresh on plugin upgrade (with `*.bak`); user-owned TOML is left alone
+  unless `setup --force-codex-agents`. If agents are missing after install, open a
+  **new session** or run optional `setup --force-codex-agents` (hook failures are
+  non-blocking so they never stall host startup).
 - **Transparent skills + agents:** skills use `$SKILL_BASE/run.mjs`; Claude/Codex
   agents use `agents/run.mjs` (self-locating). See
   [plugin-root.md](plugin/references/plugin-root.md).
@@ -207,15 +209,22 @@ Two postures, same skills:
 | **direct** | `GROK_SKILLS_MODE=direct` or companion `setup --run-mode direct` | Uses your **installed Grok CLI** and normal `~/.grok` auth — same idea as OpenAI's plugin using your installed Codex. Faster, less isolation. |
 
 ```bash
-node "${GROK_PLUGIN_ROOT}/scripts/grok-companion.mjs" setup --run-mode direct
-node "${GROK_PLUGIN_ROOT}/scripts/grok-companion.mjs" setup --run-mode hardened
+# Prefer skill runner after Skill tool load:
+node "$SKILL_BASE/run.mjs" setup --run-mode direct
+node "$SKILL_BASE/run.mjs" setup --run-mode hardened
+# Or from a known install:
+node "${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}/scripts/grok-companion.mjs" setup --run-mode hardened
 ```
 
 ### Useful flags (live modes)
 
 - Exactly one of `--task '…'` or `--task-file path` (prefer a file for long prompts).
 - `--web` only on review / reason / code when you need live docs or current APIs. Off by default. Never on verify.
-- `--model`, `--timeout`, `--max-turns` if you need them; defaults are in the skill docs under `plugin/skills/`.
+- `--model` (default `grok-4.5`), `--timeout` (mode-dependent; often 900s), optional
+  `--max-turns` (**omit for unlimited** — default). Defaults live in
+  [wrapper/SKILL.md](plugin/wrapper/SKILL.md) and argparse; skills pass flags through.
+  Incomplete Cancelled/turn-cap stops with real findings still return success + warning
+  (see [COMPATIBILITY.md](docs/COMPATIBILITY.md)).
 
 ### Reading the result
 
@@ -276,6 +285,11 @@ What it does not do:
 - Block absolute-path **reads** of host secrets on the pinned Grok CLI
 - Block network egress (Grok is online by design)
 - Guarantee pattern redaction catches every secret shape
+- Replace host tool-approval UX (Claude/Codex still prompt for Bash as usual)
+
+**Model invocation:** skills allow host models to invoke them without a slash
+command (`disable-model-invocation` is not set). That is intentional for dual-host
+Skill-tool use; treat this plugin as trusted input for those hosts.
 
 More: [SECURITY.md](SECURITY.md), [docs/OPEN-SECURITY-DECISIONS.md](docs/OPEN-SECURITY-DECISIONS.md).
 
@@ -306,15 +320,17 @@ Compatibility notes and versions tested: [docs/COMPATIBILITY.md](docs/COMPATIBIL
 
 | Symptom | What to try |
 |---------|-------------|
-| “Could not locate the Grok wrapper” | Reinstall the plugin from this repo. Confirm the cache (or `--plugin-dir`) contains `wrapper/scripts/grok_agent.py`. Only set `GROK_AGENT_WRAPPER` if you moved the binary on purpose. |
+| “Could not locate the Grok wrapper” | Reinstall the plugin from this repo. Confirm the cache (or `--plugin-dir`) contains `wrapper/scripts/grok_agent.py`. Advanced only: `GROK_AGENT_WRAPPER` + `GROK_ALLOW_WRAPPER_OVERRIDE=1`. |
 | `version-mismatch` | Your `grok --version` does not match `plugin/wrapper/accepted-version.json`. Revalidate or install the pinned build ([cli-reference](plugin/wrapper/references/cli-reference.md)). |
 | Auth / login checks fail in preflight | Log in with the Grok CLI itself, then re-run `/grok:preflight`. |
 | `probe-required` on Linux/Windows | Expected until that platform’s sandbox is live-probed. |
 | Skills missing after install | Claude: `/reload-plugins`. Codex: check `codex plugin list`. Desktop: restart after install. |
 | Codex install: which name? | Use `grok@grok-skills` (plugin@marketplace). |
-| Codex agents missing from picker | Open a **new session** after install (SessionStart installs them). Confirm `~/.codex/agents/grok-*.toml` exist and `companion:` points at the current plugin cache. Re-run optional `/grok:setup` or `setup --force-codex-agents` if you customized those files. |
-| Codex agent: `plugin root not set` | Stale agent from pre-1.2.1. New session or `setup --force-codex-agents` rewrites absolute companion path. |
+| Codex agents missing from picker | Open a **new session** after install (SessionStart installs them). Confirm `~/.codex/agents/grok-*.toml` exist and `GROK_AGENT_RUN` / `# agent-run:` point at the current `agents/run.mjs`. Re-run optional `/grok:setup` or `setup --force-codex-agents` if you customized those files. |
+| Codex agent: `plugin root not set` | Stale agent from pre-1.2.5. New session or `setup --force-codex-agents` rewrites absolute `agents/run.mjs` path. |
+| Mixed / stale plugin after upgrade | `run.mjs`, companion, and SessionStart force the install tree they live in. Prefer Skill base + `run.mjs`; open a new session after upgrade. |
 | Model invents wrong cache paths | Ignore invented paths. See [plugin-root.md](plugin/references/plugin-root.md). |
+| Review ends Cancelled / empty | Default is unlimited turns. If you set `--max-turns`, incomplete runs with real findings still return success + warning; empty shells fail. |
 | Want managed Codex agents gone | Disable/uninstall plugin first (SessionStart reinstalls while enabled), then `setup --remove-codex-agents`. |
 | Review notes files changed during the run | Informational only (dev servers, logs, other editors, or Grok listing paths). Review still **succeeds**; findings apply. Not a failure. See [over-conservatism audit](docs/reviews/2026-07-15-over-conservatism-audit.md). |
 

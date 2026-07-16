@@ -117,25 +117,31 @@ def is_turn_exhaustion(
 ) -> bool:
     """True when the run hit an operator-set turn budget.
 
-    Primary signal: the stop reason normalizes to a known max-turn token or
-    contains "maxturn".
+    Turn-exhaustion only applies when the operator set ``max_turns`` (default:
+    unlimited / flag omitted). Without that budget, this never returns True —
+    even if Grok emits a MaxTurns-shaped stop token (platform/internal limit is
+    not reclassified as operator turn-exhaustion).
+
+    Primary signal (with budget set): stop reason normalizes to a known max-turn
+    token or contains "maxturn".
 
     Grok CLI often reports the turn cap as stopReason ``Cancelled`` (not a
-    distinct max-turn token). When the operator set ``max_turns`` and either
-    ``num_turns >= max_turns`` OR ``num_turns`` is missing under a Cancelled
-    stop, treat it as turn-exhaustion (not a user abort).
+    distinct max-turn token). When the operator set ``max_turns`` and
+    ``num_turns >= max_turns``, treat Cancelled (and other non-clean, non-error
+    stops at the budget) as turn-exhaustion — not a plain user abort.
 
-    Without an operator ``max_turns`` (default: unlimited / flag omitted), this
-    never returns True for plain Cancelled.
+    Cancelled with *missing* ``num_turns`` is never treated as budget: that
+    mislabels real mid-run cancels when the operator merely set ``--max-turns``.
+    Require turn-count evidence.
 
     An explicit error/refusal stop that coincides with the turn cap is NOT
     reclassified (Grok dogfood #13).
     """
+    if not isinstance(max_turns, int) or isinstance(max_turns, bool):
+        return False
     normalized = _normalize_stop_reason(stop_reason)
     if normalized in _TURN_EXHAUSTION_STOP_TOKENS or "maxturn" in normalized:
         return True
-    if not isinstance(max_turns, int) or isinstance(max_turns, bool):
-        return False
     if any(error_token in normalized for error_token in _ERROR_STOP_SUBSTRINGS):
         return False
     if normalized in _CLEAN_TERMINAL_STOP_TOKENS:
@@ -144,33 +150,55 @@ def is_turn_exhaustion(
     if turns_ok and num_turns >= max_turns:
         # Includes Cancelled at the budget (Grok's observed turn-cap stop token).
         return True
-    # Cancelled with no num_turns but an explicit max_turns: Grok often omits
-    # num_turns on the end event when the budget is hit.
-    if normalized in _CANCELLED_STOP_TOKENS and not turns_ok:
-        return True
-    if (
-        normalized
-        and normalized not in _CANCELLED_STOP_TOKENS
-        and turns_ok
-        and num_turns >= max_turns
-    ):
-        return True
+    return False
+
+
+def _finding_has_content(item: object) -> bool:
+    """True when a findings[] entry has non-placeholder textual content."""
+    if not isinstance(item, dict):
+        return bool(item)
+    for key in ("title", "message", "detail", "summary", "description", "body", "file", "path"):
+        val = item.get(key)
+        if isinstance(val, str) and val.strip() and val.strip().lower() != "placeholder":
+            return True
+    # severity alone is not content; any other non-empty string field counts
+    for key, val in item.items():
+        if key in ("severity", "level", "id"):
+            continue
+        if isinstance(val, str) and val.strip() and val.strip().lower() != "placeholder":
+            return True
     return False
 
 
 def has_usable_model_output(fields: "dict") -> bool:
-    """True when final text and/or structuredOutput is worth keeping on an incomplete stop."""
+    """True when final text and/or structuredOutput is worth keeping on an incomplete stop.
+
+    Empty shells (blank text, empty dict/list, findings:[] / findings:null only)
+    are not usable: salvaging those would green-light an empty incomplete review.
+    """
     text = fields.get("final_text") if isinstance(fields, dict) else None
     if isinstance(text, str) and text.strip():
         return True
     structured = fields.get("structured") if isinstance(fields, dict) else None
     if structured is None:
         return False
-    if isinstance(structured, dict) and not structured:
-        return False
-    if isinstance(structured, (list, str)) and len(structured) == 0:
-        return False
-    return True
+    if isinstance(structured, str) and structured.strip():
+        return True
+    if isinstance(structured, list):
+        return len(structured) > 0
+    if isinstance(structured, dict):
+        if not structured:
+            return False
+        if "findings" in structured:
+            findings = structured.get("findings")
+            # findings key present: only a non-empty list of contentful items counts.
+            # null / object / string / empty list are empty shells (not usable alone).
+            if not isinstance(findings, list) or not findings:
+                return False
+            return any(_finding_has_content(item) for item in findings)
+        # No findings key: non-empty dict with other payload (e.g. reason answer).
+        return True
+    return False
 
 
 def _effective_model_from_usage(model_usage: Optional[object]) -> Optional[str]:

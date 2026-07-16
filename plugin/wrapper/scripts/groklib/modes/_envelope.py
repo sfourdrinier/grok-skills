@@ -191,6 +191,7 @@ def _success_envelope(
         web_access=run.web_access,
         final_text=result.final_text if isinstance(result.final_text, str) else None,
     )
+    incomplete = list(result.incomplete_warnings or ())
     fields: dict = {
         "requestedModel": run.requested_model,
         "effectiveModel": effective_model,
@@ -204,7 +205,7 @@ def _success_envelope(
         "usage": usage_field,
         "response": response_field,
         "progressStreamPath": str(run_paths.progress_path),
-        "warnings": stderr_warnings + warnings + citation_warnings,
+        "warnings": incomplete + stderr_warnings + warnings + citation_warnings,
         "cleanup": cleanup_field,
     }
     if citation_list:
@@ -248,10 +249,11 @@ def _failure_envelope(
     # envelope would, so the safe stdout surface still holds the (redacted) payload.
     if result is not None:
         grok_field, usage_field, response_field, stderr_warnings = grok_usage_response_fields(result)
+        incomplete = list(result.incomplete_warnings or ())
         fields["grok"] = grok_field
         fields["usage"] = usage_field
         fields["response"] = response_field
-        fields["warnings"] = stderr_warnings + warnings
+        fields["warnings"] = incomplete + stderr_warnings + warnings
     return failure_envelope(
         run_id=run_paths.run_id,
         mode=run.mode,

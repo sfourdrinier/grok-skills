@@ -33,7 +33,7 @@ use `--task-file -` with a single-quoted heredoc.
 toggle the stop gate / run mode.
 
 **Codex agents install automatically** on `SessionStart` (hook writes managed
-TOML under `~/.codex/agents/` with an absolute path to `grok-companion.mjs`).
+TOML under `~/.codex/agents/` with absolute `GROK_AGENT_RUN` → `agents/run.mjs`).
 You should not need a manual setup step after installing the plugin.
 
 Raw arguments:
@@ -75,7 +75,7 @@ node "$SKILL_BASE/run.mjs" setup --enable-review-gate
 - Bundled wrapper path
 - Run mode (hardened vs direct)
 - Stop-review gate on/off
-- **Codex agents** ensure result (dest `~/.codex/agents/`, absolute companion)
+- **Codex agents** ensure result (dest `~/.codex/agents/`, absolute `agents/run.mjs`)
 - Hardened preflight checks when wrapper is available
 
 ## Agents (zero post-install)

@@ -33,6 +33,7 @@ function runCompanionWithStdin(args, stdin) {
     env: {
       ...process.env,
       GROK_AGENT_WRAPPER: ECHO_WRAPPER,
+      GROK_ALLOW_WRAPPER_OVERRIDE: "1",
       GROK_PYTHON: "python3",
     },
   });
@@ -77,7 +78,12 @@ test("a --target value with shell metacharacters reaches the wrapper as a litera
     {
       encoding: "utf8",
       input: "implement it\n",
-      env: { ...process.env, GROK_AGENT_WRAPPER: ECHO_WRAPPER, GROK_PYTHON: "python3" },
+      env: {
+        ...process.env,
+        GROK_AGENT_WRAPPER: ECHO_WRAPPER,
+        GROK_ALLOW_WRAPPER_OVERRIDE: "1",
+        GROK_PYTHON: "python3",
+      },
     }
   );
   assert.equal(result.status, 0, result.stderr);
@@ -100,7 +106,12 @@ test("without the stdin sentinel the companion forwards argv unchanged (pure pas
   fs.writeFileSync(taskFile, "literal path task $(nope)\n", "utf8");
   const result = spawnSync(process.execPath, [COMPANION, "verify", "--worktree", "/x", "--task-file", taskFile], {
     encoding: "utf8",
-    env: { ...process.env, GROK_AGENT_WRAPPER: ECHO_WRAPPER, GROK_PYTHON: "python3" },
+    env: {
+      ...process.env,
+      GROK_AGENT_WRAPPER: ECHO_WRAPPER,
+      GROK_ALLOW_WRAPPER_OVERRIDE: "1",
+      GROK_PYTHON: "python3",
+    },
   });
   assert.equal(result.status, 0, result.stderr);
   const envelope = JSON.parse(result.stdout.trim());

@@ -8,11 +8,12 @@ the wrapper and relays the single JSON result envelope on stdout VERBATIM.
 
 **Agents:** `grok-engineer-coder` (implement in isolated worktree; host
 orchestrates) and `grok-rescue` (diagnosis / second opinion). Claude loads
-`plugin/agents/` automatically. Codex agents are installed by **setup** into
-`~/.codex/agents/`.
+`plugin/agents/` automatically. Codex agents auto-install on **SessionStart**
+into `~/.codex/agents/` (absolute `agents/run.mjs`); optional **setup** can force
+or remove managed agents.
 
 **Invocation:** Claude uses `/grok:…` skills; Codex uses the skill picker /
-`$name` for the same skill names. Same companion either way.
+`$name` for the same skill names. Prefer each skill’s `$SKILL_BASE/run.mjs`.
 
 ## Activating in Claude Code
 
@@ -53,11 +54,12 @@ codex plugin add grok@grok-skills
 
 Also accepted: HTTPS/SSH git URL, `owner/repo --ref <ref>`, or a local path.
 Desktop app: add the same git marketplace (or open a clone once), then install
-**grok**. Codex exports `PLUGIN_ROOT` (and usually `CLAUDE_PLUGIN_ROOT`). Skills
-use `GROK_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}"`.
+**grok**. Codex exports `PLUGIN_ROOT` (and usually `CLAUDE_PLUGIN_ROOT`). Prefer
+Skill base + `run.mjs` over inventing cache paths.
 
-After install, run the **setup** skill once so Codex agents are copied to
-`~/.codex/agents/` (`grok-engineer-coder`, `grok-rescue`).
+After install, start a **new session** so SessionStart materializes
+`~/.codex/agents/grok-*.toml` (`grok-engineer-coder`, `grok-rescue`). Optional
+`setup --force-codex-agents` if you need to overwrite user-edited agents.
 
 ## What owns safety
 
@@ -77,7 +79,7 @@ sandbox against an adversarial model. Full notes:
 
 `scripts/grok-companion.mjs` resolves `grok_agent.py` in this order:
 
-1. `GROK_AGENT_WRAPPER` (override)
+1. `GROK_AGENT_WRAPPER` only if `GROK_ALLOW_WRAPPER_OVERRIDE=1` (tests / advanced)
 2. `${CLAUDE_PLUGIN_ROOT}/wrapper/scripts/grok_agent.py`
 3. `${PLUGIN_ROOT}/wrapper/scripts/grok_agent.py`
 4. Derived from the companion script location (plugin root)

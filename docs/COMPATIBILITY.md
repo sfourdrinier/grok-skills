@@ -40,8 +40,8 @@ What we match:
   `hooks`, Figma-style `interface` (displayName, logos, defaultPrompt, category).
   Codex does not yet register plugin-bundled custom agents (openai/codex#18988);
   we materialize `plugin/codex-agents/*.toml` into `~/.codex/agents/` on SessionStart
-  with an absolute companion path (v1.2.1+).
-  **Development & Workflow**)
+  with absolute `GROK_AGENT_RUN` → `agents/run.mjs` (v1.2.5+; SessionStart since
+  v1.2.1). Interface category: **Development & Workflow**.
 - Install sources (both hosts):
 
   | Source | Claude | Codex |
@@ -70,11 +70,13 @@ What we match:
   `~/.codex/plugins/cache/grok-skills/grok/<version>/` includes
   `wrapper/`, `skills/`, `scripts/`, assets.
 - Custom agents: Claude loads `plugin/agents/` (`grok-engineer-coder`,
-  `grok-rescue`). Codex: run companion `setup` to install
-  `plugin/codex-agents/*.toml` into `~/.codex/agents/`.
+  `grok-rescue`) via self-locating `agents/run.mjs`. Codex: **SessionStart**
+  materializes `plugin/codex-agents/*.toml` into `~/.codex/agents/` with absolute
+  `GROK_AGENT_RUN` (optional `setup --force-codex-agents` to overwrite user edits).
 - Plugin env: Codex sets `PLUGIN_ROOT` and also `CLAUDE_PLUGIN_ROOT` for
-  compatibility. Companion resolves both. Preflight succeeded against the
-  **Codex cache** with only `PLUGIN_ROOT` set.
+  compatibility. Entry runners and the companion force the install tree they live
+  in so stale env after upgrade cannot mix versions. Preflight succeeded against
+  the **Codex cache** with only `PLUGIN_ROOT` set.
 - Hooks: shared `Stop` event exists on both Claude Code and Codex. Gate emits
   JSON always (`{"continue":true}` allow / `{"decision":"block","reason"}` block)
   so Codex’s “JSON required on Stop exit 0” rule is satisfied. Plugin hooks still
@@ -93,15 +95,27 @@ from the plugin directory UI and restart if prompted.
 
 ## Skill instructions
 
-Each skill includes a **Harness compatibility** section so Claude Code and Codex
+Each skill includes a **How to run (transparent)** section so Claude Code and Codex
 agents both know to:
 
-1. Set `GROK_PLUGIN_ROOT` from `CLAUDE_PLUGIN_ROOT` or `PLUGIN_ROOT`
-2. Invoke `node "$GROK_PLUGIN_ROOT/scripts/grok-companion.mjs" …`
+1. Prefer the Skill tool’s base directory and `node "$SKILL_BASE/run.mjs" …`
+   (self-locating; no env required). Host-set `CLAUDE_PLUGIN_ROOT` /
+   `PLUGIN_ROOT` is optional; entry runners force the install they live in so a
+   stale env after upgrade cannot mix trees.
+2. Alternatively: `node "${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}/scripts/grok-companion.mjs" …`
 3. Relay the single JSON envelope on stdout verbatim
 4. Never shell-evaluate free-text `--task "…"`
 
 Claude-only UI (`AskUserQuestion`) is optional; Codex falls back to asking in chat.
+
+## Incomplete / cancelled runs (envelope)
+
+Live modes default to **no** `--max-turns` (unlimited until EndTurn / timeout).
+If the operator sets `--max-turns` and Grok stops at the budget (often as
+`stopReason: Cancelled` with `numTurns` at the cap), or stops mid-run as
+`Cancelled` with real text/structured findings, the wrapper returns
+`status: success` with `response` populated and a **warning** that findings may
+be incomplete. Empty shells (`findings: []` only) are not salvaged.
 
 ## Not required for core use
 

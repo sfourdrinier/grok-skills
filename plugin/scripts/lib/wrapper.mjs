@@ -11,7 +11,9 @@
 // plugin is what makes installs work without GROK_AGENT_WRAPPER.
 //
 // Path candidates (first existing wins):
-//   1. GROK_AGENT_WRAPPER env override (tests / advanced operators)
+//   1. GROK_AGENT_WRAPPER only when GROK_ALLOW_WRAPPER_OVERRIDE=1 (tests /
+//      advanced operators). Without the allow flag, stale GROK_AGENT_WRAPPER
+//      cannot bypass the install tree after a plugin upgrade.
 //   2. ${CLAUDE_PLUGIN_ROOT}/wrapper/scripts/grok_agent.py
 //   3. ${PLUGIN_ROOT}/wrapper/scripts/grok_agent.py (Codex plugin hooks)
 //   4. Path derived from this script: scripts/lib -> plugin root -> wrapper/...
@@ -47,8 +49,9 @@ export function candidateWrapperPaths(env = process.env) {
     candidates.push(resolved);
   };
 
+  const allowOverride = (env.GROK_ALLOW_WRAPPER_OVERRIDE ?? "").trim() === "1";
   const override = (env.GROK_AGENT_WRAPPER ?? "").trim();
-  if (override) {
+  if (override && allowOverride) {
     push(override);
   }
 
@@ -108,7 +111,8 @@ export function wrapperNotFoundMessage(env = process.env) {
     `  ${tried}`,
     "",
     "The wrapper must live at <plugin-root>/wrapper/scripts/grok_agent.py",
-    "(bundled with this plugin). Reinstall the plugin, run /grok:setup, or set",
-    "GROK_AGENT_WRAPPER to the absolute path of grok_agent.py."
+    "(bundled with this plugin). Reinstall the plugin or run /grok:setup.",
+    "Advanced only: set GROK_AGENT_WRAPPER to an absolute grok_agent.py path",
+    "AND GROK_ALLOW_WRAPPER_OVERRIDE=1 (stale wrapper overrides are ignored otherwise)."
   ].join("\n");
 }

@@ -277,6 +277,27 @@ class ExecuteTests(GrokCliTestBase):
         result = grokcli.execute(self._make_spec(), self._progress())
         self.assertEqual(result.stop_reason, "Cancelled")
         self.assertIn("finding", (result.final_text or "").lower())
+        self.assertTrue(result.incomplete_warnings)
+        self.assertTrue(
+            any("findings kept" in w for w in result.incomplete_warnings),
+            result.incomplete_warnings,
+        )
+
+    def test_execute_turn_budget_with_findings_is_success_with_incomplete_warning(self) -> None:
+        self._write_control("turn-exhaustion-with-text")
+        result = grokcli.execute(self._make_spec(max_turns=7), self._progress())
+        self.assertEqual(result.stop_reason, "Cancelled")
+        self.assertIn("finding", (result.final_text or "").lower())
+        self.assertTrue(
+            any("turn budget" in w for w in result.incomplete_warnings),
+            result.incomplete_warnings,
+        )
+
+    def test_execute_cancelled_empty_findings_shell_is_cancelled(self) -> None:
+        self._write_control("cancelled-empty-findings")
+        with self.assertRaises(GrokWrapperError) as caught:
+            grokcli.execute(self._make_spec(), self._progress())
+        self.assertEqual(caught.exception.error_class, "cancelled")
 
     def test_execute_nonzero_exit_classifies_cli_failure_with_stderr_captured(self) -> None:
         self._write_control("nonzero-exit")
