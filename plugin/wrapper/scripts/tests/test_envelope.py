@@ -198,6 +198,13 @@ class BuildEnvelopeTests(unittest.TestCase):
                 "finalization-worker-missing-result",
                 "finalization-worker-unkillable",
                 "isolation-unavailable",
+                "implementation-contract-invalid",
+                "write-scope-violation",
+                "unexpected-commit",
+                "artifact-generation-failure",
+                "artifact-integrity-failure",
+                "handoff-unavailable",
+                "terminal-envelope-incomplete",
             ),
         )
 

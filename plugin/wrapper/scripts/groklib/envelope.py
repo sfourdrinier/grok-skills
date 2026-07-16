@@ -27,6 +27,7 @@ MODES: Tuple[str, ...] = (
     "verify",
     "status",
     "cleanup",
+    "handoff",
 )
 
 # "running" is for status-mode inspection of an in-progress target run (no
@@ -65,6 +66,14 @@ ERROR_CLASSES: Tuple[str, ...] = (
     "finalization-worker-missing-result",
     "finalization-worker-unkillable",
     "isolation-unavailable",
+    # PR4 implementation handoff (exactly seven new classes)
+    "implementation-contract-invalid",
+    "write-scope-violation",
+    "unexpected-commit",
+    "artifact-generation-failure",
+    "artifact-integrity-failure",
+    "handoff-unavailable",
+    "terminal-envelope-incomplete",
 )
 
 # Case-insensitive: a dict key CONTAINING any of these substrings, or ENDING
@@ -422,12 +431,23 @@ _INSTRUCTION_ITEM_SHAPE: Dict[str, tuple] = {
     "sha256": ("str",),
 }
 
+_COMMAND_TAIL_SHAPE: Dict[str, tuple] = {
+    "text": ("str",),
+    "truncated": ("bool",),
+    "bytes": ("int",),
+}
+
 _COMMAND_ITEM_SHAPE: Dict[str, tuple] = {
     "argv": ("array_of_str",),
     "exitStatus": ("int",),
     "durationSeconds": ("number",),
     "purpose": ("str",),
     "cwd": ("str",),  # command's working dir: makes the build gate's location pinning auditable
+    # PR4 §14.13 bounded redacted evidence (sha256 + 4k tails; never full logs)
+    "stdoutSha256": ("str",),
+    "stderrSha256": ("str",),
+    "stdoutTail": ("object", _COMMAND_TAIL_SHAPE),
+    "stderrTail": ("object", _COMMAND_TAIL_SHAPE),
 }
 
 _VERIFIER_SHAPE: Dict[str, tuple] = {

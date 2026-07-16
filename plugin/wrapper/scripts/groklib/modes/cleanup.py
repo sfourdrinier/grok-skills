@@ -11,6 +11,7 @@
 # and reports it. An unknown run id is `invalid-target`.
 
 import argparse
+import json
 import pathlib
 import shutil
 from typing import List, Optional
@@ -18,6 +19,28 @@ from typing import List, Optional
 from groklib import GrokWrapperError, log_stderr, runstate
 from groklib import envelope as envelope_mod
 from groklib.worktree import ExternalWorktree, remove_external_worktree
+
+# Design §14.17 — factual only; do not say "unacknowledged."
+_READY_HANDOFF_WARNING = (
+    "This run contains an integration-ready handoff. Cleanup will permanently remove "
+    "its retained worktree and stored handoff artifacts. The plugin cannot determine "
+    "whether the implementation was integrated."
+)
+
+
+def _integration_ready_handoff(run_dir: pathlib.Path) -> bool:
+    """True when implementation-handoff.json exists with integration.ready === true."""
+    path = run_dir / "implementation-handoff.json"
+    if not path.is_file():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+    integration = data.get("integration")
+    return isinstance(integration, dict) and integration.get("ready") is True
 
 
 def _log(function: str, message: str) -> None:
@@ -119,17 +142,23 @@ def _dry_run(run_id: str, run_dir: pathlib.Path, worktree: Optional[ExternalWork
     if worktree is not None:
         worktree_report = remove_external_worktree(worktree, confirmed=False, expected_run_id=run_id)
     response = {"dryRun": True, "runDir": str(run_dir), "worktree": worktree_report}
+    warnings: List[str] = []
+    if _integration_ready_handoff(run_dir):
+        warnings.append(_READY_HANDOFF_WARNING)
+        response["integrationReadyHandoff"] = True
     return envelope_mod.build_envelope(
         run_id=run_id,
         mode="cleanup",
         status="success",
         response=response,
+        warnings=warnings,
         cleanup={"status": "retained", "detail": "dry-run: nothing removed; pass --confirm to remove"},
         **_worktree_fields(worktree),
     )
 
 
 def _confirmed(run_id: str, run_dir: pathlib.Path, worktree: Optional[ExternalWorktree]) -> dict:
+    ready_handoff_warning = _READY_HANDOFF_WARNING if _integration_ready_handoff(run_dir) else None
     worktree_report = None
     if worktree is not None:
         try:
@@ -192,6 +221,8 @@ def _confirmed(run_id: str, run_dir: pathlib.Path, worktree: Optional[ExternalWo
         "worktreeRemoved": worktree is not None,
         "runDirRemoved": True,
     }
+    if ready_handoff_warning:
+        response["integrationReadyHandoff"] = True
     if branch_retained:
         cleanup_field = {
             "status": "retained",
@@ -202,11 +233,13 @@ def _confirmed(run_id: str, run_dir: pathlib.Path, worktree: Optional[ExternalWo
     else:
         detail = "run dir removed" + (" and worktree removed" if worktree is not None else "")
         cleanup_field = {"status": "clean", "detail": detail}
+    warnings: List[str] = [ready_handoff_warning] if ready_handoff_warning else []
     return envelope_mod.build_envelope(
         run_id=run_id,
         mode="cleanup",
         status="success",
         response=response,
+        warnings=warnings,
         cleanup=cleanup_field,
         **_worktree_fields(worktree),
     )

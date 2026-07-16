@@ -27,7 +27,7 @@ from groklib.envelope import (
 from groklib.modes import MODES
 
 _DEFAULT_BINARY = os.path.join("~", ".grok", "bin", "grok")
-_NON_STORING_MODES = frozenset({"status", "cleanup"})
+_NON_STORING_MODES = frozenset({"status", "cleanup", "handoff"})
 _SIGTERM_EXIT_CODE = 143  # 128 + SIGTERM, the conventional signal-terminated code
 
 # Fail-closed upper bounds for the operator-supplied run budgets (Grok r3 #11
@@ -204,6 +204,11 @@ def _build_parser() -> _Parser:
     _add_task_group(code)
     _add_web_flags(code)
     _add_run_opts(code, timeout=3600)
+    code.add_argument(
+        "--contract-file",
+        default=None,
+        help="optional operator-trusted implementation contract JSON (writeScopes + requiredValidation)",
+    )
 
     verify = _sub("verify")
     verify.add_argument("--worktree", required=True)
@@ -216,6 +221,9 @@ def _build_parser() -> _Parser:
     cleanup = _sub("cleanup")
     cleanup.add_argument("--run-id", required=True)
     cleanup.add_argument("--confirm", action="store_true")
+
+    handoff = _sub("handoff")
+    handoff.add_argument("--run-id", required=True)
 
     return parser
 

@@ -548,6 +548,66 @@ class CodeModeTests(WorktreeModeHarness):
         self.assertIn("run_terminal_command", tools)
 
 
+    def test_code_writes_handoff_artifacts_and_step_order(self) -> None:
+        """PR4: successful code writes handoff JSON + patch; steps include locked order."""
+        repo = self.make_code_repo()
+
+        def plant(wt: pathlib.Path, run_id: str) -> None:
+            _plant_sentinel_in_worktree(wt, run_id)
+            target = wt / "pkg" / "impl.txt"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("implemented\n", encoding="utf-8")
+
+        exit_code, out = self._run(repo, plant=plant)
+        env = json.loads(out)
+        self.assertEqual(exit_code, 0, out)
+        run_id = env["runId"]
+        run_dir = runstate.state_root() / "runs" / run_id
+        manifest_path = run_dir / "implementation-handoff.json"
+        patch_path = run_dir / "artifacts" / "implementation.patch"
+        self.assertTrue(manifest_path.is_file(), "missing implementation-handoff.json")
+        self.assertTrue(patch_path.is_file(), "missing implementation.patch")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        from groklib.implementation_handoff import validate_implementation_handoff, _STEP_ORDER
+        self.assertEqual(validate_implementation_handoff(manifest), [])
+        self.assertIn("impl.txt", " ".join(c.get("path", "") for c in manifest.get("changedFiles", [])))
+        # handoff mode dual-condition
+        code_h, out_h = self.drive(["handoff", "--run-id", run_id], repo_root=repo)
+        env_h = json.loads(out_h)
+        self.assertEqual(code_h, 0, out_h)
+        self.assertTrue(env_h["response"]["integration"]["ready"])
+
+    def test_code_contract_scope_violation_fails(self) -> None:
+        repo = self.make_code_repo()
+        contract = {
+            "schemaVersion": 1,
+            "taskId": "scope-test",
+            "target": "pkg",
+            "writeScopes": [{"kind": "file", "path": "pkg/only-this.ts"}],
+            "requiredValidation": [],
+        }
+        cpath = pathlib.Path(self.tmp_root) / "contract.json"
+        cpath.write_text(json.dumps(contract), encoding="utf-8")
+
+        def plant(wt: pathlib.Path, run_id: str) -> None:
+            _plant_sentinel_in_worktree(wt, run_id)
+            (wt / "pkg" / "outside.ts").write_text("x\n", encoding="utf-8")
+
+        exit_code, out = self._run(
+            repo,
+            extra_argv=["--contract-file", str(cpath)],
+            plant=plant,
+        )
+        env = json.loads(out)
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(env["error"]["class"], "write-scope-violation")
+        run_id = env["runId"]
+        manifest_path = runstate.state_root() / "runs" / run_id / "implementation-handoff.json"
+        self.assertTrue(manifest_path.is_file())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertFalse(manifest["integration"]["ready"])
+
+
 class CwdSentinelTests(unittest.TestCase):
     """Grok r3 #12: the cwd sentinel must be a real regular file, not a spoofable symlink/dir."""
 

@@ -80,6 +80,7 @@ const WRAPPER_MODES = new Set([
   "verify",
   "status",
   "cleanup",
+  "handoff",
 ]);
 
 function stderrLine(line) {
@@ -453,6 +454,12 @@ function runStatus(wrapper, args) {
   // One stdout envelope only. Do NOT re-dump progress to stderr after status:
   // hosts that merge stdout/stderr (Codex terminal) would glue [grok] lines onto
   // the JSON. Progress already lives in response.events / response.target.
+  return runPassthrough(wrapper, args);
+}
+
+function runHandoff(wrapper, args) {
+  // Read-only like status: no job, no live relay, no notify, no Grok spawn.
+  // Dual-condition ready is computed inside the wrapper handoff mode.
   return runPassthrough(wrapper, args);
 }
 
@@ -834,6 +841,10 @@ function main() {
 
   if (wrapperMode === "status") {
     return finishCleanups(runStatus(wrapper, wrapperArgs));
+  }
+
+  if (wrapperMode === "handoff") {
+    return finishCleanups(runHandoff(wrapper, wrapperArgs));
   }
 
   if (WRAPPER_MODES.has(wrapperMode) || wrapperArgs[0]) {
