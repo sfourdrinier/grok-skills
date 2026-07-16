@@ -103,13 +103,6 @@ def run(args: argparse.Namespace) -> dict:
 
     repo_root, target_abs, target_repo_relative = _resolve_target(args.target)
 
-    project_config = load_project_config(repo_root)
-    instructions = rules.discover_instruction_files(
-        repo_root, target_abs, require_parity=project_config.require_rule_file_parity
-    )
-    prompt_text = rules.build_prompt_payload(instructions, task_text)
-    instruction_entries = rules.instruction_envelope_entries(instructions)
-
     from groklib.web_defaults import resolve_web_access
 
     cwd = target_abs
@@ -162,6 +155,18 @@ def run(args: argparse.Namespace) -> dict:
                     "isolated worktree is missing the --target path {!r}".format(target_repo_relative),
                     {"worktreePath": str(isolation.worktree_path), "target": target_repo_relative},
                 )
+
+        # Load rules/config from the tree Grok will see. Under --isolated that is
+        # the owned snapshot (HEAD + tracked dirty), not the live checkout — so
+        # untracked / intent-to-add AGENTS.md etc. cannot govern the prompt.
+        rules_root = isolation.worktree_path if isolation is not None else repo_root
+        rules_target = cwd
+        project_config = load_project_config(rules_root)
+        instructions = rules.discover_instruction_files(
+            rules_root, rules_target, require_parity=project_config.require_rule_file_parity
+        )
+        prompt_text = rules.build_prompt_payload(instructions, task_text)
+        instruction_entries = rules.instruction_envelope_entries(instructions)
 
         mode_run = _shared.ModeRun(
             mode="review",

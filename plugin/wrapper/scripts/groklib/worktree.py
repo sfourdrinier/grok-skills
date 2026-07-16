@@ -796,8 +796,26 @@ def remove_external_worktree(wt: ExternalWorktree, *, confirmed: bool, expected_
         _log("remove_external_worktree", "could not remove sibling marker {}: {}".format(marker_path, exc))
         marker_removed = False
 
+    # Review isolation may leave a sibling ``{worktree}.diff`` (tracked-dirty
+    # patch with source contents). Code mode never writes it; best-effort unlink
+    # so cleanup --confirm cannot leave secrets after a crash-left isolation.
+    diff_path = pathlib.Path(str(wt.path) + ".diff")
+    diff_removed = True
+    try:
+        diff_path.unlink()
+    except FileNotFoundError:
+        diff_removed = False  # absent is normal for code worktrees
+    except OSError as exc:
+        _log(
+            "remove_external_worktree",
+            "could not remove sibling isolation patch {}: {}".format(diff_path, exc),
+        )
+        diff_removed = False
+
     report["removed"] = True
     report["markerRemoved"] = marker_removed
+    report["diffPath"] = str(diff_path)
+    report["diffRemoved"] = diff_removed
     report["branchRetained"] = branch_retained
     report["branchRetainReason"] = branch_retain_reason
     return report

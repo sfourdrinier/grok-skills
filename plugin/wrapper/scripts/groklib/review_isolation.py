@@ -228,8 +228,9 @@ def prepare_review_isolation(*, repo_root: pathlib.Path, run_id: str) -> ReviewI
             ".",
         ]
         for ita in ita_paths:
-            # pathspec exclude; leading ./ keeps paths under repo root
-            diff_argv.append(":(exclude){}".format(ita))
+            # Literal pathspec so filenames with * ? [ ] are not treated as globs
+            # (e.g. ITA path "*.txt" must not exclude tracked a.txt).
+            diff_argv.append(":(exclude,literal){}".format(ita))
 
         completed = _run_git_bytes(resolved_repo, diff_argv)
         if completed.returncode not in (0, 1):

@@ -97,6 +97,45 @@ class ReviewIsolationHelperTests(unittest.TestCase):
         finally:
             review_isolation.cleanup_review_isolation(session)
 
+    def test_ita_pathspec_metachar_does_not_exclude_tracked_dirty(self) -> None:
+        """ITA filename with * must use literal pathspec (not glob-exclude tracked files)."""
+        (self.repo / "a.txt").write_text("alpha\nbeta\ntracked-edit\n", encoding="utf-8")
+        wild = self.repo / "*.txt"
+        wild.write_text("intent only\n", encoding="utf-8")
+        _git(self.repo, "add", "-N", "--", "*.txt")
+
+        session = self._session()
+        try:
+            self.assertFalse((session.worktree_path / "*.txt").exists())
+            wt_a = (session.worktree_path / "a.txt").read_text(encoding="utf-8")
+            self.assertIn(
+                "tracked-edit",
+                wt_a,
+                "literal ITA exclude must not drop tracked dirty a.txt via glob",
+            )
+        finally:
+            review_isolation.cleanup_review_isolation(session)
+
+    def test_remove_external_worktree_deletes_sibling_diff(self) -> None:
+        """cleanup path must reap crash-left {worktree}.diff patch files."""
+        from groklib.worktree import ExternalWorktree, remove_external_worktree
+
+        (self.repo / "a.txt").write_text("alpha\nbeta\npatch-me\n", encoding="utf-8")
+        session = self._session()
+        self.assertTrue(session.diff_path.is_file())
+        # Simulate crash: leave worktree+diff, do not call cleanup_review_isolation
+        wt = ExternalWorktree(
+            path=session.worktree_path,
+            branch=session.branch,
+            base_revision=session.base_revision,
+            repo_root=session.repo_root,
+        )
+        report = remove_external_worktree(wt, confirmed=True, expected_run_id=session.run_id)
+        self.assertTrue(report["removed"])
+        self.assertFalse(session.worktree_path.exists())
+        self.assertFalse(session.diff_path.exists(), "sibling .diff must be removed by cleanup")
+        self.assertFalse(session.marker_path.exists())
+
     def test_worktree_add_failure_is_isolation_unavailable(self) -> None:
         with mock.patch.object(
             worktree_mod,
@@ -290,6 +329,40 @@ class ReviewIsolationModeTests(ModeHarness):
         record = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(record["status"], "failure")
         self.assertEqual(record["runId"], run_id)
+
+    def test_isolated_rules_come_from_snapshot_not_live_untracked(self) -> None:
+        """Untracked AGENTS.md on the live tree must not govern --isolated prompts."""
+        repo = make_review_repo(pathlib.Path(self.tmp_root))
+        # Drop AGENTS.md from HEAD so isolation snapshot has only CLAUDE.md.
+        # Leave an untracked AGENTS.md on the live tree with a unique marker.
+        subprocess.run(
+            ["git", "-C", str(repo), "rm", "-f", "AGENTS.md"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-q", "-m", "drop AGENTS for isolation rules test"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        (repo / "AGENTS.md").write_text(
+            "<!-- AGENTS.md | CLAUDE.md -->\n=== LIVE UNTRACKED RULES MARKER ===\n",
+            encoding="utf-8",
+        )
+        exit_code, out = self.drive(
+            ["review", "--target", "pkg", "--isolated", "--task", "Review"],
+            repo_root=repo,
+        )
+        self.assertEqual(exit_code, 0, out)
+        prompt = self.read_prompt(self.read_run_argv())
+        self.assertNotIn(
+            "LIVE UNTRACKED RULES MARKER",
+            prompt,
+            "isolated review must not load untracked live AGENTS.md into the prompt",
+        )
+        self.assertIn("Always read the rules before acting.", prompt)
 
     def test_isolated_original_checkout_noise_not_unexpected_edits(self) -> None:
         """Concurrent live-checkout writes must not hard-fail an isolated review."""
