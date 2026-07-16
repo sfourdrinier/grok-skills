@@ -1,6 +1,6 @@
 # Run lifecycle, isolated review, completion signals, and implementation handoff
 
-**Status:** design revision 5 (PR1–PR4 fully locked — no open decisions; PR4 expanded to executable detail)  
+**Status:** design revision 6 (PR1–PR4 locked; all 24 review findings incorporated — no open decisions)  
 **Date:** 2026-07-15  
 **Product:** grok-skills (Claude Code + Codex)  
 **Baseline:** v1.2.10  
@@ -17,22 +17,23 @@ Background and long-running Grok modes (especially `review`) are hard to trust:
 6. No clean completion signal for background jobs.
 7. `code` retains a dirty worktree but does not produce a verified, immutable
    implementation artifact a parent harness (Codex/Claude) can safely inspect,
-   hash, and integrate. A retained worktree can change after completion, loses
-   provenance, and drops untracked/binary files easily.
+   hash, and integrate.
 
 ## 2. Goals
 
 - Durable target lifecycle for every live run.
 - Atomic seed `run.json` before the run id is published.
 - Atomic, validated terminal `envelope.json` before a run is finished.
-- Status projection per §6 (both, versioned).
-- Phase progress with `elapsedMs`.
-- Process-based finalization watchdog with classified terminal failure.
-- Isolated review for `--base` and `--isolated`; fail closed on isolation failure.
-- Optional notifications after terminal envelope; at-most-once; never fail the run.
+- **Single terminal-envelope writer** with CAS/`recordRevision` (no lost races).
+- Status projection per §6; **`status` remains strictly read-only** (no writes).
+- Phase progress with process-local monotonic `elapsedMs` and UTC timestamps.
+- Process-based finalization watchdog with fully specified worker protocol.
+- Isolated review for `--base` and `--isolated`; ownership-marked worktrees; fail closed.
+- Optional notifications after terminal envelope; **at-most-once attempt** (no duplicate auto-retry); never fail the run.
 - Dual-host: same core; harnesses only present.
 - Docs follow code on every shippable PR (AGENTS.md rule #1).
 - Verified immutable `code` handoff: contract scopes, unexpected-commit check,
+  sandboxed contract validation execution, two-phase handoff readiness,
   git-binary patch, `integration.ready`, read-only `/grok:handoff --run-id`.
 
 ## 3. Non-goals
@@ -45,67 +46,122 @@ Background and long-running Grok modes (especially `review`) are hard to trust:
 - Auto-apply, auto-commit, merge, cherry-pick, or push of handoff patches.
 - `--allow-commits` for code mode (future; out of PR4).
 - Repurposing `/grok:transfer` for implementation output.
+- Status mode writing lifecycle or any run-directory bytes.
+- Automatic retry of failed/crashed notification attempts (operator-driven future PR).
+- Multi-workspace authoritative build gates in one `code` run (PR4 = one target).
 
 ## 4. Locked decisions
 
 | Topic | Decision |
 |-------|----------|
-| Lifecycle representation | `run.json.lifecycle` and `response.target.lifecycle` are source of truth. Top-level envelope `status` is a projection (§6 table only). |
-| Seed record | `lifecycle: "created"`, `status: "running"` (never `status: "created"`). |
-| Terminal persist | `persist_terminal_envelope(paths, envelope, *, lifecycle)` where `lifecycle` is exactly one of `completed`, `failed`, `canceled`. Caller always passes it. |
-| Interrupted | Status mode **always** best-effort atomic-writes `lifecycle: "interrupted"` when owner is dead and no valid envelope. If that write fails, response still reports `lifecycle: "interrupted"` and top-level `failure`. |
-| Finalization | Child process via `multiprocessing.get_context("spawn")`; parent `join(timeout)`; kill on timeout. Worker **writes** the terminal envelope. Parent does not re-promote. Progress during finalize: **parent-only** progress events around join (enter/timeout/success); worker does not append progress. |
-| Review isolation | See §10. No silent live-checkout fallback. |
-| Notifications storage | **Only** `plugin/scripts/lib/jobs.mjs` index `config` (with `runMode`). Never gate-state. |
-| Notifications default | `off`. Setup flags set mode. Setup copy recommends `auto`. |
-| Notify at-most-once | Exclusive `notified.json` with states `pending` then `sent` (§11). |
-| Native notify | argv-only spawn, `shell: false`, 5s timeout, platforms §11. |
-| PR versions | PR1 **1.3.0**, PR2 **1.4.0**, PR3 **1.5.0**, PR4 **1.6.0**. |
+| Lifecycle representation | `run.json.lifecycle` is durable truth for **persisted** state. Status may **derive** a display lifecycle (e.g. `interrupted`) without persisting it. Top-level envelope `status` is a projection (§6). |
+| Seed record | `lifecycle: "created"`, compatible `status: "running"`, `recordRevision: 0`. |
+| Status mode | **Strictly read-only.** Never writes under the target run directory. Byte-for-byte unchanged after every status query (test-enforced). |
+| Interrupted durable write | **Not from status.** If a durable recovery operation is ever added, it is a separate authorized mode (out of this program unless explicitly scheduled). Status only **derives** `response.target.lifecycle: "interrupted"`. |
+| Terminal writer | **Finalization worker only** for normal terminal envelopes. Parent may write `finalization-timeout` **only after** terminate/kill + successful join **and** re-read under lock shows no valid terminal envelope yet. |
+| CAS | `run.json.recordRevision` monotonic integer; every lifecycle/record mutation requires expected revision; lock file §7. |
+| Terminal immutability | A valid terminal envelope is **never** replaced by another terminal envelope. Terminal lifecycle never overwritten. |
+| Progress elapsed | Owning process uses **monotonic** clock for `elapsedMs` on events it writes. Cross-process/status uses UTC timestamps; clamp negative elapsed to 0. |
+| Finalization | Child via `multiprocessing.get_context("spawn")`; fully specified payload and ownership (§9). |
+| Review isolation | §10; ownership markers; no silent live-checkout fallback. |
+| Notifications storage | **Only** jobs index `config` in `plugin/scripts/lib/jobs.mjs`. Never gate-state. |
+| Notifications default | `off`. Setup recommends `auto`. |
+| Notify contract | **At-most-once attempt:** prioritize no duplicate attempts over guaranteed delivery. **Not** exactly-once. No automatic retry of `pending`. |
+| Background signal | Companion-only `GROK_COMPANION_EXECUTION_CONTEXT=foreground\|background` set by skills; never forwarded to wrapper; never inferred from TTY. |
+| Handoff mode | `WRAPPER_MODES` only; **not** `STREAMING_MODES`; `runHandoff()` like status passthrough. |
+| Contract validation | Explicit execution task; sandboxed; after scopes + HEAD check; trust model §14.3. |
+| Handoff readiness | Two-phase: forensic patch first; final handoff JSON only after all shared finalization evidence (§14.5–14.7). |
+| Code target scope | **One** cohesive `--target` workspace per `code` run in PR4. |
+| PR versions | PR1 **1.3.0**, PR2 **1.4.0**, PR3 **1.5.0**, PR4 **1.6.0** (four minor releases for independent dogfood). |
+| Packaging version paths | Exactly three: `plugin/.claude-plugin/plugin.json`, `plugin/.codex-plugin/plugin.json`, `.claude-plugin/marketplace.json`. |
+| PROVENANCE | No content change required for this program unless a release note needs a one-line D-log entry; **locked: no `docs/PROVENANCE.md` edit in PR1–PR4** unless a finding forces it. |
 
 ## 5. Architecture
 
 ```text
 Companion → Wrapper → state_root/runs/<id>/
-  run.json, progress.jsonl, envelope.json, owner.json, owner.pid, notified.json
+  run.json          # CAS + recordRevision + lifecycle
+  run.lock          # exclusive lock for record/envelope mutations
+  progress.jsonl
+  envelope.json     # terminal only; never replaced once valid
+  owner.json, owner.pid
+  notified.json     # companion notify marker (attempt, not delivery guarantee)
+  finalize-payload.json
+  finalize-result.json
+  finalize-worker.stderr
+  artifacts/        # PR4 handoff (code)
 ```
 
-Worktrees for isolation: `state_root/worktrees/review/<runId>/` (absolute under `runstate.state_root()`).
+Worktrees:
+
+- Code/verify: existing external worktree paths + ownership (unchanged).
+- Review isolation: `{state_root}/worktrees/review/{run_id}/` + owner marker bound to run id (§10).
 
 ## 6. Lifecycle and status projection
 
-### Lifecycle values on `run.json.lifecycle`
+### Lifecycle values on `run.json.lifecycle` (persisted)
 
 | Value | Meaning |
 |-------|---------|
 | `created` | Seed written; run id may be published |
 | `running` | Active work before post-model finalize |
 | `finalizing` | After Grok exit; packaging terminal result |
-| `completed` | Valid success envelope persisted |
-| `failed` | Valid failure envelope persisted |
+| `completed` | Valid success envelope persisted by terminal writer |
+| `failed` | Valid failure envelope persisted by terminal writer |
 | `canceled` | Operator cancel with terminal envelope |
-| `interrupted` | Written by status when process dead and no valid envelope |
 
-### Transition graph (allowed writes)
+**Not persisted by status:** `interrupted` is a **derived** display lifecycle only (§6.3).
+
+### Transition graph (allowed **persisted** writes under CAS)
 
 ```text
 created → running | failed | canceled
 running → finalizing | failed | canceled
 finalizing → completed | failed | canceled
-(any non-terminal) → interrupted   # status-mode only, when process dead + no envelope
 ```
 
-Terminal lifecycles `completed`, `failed`, `canceled`, `interrupted` are **immutable** once set (further `set_lifecycle` raises or no-ops with log; tests require refuse overwrite).
+Terminal persisted lifecycles `completed`, `failed`, `canceled` are **immutable**.
+Further CAS transitions that would overwrite them **fail closed** (no write).
 
-### Top-level status projection
+### Top-level status projection (status mode and status-shaped envelopes)
 
-| Target lifecycle | Top-level `status` | Status-mode exit |
-|------------------|--------------------|------------------|
+| Effective lifecycle (persisted or derived) | Top-level `status` | Status-mode exit |
+|--------------------------------------------|--------------------|------------------|
 | `created`, `running`, `finalizing` | `running` | 0 |
 | `completed` | `success` | 0 |
-| `failed`, `canceled`, `interrupted` | `failure` | 1 |
+| `failed`, `canceled` | `failure` | 1 |
+| derived `interrupted` | `failure` | 1 |
 | Cannot load/own run; stored envelope unreadable or invalid C4 | `failure` | 1 |
 
-Status mode always emits `mode: "status"` with a well-formed envelope. Live modes still emit their own terminal envelopes with `success`/`failure` for the *run* result.
+### 6.3 Status is strictly read-only
+
+`status` mode:
+
+1. Loads run record and optional envelope **without** opening the run for write.
+2. Never creates, truncates, renames, or chmods files under the target run directory.
+3. Never calls `set_lifecycle`, `write_run_record`, or any CAS mutator.
+4. Derives display fields only in memory.
+
+**Derived interrupted rule** (display only):
+
+When **all** of:
+
+- persisted lifecycle is non-terminal (`created` | `running` | `finalizing`),
+- no valid stored terminal envelope exists,
+- owner process is provably dead (existing owner.pid / liveness rules),
+
+then:
+
+- `response.target.lifecycle` = `"interrupted"` (derived),
+- top-level `status` = `"failure"`,
+- exit = 1,
+- **do not** persist `interrupted` into `run.json`.
+
+If durable reconciliation is required later, it is a **separate authorized recovery operation**, not status.
+
+**Test:** after every status query, the target run directory is **byte-for-byte unchanged** (recursive hash of all files + metadata as practical for the suite).
+
+**Skill / harness:** `plugin/skills/status/SKILL.md` must state that exit 1 can mean “successfully inspected a failed/interrupted **target**,” not “status command malfunctioned.” Harness must relay the JSON envelope regardless of exit status. Distinguish envelope parse failure (tool broken) from target failure (useful envelope present).
 
 ### Seed `run.json` (exact fields)
 
@@ -117,6 +173,7 @@ Status mode always emits `mode: "status"` with a well-formed envelope. Live mode
   "createdAtUtc": "<iso-z>",
   "lifecycle": "created",
   "status": "running",
+  "recordRevision": 0,
   "requestedModel": null,
   "repository": null,
   "targetWorkspace": null,
@@ -128,13 +185,47 @@ Status mode always emits `mode: "status"` with a well-formed envelope. Live mode
 }
 ```
 
+### `create_run` callers (complete inventory)
+
+Production:
+
+| Caller | File |
+|--------|------|
+| Shared live modes (review, reason, …) | `plugin/wrapper/scripts/groklib/modes/_shared.py` |
+| Worktree modes (code, verify) | `plugin/wrapper/scripts/groklib/modes/_worktree.py` |
+| Preflight | `plugin/wrapper/scripts/groklib/modes/preflight.py` |
+
+Tests (must update fixtures for seed + CAS):
+
+- `plugin/wrapper/scripts/tests/test_runstate.py` (**exists** — not new)
+- `plugin/wrapper/scripts/tests/test_mode_status.py`
+- `plugin/wrapper/scripts/tests/test_mode_cleanup.py`
+- `plugin/wrapper/scripts/tests/test_mode_review.py`
+- any other fixture that calls `create_run` or dumps full `run.json`
+
+### Record write semantics (single model — no mixed APIs)
+
+| API | Semantics |
+|-----|-----------|
+| `create_run` | Creates run dir, owner marker, **seed `run.json`**, then `emit_run_id_marker`. Seed is the first write. |
+| `cas_update_run_record(paths, expected_revision, patch)` | **Only** mutator for non-terminal record fields. Under exclusive lock: load, require `recordRevision == expected_revision`, apply **validated merge patch**, set `recordRevision = expected + 1`, atomic write. Reject unknown keys and lifecycle fields unless caller is `set_lifecycle` / terminal path. |
+| `set_lifecycle(paths, expected_revision, lifecycle)` | CAS graph transition only. |
+| `persist_terminal_envelope(paths, expected_revision, envelope, *, lifecycle)` | Terminal writer path: validate envelope; write `envelope.json` once; CAS lifecycle to `completed`\|`failed`\|`canceled`. Refuse if envelope already valid or lifecycle already terminal. |
+| `write_run_record` (public) | **Deleted** after all call sites migrate in PR1. Internal helper `_write_run_json_unlocked` may exist only for CAS paths under lock. No public full-replacement API. |
+
+Later field updates (model, repository, worktree paths, etc.) use `cas_update_run_record` merge patches only. Merge **preserves** `runId`, `createdAtUtc`, and never silently resets `lifecycle` or `recordRevision`.
+
+**Call-site migration (mandatory in PR1):** every current `write_run_record` / `best_effort_write_run_record` site in `_shared.py`, `_worktree.py`, `preflight.py`, and tests must move to CAS APIs. Terminal paths use only `persist_terminal_envelope`.
+
 ## 7. Durable invariants
 
 1. `[grok-run-id]` is emitted only after atomic seed `run.json` exists.  
-2. Finished only after atomic validated `envelope.json`.  
-3. `persist_terminal_envelope` always receives explicit terminal lifecycle.  
+2. Finished only after atomic validated `envelope.json` from the terminal writer rules.  
+3. `persist_terminal_envelope` always receives explicit terminal lifecycle + expected revision.  
 4. JSON writes: temp sibling `path.name + ".tmp." + pid` then `os.replace`, file mode 0600.  
-5. Progress: only `progress.jsonl`.
+5. Progress: only `progress.jsonl` (append).  
+6. **Lock:** exclusive `run.lock` (POSIX `fcntl.flock` where available; Windows `msvcrt.locking` or portalocker-equivalent stdlib pattern already used in repo if any — **locked: use `portalocker`-free stdlib**: `fcntl` on Unix, `msvcrt` on Windows for a lock byte file) held for every CAS record or envelope mutation.  
+7. Terminal envelope never replaced once validated.  
 
 ## 8. Progress
 
@@ -146,13 +237,24 @@ Status mode always emits `mode: "status"` with a well-formed envelope. Live mode
 
 ### Event fields
 
-Every event: `schemaVersion`, `runId`, `seq`, `ts`, `phase`, `level`, `message`, plus `elapsedMs` (int, from `createdAtUtc`).
+Every event: `schemaVersion`, `runId`, `seq`, `ts` (UTC ISO-Z), `phase`, `level`, `message`, plus `elapsedMs` (int).
+
+### Elapsed time (exact)
+
+| Writer | Rule |
+|--------|------|
+| Parent process ProgressWriter | Capture `time.monotonic()` at first emit after seed; `elapsedMs = int((monotonic_now - start) * 1000)`. |
+| Spawned finalize worker | **Does not write progress.jsonl.** Parent owns progress around join. |
+| Status mode display | Compute from `createdAtUtc` vs wall clock UTC; if negative or unparsable, use `0`. Prefer last event’s stored `elapsedMs` for `lastEvent`. |
+
+Do **not** pass monotonic start values across processes (clock domains are not guaranteed).
 
 ### Status `response.target` (exact keys)
 
 ```json
 {
   "lifecycle": "finalizing",
+  "lifecycleSource": "record",
   "process": "alive",
   "elapsedMs": 181492,
   "lastProgressAt": "2026-07-16T02:15:11+00:00",
@@ -169,33 +271,81 @@ Every event: `schemaVersion`, `runId`, `seq`, `ts`, `phase`, `level`, `message`,
 }
 ```
 
-`recentEvents`: last **8** events as compact summaries (same shape as `lastEvent`).  
-`resultAvailable`: true iff valid stored envelope exists.
+- `lifecycleSource`: `"record"` | `"derived"` (derived only for interrupted display).  
+- `recentEvents`: last **8** events as compact summaries.  
+- `resultAvailable`: true iff valid stored envelope exists.
 
-## 9. Finalization watchdog
+## 9. Finalization watchdog (fully specified protocol)
 
-### Mechanism (exact)
+### Who owns what
 
-1. After Grok child exits, parent: `set_lifecycle(paths, "finalizing")`; progress `finalizing` / "entering finalization".  
-2. Parent writes worker payload JSON (0600) to `paths.run_dir / "finalize-payload.json"` containing run_id, paths, mode context needed to build the envelope.  
-3. Parent starts:
+| Responsibility | Owner |
+|----------------|-------|
+| Set lifecycle `finalizing` (CAS) | Parent, before spawn |
+| Progress enter/timeout/success around join | Parent only |
+| Auth-home cleanup | **Worker** (same as today’s post-Grok finalize path moved into worker) |
+| Sandbox verify / drift / mode envelope build | Worker |
+| Terminal envelope + terminal lifecycle CAS | **Worker** on success path |
+| `finalization-timeout` envelope | **Parent only**, after kill+join+re-read |
+| progress.jsonl during finalize | Parent only |
 
-```python
-ctx = multiprocessing.get_context("spawn")
-proc = ctx.Process(target=finalize_worker_main, args=(str(payload_path),), name="grok-finalize")
-proc.start()
-proc.join(timeout=budget_seconds)
+### Worker input (`finalize-payload.json`, mode 0600)
+
+Exact serializable JSON only — **no** open handles, locks, picklable closures, or live context objects. Process target is `finalize_worker_main(payload_path: str)` reading this file.
+
+```json
+{
+  "schemaVersion": 1,
+  "runId": "<id>",
+  "mode": "review|reason|code|verify|…",
+  "runDir": "<absolute>",
+  "expectedRecordRevision": 3,
+  "baseRevision": "<full sha or null>",
+  "worktreePath": "<absolute or null>",
+  "privateHomePath": "<absolute>",
+  "repoRoot": "<absolute or null>",
+  "targetWorkspace": "<absolute or null>",
+  "resultPath": "<absolute runDir/finalize-result.json>",
+  "stderrPath": "<absolute runDir/finalize-worker.stderr>",
+  "modeContext": {}
+}
 ```
 
-4. If `proc.is_alive()`: `proc.terminate(); proc.join(5)`; if still alive `proc.kill(); proc.join(5)`. Parent builds failure envelope class `finalization-timeout`, calls `persist_terminal_envelope(..., lifecycle="failed")`, progress done, return failure.  
-5. If process exited 0 and `envelope.json` validates: parent returns that envelope (already persisted by worker).  
-6. If process exited non-zero without valid envelope: parent writes `finalization-timeout` or `cli-failure` with detail from worker stderr file `paths.run_dir / "finalize-worker.stderr"`; lifecycle `failed`.
+`modeContext` holds only JSON-serializable scalars/lists/dicts needed to rebuild the mode’s success/failure envelope (command summaries, warning lists already collected, paths as strings). Parent freezes modeContext **before** spawn.
 
-### Worker responsibilities
+### Worker output (`finalize-result.json`)
 
-- Load payload, perform sandbox verify, drift, build success/failure envelope for the mode, `persist_terminal_envelope` with correct lifecycle (`completed` or `failed`).  
-- Does **not** write progress.jsonl (parent owns progress around the join).  
-- Exit 0 only if envelope persisted and valid.
+```json
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "lifecycle": "completed",
+  "envelopePath": "<absolute>",
+  "errorClass": null,
+  "message": null,
+  "recordRevisionAfter": 5
+}
+```
+
+On failure without envelope: `ok: false`, `errorClass`, `message`.  
+On success: envelope already persisted; `ok: true`.
+
+### Parent sequence (exact)
+
+1. CAS lifecycle → `finalizing`; progress `"entering finalization"`.  
+2. Write `finalize-payload.json` (0600).  
+3. `ctx = multiprocessing.get_context("spawn")`; `Process(target=finalize_worker_main, args=(payload_path,), name="grok-finalize")`.  
+4. `proc.start()`; `proc.join(timeout=budget_seconds)`.  
+5. If still alive:  
+   - `proc.terminate()`; `proc.join(5)` (terminate grace **5s**).  
+   - If still alive: `proc.kill()`; `proc.join(5)` (kill grace **5s**).  
+   - If kill unavailable / still alive: treat as timeout; log; proceed to re-read (do not assume worker dead for filesystem purposes — still re-read under lock).  
+6. **Under lock, re-read** `envelope.json` + `run.json`:  
+   - If valid terminal envelope already present → **preserve it**; return it; do **not** write timeout.  
+   - Else write `finalization-timeout` failure envelope via parent terminal path with CAS; lifecycle `failed`.  
+7. If process exited 0: require valid envelope + matching finalize-result; return envelope.  
+8. If process exited non-zero without valid envelope: parent writes failure (`cli-failure` or worker-reported class) under lock only if no terminal envelope yet.  
+9. Worker wrote envelope but died before result file: step 6 re-read preserves envelope (success path for parent).
 
 ### Budgets
 
@@ -203,9 +353,18 @@ proc.join(timeout=budget_seconds)
 |-------|---------|
 | review, reason, adversarial-review (maps to review) | 120 |
 | code, verify | 180 |
-| preflight, status, cleanup | no finalize worker |
+| preflight, status, cleanup, handoff | no finalize worker |
 
 Env `GROK_FINALIZE_TIMEOUT_SECONDS`: integer, clamp **30..600**, overrides table when set.
+
+### Tests (mandatory)
+
+- Worker completion immediately **before** parent timeout path.  
+- Worker completion **during** timeout/kill window.  
+- Worker completion **after** kill attempt (envelope preserved).  
+- Terminal envelope never replaced by another terminal envelope.  
+- Spawn works on macOS; Windows spawn tested when CI/platform available (skip with explicit marker only if platform lacks spawn — prefer run).  
+- No non-serializable objects in payload.
 
 ## 10. Isolated review
 
@@ -215,42 +374,53 @@ Env `GROK_FINALIZE_TIMEOUT_SECONDS`: integer, clamp **30..600**, overrides table
 |-------|--------|
 | `--base` set | Isolation required |
 | `--isolated` set | Isolation required |
-| both | Isolation required (same as base path for worktree; still apply dirty if working tree differs from HEAD — **locked:** when both set, worktree at HEAD, apply tracked dirty, keep `--base` for comparison) |
+| both | Worktree at HEAD; apply tracked dirty; keep `--base` for comparison |
 | neither | Live checkout; drift warnings only |
 
-### Worktree path
+### Worktree path and ownership
 
-`{state_root}/worktrees/review/{run_id}` where `state_root = runstate.state_root()`.
+- Path: `{state_root}/worktrees/review/{run_id}` where `state_root = runstate.state_root()`.  
+- Write owner marker bound to `run_id` (same C2 schema as code worktrees; path `…/review/{run_id}.owner.json` sibling or `owner.json` inside — **locked: sibling** `{worktree_path}.owner.json` matching code-mode pattern).  
+- Never silently reuse an existing path: if path or git worktree registration exists, fail `isolation-unavailable`.  
+- Partial setup: if directory or registration exists but init failed, cleanup attempt then fail closed.  
 
-### `--base` (exact)
+### Dirty patch rules (exact)
 
-1. `git -C repo_root worktree add --detach {worktree_path} HEAD`  
-2. On non-zero: raise `isolation-unavailable`.  
-3. Review `cwd` / target workspace = worktree_path.  
-4. Pass original `--base` through unchanged to comparison/prompt logic.  
-5. `finally`: `git -C repo_root worktree remove --force {worktree_path}` then `rmtree` if needed; failures log only.
+1. From **repository root** (git toplevel of original checkout):  
 
-### `--isolated` without `--base` (exact)
+```text
+git diff --binary --full-index HEAD --
+```
 
-1. Same worktree add at HEAD.  
-2. Diff file: `{worktree_path}.diff` under state temp next to worktree, mode 0600:  
-   `git -C repo_root diff HEAD --binary` → write file.  
-3. If file size > 0:  
-   `git -C worktree_path apply --whitespace=nowarn {diff_path}`  
-   Non-zero exit → `isolation-unavailable` (cleanup worktree first).  
-4. Empty diff: continue.  
-5. Untracked files: **never** copied.  
-6. Cleanup worktree + delete diff file in `finally`.
+2. This combines **staged and unstaged tracked** changes relative to HEAD.  
+3. Ordinary untracked files: **never** included.  
+4. Intent-to-add / untracked: treated as untracked → excluded.  
+5. Dirty submodules or unsupported gitlinks: **reject** with `isolation-unavailable` unless a future version implements and tests them (PR2 rejects).  
+6. Write patch to `{worktree_path}.diff` mode 0600.  
+7. If size > 0: `git -C {worktree_path} apply --whitespace=nowarn {diff_path}` from isolated repo root.  
+8. Any patch-generation or apply failure → `isolation-unavailable` (cleanup first).  
+9. Empty diff: continue.  
+10. Preserve original `--base` for review comparison; isolation HEAD is **not** the comparison base.
 
-### Return type when isolation not required
+### Cleanup (always)
 
-`prepare_review_isolation` returns `None` when neither flag is set. Type is `Optional[ReviewIsolation]`.
+On success, classified failure, cancellation, and timeout:
+
+1. `git -C repo_root worktree remove --force {worktree_path}`  
+2. `git worktree prune` best-effort  
+3. Remove marker and diff file  
+4. `rmtree` worktree path if needed  
+5. Failures log only; never delete another run’s worktree  
+
+### Concurrent runs
+
+Concurrent review isolations must not share paths; run-id uniqueness enforces this. Tests for concurrent-run and partial-cleanup.
 
 ## 11. Notifications
 
 ### Storage (exact)
 
-File: jobs index used by `jobs.mjs` (`index.json` under jobs dir). Config object always includes:
+Jobs index used by `plugin/scripts/lib/jobs.mjs`. Config always includes:
 
 ```json
 {
@@ -260,54 +430,69 @@ File: jobs index used by `jobs.mjs` (`index.json` under jobs dir). Config object
 }
 ```
 
-Defaults when missing keys: `notificationMode: "off"`, `notificationWebhookUrl: null`.
+### Execution context signal (companion-only)
+
+Environment variable on the **companion process** (not the wrapper):
+
+```text
+GROK_COMPANION_EXECUTION_CONTEXT=foreground|background
+```
+
+| Rule | Locked |
+|------|--------|
+| Who sets it | The host skill invocation that chooses Wait vs background (Claude skill Bash command prefixes the env; Codex agent/skill spawn does the same). `plugin/scripts/lib/skill-run.mjs` may gain an optional third-arg env merge helper, but the **skill markdown / agent prompt** is the authority for the value based on the user’s execution choice. |
+| Forward to wrapper | **Never** (companion strips/ignores for wrapper argv and wrapper child env) |
+| Infer from TTY | **Never** |
+| Missing / invalid | Treat as `foreground` |
 
 ### Modes (exact)
 
 | Mode | Behavior |
 |------|----------|
-| `off` | No notify |
-| `auto` | Notify only if job was **background** and a native channel is available |
-| `native` | Always attempt native (foreground or background) when channel available |
-| `webhook` | POST to `notificationWebhookUrl` if non-null non-empty URL; else no-op log |
+| `off` | Never notify |
+| `auto` | Notify only if execution context is **`background`** and a native channel is available |
+| `native` | Attempt native for **foreground and background** when channel available |
+| `webhook` | POST to URL if non-null non-empty; else no-op log |
 
-### At-most-once (exact)
+### At-most-once attempt (exact contract)
+
+**Priority: no duplicate attempts over guaranteed delivery.** Do not call this exactly-once delivery.
 
 File: `{runDir}/notified.json`.
 
-1. Try create exclusive with content `{"state":"pending","at":"<iso>"}`.  
-2. If file exists:  
-   - `state=="sent"` → return `{attempted:false, sent:false, reason:"already-sent"}`  
-   - `state=="pending"` and age &lt; 300s → return skip `pending-inflight`  
-   - `state=="pending"` and age ≥ 300s → proceed to send (retry)  
-3. Send.  
-4. Overwrite marker `{"state":"sent","at":"<iso>"}` via atomic write.  
-5. On send failure: leave `pending` (or rewrite pending with new `at`); return `{attempted:true, sent:false}`; never throw to fail the job.
+1. Atomically create exclusive marker:  
+   `{"state":"pending","attemptedAt":"<iso>","adapter":null,"result":null}`  
+2. If file already exists (any state): return `{attempted:false, sent:false, reason:"already-attempted"}` — **never auto-retry**.  
+3. Perform external notification once.  
+4. Overwrite marker:  
+   `{"state":"completed","attemptedAt":"…","completedAt":"…","adapter":"native|webhook","result":"sent|failed","detail":"…"}`  
+5. On send failure after create: still write `state: completed` with `result: failed` so automatic retry never re-fires.  
+6. Crash after send before complete write: marker may remain `pending`; next process **must not** auto-retry (duplicate risk). Operator-driven retry is a **future PR**, not this program.  
+7. Never throw to fail the job.
 
 ### Native adapters (exact)
 
 | Platform | Command argv | Timeout |
 |----------|--------------|---------|
-| Darwin | `["osascript", "-e", "display notification \"" + escape(body) + "\" with title \"" + escape(title) + "\""]` where escape only backslash-escapes `\` and `"` | 5000 ms |
-| Linux | `["notify-send", "--", title, body]` if `notify-send` on PATH | 5000 ms |
-| Windows | Skip native (no-op, reason `windows-native-unsupported` in v1) | n/a |
+| Darwin | `["osascript", "-e", "display notification \"" + escape(body) + "\" with title \"" + escape(title) + "\""]` | 5000 ms |
+| Linux | `["notify-send", "--", title, body]` if on PATH | 5000 ms |
+| Windows | no-op, reason `windows-native-unsupported` | n/a |
 | Other | no-op | n/a |
 
-Always `shell: false`. Title fixed string `Grok Skills`. Body: `"{mode} {lifecycle} · {runId} · {durationSeconds}s"`.
+Always `shell: false`. Title `Grok Skills`. Body `"{mode} {lifecycle} · {runId} · {durationSeconds}s"`.
 
 ### Webhook (exact)
 
-- Method POST, `Content-Type: application/json`  
-- Body: `{"runId","mode","lifecycle","durationSeconds"}` only  
+- POST JSON `{"runId","mode","lifecycle","durationSeconds"}`  
 - Timeout 3000 ms  
 - URL from config only  
 
 ### When companion notifies
 
-- After **background** job wrapper process closes, and run has terminal envelope or terminal lifecycle, if preference is `auto` or `native` or `webhook`.  
-- For `native` preference: also after **foreground** terminal (explicit user choice).  
-- Never on `status` / `result` / `jobs` / `setup` alone.  
-- Resolve `runDir` from `XDG_STATE_HOME`/state_root + runId from job record or envelope.
+- After background job wrapper closes with terminal envelope/lifecycle, if mode is `auto` or `native` or `webhook`.  
+- For `native`: also after foreground terminal.  
+- Never on `status` / `result` / `jobs` / `setup` / `handoff` alone.  
+- Tests for Claude and Codex skill paths setting both execution contexts.
 
 ## 12. Error classes
 
@@ -322,73 +507,58 @@ Always `shell: false`. Title fixed string `Grok Skills`. Body: `"{mode} {lifecyc
 | `artifact-integrity-failure` | `failed` (handoff mode) | PR4 |
 | `handoff-unavailable` | `failed` (handoff mode) | PR4 |
 
-Add all of the above to `envelope.ERROR_CLASSES` when the owning PR lands.
+Reuse existing: `validation-failure`, `secret-material`, `wrong-working-directory`, `worktree-failure`, `state-ownership-violation`, `cleanup-failure`, `cli-failure`.
+
+Add new classes to `envelope.ERROR_CLASSES` in the owning PR.
 
 ## 13. Four PRs
 
 | PR | Version | Scope |
 |----|---------|--------|
-| PR1 | 1.3.0 | Lifecycle, seed, persist, status projection, progress, process finalize |
-| PR2 | 1.4.0 | Isolated review |
-| PR3 | 1.5.0 | Notifications |
-| PR4 | 1.6.0 | Verified implementation handoff for `code` |
+| PR1 | 1.3.0 | Lifecycle, CAS seed, single terminal writer, status read-only projection, progress, process finalize |
+| PR2 | 1.4.0 | Isolated review + ownership |
+| PR3 | 1.5.0 | Notifications + execution context |
+| PR4 | 1.6.0 | Verified implementation handoff |
+
+Release choice: **four consecutive minor releases** for independent dogfood (accepted operational cost).
 
 ## 14. PR4 — Verified implementation handoff
 
 ### 14.1 Purpose
 
-Make Grok `code` usable as a peer implementation agent for Codex and Claude.
-
-A successful code run must produce a **verified, immutable handoff artifact**.
-The parent harness must be able to prove:
-
-| Proof | Source |
-|-------|--------|
-| Exact committed revision Grok started from | `baseRevision` (full SHA) |
-| Paths Grok was allowed to modify | contract `writeScopes` (when provided) |
-| What files and Git modes changed | handoff `changedFiles` + patch |
-| Whether Grok created commits unexpectedly | HEAD == `baseRevision` after exit |
-| Which validation commands ran and outcomes | envelope `commands` + evidence tails |
-| Whether wrapper-owned gates passed | build gate + requiredValidation + ready |
-| Whether the artifact is intact | patch SHA-256 re-read + handoff verify |
-| Whether result is safe to consider for integration | `integration.ready` + `blockers` |
-| Which worktree and run own the result | `runId` + worktree path/branch |
-
-The **parent** remains responsible for reviewing and integrating. PR4 must
-**never** automatically commit, merge, cherry-pick, push, or modify the parent
-checkout.
+Make Grok `code` a peer implementer for Codex/Claude via verified immutable artifacts.
+Parent reviews and integrates. PR4 never auto-commits, merges, cherry-picks, pushes, or edits the parent checkout.
 
 | Command | Transfers | Key |
 |---------|-----------|-----|
-| `/grok:transfer` | Claude session **conversation context** only | session (unchanged) |
-| `/grok:result` | Companion job output | companion job ID (UI convenience) |
-| `/grok:handoff` | **Implementation output** (immutable patch + schema) | wrapper **`runId` only** |
+| `/grok:transfer` | Conversation context | session |
+| `/grok:result` | Companion job output | job ID (UI) |
+| `/grok:handoff` | Implementation output | **`runId` only** |
 
-Do not repurpose or rename `/grok:transfer`. Companion job ID must not be
-required for handoff when `runId` is known.
-
-### 14.2 Existing implementation facts (grounding)
+### 14.2 Grounding
 
 | Component | Owns |
 |-----------|------|
-| `plugin/skills/code/SKILL.md` | Code mode: isolated external worktree, uncommitted, retained |
-| `plugin/wrapper/scripts/groklib/modes/code.py` | Sentinel validation, diff confinement, deps install, build gate |
-| `plugin/wrapper/scripts/groklib/modes/_worktree.py` | code/verify lifecycle and envelope assembly |
-| `plugin/wrapper/scripts/groklib/worktree.py` | External worktree create, ownership markers, base validation, cleanup |
-| Existing C4 envelope fields | `baseRevision`, `changedFiles`, `diffSummary`, `commands`, `worktreePath`, `worktreeBranch` |
+| `plugin/skills/code/SKILL.md` | Isolated external worktree, uncommitted, retained |
+| `plugin/wrapper/scripts/groklib/modes/code.py` | Sentinel, diff confinement, deps, **single-target** build gate |
+| `plugin/wrapper/scripts/groklib/modes/_worktree.py` | code/verify lifecycle |
+| `plugin/wrapper/scripts/groklib/worktree.py` | Worktree create, ownership, cleanup |
+| C4 fields | `baseRevision`, `changedFiles`, `diffSummary`, `commands`, worktree metadata |
 
-PR4 builds on these. It does not re-implement worktree isolation from scratch.
+### 14.3 Contract file
 
-### 14.3 Machine-readable implementation task contract
+Optional but recommended: `--contract-file <path>`. Keep `--task` / `--task-file`.
 
-#### CLI
+#### Trust model (locked)
 
-Optional but recommended: `--contract-file <path>` on `code` mode.
+The contract is **trusted operator authority**: supplied by the parent harness or human operator who already has the right to run `code` on that repository. It is **not** untrusted model output. Even so:
 
-Keep existing `--task` / `--task-file`: the task file explains the work; the
-contract defines **machine-enforced boundaries**.
+- Commands never run through a shell.  
+- `cwd` must resolve inside the **isolated worktree** under the single `--target` workspace; escapes rejected.  
+- Execution uses the same write-confinement / sandbox policy as code mode.  
+- Prefer `requiredValidation` entries that name **package/workspace scripts** resolved from the committed package manifest when possible; arbitrary argv remains allowed only under this trust + sandbox model and is documented as such.
 
-#### Contract schema (exact)
+#### Schema
 
 ```json
 {
@@ -397,19 +567,10 @@ contract defines **machine-enforced boundaries**.
   "objective": "Implement the shared ImagiExplain voice policy contract",
   "target": ".",
   "writeScopes": [
-    {
-      "path": "packages/sharedSchemas/src/imagibooks/imagiexplainAdminPreview.ts",
-      "kind": "file"
-    },
-    {
-      "path": "packages/sharedSchemas/src/imagibooks/imagiexplainAdminPreview.test.ts",
-      "kind": "file"
-    }
+    { "path": "packages/sharedSchemas/src/imagibooks/imagiexplainAdminPreview.ts", "kind": "file" },
+    { "path": "packages/sharedSchemas/src/imagibooks/imagiexplainAdminPreview.test.ts", "kind": "file" }
   ],
-  "acceptanceCriteria": [
-    "Only provider-default ElevenLabs Multilingual v2 and Gemini 2.5 Flash Preview TTS classify as public",
-    "Designed and cloned voices do not classify as public"
-  ],
+  "acceptanceCriteria": ["…"],
   "requiredValidation": [
     {
       "argv": ["pnpm", "--filter", "@shared/schemas", "typecheck"],
@@ -422,111 +583,122 @@ contract defines **machine-enforced boundaries**.
 
 Module: `plugin/wrapper/scripts/groklib/implementation_contract.py`.
 
-#### Contract rules (locked)
-
 | Rule | Behavior |
 |------|----------|
-| `schemaVersion` | Must equal `1` |
-| `taskId` | Stable restricted id: `[A-Za-z0-9][A-Za-z0-9._-]{0,127}` |
-| `objective` | Non-empty string; supplied to Grok; not wrapper-proved |
-| `target` | Must match CLI `--target` after canonical normalization |
-| Write-scope paths | Repository-relative; reject absolute paths, `..`, empty, NUL bytes, symlink escapes |
-| `kind: "file"` | Matches exactly one path (normalized path components) |
-| `kind: "subtree"` | Matches that directory and descendants using **path-component** semantics, not string-prefix matching (e.g. scope `a` does **not** match path `ab`) |
-| Empty `writeScopes` | Invalid for code mode when contract is present |
-| Enforcement timing | Wrapper enforces write scopes **after** Grok exits (changed paths vs scopes) |
-| OS sandbox | Wrapper **may** also use write scopes to narrow the OS sandbox where supported; post-exit check remains mandatory |
-| `acceptanceCriteria` | Supplied to Grok and included in handoff; wrapper does **not** claim semantic proof from prose |
-| `requiredValidation` | `argv` arrays only; never execute through a shell; each entry needs non-empty `argv` (string list), relative `cwd` without `..`, non-empty `purpose` |
-| Bad contract | Fail before Grok with `implementation-contract-invalid` |
-| Path outside scopes | `write-scope-violation` after Grok; `integration.ready` false |
-| No contract file | Code runs as today; write-scope check uses existing worktree confinement only; `integration.ready` may still be true if all other gates pass |
-| Contract hash | Persist SHA-256 of canonical contract bytes as `contractSha256` (null if no contract) |
+| schemaVersion | `1` |
+| taskId | `[A-Za-z0-9][A-Za-z0-9._-]{0,127}` |
+| target | Match CLI target after canonical normalization |
+| Paths | Repo-relative; reject absolute, `..`, empty, NUL, symlink escape |
+| file / subtree | Exact vs path-component prefix (not string prefix) |
+| Empty writeScopes | Invalid when contract present |
+| Bad contract | `implementation-contract-invalid` **before** Grok |
+| No contract | Existing confinement only |
 
-Support multiple validation targets (multiple packages / workspaces). Do not
-assume one `package.json` is sufficient for a cross-package task.
+### 14.4 One target workspace (PR4)
 
-### 14.4 Prohibit unexpected commits
+PR4 constrains each `code` run to **one** cohesive `--target` workspace.
 
-1. Record the exact resolved full base SHA as `baseRevision` **before** Grok runs.  
-2. After Grok exits, require:
+- Wrapper-owned build gate remains the existing single-target gate for that workspace.  
+- Contract validation commands must resolve `cwd` under that target/worktree; they do **not** replace the build gate.  
+- Cross-package work spanning multiple independent package roots: sequential runs or declare all work under one target that legitimately owns the gate — not multi-root gates in PR4.
 
-```text
-git rev-parse HEAD == baseRevision
-```
+### 14.5 Unexpected commits
 
-3. If HEAD changed:
+Before Grok: record full `baseRevision`. After Grok: `git rev-parse HEAD == baseRevision`.
 
-| Action | Required |
-|--------|----------|
-| Error class | `unexpected-commit` |
-| Worktree / branch | Preserve for inspection |
-| `integration.ready` | `false` |
-| Convert commit to handoff | **No** — do not silently use commits as the artifact source |
-| Reset / rewrite worktree | **No** |
-| `--allow-commits` | Out of PR4 (future explicit mode) |
+If not: append blocker `unexpected-commit` (see §14.8); ready false; **preserve** worktree; **no** reset; continue forensic capture if state readable. Primary classified failure uses unexpected-commit when it is the primary policy failure.
 
-### 14.5 Immutable complete Git patch
-
-Module (required path):
+### 14.6 Finalization order for code (exact)
 
 ```text
-plugin/wrapper/scripts/groklib/implementation_handoff.py
+1. verify sentinel
+2. remove exact sentinel only (never a user-authored similarly named path)
+3. verify HEAD still equals baseRevision
+4. compute changed files (sentinel must not appear)
+5. enforce write scopes (contract)
+6. capture forensic patch (phase 1) + provisional blockers
+7. execute requiredValidation (sandboxed, cwd confined)
+8. execute wrapper build gate (authoritative)
+9. complete shared safety checks (sandbox verify, auth-home cleanup, original-checkout)
+10. compute integration.ready
+11. persist final handoff JSON (phase 2) — never rewrite ready true after terminal publication
+12. persist terminal envelope (worker terminal writer)
 ```
 
-After sentinel verification and write-scope validation, generate a complete
-patch using a temporary Git index.
+Tests: sentinel never in changed files/patch; missing/symlinked/malformed sentinel fails; sentinel removal cannot delete user path with similar name.
 
-#### Algorithm (exact order)
+### 14.7 Two-phase handoff artifacts
 
-1. Remove the exact wrapper-owned sentinel `.grok-run-<run-id>` after validating it.  
-2. Create a temporary index inside the private run directory:
-   `runs/<run-id>/artifacts/handoff.idx` (mode 0600, private dir 0700).  
-3. Set `GIT_INDEX_FILE` **only** for artifact-generation commands.  
-4. `git read-tree <baseRevision>`.  
-5. `git add -A` against the isolated worktree using the temporary index.  
-6. `resultTreeOid = git write-tree`.  
-7. Generate:
+Module: `plugin/wrapper/scripts/groklib/implementation_handoff.py`.
 
-```text
-git diff --cached --binary --full-index --no-ext-diff <baseRevision>
+**Phase 1 — immutable patch capture** (after scopes/HEAD; before/while remaining gates):
+
+1. Temp index uniquely named under `artifacts/` (e.g. `handoff.<pid>.<token>.idx`).  
+2. `GIT_INDEX_FILE` only for artifact git commands.  
+3. `read-tree` base → `add -A` → `write-tree` → `diff --cached --binary --full-index --no-ext-diff`.  
+4. Atomic `implementation.patch` mode 0600; SHA-256; re-read verify.  
+5. Max 25 MiB default; env `GROK_HANDOFF_PATCH_MAX_BYTES` clamp 1–100 MiB; never truncate.  
+6. Secret detector on patch; fail closed `secret-material`.  
+7. `finally`: remove temp index; cleanup failure logged; does not invalidate already verified patch unless sensitive temp state remains accessible.  
+8. Record provisional blockers accumulated so far.
+
+**Phase 2 — final handoff manifest** only after sandbox, auth-home, build gate, requiredValidation, and terminal lifecycle resolution:
+
+- Write `implementation-handoff.json` once with final `integration.ready` and complete `blockers`.  
+- Never rewrite an integration-ready manifest after terminal publication.  
+- Failed runs may keep forensic patch; manifest is terminal and permanently `ready: false`.
+
+### 14.8 Blocker accumulator (not raise-and-abort for policy)
+
+Post-Grok **policy** failures use a blocker list:
+
+| Kind | Behavior |
+|------|----------|
+| Integration blockers (unexpected-commit, write-scope-violation, validation-failure, no-changes, build-gate, secret-material when patch rejected, etc.) | Append blocker; ready false; **continue** forensic capture when repo readable |
+| Unrecoverable (ownership failure, unsafe path, artifact corruption mid-write, unreadable git) | Abort capture; no ready; classified failure |
+
+After capture: produce classified failure envelope using **primary** blocker (first hard policy failure in order of detection), with **all** blockers listed in handoff.
+
+### 14.9 Execute contract validation (mandatory)
+
+Dedicated step (plan Task 4.5):
+
+1. Only after scope + unexpected-commit checks (and sentinel removal).  
+2. For each `requiredValidation` entry: resolve `cwd` under isolated worktree; reject escapes.  
+3. Execute argv array with `shell=False` under code write-confinement/sandbox.  
+4. Record full command evidence (hashes + redacted tails) **before** interpreting exit status.  
+5. Nonzero exit → blocker; prevents `integration.ready`.  
+6. Test: validation command cannot write outside the worktree.
+
+### 14.10 Validation authority in handoff schema
+
+```json
+{
+  "validation": {
+    "requiredCommandsPassed": true,
+    "buildGatePassed": true,
+    "allPassed": true,
+    "sources": {
+      "wrapperBuildGate": { "authoritative": true, "passed": true },
+      "contractRequiredValidation": { "authoritative": true, "passed": true, "trustModel": "operator-contract-sandboxed" },
+      "modelClaimedCommands": { "authoritative": false, "note": "ignored for readiness" }
+    }
+  }
+}
 ```
 
-8. Write `artifacts/implementation.patch` atomically (temp + `os.replace`), mode **0600**.  
-9. Calculate and persist: patch SHA-256, byte length, `resultTreeOid`, contract SHA-256, `createdAtUtc`.  
-10. Re-read the patch from disk and verify SHA-256 before reporting terminal success for ready.  
-11. Bounded size: default **25 MiB** (`26214400` bytes). Env
-    `GROK_HANDOFF_PATCH_MAX_BYTES` integer, clamp **1 MiB .. 100 MiB**. Exceed →
-    `artifact-generation-failure`; **never truncate**.  
-12. Run the existing secret-material detector over the patch before exposing it
-    as a handoff. Secret-shaped material fails closed with existing secret
-    classification (`secret-material`).  
-13. Ignored files remain excluded. Sentinel and temporary artifact files must
-    **never** enter the patch.
+- Wrapper build gate: authoritative.  
+- Wrapper-executed contract validation: authoritative only under declared trust+sandbox.  
+- Grok-prose command claims: non-authoritative; never set readiness.  
+- Parent always reruns relevant validation after integration.
 
-#### Capture requirements
+### 14.11 Handoff JSON schema + single validator
 
-The patch **must** capture: modified, new untracked, deleted, renames, binary,
-symlinks, executable-bit changes.
+Canonical validation function: `validate_implementation_handoff(doc: dict) -> list[str]` in `implementation_handoff.py`.
 
-#### Source of truth
+Writer and `modes/handoff.py` **must** call the same function. No separate hand-edited public JSON Schema file in PR4 (avoid dual sources). Round-trip writer-reader test prevents drift.
 
-Do **not** treat the live worktree as the durable handoff after completion.
-The **persisted patch** (plus handoff JSON) is the immutable source of truth.
-Forensic inspection of the retained worktree remains allowed and useful.
-
-#### Required artifact files
-
-```text
-runs/<run-id>/artifacts/implementation.patch
-runs/<run-id>/artifacts/implementation-handoff.json
-```
-
-Optional private full command logs: `runs/<run-id>/artifacts/commands/` (mode 0600 files).
-
-### 14.6 Implementation handoff schema (canonical)
-
-One schema only. File: `implementation-handoff.json`.
+Full document shape:
 
 ```json
 {
@@ -537,11 +709,7 @@ One schema only. File: `implementation-handoff.json`.
   "baseRevision": "<full SHA>",
   "resultTreeOid": "<Git tree OID>",
   "changedFiles": [
-    {
-      "path": "packages/sharedSchemas/src/imagibooks/imagiexplainAdminPreview.ts",
-      "status": "added",
-      "oldPath": null
-    }
+    { "path": "…", "status": "added", "oldPath": null }
   ],
   "patch": {
     "format": "git-binary-full-index-v1",
@@ -549,85 +717,38 @@ One schema only. File: `implementation-handoff.json`.
     "sha256": "…",
     "bytes": 12345
   },
-  "validation": {
-    "requiredCommandsPassed": true,
-    "buildGatePassed": true,
-    "allPassed": true
-  },
-  "integration": {
-    "ready": true,
-    "blockers": []
-  },
-  "worktree": {
-    "retained": true,
-    "path": "<runtime path>",
-    "branch": "grok/code/<run-id>"
-  },
+  "validation": { "requiredCommandsPassed": true, "buildGatePassed": true, "allPassed": true, "sources": {} },
+  "integration": { "ready": true, "blockers": [] },
+  "worktree": { "retained": true, "path": "…", "branch": "grok/code/<run-id>" },
   "createdAtUtc": "…"
 }
 ```
 
-#### Field rules
+### 14.12 `integration.ready`
 
-| Field | Rule |
-|-------|------|
-| `taskId` / `contractSha256` | `null` if no contract file |
-| `changedFiles[].status` | Git-style: `added`, `modified`, `deleted`, `renamed`, `typechange` as applicable |
-| `changedFiles[].oldPath` | Set for renames; else `null` |
-| `patch.format` | Exact string `git-binary-full-index-v1` |
-| Alignment with C4 | Prefer single source: handoff may mirror `baseRevision` / `changedFiles` / worktree from the same post-Grok computation used for the envelope; do not maintain divergent independent copies |
+Wrapper-computed only. True only when all hold:
 
-### 14.7 `integration.ready` (wrapper-computed only)
+1. Lifecycle `completed`  
+2. HEAD == baseRevision  
+3. Scopes OK (if contract)  
+4. No original-checkout escape  
+5. Sentinel OK  
+6. Patch + hash OK  
+7. Contract requiredValidation all 0 (if present)  
+8. Build gate OK  
+9. Shared safety (sandbox/auth) OK  
+10. `blockers` empty  
+11. At least one changed path (else blocker `no-changes`)
 
-`integration.ready` is computed by the wrapper, **never** by Grok prose.
+### 14.13 Command evidence
 
-It may be `true` **only** when all of the following hold:
+Per command: stdout/stderr sha256; redacted tails max **4096** bytes; truncated flags. Optional full logs under `artifacts/commands/` mode 0600. Never full logs on envelope stdout.
 
-1. Lifecycle is `completed`.  
-2. HEAD still equals the exact full `baseRevision`.  
-3. All changed files are inside declared write scopes (when contract present).  
-4. No unexpected original-checkout write occurred.  
-5. Sentinel verification passed.  
-6. Patch generation and hash verification passed.  
-7. All `requiredValidation` commands exited 0 (when contract present; if no contract, this clause is N/A and treated as pass for the clause).  
-8. Existing wrapper-controlled build gate passed.  
-9. Cleanup/auth/sandbox verification passed as required by existing code mode.  
-10. No classified blocker remains (`blockers` is empty).  
-11. At least one changed path exists (empty diff is **not** ready; blocker `no-changes`).
+Git path listing: use `-z` / NUL-safe parsing only. Tests include paths with spaces, tabs, newlines, and non-ASCII. Never parse porcelain by line splitting alone.
 
-A failed implementation may still retain a **forensic** patch and handoff JSON,
-but `integration.ready` must be `false` and `blockers` must name every reason
-(e.g. `write-scope-violation`, `unexpected-commit`, `validation-failure`,
-`secret-material`, `artifact-generation-failure`, `no-changes`, build-gate failure class).
+### 14.14 `/grok:handoff`
 
-### 14.8 Command validation evidence
-
-Current command records already have argv, cwd, purpose, duration, exit status.
-Extend each command record with:
-
-```json
-{
-  "stdoutSha256": "…",
-  "stderrSha256": "…",
-  "stdoutTail": "…",
-  "stderrTail": "…",
-  "stdoutTruncated": true,
-  "stderrTruncated": false
-}
-```
-
-| Rule | Locked |
-|------|--------|
-| Hash | SHA-256 of complete captured stdout/stderr (before tail truncation) |
-| Tail size | Max **4096** UTF-8 bytes each (or byte-bounded equivalent if non-UTF-8 safe decode) |
-| Redaction | Apply existing secret redaction **before** persisting or returning tails |
-| Full logs | Optional under `artifacts/commands/` mode 0600; never on the one-envelope stdout channel |
-| Authority | Wrapper-controlled build-gate commands remain authoritative for the gate |
-| Parent duty | Parent harness must re-run relevant validation after integration; task commands are evidence only |
-
-### 14.9 Mode `/grok:handoff`
-
-#### New files
+Files:
 
 ```text
 plugin/skills/handoff/SKILL.md
@@ -635,207 +756,54 @@ plugin/skills/handoff/run.mjs
 plugin/wrapper/scripts/groklib/modes/handoff.py
 ```
 
-Register `handoff` in wrapper modes, envelope MODES, and companion
-`WRAPPER_MODES` / streaming lists as required for parity.
+Companion:
 
-#### Behavior (strictly read-only)
+- Add `handoff` to `WRAPPER_MODES` only.  
+- **Do not** add to `STREAMING_MODES`.  
+- Dedicated `runHandoff()` equivalent to `runStatus()` passthrough (no job creation, no live relay, no progress adoption).  
+- Stderr must not contaminate single JSON stdout (same discipline as status).  
 
-1. Accept exactly one canonical `--run-id`.  
-2. Verify run ownership.  
-3. Require a terminal run (terminal lifecycle or valid terminal envelope).  
-4. Load `implementation-handoff.json`.  
-5. Re-hash `implementation.patch` and compare to stored `patch.sha256`.  
-6. Validate handoff schema (`schemaVersion`, required keys, types).  
-7. Return **one** JSON envelope including `integration.ready` and `blockers`.  
-8. Never apply, commit, merge, push, or clean anything.  
-9. Never modify the worktree.  
-10. Fail `artifact-integrity-failure` if stored artifacts were modified (hash mismatch or schema break after load).  
-11. Fail `handoff-unavailable` for runs that never produced an implementation artifact (non-code modes, interrupted before artifact, missing files).  
+Behavior: read-only; `--run-id` only; rehash patch; same `validate_implementation_handoff`; `artifact-integrity-failure` / `handoff-unavailable`. No apply/commit/merge/push/cleanup. Tests: no Grok process; no companion job.
 
-Durable identifier: **run ID**. Companion job ID may remain a UI convenience for
-status/result but cannot be required for handoff.
+### 14.15 Parent protocol (document only)
 
-### 14.10 Parent-harness integration protocol (document only)
+Same 14 steps as rev 5 (dispatch → wait → handoff → ready → hash → inspect → base still present → dirty overlap check → `git apply --check --binary` → explicit apply → revalidate parent → record runId+hash). No auto-apply in PR4.
 
-Codex/Claude parent protocol — **document in skills/docs**; no auto-apply command in PR4:
+### 14.16 Parallel peers
 
-1. Dispatch `code` from an exact committed base SHA.  
-2. Use disjoint write scopes for parallel implementation peers.  
-3. Wait for terminal lifecycle (`status` until not running).  
-4. Read `/grok:handoff --run-id <id>`.  
-5. Require `integration.ready === true`.  
-6. Verify the patch hash (local re-hash or trust handoff mode re-verify).  
-7. Inspect the patch semantically.  
-8. Check that the parent branch still contains the recorded `baseRevision`.  
-9. Check for dirty changes overlapping the patch paths.  
-10. Run `git apply --check --binary <patch>`.  
-11. Apply only after the parent agent or user **explicitly** authorizes integration.  
-12. Never auto-commit or auto-push.  
-13. Rerun affected tests and build gates in the parent worktree.  
-14. Record the Grok `runId` and patch hash in execution evidence.  
+Suitable/unsuitable lists unchanged from rev 5. Disjoint write scopes; dependents re-base after integrate A. One target workspace per run.
 
-Safe automatic application is a **separate** future feature after dogfooding.
+### 14.17 Cleanup language (factual only)
 
-### 14.11 Parallel peer-agent rules (document)
-
-#### Suitable tasks
-
-- One module or cohesive package boundary  
-- Exact write paths or subtrees  
-- Concrete acceptance criteria  
-- Deterministic validation commands  
-- No unresolved architecture decision  
-- No production deployment or external write  
-- No database migration unless separately designed and operator-approved  
-
-#### Unsuitable tasks
-
-- Broad repository refactors with overlapping ownership  
-- Changes requiring continuous shared conversational context  
-- Tasks whose write scope cannot be enumerated  
-- Production migrations, deployment, or destructive operations  
-- Multiple agents modifying the same paths concurrently  
-
-#### Parallelism
-
-- Parallel runs **must** have disjoint write scopes.  
-- If task B depends on task A: integrate A first, dispatch B from the **new**
-  committed revision. Do not dispatch dependent runs from the same stale base.  
-- Parent Codex/Claude owns orchestration, integration order, final validation,
-  and conflict resolution.
-
-### 14.12 Cleanup and forensic behavior
-
-| Rule | Locked |
-|------|--------|
-| Code worktrees | Retained by default (unchanged) |
-| Artifact location | Run directory `artifacts/`, not only the worktree |
-| Ownership | Cleanup continues to verify run/worktree ownership |
-| Cross-run | Never remove another run’s worktree or branch |
-| Ready handoff | Warn clearly when deleting a run that has `integration.ready: true` and no acknowledgment field; still allow explicit confirm |
-| Claims | Never claim that cleanup integrated the implementation |
-| Confirmation | Preserve existing explicit confirmation requirements |
-| Auto-cleanup after success | **Do not** add; would remove the easiest forensic surface before parent inspection |
-
-### 14.13 Error classes
-
-#### New (add to `ERROR_CLASSES` and docs)
+When cleaning a run with `integration.ready === true`, warn with **exactly** this meaning (wording may match):
 
 ```text
-implementation-contract-invalid
-write-scope-violation
-unexpected-commit
-artifact-generation-failure
-artifact-integrity-failure
-handoff-unavailable
+This run contains an integration-ready handoff. Cleanup will permanently remove its retained worktree and stored handoff artifacts. The plugin cannot determine whether the implementation was integrated.
 ```
 
-#### Reuse existing
+Do **not** say “unacknowledged.” No acknowledgment state exists.
 
-```text
-validation-failure
-secret-material
-wrong-working-directory
-worktree-failure
-state-ownership-violation
-cleanup-failure
-```
+### 14.18 Error classes / tests / docs / release
 
-Every failure must produce a terminal envelope when safe persistence is still
-possible. Forensic handoff may still be written with `integration.ready: false`
-when partial artifacts exist.
+As §12, §14.6–14.14 tests, dual-host smoke §14.19, packaging 1.6.0 on the three version paths.
 
-### 14.14 Test matrix (mandatory)
+### 14.19 Dual-host smoke
 
-Unit and integration tests must cover:
-
-| Area | Cases |
-|------|--------|
-| Contract parsing | Strict schema; schemaVersion; taskId charset |
-| Scopes | Exact file vs subtree; path-component not string prefix |
-| Path rejection | Traversal, absolute, symlink escape, empty, NUL |
-| Patch shapes | Modified, added, deleted, renamed, binary, symlink, executable-bit |
-| Untracked | Previously untracked files included in patch |
-| Ignored | Ignored files excluded |
-| Sentinel | Grok sentinel excluded from patch |
-| Commits | Unexpected Grok commit → `unexpected-commit`, ready false, no reset |
-| Apply fidelity | Patch applies cleanly to exact base; applied tree matches `resultTreeOid` |
-| Integrity | Patch tampering → handoff `artifact-integrity-failure`; contract tampering → hash fail |
-| Scopes fail | Write-scope violation → not integration-ready |
-| Gates | Build-gate failure retains forensic artifact, ready false; required-validation failure blocks ready |
-| Empty | No-change code run not integration-ready (`no-changes`) |
-| Interrupted | Handoff unavailable |
-| Identity | Job ID not required when run ID known |
-| Mode | Handoff mode is read-only (no worktree/git mutations in tests) |
-| Paths | Spaces and non-ASCII path components handled safely |
-| Concurrency | Concurrent runs cannot read or clean each other’s artifacts |
-| Permissions | Artifact files/dirs private (0600/0700) |
-| Secrets | Secret-shaped patch content fails closed |
-| Command tails | Bounded and redacted |
-| Suites | Full Python and Node suites pass |
-
-### 14.15 Documentation and dual-host parity
-
-Update all behavior-owning documentation required by AGENTS.md:
-
-| Document |
-|----------|
-| `README.md` |
-| `CHANGELOG.md` |
-| `docs/roadmap.md` |
-| `docs/COMPATIBILITY.md` |
-| `docs/RELEASE.md` (smoke steps) |
-| `docs/PROVENANCE.md` (one line if needed) |
-| `plugin/references/README.md` |
-| `plugin/references/manual-smoke.md` |
-| `plugin/wrapper/references/authority-policies.md` |
-| `plugin/wrapper/SKILL.md` |
-| `plugin/skills/code/SKILL.md` |
-| `plugin/skills/handoff/SKILL.md` (new) |
-| Claude and Codex plugin/agent manifests / packaging version **1.6.0** |
-
-Document explicitly:
-
-- `/grok:transfer` transfers conversation context.  
-- `/grok:handoff` transfers implementation output.  
-- Neither command integrates code automatically.  
-- Codex and Claude consume the same handoff schema.  
-- The wrapper remains the sole authority for safety and readiness.  
-- Notifications indicate terminal availability, not integration success.  
-
-### 14.16 PR4 release
-
-Treat PR4 as a **minor** release (**1.6.0** after 1.5.x) because it adds a
-public handoff mode and schema.
-
-#### Required automated evidence
-
-```bash
-cd plugin/wrapper/scripts
-python3 -m unittest discover -s tests -q
-
-cd plugin/scripts
-node --test tests/*.test.mjs
-
-claude plugin validate ./plugin --strict
-```
-
-#### Dual-host smoke
-
-1. Claude Code: `code` → `status` → `handoff`.  
-2. Codex: `code` → `status` → `handoff`.  
-3. Failed code run → forensic handoff with `integration.ready: false`.  
-4. Tampered patch → handoff integrity failure.  
-5. Explicit cleanup after handoff inspection.  
+1. Claude: code → status → handoff  
+2. Codex: code → status → handoff  
+3. Failed code → forensic handoff ready false  
+4. Tampered patch → integrity failure  
+5. Explicit cleanup after inspection  
+6. Status on failed target: envelope visible despite exit 1  
 
 ## 15. Success criteria (full program)
 
-- [ ] PR1–PR3 criteria (lifecycle, isolation, notify)  
-- [ ] Code handoff artifacts + ready gate per §14.7  
-- [ ] `/grok:handoff` integrity per §14.9  
-- [ ] Dual-host smoke code→status→handoff  
-- [ ] Parent protocol and parallel rules documented  
-- [ ] No TBD/placeholder decisions remain in this design  
+- [ ] PR1–PR3 criteria with CAS + read-only status  
+- [ ] Terminal envelope never replaced  
+- [ ] Code two-phase handoff + ready after all gates  
+- [ ] Contract validation executed under sandbox  
+- [ ] `/grok:handoff` non-streaming integrity  
+- [ ] Dual-host smoke including failed-target status envelope  
 
 ## 16. Out of scope
 
@@ -845,4 +813,40 @@ claude plugin validate ./plugin --strict
 - Ignore-list review safety  
 - Auto-apply handoff  
 - `--allow-commits`  
+- Status-driven durable interrupted persistence  
+- Automatic notification retry  
+- Multi-root build gates in one code run  
+- Operator notify-retry command (future PR)  
 
+## 17. New source file conventions
+
+Every new Python/JS/Markdown/skill file must follow repository path-header and skill-frontmatter rules (existing `modes/*.py` header style; skill YAML frontmatter; `run.mjs` self-locating pattern).
+
+## 18. Review findings map (rev 6)
+
+| # | Severity | Resolution section |
+|---|----------|--------------------|
+| 1 | Critical | §6.3 read-only status |
+| 2 | Critical | §4, §7, §9 CAS + single writer |
+| 3 | Critical | §14.9 contract validation execution |
+| 4 | Critical | §14.7 two-phase handoff |
+| 5 | High | §6 create_run inventory + CAS merge |
+| 6 | High | §14.14 non-streaming handoff |
+| 7 | High | §14.6 order |
+| 8 | High | §14.8 blocker accumulator |
+| 9 | High | §9 full protocol |
+| 10 | High | §11 execution context |
+| 11 | High | §11 at-most-once attempt |
+| 12 | High | §10 ownership + cleanup |
+| 13 | High | §10 dirty patch rules |
+| 14 | Medium | §14.17 cleanup wording |
+| 15 | Medium | §4 packaging paths; plan file maps |
+| 16 | Medium | §14.10 validation sources |
+| 17 | Medium | §6.3 skill exit 1 |
+| 18 | Medium | §8 elapsed time |
+| 19 | Medium | §14.7 temp index finally |
+| 20 | Medium | §14.11 single validator |
+| 21 | Medium | §14.4 one target |
+| 22 | Low | §13 four minors |
+| 23 | Low | §17 conventions |
+| 24 | Low | §14.13 `-z` paths |
