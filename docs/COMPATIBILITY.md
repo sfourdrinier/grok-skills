@@ -28,10 +28,18 @@ adversarial-review). Not status/jobs/result/setup alone.
 | `native` | OS notify (macOS/Linux) for FG and BG |
 | `webhook` | POST JSON if `notificationWebhookUrl` set |
 
-At-most-once **attempt** via `runs/<runId>/notified.json` (no auto-retry; not
-exactly-once). Skills/agents must set execution context per
-`plugin/references/execution-context.md`. Context is never forwarded to the
-Python wrapper. Operator re-attempt is deferred (PR5).
+At-most-once **attempt** via `runs/<runId>/notified.json` for hardened durable
+runs (no auto-retry; not exactly-once). Skills/agents must set execution context
+per `plugin/references/execution-context.md`. Context is never forwarded to the
+Python wrapper.
+
+**1.5.0 residuals deferred to PR5 (1.7.0):**
+
+| Item | Note |
+|------|------|
+| Operator re-attempt | Explicit re-fire after failed/stuck notify (may duplicate) |
+| Direct-mode push notify | Job-scoped marker home (direct has no wrapper `runs/<id>`) |
+| Headless / native honesty | Setup + docs: native needs a desktop session; prefer webhook |
 
 Verified against local installs on 2026-07-15:
 

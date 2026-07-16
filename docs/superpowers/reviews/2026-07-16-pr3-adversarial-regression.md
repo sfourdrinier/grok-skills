@@ -71,11 +71,15 @@
 | plan CAS before prepare | `test_isolation_identity_recorded_before_prepare` |
 | sibling .diff reaped | `test_remove_external_worktree_deletes_sibling_diff` |
 
-## Residual accepted (document, do not open Codex loop)
+## Residual accepted for 1.5.0 (PR5 or permanent)
 
-1. Direct mode: no durable `runs/<id>` -> no push notify (job still tracked).  
-2. Headless native often fails; marker still `completed`+`failed` (correct).  
-3. Webhook may target private IPs if operator sets URL (operator-trusted config).  
+| Residual | Disposition |
+|----------|-------------|
+| Direct mode: no durable `runs/<id>` → no push notify | **PR5-B** (job-scoped marker) |
+| Headless native often fails; marker still completed+failed | **PR5-C** (setup/docs honesty + optional hint); behavior correct |
+| Operator re-attempt / stuck `pending` force | **PR5-A** (already scheduled) |
+| Webhook private/metadata IPs | Permanent residual unless later denylist; operator-trusted |
+| Automatic retry / exactly-once | Permanent non-goal |
 
 ## Post-Codex-simulation fixes (same branch)
 

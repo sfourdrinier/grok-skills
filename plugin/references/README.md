@@ -110,8 +110,12 @@ Canonical table: root [README.md](../../README.md) (skills + agents). Summary:
 Canonical skill/agent prefix: [execution-context.md](execution-context.md).
 
 Completion push (OS toast / webhook) is companion-only, default **off**, at-most-once
-attempt after terminal live runs. Prefer `setup --notification-mode auto` for
-background jobs. Never status/jobs alone. Operator retry is not in 1.5.0 (PR5).
+attempt after terminal live runs (hardened durable `runs/<id>`). Prefer
+`setup --notification-mode auto` for background jobs. Never status/jobs alone.
+
+**Not in 1.5.0 (PR5 → 1.7.0):** operator re-attempt; direct-mode push notify;
+headless/native honesty polish (setup/docs). Native toasts need a desktop session
+today; use `webhook` for SSH/CI until PR5.
 
 ## Optional stop-review gate
 

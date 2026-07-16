@@ -39,8 +39,11 @@ over. It is **not** a complete sandbox against an adversarial model.
   (plugin state), not in the wrapper envelope. Payload is small
   (`runId`, `mode`, `lifecycle`, `durationSeconds`) — do not put secrets in the
   webhook URL. At-most-once **attempt** only (no delivery guarantee; no auto-retry).
-  Isolation dirty patches may briefly exist as `*.diff` under the state root and
-  are cleaned on success/cleanup paths; treat state root as sensitive.
+  Native OS notify expects a desktop session; prefer **webhook** for headless
+  hosts until PR5 docs/setup polish. Direct mode has no push notify in 1.5.0
+  (job still tracked; PR5 job-scoped marker). Isolation dirty patches may briefly
+  exist as `*.diff` under the state root and are cleaned on success/cleanup
+  paths; treat state root as sensitive.
 
 Full design notes: [docs/OPEN-SECURITY-DECISIONS.md](docs/OPEN-SECURITY-DECISIONS.md).
 
