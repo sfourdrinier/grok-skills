@@ -1,10 +1,10 @@
-# Run lifecycle program — Implementation Plan (revision 11)
+# Run lifecycle program — Implementation Plan (revision 12)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Checkboxes track progress.
 
-**Goal:** Full run lifecycle with CAS, crash-consistent terminal persistence, read-only status, process finalize worker, **opt-in** isolated review, at-most-once notify attempts, verified `code` implementation handoff, and (later) **operator-driven notify retry** — **five PRs**.
+**Goal:** Full run lifecycle with CAS, crash-consistent terminal persistence, read-only status, process finalize worker, **opt-in** isolated review, at-most-once notify attempts, verified `code` implementation handoff, and (later) **notify dogfood follow-ups as PR5** — **five PRs**.
 
-**Design:** [docs/superpowers/specs/2026-07-15-run-lifecycle-design.md](../specs/2026-07-15-run-lifecycle-design.md) **revision 11**.
+**Design:** [docs/superpowers/specs/2026-07-15-run-lifecycle-design.md](../specs/2026-07-15-run-lifecycle-design.md) **revision 12**.
 
 **Baseline:** v1.2.10; **PR1 shipped** on main as **1.3.x**. **Versions:** 1.3.x (done) → 1.4.0 → 1.5.0 → 1.6.0 → **1.7.0** (PR5).
 
