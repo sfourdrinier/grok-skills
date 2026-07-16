@@ -163,7 +163,31 @@ terminal-envelope-incomplete
 
 ## PR1 — Lifecycle core
 
+### /goal strings (copy-paste)
+
+Use these under `/goal` when executing PR1. One goal at a time: prefer the **task** goal while coding that task; use the **PR1 ship** goal for end-to-end finish.
+
+**PR1 ship (full release gate):**
+
+```text
+Ship PR1 lifecycle core as v1.3.0 on branch feat/pr1-run-lifecycle-1.3.0 per design+plan rev 8. Done only when ALL: Tasks 1.1–1.7 complete; seed before run-id + CAS/run.lock + envelope-first persist_terminal_envelope + read-only status (envelope-aware projection) + monotonic elapsedMs + spawn finalize worker with parent recovery only when is_alive() is False; cd plugin/wrapper/scripts && python3 -m unittest discover -s tests -q exits 0; cd plugin/scripts && node --test tests/*.test.mjs exits 0; packaging triple 1.3.0; PR1 docs list updated; no PR2–PR4 product scope.
+```
+
+| Task | `/goal` objective (paste after `/goal `) |
+|------|------------------------------------------|
+| **1.1** | `PR1 Task 1.1: create_run seeds run.json (lifecycle=created, status=running, recordRevision=0) before emit_run_id_marker; inventory all create_run callers; migrate preflight/_shared/_worktree + fixtures off full-replace write_run_record toward CAS merge; tests pass for seed + migration; commit "runstate: seed run.json with recordRevision before run-id marker". Done when those tests green and commit exists on feat/pr1-run-lifecycle-1.3.0.` |
+| **1.2** | `PR1 Task 1.2: implement run.lock + cas_update_run_record + set_lifecycle with design §6 graph and recordRevision CAS; terminal lifecycle overwrite refused; concurrent CAS conflict tested; commit "runstate: CAS recordRevision and run.lock". Done when unit tests green and commit exists.` |
+| **1.3** | `PR1 Task 1.3: persist_terminal_envelope envelope-first per design §7.1; idempotent lifecycle finish if valid envelope exists; never replace terminal envelope body; crash-after-envelope-before-lifecycle test; success/failure/cancel paths; commit "runstate: envelope-first crash-consistent terminal persist". Done when those tests green and commit exists.` |
+| **1.4** | `PR1 Task 1.4: ProgressWriter elapsedMs from process-local monotonic clock; UTC ts on events; worker does not write progress; parent finalizing messages; status display elapsed from UTC with clamp; commit "progress: monotonic elapsedMs in owning process". Done when tests green and commit exists.` |
+| **1.5** | `PR1 Task 1.5: spawn finalize_worker per design §9/§9.4; worker normal terminal writer; parent durable recovery only when is_alive() is False; durable classes finalization-timeout/cli-failure/finalization-worker-missing-result; unkillable → ephemeral only; race tests; commit "modes: process finalize worker with confirmed-dead parent recovery". Done when test_finalize_watchdog green and commit exists.` |
+| **1.6** | `PR1 Task 1.6: status strictly read-only; effective lifecycle record/envelope/derived per design §6; byte-identical run dir after status; failed target exit 1 with envelope relay; status SKILL.md updated; commit "status: read-only projection with envelope-aware effective lifecycle". Done when test_mode_status green and commit exists.` |
+| **1.7** | `PR1 Task 1.7: all PR1 docs from file map; packaging triple 1.3.0; full Python+Node suites green; commit and annotated tag v1.3.0. Done when versions are 1.3.0, suites pass, and tag exists.` |
+
+**Session rule:** When a task goal completes, mark `/goal` completed (or clear and set the next task goal). Do not start Task N+1 until Task N’s commit exists unless the plan requires a single combined commit (it does not).
+
 ### Task 1.1 — Atomic seed before run-id + caller inventory
+
+**/goal:** see table row **1.1** above.
 
 **Files:** `runstate.py`, `preflight.py`, `_shared.py`, `_worktree.py`, `test_runstate.py`, fixture tests listed in file map
 
@@ -191,6 +215,8 @@ def test_emit_run_id_only_after_seed_exists(self):
 
 ### Task 1.2 — Lock + CAS API
 
+**/goal:** see table row **1.2** above.
+
 **Files:** `runstate.py`, tests
 
 - [ ] Implement exclusive `run.lock` (fcntl Unix / msvcrt Windows).  
@@ -201,6 +227,8 @@ def test_emit_run_id_only_after_seed_exists(self):
 - [ ] **Commit** `runstate: CAS recordRevision and run.lock`
 
 ### Task 1.3 — Crash-consistent `persist_terminal_envelope`
+
+**/goal:** see table row **1.3** above.
 
 Implement design §7.1 exactly (envelope-first; idempotent lifecycle finish).
 
@@ -225,6 +253,8 @@ def persist_terminal_envelope(
 
 ### Task 1.4 — Progress `elapsedMs` (monotonic owner)
 
+**/goal:** see table row **1.4** above.
+
 - [ ] ProgressWriter stores `time.monotonic()` start at construction (owning process).  
 - [ ] Every emit includes `elapsedMs` and UTC `ts`.  
 - [ ] Worker does not write progress.  
@@ -233,6 +263,8 @@ def persist_terminal_envelope(
 - [ ] **Commit** `progress: monotonic elapsedMs in owning process`
 
 ### Task 1.5 — Finalize worker protocol
+
+**/goal:** see table row **1.5** above.
 
 **Files:** `modes/finalize_worker.py`, `_shared.py`, `_worktree.py`, `envelope.py`, `tests/test_finalize_watchdog.py`
 
@@ -261,6 +293,8 @@ Tests:
 
 ### Task 1.6 — Status projection (read-only)
 
+**/goal:** see table row **1.6** above.
+
 **Files:** `status.py`, `test_mode_status.py`, `plugin/skills/status/SKILL.md`
 
 - [ ] Projection table + effective lifecycle resolution design §6 (record / envelope / derived).  
@@ -272,6 +306,8 @@ Tests:
 - [ ] **Commit** `status: read-only projection with envelope-aware effective lifecycle`
 
 ### Task 1.7 — Docs + tag 1.3.0
+
+**/goal:** see table row **1.7** above.
 
 - [ ] All PR1 docs from file map.  
 - [ ] Packaging triple **1.3.0**.  

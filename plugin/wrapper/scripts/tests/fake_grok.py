@@ -400,7 +400,7 @@ def _scenario_turn_exhaustion(control: "dict") -> int:
 
 
 def _scenario_turn_exhaustion_with_text(control: "dict") -> int:
-    # Operator budget hit but findings already present — salvage as success.
+    # Operator budget hit but findings already present - salvage as success.
     payload = _load_base_payload()
     payload["stopReason"] = "Cancelled"
     payload["text"] = "PARTIAL finding: race on auth token refresh is still open."
@@ -417,7 +417,7 @@ def _scenario_turn_exhaustion_with_text(control: "dict") -> int:
 
 
 def _scenario_cancelled_empty_findings(control: "dict") -> int:
-    # Cancelled with structured empty shell only — must hard-fail as cancelled.
+    # Cancelled with structured empty shell only - must hard-fail as cancelled.
     payload = _load_base_payload()
     payload["stopReason"] = "Cancelled"
     payload["text"] = ""

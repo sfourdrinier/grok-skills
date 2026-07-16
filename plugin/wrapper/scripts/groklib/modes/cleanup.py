@@ -59,6 +59,45 @@ def _rebuild_worktree(record: dict) -> Optional[ExternalWorktree]:
     )
 
 
+_TERMINAL_LIFECYCLES = frozenset({"completed", "failed", "canceled"})
+
+
+def _refuse_active_run(run_id: str, run_dir: pathlib.Path, record: dict) -> None:
+    """Raise if --confirm would delete a still-active run (C3).
+
+    - Finalize worker alive/unknown: always refuse (durable write may still land).
+    - Non-terminal lifecycle + owner not dead: refuse (run still in progress).
+    Terminal runs may be cleaned even if owner.pid still names a live process
+    (the CLI process that finished the run often outlives terminalization in tests).
+    Stuck non-terminal runs (owner dead AND worker dead) may be cleaned.
+    """
+    from groklib.modes.finalize_worker import finalize_worker_liveness
+
+    worker_liveness = finalize_worker_liveness(run_dir)
+    if worker_liveness != "dead":
+        raise GrokWrapperError(
+            "state-ownership-violation",
+            "refusing to remove run {}: finalize worker is still {!r}".format(run_id, worker_liveness),
+            {
+                "runId": run_id,
+                "workerLiveness": worker_liveness,
+                "lifecycle": record.get("lifecycle"),
+            },
+        )
+    life = record.get("lifecycle")
+    if life in _TERMINAL_LIFECYCLES:
+        return
+    owner_liveness = runstate._home_owner_liveness(run_dir)
+    if owner_liveness != "dead":
+        raise GrokWrapperError(
+            "state-ownership-violation",
+            "refusing to remove run {}: owner process is still {!r} (lifecycle={!r})".format(
+                run_id, owner_liveness, life
+            ),
+            {"runId": run_id, "ownerLiveness": owner_liveness, "lifecycle": life},
+        )
+
+
 def _remove_run_dir(run_dir: pathlib.Path) -> None:
     failed_paths: List[str] = []
 
@@ -243,6 +282,8 @@ def run(args: argparse.Namespace) -> dict:
     try:
         if not confirmed:
             return _dry_run(run_id, run_dir, worktree)
+        # Refuse to delete an actively owned or still-finalizing run (C3).
+        _refuse_active_run(run_id, run_dir, record)
         return _confirmed(run_id, run_dir, worktree)
     except GrokWrapperError as exc:
         return _fail(run_id, exc, worktree)

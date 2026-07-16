@@ -6,12 +6,12 @@
 # {storedEnvelope, events, eventWarnings, target}. It writes NOTHING to the
 # target run directory.
 #
-# Outcome of the status *query* (top-level envelope status):
-#   - success: target finished (stored envelope present and valid)
-#   - running: target still in progress (no stored envelope; process/record alive)
-#   - failure: unknown/unowned run, or unreadable/invalid stored envelope
-#
-# Missing envelope.json is normal while a run is in progress — not a warning.
+# Outcome of the status *query* (top-level envelope status projection, design §6):
+#   - running (exit 0): target lifecycle created|running|finalizing
+#   - success (exit 0): target lifecycle completed
+#   - failure (exit 1): failed|canceled|derived interrupted, or load/own/malformed
+# Target-failure projection has response.target (no error field). Command failure
+# uses failure_envelope with error.class. Status never writes the run directory.
 
 import argparse
 import datetime
@@ -63,6 +63,23 @@ def _load_stored_envelope(
             error_class="output-malformed",
             message="stored envelope for run {} failed C4 validation".format(run_id),
             detail={"violations": violations},
+            progressStreamPath=None,
+        )
+
+    # Bind stored envelope to the requested run (never project a foreign runId).
+    if stored.get("runId") != run_id:
+        _log(
+            "_load_stored_envelope",
+            "stored envelope runId {!r} does not match requested {!r}".format(
+                stored.get("runId"), run_id
+            ),
+        )
+        return None, envelope_mod.failure_envelope(
+            run_id=run_id,
+            mode="status",
+            error_class="output-malformed",
+            message="stored envelope for run {} belongs to a different runId".format(run_id),
+            detail={"requestedRunId": run_id, "storedRunId": stored.get("runId")},
             progressStreamPath=None,
         )
 
@@ -136,26 +153,46 @@ def _build_target_info(
     events: List[dict],
     process_liveness: str,
     has_stored_envelope: bool,
+    effective_life: str,
+    lifecycle_source: str,
 ) -> dict:
     created = record.get("createdAtUtc")
     created_dt = _parse_utc(created if isinstance(created, str) else None)
     now = datetime.datetime.now(datetime.timezone.utc)
-    elapsed = None
+    elapsed_seconds = None
+    elapsed_ms = 0
     if created_dt is not None:
         if created_dt.tzinfo is None:
             created_dt = created_dt.replace(tzinfo=datetime.timezone.utc)
-        elapsed = max(0, int((now - created_dt).total_seconds()))
+        delta = now - created_dt
+        # Wall-clock for status display (design §8); clamp negative to 0
+        elapsed_seconds = max(0, int(delta.total_seconds()))
+        elapsed_ms = max(0, int(delta.total_seconds() * 1000))
 
     last_event = _event_summary(events[-1]) if events else None
+    last_progress_at = None
+    if last_event is not None and events:
+        # lastEvent may carry process-local elapsedMs from the progress writer
+        last_em = events[-1].get("elapsedMs")
+        if isinstance(last_em, int) and last_em >= 0:
+            last_event["elapsedMs"] = last_em
+        ts = events[-1].get("ts")
+        if isinstance(ts, str):
+            last_progress_at = ts
     recent = [_event_summary(ev) for ev in events[-8:]] if events else []
 
     return {
         "mode": record.get("mode"),
+        "lifecycle": effective_life,
+        "lifecycleSource": lifecycle_source,
         "recordStatus": record.get("status"),
         "process": process_liveness,  # alive | dead | unknown
         "hasStoredEnvelope": has_stored_envelope,
+        "resultAvailable": has_stored_envelope,
         "createdAtUtc": created,
-        "elapsedSeconds": elapsed,
+        "elapsedSeconds": elapsed_seconds,
+        "elapsedMs": elapsed_ms,
+        "lastProgressAt": last_progress_at,
         "requestedModel": record.get("requestedModel"),
         "repository": record.get("repository"),
         "eventCount": len(events),
@@ -216,7 +253,35 @@ def run(args: argparse.Namespace) -> dict:
     events, event_warnings = read_events(progress_path)
     safe_events = _stream_redact_event_text(events)
     process_liveness = runstate._home_owner_liveness(run_dir)
+    # Parent owner.pid can die while the finalize worker still lives and may
+    # still persist the real terminal envelope. Treat that as process-alive so
+    # finalizing runs project as in-progress, not derived interrupted.
+    try:
+        from groklib.modes.finalize_worker import finalize_worker_blocks_durable_write
+
+        # alive or unknown: project as still in progress (never derived interrupted).
+        if finalize_worker_blocks_durable_write(run_dir):
+            process_liveness = "alive"
+    except Exception as liveness_exc:
+        _log(
+            "run",
+            "finalize worker liveness check failed (treating as alive): {}".format(liveness_exc),
+        )
+        process_liveness = "alive"
     record_status = record.get("status") if isinstance(record.get("status"), str) else None
+    envelope_status = stored.get("status") if isinstance(stored, dict) else None
+    envelope_error_class = None
+    if isinstance(stored, dict) and isinstance(stored.get("error"), dict):
+        ec = stored["error"].get("class")
+        if isinstance(ec, str):
+            envelope_error_class = ec
+    effective_life, lifecycle_source = runstate.effective_lifecycle(
+        record,
+        has_valid_envelope=stored is not None,
+        envelope_status=envelope_status if isinstance(envelope_status, str) else None,
+        process_liveness=process_liveness,
+        envelope_error_class=envelope_error_class,
+    )
 
     target = _build_target_info(
         record=record,
@@ -224,33 +289,27 @@ def run(args: argparse.Namespace) -> dict:
         events=safe_events,
         process_liveness=process_liveness,
         has_stored_envelope=stored is not None,
+        effective_life=effective_life,
+        lifecycle_source=lifecycle_source,
     )
 
-    # Still in progress: no final envelope yet, and the owner process is still
-    # alive (or lease unknown while the record claims running). A dead process
-    # with no envelope is incomplete/interrupted — not "running".
-    in_progress = stored is None and (
-        process_liveness == runstate._LIVENESS_ALIVE
-        or (
-            process_liveness == runstate._LIVENESS_UNKNOWN
-            and record_status == "running"
-        )
-    )
-
-    if in_progress:
+    # Projection (design §6): in-flight → running/0; completed → success/0;
+    # failed/canceled/interrupted → failure/1. Status never writes the run dir.
+    if effective_life in ("created", "running", "finalizing"):
         response = {
-            "storedEnvelope": None,
+            "storedEnvelope": stored,
             "events": safe_events,
             "eventWarnings": event_warnings,
             "target": target,
             "summary": (
-                "Run is still in progress (no final envelope yet). "
-                "recordStatus={!r}, process={!r}, events={}, elapsedSeconds={!r}."
+                "Run is still in progress. "
+                "lifecycle={!r} ({}), process={!r}, events={}, elapsedMs={!r}."
             ).format(
-                record_status,
+                effective_life,
+                lifecycle_source,
                 process_liveness,
                 len(safe_events),
-                target.get("elapsedSeconds"),
+                target.get("elapsedMs"),
             ),
         }
         safe_response = envelope_mod.redact_secret_material(response)
@@ -263,26 +322,43 @@ def run(args: argparse.Namespace) -> dict:
             response=safe_response,
         )
 
-    if stored is None:
-        # Finished or abandoned without writing envelope.json
+    if effective_life == "completed":
+        response = {
+            "storedEnvelope": stored,
+            "events": safe_events,
+            "eventWarnings": event_warnings,
+            "target": target,
+        }
+        safe_response = envelope_mod.redact_secret_material(response)
+        return envelope_mod.build_envelope(
+            run_id=run_id,
+            mode="status",
+            status="success",
+            progressStreamPath=str(progress_path),
+            warnings=warnings,
+            response=safe_response,
+        )
+
+    # failed / canceled / interrupted
+    if stored is None and effective_life == "interrupted":
         warnings.append(
             "run {} has no stored envelope (recordStatus={!r}, process={!r}); "
-            "run may have been interrupted before completion".format(
+            "run appears interrupted (derived; not persisted)".format(
                 run_id, record_status, process_liveness
             )
         )
-
     response = {
         "storedEnvelope": stored,
         "events": safe_events,
         "eventWarnings": event_warnings,
         "target": target,
+        "summary": "Target lifecycle={!r} (source={}).".format(effective_life, lifecycle_source),
     }
     safe_response = envelope_mod.redact_secret_material(response)
     return envelope_mod.build_envelope(
         run_id=run_id,
         mode="status",
-        status="success",
+        status="failure",
         progressStreamPath=str(progress_path),
         warnings=warnings,
         response=safe_response,

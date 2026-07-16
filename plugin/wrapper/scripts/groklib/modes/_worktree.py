@@ -48,9 +48,9 @@ from groklib.modes._shared import (
     ModeRun,
     _execute_and_verify,
     _policy_field,
+    _publish_terminal_envelope,
     _run_record_fields,
     _write_prompt_file,
-    best_effort_write_run_record,
     grok_usage_response_fields,
     resolve_terminal_cleanup,
     source_grok_dir,
@@ -276,30 +276,34 @@ def run_worktree_mode(
             raise
         if progress is None:
             progress = ProgressWriter(paths.run_id, paths.progress_path)
+        def _merge_worktree_meta() -> None:
+            # Non-terminal metadata only - must not set status success/failure.
+            # Always include repository/target so cleanup can rebuild the worktree
+            # even when the earlier running-record CAS never landed.
+            wt = holder.worktree if worktree_retained else None
+            if wt is None:
+                return
+            record = runstate.load_run_record(paths.run_id)
+            rev = int(record.get("recordRevision", 0))
+            runstate.cas_update_run_record(
+                paths,
+                rev,
+                {
+                    "repository": repository,
+                    "targetWorkspace": target_workspace,
+                    "worktreePath": str(wt.path),
+                    "worktreeBranch": wt.branch,
+                    "baseRevision": wt.base_revision,
+                    "status": "running",
+                },
+            )
+
         return terminalize_unexpected_failure(
             run_paths=paths,
             mode=mode,
             progress=progress,
             exc=exc,
-            write_terminal_record=lambda: runstate.write_run_record(
-                paths,
-                _run_record_fields(
-                    mode=mode,
-                    run_paths=paths,
-                    status_value="failure",
-                    requested_model=requested_model,
-                    repository=repository,
-                    target_workspace=target_workspace,
-                    # PR968 codex verify-adopted-worktree: only the OWNING run
-                    # (code, worktree_retained) records the worktree into its
-                    # cleanup record. A verify run merely ADOPTS the code run's
-                    # worktree; recording it here would make cleanup of the
-                    # verify run rebuild and try to reap a worktree whose path +
-                    # sibling marker name the ORIGINAL code run, wedging cleanup
-                    # on the run-id binding. The owning code run stays responsible.
-                    worktree=holder.worktree if worktree_retained else None,
-                ),
-            ),
+            write_terminal_record=_merge_worktree_meta,
             log=_log,
             cleanup=resolve_terminal_cleanup(holder.home_cleanup),
             result=holder.result_holder[0],
@@ -326,18 +330,52 @@ def _run_worktree_mode_body(
     holder: "WorktreeHolder",
 ) -> dict:
     """The classified-failure lifecycle body of run_worktree_mode (see its docstring)."""
-    runstate.write_run_record(
-        run_paths,
-        _run_record_fields(
-            mode=mode,
-            run_paths=run_paths,
-            status_value="running",
-            requested_model=requested_model,
-            repository=repository,
-            target_workspace=target_workspace,
-            worktree=None,
-        ),
-    )
+    try:
+        record = runstate.load_run_record(run_paths.run_id)
+        rev = int(record.get("recordRevision", 0))
+        if record.get("lifecycle") == "created":
+            record = runstate.set_lifecycle(run_paths, rev, "running")
+            rev = int(record["recordRevision"])
+        runstate.cas_update_run_record(
+            run_paths,
+            rev,
+            {
+                "requestedModel": requested_model,
+                "repository": repository,
+                "targetWorkspace": target_workspace,
+                "status": "running",
+            },
+        )
+    except Exception as exc:
+        _log("_run_worktree_mode_body", "lifecycle advance failed: {}".format(exc))
+        try:
+            record = runstate.load_run_record(run_paths.run_id)
+            rev = int(record.get("recordRevision", 0))
+            if record.get("lifecycle") == "created":
+                record = runstate.set_lifecycle(run_paths, rev, "running")
+                rev = int(record["recordRevision"])
+            runstate.cas_update_run_record(
+                run_paths,
+                rev,
+                {
+                    "requestedModel": requested_model,
+                    "repository": repository,
+                    "targetWorkspace": target_workspace,
+                    "status": "running",
+                },
+            )
+        except Exception as retry_exc:
+            _log("_run_worktree_mode_body", "retry lifecycle advance failed: {}".format(retry_exc))
+            raise GrokWrapperError(
+                "state-ownership-violation",
+                "could not advance run record to running after retry: {}".format(retry_exc),
+                {
+                    "reason": "run-record-cas-failed",
+                    "runId": run_paths.run_id,
+                    "firstError": str(exc),
+                    "retryError": str(retry_exc),
+                },
+            ) from retry_exc
     progress.safe_emit("start", "{} run created".format(mode), data={"mode": mode})
 
     # Reap a crashed prior run's stranded credential-bearing private home on live
@@ -497,27 +535,7 @@ def _run_worktree_mode_body(
         and effective_model is not None
     ):
         grok_field, usage_field, response_field, stderr_warnings = grok_usage_response_fields(result)
-        progress.safe_emit("done", "{} run completed".format(mode))
-        # Write the terminal record BEFORE assembling the envelope fields so a
-        # guarded write-failure warning (F3) is reflected in the emitted envelope.
-        best_effort_write_run_record(
-            run_paths,
-            _run_record_fields(
-                mode=mode,
-                run_paths=run_paths,
-                status_value="success",
-                requested_model=requested_model,
-                repository=repository,
-                target_workspace=target_workspace,
-                # PR968 codex verify-adopted-worktree: record the worktree into
-                # the cleanup record ONLY for the run that OWNS it (code). verify
-                # adopts a borrowed worktree it must not enroll for its own
-                # cleanup -- see the terminalize handler above for the full note.
-                worktree=holder.worktree if worktree_retained else None,
-            ),
-            warnings,
-            _log,
-        )
+        # No progress "done" until _publish_terminal_envelope confirms durable_ok.
         fields = _common_fields(
             requested_model=requested_model,
             effective_model=effective_model,
@@ -536,30 +554,51 @@ def _run_worktree_mode_body(
         fields["grok"] = grok_field
         fields["usage"] = usage_field
         fields["response"] = response_field
-        return build_envelope(run_id=run_paths.run_id, mode=mode, status="success", **fields)
+        envelope = build_envelope(run_id=run_paths.run_id, mode=mode, status="success", **fields)
+        # Worktree ownership metadata is safety-critical when a worktree is retained:
+        # fail closed if CAS cannot record paths for cleanup (H9).
+        wt = holder.worktree if worktree_retained else None
+        try:
+            record = runstate.load_run_record(run_paths.run_id)
+            rev = int(record.get("recordRevision", 0))
+            runstate.cas_update_run_record(
+                run_paths,
+                rev,
+                {
+                    "requestedModel": requested_model,
+                    "repository": repository,
+                    "targetWorkspace": target_workspace,
+                    "worktreePath": str(wt.path) if wt is not None else None,
+                    "worktreeBranch": wt.branch if wt is not None else None,
+                    "baseRevision": wt.base_revision if wt is not None else None,
+                    "status": "running",
+                },
+            )
+        except Exception as meta_exc:
+            _log("_run_worktree_mode_body", "non-terminal metadata merge failed: {}".format(meta_exc))
+            if wt is not None:
+                # Retained worktree without durable metadata would strand the branch.
+                return failure_envelope(
+                    run_id=run_paths.run_id,
+                    mode=mode,
+                    error_class="state-ownership-violation",
+                    message="could not persist worktree ownership metadata before terminal success",
+                    detail={"reason": "worktree-metadata-cas-failed", "error": str(meta_exc)},
+                    progressStreamPath=str(run_paths.progress_path),
+                    warnings=list(warnings) + ["worktree metadata CAS failed; refusing silent success"],
+                    **{
+                        "worktreePath": str(wt.path),
+                        "worktreeBranch": wt.branch,
+                        "baseRevision": wt.base_revision,
+                        "repository": repository,
+                    },
+                )
+        return _publish_terminal_envelope(
+            run_paths, mode, envelope, lifecycle="completed", progress=progress, warnings=warnings
+        )
 
     error = outcome_error if outcome_error is not None else GrokWrapperError(
         "cli-failure", "{} run did not complete".format(mode), {"reason": "incomplete-run"}
-    )
-    progress.safe_emit("done", "{} failed: {}".format(mode, error.error_class), level="error")
-    # Guarded write BEFORE field assembly so the determined classified failure
-    # survives a run.json write failure and any write-failure warning is included.
-    best_effort_write_run_record(
-        run_paths,
-        _run_record_fields(
-            mode=mode,
-            run_paths=run_paths,
-            status_value="failure",
-            requested_model=requested_model,
-            repository=repository,
-            target_workspace=target_workspace,
-            # PR968 codex verify-adopted-worktree: only the owning run (code)
-            # enrolls its worktree for cleanup; a verify run's adopted worktree
-            # is reaped by the owning code run, never by the verify run.
-            worktree=holder.worktree if worktree_retained else None,
-        ),
-        warnings,
-        _log,
     )
     fields = _common_fields(
         requested_model=requested_model,
@@ -587,11 +626,52 @@ def _run_worktree_mode_body(
         fields["usage"] = usage_field
         fields["response"] = response_field
         fields["warnings"] = stderr_warnings + warnings
-    return failure_envelope(
+    envelope = failure_envelope(
         run_id=run_paths.run_id,
         mode=mode,
         error_class=error.error_class,
         message=str(error),
         detail=error.detail or None,
         **fields,
+    )
+    wt = holder.worktree if worktree_retained else None
+    try:
+        record = runstate.load_run_record(run_paths.run_id)
+        rev = int(record.get("recordRevision", 0))
+        runstate.cas_update_run_record(
+            run_paths,
+            rev,
+            {
+                "requestedModel": requested_model,
+                "repository": repository,
+                "targetWorkspace": target_workspace,
+                "worktreePath": str(wt.path) if wt is not None else None,
+                "worktreeBranch": wt.branch if wt is not None else None,
+                "baseRevision": wt.base_revision if wt is not None else None,
+                "status": "running",
+            },
+        )
+    except Exception as meta_exc:
+        _log("_run_worktree_mode_body", "non-terminal metadata merge failed: {}".format(meta_exc))
+        if wt is not None:
+            warnings = list(warnings) + [
+                "worktree metadata CAS failed; worktree may need manual cleanup"
+            ]
+            # Prefer recording the original failure; metadata note is a warning.
+            # Still fail closed for silent loss of worktree identity by ensuring
+            # the failure envelope carries path fields from the live holder.
+            envelope = failure_envelope(
+                run_id=run_paths.run_id,
+                mode=mode,
+                error_class=error.error_class,
+                message=str(error),
+                detail=dict(error.detail or {}, worktreeMetadataCasFailed=True),
+                **fields,
+            )
+            envelope["warnings"] = list(envelope.get("warnings") or []) + warnings
+            envelope["worktreePath"] = str(wt.path)
+            envelope["worktreeBranch"] = wt.branch
+            envelope["baseRevision"] = wt.base_revision
+    return _publish_terminal_envelope(
+        run_paths, mode, envelope, lifecycle="failed", progress=progress, warnings=warnings
     )

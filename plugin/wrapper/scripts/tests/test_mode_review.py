@@ -157,29 +157,24 @@ class ReviewModeTests(ModeHarness):
         self.assertEqual(record["status"], "failure")
         self.assertEqual(record["runId"], run_id, "the envelope must carry the REAL run id")
 
-    def test_write_run_record_failure_preserves_success_outcome(self) -> None:
-        # Round4 F3-write-run-record-unguarded: if the FINAL terminal run.json write
-        # fails, the already-determined success envelope must still be returned
-        # (with a warning), never reclassified into a generic cli-failure.
+    def test_finalize_failure_fail_closed_not_success(self) -> None:
+        # Durable terminal publish failure must not exit 0 as success.
         repo = self._repo()
-        real_write = runstate.write_run_record
 
-        def _write_but_fail_terminal(run_paths, record):
-            if record.get("status") == "running":
-                return real_write(run_paths, record)
-            raise OSError("simulated terminal run.json write failure (disk full)")
+        def _fail_finalize(*_a, **_k):
+            raise OSError("simulated terminal finalize failure (disk full)")
 
-        with mock.patch.object(runstate, "write_run_record", _write_but_fail_terminal):
+        with mock.patch(
+            "groklib.modes.finalize_worker.run_finalize_parent",
+            side_effect=_fail_finalize,
+        ), mock.patch.object(_shared, "run_finalize_parent", side_effect=_fail_finalize):
             exit_code, out = self.drive(
                 ["review", "--target", "pkg", "--task", "Review"], repo_root=repo
             )
         env = json.loads(out)
-        self.assertEqual(exit_code, 0, out)
-        self.assertEqual(env["status"], "success")
-        self.assertTrue(
-            any("terminal run record could not be persisted" in warning for warning in env["warnings"]),
-            env["warnings"],
-        )
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(env["status"], "failure")
+        self.assertEqual(env["error"]["class"], "finalization-worker-missing-result")
 
     def test_sigterm_systemexit_midrun_terminalizes_and_emits_one_envelope(self) -> None:
         # Round4 F5-sigterm-bypasses-envelope: a SIGTERM-driven SystemExit
@@ -205,6 +200,11 @@ class ReviewModeTests(ModeHarness):
         self.assertEqual(env["error"]["class"], "cancelled")
         record = _run_record_for(self.state_home, env["runId"])
         self.assertEqual(record["status"], "failure", "run.json must be terminal, not stuck at running")
+        self.assertEqual(
+            record.get("lifecycle"),
+            "canceled",
+            "operator cancel must durable-terminalize as lifecycle canceled",
+        )
         self.assertEqual(
             self.temp_home_prefix_dirs() - before, set(), "the private home must be torn down on SIGTERM"
         )

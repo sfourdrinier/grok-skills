@@ -440,6 +440,14 @@ Env `GROK_FINALIZE_TIMEOUT_SECONDS`: integer, clamp **30..600**, overrides table
 - Parent cannot durable-write while `proc.is_alive()` (unit test of guard).  
 - After kill grace still alive → no durable timeout envelope; ephemeral `finalization-worker-unkillable`; lifecycle remains `finalizing`.
 
+
+### 9.5 PR1 implementation note (persist-only worker)
+
+PR1 ships a **persist-only** finalize worker: the parent assembles the C4
+envelope after Grok; the spawned worker runs `persist_terminal_envelope` under
+a hang budget. Parent durable recovery remains §9.4 (`is_alive` gate). Full
+§9 ownership of sandbox verify / envelope build in the worker is deferred.
+
 ## 10. Isolated review
 
 ### When

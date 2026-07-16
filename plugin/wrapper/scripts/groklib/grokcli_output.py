@@ -118,7 +118,7 @@ def is_turn_exhaustion(
     """True when the run hit an operator-set turn budget.
 
     Turn-exhaustion only applies when the operator set ``max_turns`` (default:
-    unlimited / flag omitted). Without that budget, this never returns True —
+    unlimited / flag omitted). Without that budget, this never returns True -
     even if Grok emits a MaxTurns-shaped stop token (platform/internal limit is
     not reclassified as operator turn-exhaustion).
 
@@ -128,7 +128,7 @@ def is_turn_exhaustion(
     Grok CLI often reports the turn cap as stopReason ``Cancelled`` (not a
     distinct max-turn token). When the operator set ``max_turns`` and
     ``num_turns >= max_turns``, treat Cancelled (and other non-clean, non-error
-    stops at the budget) as turn-exhaustion — not a plain user abort.
+    stops at the budget) as turn-exhaustion - not a plain user abort.
 
     Cancelled with *missing* ``num_turns`` is never treated as budget: that
     mislabels real mid-run cancels when the operator merely set ``--max-turns``.

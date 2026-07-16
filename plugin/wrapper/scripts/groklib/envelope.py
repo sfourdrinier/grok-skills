@@ -61,6 +61,9 @@ ERROR_CLASSES: Tuple[str, ...] = (
     "leader-socket-failure",
     "usage-error",
     "probe-required",
+    "finalization-timeout",
+    "finalization-worker-missing-result",
+    "finalization-worker-unkillable",
 )
 
 # Case-insensitive: a dict key CONTAINING any of these substrings, or ENDING
@@ -508,6 +511,14 @@ FIELD_SPECS: Dict[str, dict] = {
         "type_spec": ("object", _CLEANUP_SHAPE),
         "default_factory": lambda: {"status": "not-applicable", "detail": None},
     },
+    # Ephemeral durability signal for stdout-only failures (design §9.4).
+    # When True, callers must not durable-persist this envelope. omit_when_absent
+    # so normal durable envelopes stay free of the field.
+    "doNotStore": {
+        "type_spec": ("bool",),
+        "default_factory": None,
+        "omit_when_absent": True,
+    },
 }
 
 # The four fields build_envelope binds directly from its named parameters;
@@ -889,20 +900,24 @@ def emit_envelope(envelope: dict, envelope_path: Optional[pathlib.Path]) -> None
 
     When ``envelope_path`` is not None, a stored copy is written first at
     that path with mode 0600 (pre-run failures pass ``envelope_path=None``
-    and store no copy, per C8). This function contains the single stdout
-    write in the entire groklib package (Global Constraints stdout
-    discipline: wrapper subcommands write exactly one JSON result envelope
-    to stdout and nothing else).
+    and store no copy, per C8). Ephemeral ``doNotStore`` is kept on stdout but
+    stripped from any stored copy so durable files never carry the signal.
+    This function contains the single stdout write in the entire groklib package
+    (Global Constraints stdout discipline: wrapper subcommands write exactly one
+    JSON result envelope to stdout and nothing else).
     """
     serialized = json.dumps(envelope, sort_keys=True)
 
     if envelope_path is not None:
+        # Never durable-store an ephemeral durability marker.
+        to_store = {k: v for k, v in envelope.items() if k != "doNotStore"}
+        store_serialized = json.dumps(to_store, sort_keys=True)
         try:
             file_descriptor = os.open(
                 str(envelope_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _STORED_ENVELOPE_FILE_MODE
             )
             with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
-                handle.write(serialized + "\n")
+                handle.write(store_serialized + "\n")
             # P4: route the owner-only tightening through platformsupport so it
             # is consistent (POSIX chmod / Windows ACL) rather than a raw chmod.
             platformsupport.restrict_file_permissions(envelope_path)

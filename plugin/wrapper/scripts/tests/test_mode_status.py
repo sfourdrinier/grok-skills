@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import pathlib
 import shutil
 import tempfile
 import unittest
@@ -14,6 +15,20 @@ from groklib import runstate
 from groklib.envelope import build_envelope
 from groklib.progress import ProgressWriter
 
+
+
+def _force_running_record(paths, **fields):
+    """Seed a non-terminal running record via CAS (no write_run_record)."""
+    rec = runstate.load_run_record(paths.run_id)
+    rev = int(rec.get("recordRevision", 0))
+    if rec.get("lifecycle") == "created":
+        rec = runstate.set_lifecycle(paths, rev, "running")
+        rev = int(rec["recordRevision"])
+    patch = {"status": "running"}
+    patch.update({k: v for k, v in fields.items() if k not in ("lifecycle", "recordRevision", "runId")})
+    if "status" in patch and patch["status"] in ("success", "failure"):
+        patch["status"] = "running"
+    return runstate.cas_update_run_record(paths, rev, patch)
 
 def _run_status(run_id):
     buffer = io.StringIO()
@@ -36,22 +51,13 @@ class StatusModeTests(unittest.TestCase):
 
     def _seed_run(self, *, stored_envelope=None, with_progress=True):
         paths = runstate.create_run("review")
-        record = {
-            "schemaVersion": 1,
-            "runId": paths.run_id,
-            "mode": "review",
-            "createdAtUtc": "2026-07-14T00:00:00+00:00",
-            "status": "success",
-            "requestedModel": "grok-4.5",
-            "repository": None,
-            "targetWorkspace": None,
-            "worktreePath": None,
-            "worktreeBranch": None,
-            "baseRevision": None,
-            "progressStreamPath": str(paths.progress_path),
-            "envelopePath": str(paths.envelope_path),
-        }
-        runstate.write_run_record(paths, record)
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.cas_update_run_record(
+            paths,
+            1,
+            {"requestedModel": "grok-4.5", "status": "running"},
+        )
+        runstate.set_lifecycle(paths, 2, "finalizing")
 
         if with_progress:
             writer = ProgressWriter(paths.run_id, paths.progress_path)
@@ -62,7 +68,19 @@ class StatusModeTests(unittest.TestCase):
             stored_envelope = build_envelope(
                 run_id=paths.run_id, mode="review", status="success", response={"answer": "PONG"}
             )
-        paths.envelope_path.write_text(json.dumps(stored_envelope), encoding="utf-8")
+        violations = []
+        try:
+            from groklib import envelope as envelope_mod
+
+            violations = envelope_mod.validate_envelope(stored_envelope)
+        except Exception:
+            violations = ["invalid"]
+        if violations:
+            # Fixture for malformed stored document: write raw bytes, leave lifecycle finalizing
+            paths.envelope_path.write_text(json.dumps(stored_envelope), encoding="utf-8")
+        else:
+            # Envelope-first terminalization (never lifecycle without envelope)
+            runstate.persist_terminal_envelope(paths, 3, stored_envelope, lifecycle="completed")
         return paths
 
     def test_status_returns_stored_envelope_and_events(self) -> None:
@@ -100,7 +118,7 @@ class StatusModeTests(unittest.TestCase):
             "progressStreamPath": str(paths.progress_path),
             "envelopePath": str(paths.envelope_path),
         }
-        runstate.write_run_record(paths, record)
+        _force_running_record(paths, requestedModel=record.get("requestedModel"), repository=record.get("repository"))
         writer = ProgressWriter(paths.run_id, paths.progress_path)
         writer.emit("start", "review run created", data={"mode": "review"})
         writer.emit("grok", "spawning grok cli", data={"model": "grok-4.5"})
@@ -141,14 +159,17 @@ class StatusModeTests(unittest.TestCase):
             "progressStreamPath": str(paths.progress_path),
             "envelopePath": str(paths.envelope_path),
         }
-        runstate.write_run_record(paths, record)
+        _force_running_record(paths, requestedModel=record.get("requestedModel"), repository=record.get("repository"))
         # Stale pid that is not alive
         runstate.write_home_liveness_marker(paths.run_dir, 999999999)
 
         exit_code, out = _run_status(paths.run_id)
         envelope = json.loads(out)
-        self.assertEqual(exit_code, 0, out)
-        self.assertEqual(envelope["status"], "success")
+        # Dead owner + no envelope → derived interrupted, top-level failure (read-only)
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(envelope["status"], "failure")
+        self.assertEqual(envelope["response"]["target"]["lifecycle"], "interrupted")
+        self.assertEqual(envelope["response"]["target"]["lifecycleSource"], "derived")
         self.assertTrue(
             any("no stored envelope" in str(w) for w in envelope.get("warnings") or []),
             envelope.get("warnings"),
@@ -235,7 +256,7 @@ class StatusModeTests(unittest.TestCase):
             "progressStreamPath": str(paths.progress_path),
             "envelopePath": str(paths.envelope_path),
         }
-        runstate.write_run_record(paths, record)
+        _force_running_record(paths, requestedModel=record.get("requestedModel"), repository=record.get("repository"))
 
         secret_thought = (
             "the handler reads Authorization: bearer "
@@ -298,7 +319,7 @@ class StatusModeTests(unittest.TestCase):
             "progressStreamPath": str(paths.progress_path),
             "envelopePath": str(paths.envelope_path),
         }
-        runstate.write_run_record(paths, record)
+        _force_running_record(paths, requestedModel=record.get("requestedModel"), repository=record.get("repository"))
 
         first_half = "the handler logs bearer eyJab"
         second_half = "cdef0123456789ABCDEFghijKLM trailing"
@@ -334,6 +355,203 @@ class StatusModeTests(unittest.TestCase):
         self.assertEqual(before_listing, after_listing)
         self.assertEqual(before_mtime, after_mtime)
 
+    def test_status_run_dir_byte_identical(self) -> None:
+        """status is read-only: recursive file contents unchanged after query."""
+        paths = self._seed_run()
+        before = {}
+        for root, _dirs, files in os.walk(paths.run_dir):
+            for name in files:
+                fp = pathlib.Path(root) / name
+                before[str(fp.relative_to(paths.run_dir))] = fp.read_bytes()
+        exit_code, _out = _run_status(paths.run_id)
+        self.assertEqual(exit_code, 0)
+        after = {}
+        for root, _dirs, files in os.walk(paths.run_dir):
+            for name in files:
+                fp = pathlib.Path(root) / name
+                after[str(fp.relative_to(paths.run_dir))] = fp.read_bytes()
+        self.assertEqual(before, after)
+
+    def test_status_envelope_overrides_nonterminal_record(self) -> None:
+        """Valid envelope + non-terminal lifecycle → effective lifecycle from envelope."""
+        paths = runstate.create_run("review")
+        env = build_envelope(
+            run_id=paths.run_id, mode="review", status="success", response={"answer": "done"}
+        )
+        paths.envelope_path.write_text(json.dumps(env), encoding="utf-8")
+        runstate.write_home_liveness_marker(paths.run_dir, 999999999)
+        exit_code, out = _run_status(paths.run_id)
+        envelope = json.loads(out)
+        self.assertEqual(exit_code, 0, out)
+        self.assertEqual(envelope["status"], "success")
+        self.assertEqual(envelope["response"]["target"]["lifecycle"], "completed")
+        self.assertEqual(envelope["response"]["target"]["lifecycleSource"], "envelope")
+
+
+
+    def test_status_failed_target_exit_1(self) -> None:
+        from groklib.envelope import failure_envelope
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.set_lifecycle(paths, 1, "finalizing")
+        env = failure_envelope(
+            run_id=paths.run_id, mode="review", error_class="cli-failure", message="boom"
+        )
+        runstate.persist_terminal_envelope(paths, 2, env, lifecycle="failed")
+        exit_code, out = _run_status(paths.run_id)
+        envelope = json.loads(out)
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(envelope["status"], "failure")
+        self.assertNotIn("error", envelope)
+        self.assertEqual(envelope["response"]["storedEnvelope"]["status"], "failure")
+        self.assertEqual(envelope["response"]["target"]["lifecycle"], "failed")
+
+    def test_status_interrupted_byte_identical(self) -> None:
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.write_home_liveness_marker(paths.run_dir, 999999999)
+        before = {}
+        for root, _d, files in os.walk(paths.run_dir):
+            for name in files:
+                fp = pathlib.Path(root) / name
+                before[str(fp.relative_to(paths.run_dir))] = fp.read_bytes()
+        life_before = runstate.load_run_record(paths.run_id)["lifecycle"]
+        exit_code, out = _run_status(paths.run_id)
+        envelope = json.loads(out)
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(envelope["response"]["target"]["lifecycle"], "interrupted")
+        self.assertEqual(runstate.load_run_record(paths.run_id)["lifecycle"], life_before)
+        after = {}
+        for root, _d, files in os.walk(paths.run_dir):
+            for name in files:
+                fp = pathlib.Path(root) / name
+                after[str(fp.relative_to(paths.run_dir))] = fp.read_bytes()
+        self.assertEqual(before, after)
+
+
+    def test_status_created_is_running(self) -> None:
+        paths = runstate.create_run("review")
+        runstate.write_home_liveness_marker(paths.run_dir, os.getpid())
+        exit_code, out = _run_status(paths.run_id)
+        env = json.loads(out)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(env["status"], "running")
+        self.assertEqual(env["response"]["target"]["lifecycle"], "created")
+
+    def test_status_finalizing_is_running(self) -> None:
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.set_lifecycle(paths, 1, "finalizing")
+        runstate.write_home_liveness_marker(paths.run_dir, os.getpid())
+        exit_code, out = _run_status(paths.run_id)
+        env = json.loads(out)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(env["status"], "running")
+        self.assertEqual(env["response"]["target"]["lifecycle"], "finalizing")
+
+    def test_status_canceled_lifecycle_exit_1(self) -> None:
+        from groklib.envelope import failure_envelope
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        env = failure_envelope(
+            run_id=paths.run_id, mode="review", error_class="cancelled", message="bye"
+        )
+        runstate.persist_terminal_envelope(paths, 1, env, lifecycle="canceled")
+        exit_code, out = _run_status(paths.run_id)
+        envelope = json.loads(out)
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(envelope["status"], "failure")
+        self.assertEqual(envelope["response"]["target"]["lifecycle"], "canceled")
+
+    def _rewrite_created_at(self, paths, iso_utc: str) -> None:
+        """Test helper: rewrite createdAtUtc (CAS preserves seed timestamp)."""
+        run_json = paths.run_dir / "run.json"
+        rec = json.loads(run_json.read_text(encoding="utf-8"))
+        rec["createdAtUtc"] = iso_utc
+        run_json.write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
+
+    def test_status_elapsed_ms_past_created_at(self) -> None:
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.write_home_liveness_marker(paths.run_dir, os.getpid())
+        self._rewrite_created_at(paths, "2020-01-01T00:00:00+00:00")
+        exit_code, out = _run_status(paths.run_id)
+        envelope = json.loads(out)
+        self.assertEqual(exit_code, 0, out)
+        target = envelope["response"]["target"]
+        self.assertIsInstance(target["elapsedMs"], int)
+        self.assertGreater(target["elapsedMs"], 0)
+        self.assertGreaterEqual(target["elapsedMs"], 0)
+        if target.get("elapsedSeconds") is not None:
+            self.assertGreaterEqual(target["elapsedSeconds"], 0)
+
+    def test_status_elapsed_ms_future_created_at_clamps_to_zero(self) -> None:
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.write_home_liveness_marker(paths.run_dir, os.getpid())
+        self._rewrite_created_at(paths, "2099-01-01T00:00:00+00:00")
+        exit_code, out = _run_status(paths.run_id)
+        envelope = json.loads(out)
+        self.assertEqual(exit_code, 0, out)
+        target = envelope["response"]["target"]
+        self.assertEqual(target["elapsedMs"], 0)
+        self.assertEqual(target["elapsedSeconds"], 0)
+
+    def test_status_last_event_copies_progress_elapsed_ms(self) -> None:
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.write_home_liveness_marker(paths.run_dir, os.getpid())
+        writer = ProgressWriter(paths.run_id, paths.progress_path)
+        writer.emit("start", "run created", data={"mode": "review"})
+        writer.emit("grok", "still working")
+        exit_code, out = _run_status(paths.run_id)
+        envelope = json.loads(out)
+        self.assertEqual(exit_code, 0, out)
+        last = envelope["response"]["target"]["lastEvent"]
+        self.assertIsNotNone(last)
+        self.assertIn("elapsedMs", last)
+        self.assertIsInstance(last["elapsedMs"], int)
+        self.assertGreaterEqual(last["elapsedMs"], 0)
+
+
+    def test_status_finalizing_with_live_finalize_worker_not_interrupted(self) -> None:
+        """Dead parent owner.pid + live finalize worker => still in progress."""
+        from groklib.modes import finalize_worker
+
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.set_lifecycle(paths, 1, "finalizing")
+        # Parent owner is dead; without finalize liveness this becomes interrupted.
+        runstate.write_home_liveness_marker(paths.run_dir, 999999999)
+        finalize_worker.mark_worker_starting(paths.run_dir)
+        try:
+            exit_code, out = _run_status(paths.run_id)
+            envelope = json.loads(out)
+            self.assertEqual(exit_code, 0, out)
+            self.assertEqual(envelope["status"], "running")
+            self.assertEqual(envelope["response"]["target"]["lifecycle"], "finalizing")
+            self.assertEqual(envelope["response"]["target"]["process"], "alive")
+        finally:
+            finalize_worker.clear_worker_pid(paths.run_dir)
+
+
+    def test_status_envelope_only_cancelled_projects_canceled(self) -> None:
+        """Durable cancel envelope with non-terminal run.json projects canceled."""
+        from groklib.envelope import failure_envelope
+
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.set_lifecycle(paths, 1, "finalizing")
+        env = failure_envelope(
+            run_id=paths.run_id, mode="review", error_class="cancelled", message="bye"
+        )
+        runstate.write_json_atomic(paths.envelope_path, env)
+        exit_code, out = _run_status(paths.run_id)
+        envelope = json.loads(out)
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(envelope["status"], "failure")
+        self.assertEqual(envelope["response"]["target"]["lifecycle"], "canceled")
+        self.assertEqual(envelope["response"]["target"]["lifecycleSource"], "envelope")
 
 if __name__ == "__main__":
     unittest.main()

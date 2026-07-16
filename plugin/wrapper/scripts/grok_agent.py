@@ -340,23 +340,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         return _emit(env, None)
 
-    if mode in _NON_STORING_MODES:
-        return _emit(env, None)
-    run_id = env.get("runId")
-    if not isinstance(run_id, str) or not run_id:
-        # A storing mode returned an envelope without a usable runId. Reading
-        # env["runId"] here (outside the try/except above) would let a
-        # KeyError escape with no stdout envelope emitted, breaking the
-        # exactly-one-envelope guarantee. Guard it so every path still emits
-        # exactly one envelope (here: without a stored copy).
-        log_stderr(
-            "grok_agent",
-            "main",
-            "storing mode {!r} produced an envelope without a usable runId; emitting without a stored copy".format(mode),
-        )
-        return _emit(env, None)
-    envelope_path = runstate.state_root() / "runs" / run_id / "envelope.json"
-    return _emit(env, envelope_path)
+    # PR1 single terminal writer: modes own durable envelope.json via
+    # persist_terminal_envelope. Entrypoint never O_TRUNC-stores a second copy.
+    # Keep doNotStore on stdout when present so callers can distinguish ephemeral
+    # (stdout-only) failures from durable terminal envelopes (design §9.4).
+    return _emit(env, None)
 
 
 if __name__ == "__main__":

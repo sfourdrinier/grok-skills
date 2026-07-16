@@ -15,7 +15,8 @@ process isolation, private authentication, sandboxing, and result reporting.
 It never trusts a Grok narrative in place of verified evidence.
 
 Every subcommand prints exactly one JSON result envelope to stdout, success
-or failure alike. Exit code is `0` iff the envelope's `status` is `"success"`.
+or failure alike. Exit code is `0` when the envelope's `status` is `"success"`
+or `"running"` (in-flight status polls); otherwise `1`.
 
 ## Hard rule: copy the command lines exactly
 
@@ -148,7 +149,10 @@ stays hermetic by design.
 ### `status` - read-only inspection of a prior run
 
 Reads back a run's stored envelope and progress stream by run id. It never
-writes to the run it inspects.
+writes to the run it inspects. Top-level status is a **projection** of the
+target lifecycle (`running` / `success` / `failure`); exit 1 with a valid
+status envelope means the target failed or was interrupted, not that status
+itself failed to inspect.
 
 ```bash
 python3 plugin/wrapper/scripts/grok_agent.py status --run-id <run-id>

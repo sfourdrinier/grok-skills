@@ -315,21 +315,26 @@ def terminalize_unexpected_failure(
     programmer error), a minimal detail-free failure envelope is emitted as the
     final fallback so exactly one envelope always reaches the entrypoint.
     """
+    terminal_lifecycle = "failed"
     if isinstance(exc, GrokWrapperError):
         error_class = exc.error_class
         message = str(exc)
         detail: Optional[dict] = exc.detail or None
+        terminal_lifecycle = "failed"
     elif isinstance(exc, (SystemExit, KeyboardInterrupt)):
         # A SIGTERM-driven SystemExit or a Ctrl-C KeyboardInterrupt is an external
         # cancellation, not a wrapper bug: classify it as "cancelled" so the
         # terminal envelope is honest (F5-sigterm-bypasses-envelope).
+        # Durable lifecycle uses American spelling "canceled" (design §6).
         error_class = "cancelled"
         message = "{} run was cancelled by an external signal".format(mode)
         detail = {"reason": "external-termination", "exceptionType": type(exc).__name__}
+        terminal_lifecycle = "canceled"
     else:
         error_class = "cli-failure"
         message = "{} run failed with an unexpected error".format(mode)
         detail = {"reason": "unexpected-error", "exceptionType": type(exc).__name__}
+        terminal_lifecycle = "failed"
 
     log(
         "terminalize_unexpected_failure",
@@ -337,22 +342,6 @@ def terminalize_unexpected_failure(
             mode, run_paths.run_id, error_class, exc
         ),
     )
-
-    try:
-        write_terminal_record()
-    except Exception as record_exc:  # best-effort: still emit under the real id
-        log(
-            "terminalize_unexpected_failure",
-            "could not write terminal run.json for {}: {}".format(run_paths.run_id, record_exc),
-        )
-
-    try:
-        progress.safe_emit("done", "{} failed: {}".format(mode, error_class), level="error")
-    except Exception as emit_exc:  # progress is best-effort; never block the envelope
-        log(
-            "terminalize_unexpected_failure",
-            "progress emit failed during terminalization of {}: {}".format(run_paths.run_id, emit_exc),
-        )
 
     # Round5 cleanup-outcome-lost-on-terminalize: carry the REAL private-home teardown
     # outcome onto the terminal envelope so a FAILED auth-material teardown on this
@@ -383,12 +372,13 @@ def terminalize_unexpected_failure(
             primary_fields["warnings"] = stderr_warnings
 
     try:
-        return failure_envelope(
+        envelope = failure_envelope(
             run_id=run_paths.run_id,
             mode=mode,
             error_class=error_class,
             message=message,
             detail=detail,
+            progressStreamPath=str(run_paths.progress_path),
             **primary_fields,
         )
     except (InvalidEnvelopeError, SecretMaterialError) as build_exc:
@@ -403,10 +393,132 @@ def terminalize_unexpected_failure(
                 run_paths.run_id, build_exc
             ),
         )
-        return failure_envelope(
+        envelope = failure_envelope(
             run_id=run_paths.run_id,
             mode=mode,
             error_class="cli-failure",
             message="{} run failed and its failure detail could not be safely rendered".format(mode),
+            progressStreamPath=str(run_paths.progress_path),
             **cleanup_fields,
         )
+
+    # Envelope-first durable terminalization (never lifecycle-before-envelope).
+    # Emit progress "done" only after durable persist succeeds.
+    # Design §9.4: never durable-write while a finalize worker may still be alive
+    # (SIGTERM mid-join would otherwise race the worker's real success envelope).
+    try:
+        from groklib.modes.finalize_worker import finalize_worker_blocks_durable_write
+
+        # alive OR unknown: refuse competing durable write (never fail open as dead).
+        if finalize_worker_blocks_durable_write(run_paths.run_dir):
+            log(
+                "terminalize_unexpected_failure",
+                "{} refusing durable terminalize while finalize worker is alive or unknown".format(
+                    run_paths.run_id
+                ),
+            )
+            envelope = dict(envelope)
+            envelope["doNotStore"] = True
+            return envelope
+    except Exception as liveness_exc:
+        # Probe itself failed: fail closed (same as unknown), do not terminalize.
+        log(
+            "terminalize_unexpected_failure",
+            "finalize worker liveness check failed for {} (refusing durable write): {}".format(
+                run_paths.run_id, liveness_exc
+            ),
+        )
+        envelope = dict(envelope)
+        envelope["doNotStore"] = True
+        return envelope
+
+    try:
+        # Optional non-terminal bookkeeping from caller (must not terminalize alone)
+        try:
+            write_terminal_record()
+        except Exception as record_exc:
+            log(
+                "terminalize_unexpected_failure",
+                "non-terminal record merge failed for {}: {}".format(run_paths.run_id, record_exc),
+            )
+        # Worker may have written envelope.json after liveness re-check: preserve it.
+        existing: Optional[dict] = None
+        if run_paths.envelope_path.is_file():
+            try:
+                import json as _json
+                from groklib import envelope as envelope_mod
+
+                candidate = _json.loads(run_paths.envelope_path.read_text(encoding="utf-8"))
+                if isinstance(candidate, dict) and not envelope_mod.validate_envelope(candidate):
+                    existing = candidate
+            except (OSError, ValueError, TypeError):
+                existing = None
+        if existing is not None:
+            try:
+                runstate.persist_terminal_envelope(run_paths, None, None)
+            except Exception as finish_exc:
+                log(
+                    "terminalize_unexpected_failure",
+                    "finish existing envelope failed for {}: {}".format(
+                        run_paths.run_id, finish_exc
+                    ),
+                )
+                # Envelope on disk but lifecycle not repaired: do not claim done.
+                out = dict(existing)
+                out["doNotStore"] = True
+                return out
+            try:
+                status = existing.get("status")
+                if status == "success":
+                    progress.safe_emit("done", "{} run completed".format(mode))
+                else:
+                    progress.safe_emit(
+                        "done",
+                        "{} failed: {}".format(
+                            mode,
+                            ((existing.get("error") or {}) if isinstance(existing.get("error"), dict) else {}).get(
+                                "class"
+                            )
+                            or "failure",
+                        ),
+                        level="error",
+                    )
+            except Exception as emit_exc:
+                log(
+                    "terminalize_unexpected_failure",
+                    "progress emit failed during terminalization of {}: {}".format(
+                        run_paths.run_id, emit_exc
+                    ),
+                )
+            return existing
+
+        record = runstate.load_run_record(run_paths.run_id)
+        rev = int(record.get("recordRevision", 0))
+        life = record.get("lifecycle")
+        if life == "created":
+            record = runstate.set_lifecycle(run_paths, rev, "running")
+            rev = int(record["recordRevision"])
+            life = "running"
+        if life == "running":
+            record = runstate.set_lifecycle(run_paths, rev, "finalizing")
+            rev = int(record["recordRevision"])
+        runstate.persist_terminal_envelope(
+            run_paths, rev, envelope, lifecycle=terminal_lifecycle
+        )
+        try:
+            progress.safe_emit("done", "{} failed: {}".format(mode, error_class), level="error")
+        except Exception as emit_exc:  # progress is best-effort; never block the envelope
+            log(
+                "terminalize_unexpected_failure",
+                "progress emit failed during terminalization of {}: {}".format(
+                    run_paths.run_id, emit_exc
+                ),
+            )
+    except Exception as persist_exc:
+        log(
+            "terminalize_unexpected_failure",
+            "persist_terminal_envelope failed for {}: {}".format(run_paths.run_id, persist_exc),
+        )
+        envelope = dict(envelope)
+        envelope["doNotStore"] = True
+    return envelope

@@ -2,6 +2,13 @@
 
 # Compatibility (Claude Code + Codex / ChatGPT)
 
+## Wrapper lifecycle (1.3.0+)
+
+Status is strictly read-only. Failed/interrupted targets return exit 1 with a
+well-formed status envelope (relay the JSON regardless). Durable runs seed
+`run.json` before publishing a run id; terminal results use envelope-first
+persist via a spawn finalize worker.
+
 Verified against local installs on 2026-07-15:
 
 | Host | Version tested |

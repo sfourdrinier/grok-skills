@@ -3,6 +3,7 @@
 import contextlib
 import io
 import json
+import pathlib
 import signal
 import unittest
 from unittest import mock
@@ -140,6 +141,26 @@ class UsageErrorTests(unittest.TestCase):
         json.loads(out)  # the entire capture parses as a single JSON document
 
 
+
+    def test_main_never_stores_envelope_path_argument(self) -> None:
+        """Entrypoint always emits with envelope_path=None (PR1 single writer)."""
+        calls = []
+        real = grok_agent.emit_envelope
+
+        def spy(env, path):
+            calls.append(path)
+            return real(env, None)
+
+        from groklib.modes import preflight
+        buffer = io.StringIO()
+        with mock.patch.object(grok_agent, "emit_envelope", spy):
+            with contextlib.redirect_stdout(buffer):
+                # usage error path - no mode persist
+                code = grok_agent.main(["not-a-mode"])
+        self.assertEqual(code, 1)
+        self.assertTrue(calls)
+        self.assertTrue(all(c is None for c in calls), calls)
+
 class EntrypointSuccessTests(PreflightHarness):
     """The success and stored-write-failure paths each emit exactly one envelope."""
 
@@ -194,12 +215,24 @@ class EntrypointSuccessTests(PreflightHarness):
         return exit_code, buffer.getvalue()
 
     def test_stored_write_failure_reemits_original_envelope(self) -> None:
-        # F2: a fully SUCCESSFUL run whose stored-copy write fails must re-emit the
-        # SAME original success envelope (never a fabricated cli-failure); exactly
-        # one envelope reaches stdout, with an appended stored-write warning.
-        exit_code, out = self._drive_preflight_with_flaky_store(
-            ("models-ok", "inspect-ok"), self.grok_home
+        # F2: when the entrypoint still attempts a stored-copy write and that write
+        # fails, re-emit the original envelope (never fabricate cli-failure).
+        # PR1 modes may already persist via persist_terminal_envelope; main then
+        # skips re-store (doNotStore / existing valid envelope). Drive _emit
+        # directly for the flaky-store path.
+        from groklib.envelope import build_envelope
+
+        env = build_envelope(
+            run_id="20260716T000000Z-abcdef",
+            mode="preflight",
+            status="success",
+            response={"checks": []},
         )
+        buffer = io.StringIO()
+        with mock.patch.object(grok_agent, "emit_envelope", self._flaky_emit_factory()):
+            with contextlib.redirect_stdout(buffer):
+                exit_code = grok_agent._emit(env, pathlib.Path(self.tmp_root) / "env.json")
+        out = buffer.getvalue()
         non_empty = [line for line in out.splitlines() if line.strip()]
         self.assertEqual(len(non_empty), 1, "exactly one envelope must reach stdout")
         envelope = json.loads(out)
@@ -228,3 +261,43 @@ class EntrypointSuccessTests(PreflightHarness):
 
 if __name__ == "__main__":
     unittest.main()
+
+class EntrypointStorePolicyTests(unittest.TestCase):
+    def test_main_emits_with_no_store_path(self) -> None:
+        calls = []
+        real = grok_agent.emit_envelope
+
+        def spy(env, path):
+            calls.append(path)
+            real(env, None)
+
+        buffer = io.StringIO()
+        with mock.patch.object(grok_agent, "emit_envelope", spy):
+            with contextlib.redirect_stdout(buffer):
+                code = grok_agent.main(["not-a-mode"])
+        self.assertEqual(code, 1)
+        self.assertTrue(calls)
+
+    def test_do_not_store_flag_preserved_on_stdout(self) -> None:
+        """Ephemeral envelopes keep doNotStore so callers do not treat them as durable."""
+        from groklib.envelope import failure_envelope
+
+        env = failure_envelope(
+            run_id="20260716T000000Z-abcdef",
+            mode="review",
+            error_class="finalization-worker-unkillable",
+            message="no durable write",
+        )
+        env["doNotStore"] = True
+        seen = []
+
+        def spy(envelope, path):
+            seen.append(dict(envelope) if isinstance(envelope, dict) else envelope)
+            return 1
+
+        # main() ends with _emit(env, None) without stripping doNotStore
+        with mock.patch.object(grok_agent, "emit_envelope", spy):
+            code = grok_agent._emit(env, None)
+        self.assertEqual(code, 1)
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0].get("doNotStore"))

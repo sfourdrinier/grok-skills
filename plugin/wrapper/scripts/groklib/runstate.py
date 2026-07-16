@@ -9,6 +9,7 @@
 # GrokWrapperError and the shared log_stderr helper from the top-level
 # groklib package.
 
+import contextlib
 import dataclasses
 import datetime
 import json
@@ -24,6 +25,16 @@ from typing import Dict, List, Optional
 
 from groklib import GrokWrapperError, log_stderr
 from groklib import platformsupport
+
+try:
+    import fcntl  # type: ignore
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore
+
+try:
+    import msvcrt  # type: ignore
+except ImportError:  # pragma: no cover - non-Windows
+    msvcrt = None  # type: ignore
 
 _OWNER_STRING = "grok-skills-wrapper"
 _STATE_DIR_NAME = "grok-skills"
@@ -122,16 +133,120 @@ def _mkdir_0700(path: pathlib.Path) -> None:
 
 def _write_json_0600(path: pathlib.Path, payload: object) -> None:
     """Write ``payload`` as JSON to ``path``, forcing the file to exactly 0600 regardless of umask."""
+    write_json_atomic(path, payload)
+
+
+def write_json_atomic(path: pathlib.Path, payload: object) -> None:
+    """Atomically write JSON: temp sibling, fsync file, ``os.replace``, fsync parent dir.
+
+    Parent-directory fsync makes the rename durable across power loss on POSIX
+    (envelope-first crash consistency for ``run.json`` / ``envelope.json``).
+    """
     serialized = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    parent = path.parent
+    tmp_name = "{}.tmp.{}".format(path.name, os.getpid())
+    tmp_path = parent / tmp_name
     try:
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _FILE_MODE)
+        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _FILE_MODE)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        platformsupport.restrict_file_permissions(tmp_path)
+        os.replace(str(tmp_path), str(path))
         platformsupport.restrict_file_permissions(path)
+        # Durable directory entry for the replace (POSIX power-loss safety).
+        # Skip on non-POSIX: Windows cannot O_RDONLY-open directories (PermissionError)
+        # and would fail every write after replace - platform probe-required is separate.
+        if os.name == "posix":
+            try:
+                dir_fd = os.open(str(parent), os.O_RDONLY)
+            except OSError as dir_open_exc:
+                _log_stderr(
+                    "write_json_atomic",
+                    "could not open parent dir for fsync after writing {}: {}".format(
+                        path, dir_open_exc
+                    ),
+                )
+                raise
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
     except OSError as exc:
-        _log_stderr("_write_json_0600", "failed writing {}: {}".format(path, exc))
+        _log_stderr("write_json_atomic", "failed writing {}: {}".format(path, exc))
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
         raise
 
+
+@contextlib.contextmanager
+def run_lock(paths: RunPaths):
+    """Exclusive lock on ``run_dir/run.lock`` (fcntl on Unix, msvcrt on Windows)."""
+    lock_path = paths.run_dir / "run.lock"
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, _FILE_MODE)
+    try:
+        platformsupport.restrict_file_permissions(lock_path)
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        elif msvcrt is not None:  # pragma: no cover - Windows
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        yield
+    finally:
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            elif msvcrt is not None:  # pragma: no cover
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+        finally:
+            os.close(fd)
+
+
+def _load_run_json_unlocked(paths: RunPaths) -> dict:
+    record_path = paths.run_dir / "run.json"
+    try:
+        with open(record_path, "r", encoding="utf-8") as handle:
+            record = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise UnknownRunError(
+            "no run record for run id {}".format(paths.run_id),
+            {"runId": paths.run_id},
+        ) from exc
+    if not isinstance(record, dict):
+        raise UnknownRunError(
+            "run record for run id {} is not a JSON object".format(paths.run_id),
+            {"runId": paths.run_id},
+        )
+    return record
+
+
+def _verify_paths_owner(paths: RunPaths) -> None:
+    marker_path = paths.run_dir / "owner.json"
+    owner_run_id = verify_owner_marker(marker_path)
+    if owner_run_id != paths.run_id:
+        raise StateOwnershipError(
+            "owner marker run id mismatch for {}".format(paths.run_dir),
+            {"expectedRunId": paths.run_id, "markerRunId": owner_run_id},
+        )
+
+
+
+# Lifecycle CAS / terminal persist live in run_lifecycle.py (900-line cap).
+from groklib.run_lifecycle import (  # noqa: E402 - re-export public API
+    CasConflictError,
+    LifecycleError,
+    cas_update_run_record,
+    effective_lifecycle,
+    persist_terminal_envelope,
+    seed_run_record,
+    set_lifecycle,
+)
 
 def emit_run_id_marker(run_id: str) -> None:
     """Write the run id to stderr as a stable machine-readable line for the plugin relay.
@@ -187,22 +302,11 @@ def _run_paths_for(run_id: str) -> RunPaths:
 
 
 def create_run(mode: str) -> RunPaths:
-    """Mint a fresh run id and build the C2 run-dir layout: run_dir/, trace/, owner.json.
+    """Mint a fresh run id, seed ``run.json``, then emit the run-id marker.
 
-    ``mode`` identifies the calling subcommand for forward compatibility with
-    callers; the C2 owner.json schema has no mode field, and run.json (which
-    does) is written separately via ``write_run_record`` by the mode handler
-    at run start, not by this function.
-
-    Parent directories (state root, ``runs/``) are created the same way as
-    every other directory in this module: missing ancestors are created and
-    chmod'd to 0700 with ``exist_ok=True``. The LEAF ``run_dir`` is different
-    on purpose: a colliding run id must never silently adopt an existing run
-    directory (which could belong to a concurrent or prior run), so it is
-    created with a bare ``os.mkdir`` and a ``FileExistsError`` is turned into
-    a fail-closed ``StateOwnershipError``.
+    Seed is written **before** ``emit_run_id_marker`` so a published run id always
+    has durable state (lifecycle ``created``, status ``running``, recordRevision 0).
     """
-    del mode  # accepted per the C5 signature; not persisted by this function, see docstring.
     run_id = new_run_id()
     paths = _run_paths_for(run_id)
     _mkdir_0700(paths.run_dir.parent)
@@ -219,26 +323,13 @@ def create_run(mode: str) -> RunPaths:
             ),
             {"runId": run_id, "operation": "create_run"},
         ) from exc
-    # From here the leaf run directory is OURS. Any failure finishing the layout
-    # must let the caller terminalize under THIS real run id instead of orphaning
-    # a dangling run dir under a synthesized id (F1-create-run-outside-try): the
-    # exception carries ``paths`` so run_grok_mode / run_worktree_mode /
-    # preflight.run can write a terminal run.json under the real id. The owner
-    # marker is written FIRST (before the trace dir and the relay marker) so
-    # write_run_record's owner-marker verification can succeed even when a later
-    # step fails.
     try:
         platformsupport.restrict_dir_permissions(paths.run_dir)
         write_owner_marker(paths.run_dir, run_id)
-        # F4-partial-create: write the owner-pid liveness lease into the run dir the
-        # instant the marker exists, so is_orphaned_partial_run_dir can tell a
-        # genuinely orphaned post-create crash (owner dead, no run.json) from a live
-        # in-flight create (owner alive). Written right after the marker so an
-        # in-flight run carries the lease before the caller writes run.json.
         write_home_liveness_marker(paths.run_dir, os.getpid())
         _mkdir_0700(paths.trace_dir)
-        # F-RELAY-RUNID: announce the freshly-minted run id on stderr so the
-        # plugin's foreground relay follows THIS run deterministically.
+        seed = seed_run_record(paths, mode)
+        write_json_atomic(paths.run_dir / "run.json", seed)
         emit_run_id_marker(run_id)
     except BaseException as exc:
         _attach_run_paths(exc, paths)
@@ -372,20 +463,8 @@ def allocate_leader_socket(private_home: pathlib.Path, run_id: str) -> pathlib.P
     return socket_path
 
 
-def write_run_record(paths: RunPaths, record: dict) -> None:
-    """Write ``run_dir/run.json`` after verifying the run dir's owner marker matches ``paths.run_id``."""
-    marker_path = paths.run_dir / "owner.json"
-    owner_run_id = verify_owner_marker(marker_path)
-    if owner_run_id != paths.run_id:
-        _log_stderr(
-            "write_run_record",
-            "owner marker run id {!r} does not match paths.run_id {!r}".format(owner_run_id, paths.run_id),
-        )
-        raise StateOwnershipError(
-            "owner marker run id mismatch for {}".format(paths.run_dir),
-            {"expectedRunId": paths.run_id, "markerRunId": owner_run_id},
-        )
-    _write_json_0600(paths.run_dir / "run.json", record)
+# Public write_run_record removed in PR1: use cas_update_run_record / set_lifecycle /
+# persist_terminal_envelope only.
 
 
 def load_run_record(run_id: str) -> dict:

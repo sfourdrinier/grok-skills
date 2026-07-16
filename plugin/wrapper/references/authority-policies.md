@@ -16,7 +16,7 @@ the underlying probe evidence.
 | `code` | External git worktree the wrapper creates and verifies (never the current checkout) | Editing and terminal tools (`write`, `search_replace`, `run_terminal_command`, `get_command_or_subagent_output`) plus read tools (`read_file`, `list_dir`, `grep`), confined by the sandbox to the worktree | `workspace` (built-in; confines writes to cwd plus private temp) | Permitted (D-NET) | Disabled | Opt-in per run (same as `review`) | `auto` |
 | `verify` | An EXISTING external worktree named by `--worktree`; source-editing tools absent | Read-only set plus terminal tools for approved verification commands only; no `write`/`search_replace` | `workspace` (same base profile and confinement as `code`) | Permitted (D-NET) | Disabled | **Never** (hermetic by design; `verify` has no `--web` flag) | `auto` |
 | `preflight` | N/A (no task-bearing Grok run; only short `grok models` / `grok inspect --json` probes in a throwaway private home) | N/A | N/A | N/A | N/A | N/A | N/A |
-| `status` | N/A (pure local read of stored run state; never invokes Grok). Top-level envelope status is `success` when finished, `running` when the target is still in progress (no stored envelope yet). | N/A | N/A | N/A | N/A | N/A | N/A |
+| `status` | N/A (pure local read of stored run state; never invokes Grok; **never writes** the target run dir). Top-level envelope: `running` (exit 0) for in-flight lifecycle; `success` (exit 0) for completed; `failure` (exit 1) for failed/canceled/derived interrupted — still a well-formed status envelope. Effective lifecycle: record → valid envelope → derived `interrupted`. | N/A | N/A | N/A | N/A | N/A | N/A |
 | `cleanup` | N/A (pure local read/remove of stored run state and, for code/verify, the worktree; never invokes Grok) | N/A | N/A | N/A | N/A | N/A | N/A |
 
 Notes:
@@ -51,7 +51,7 @@ Notes:
 
 ## C4 error classes and what they mean for you
 
-Every failure envelope's `error.class` is exactly one of the 24 registered
+Every failure envelope's `error.class` is exactly one of the 27 registered
 values below (`groklib/envelope.py: ERROR_CLASSES`). `error.message` and
 `error.detail` carry the specifics; this table is the quick index of what
 each class implies and what to do next.
@@ -82,3 +82,6 @@ each class implies and what to do next.
 | `leader-socket-failure` | The generated `--leader-socket` path exceeded the OS `AF_UNIX` path length limit (~104 bytes on macOS). | This should not occur with the current short prefix scheme; report it if it does. |
 | `usage-error` | Bad argv - missing/mutually-exclusive/malformed CLI flags - caught before any run was created. | Fix the command line; compare against the exact C8 surface in `cli-reference.md`, never guess a flag. |
 | `probe-required` | The current platform (or a specific enforcement claim) has no captured live-probe evidence backing it. | On version 1 this means: you are not on macOS. Live modes stay blocked until that platform's own probe suite runs and is committed. |
+| `finalization-timeout` | The finalize worker exceeded its wall-clock budget; parent recovered after kill and durably wrote a terminal failure (or fail-closed if persist itself failed). | Inspect `error.detail.budgetSeconds` and `finalize-worker.stderr` under the run dir; retry only after checking disk/CAS pressure. |
+| `finalization-worker-missing-result` | The finalize worker exited 0 (or parent recovery finished) without a valid terminal `envelope.json`. | Treat as durable hang recovery failure; inspect the run dir and re-run if the task outcome was not persisted. |
+| `finalization-worker-unkillable` | Parent could not terminate the finalize worker after timeout; **no durable terminal write** was performed (`doNotStore`). Lifecycle may remain `finalizing`. | Investigate the stuck worker process; do not trust stdout-only ephemeral failure as stored state — poll `status` until lifecycle moves or intervene manually. |
