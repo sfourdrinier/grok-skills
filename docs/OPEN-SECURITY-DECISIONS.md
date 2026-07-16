@@ -2,10 +2,10 @@
 
 # Security decisions (resolved)
 
-The dual-lens review loop (adversarial agents + Grok dogfood, 6 rounds) fixed every
-mechanical bug it found. Four remaining findings were design choices about the wrapper's
-security posture rather than mechanical defects. They are documented here for operators
-and auditors; the resolutions below are what shipped.
+Several hardening rounds (outside agents plus Grok reviewing its own engine) fixed
+every mechanical bug they found. Four remaining items were design choices about the
+wrapper's security posture, not code bugs. They are documented here for operators and
+auditors; the resolutions below are what shipped.
 
 **Fail-closed carve-out (v1.2.8):** Grok CLI **build-string mismatch** vs
 `accepted-version.json` is **not** fail-closed. Any working `grok --version` is

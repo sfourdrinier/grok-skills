@@ -10,11 +10,10 @@ for marketplace / package tags.
 
 ### Fixed
 
-- **Docs vs code pass (adversarial):** aligned README, PROVENANCE, authority
-  policies, wrapper SKILL, checklists, roadmap, live probe docs, and setup
-  hints with current behavior — no hard CLI pin, repo-agnostic targets,
-  review drift as warnings, reason web default off, Codex `agents/run.mjs` /
-  `GROK_AGENT_RUN`, dual-host plugin surface.
+- **Docs matched code:** README, PROVENANCE, authority policies, wrapper SKILL,
+  checklists, roadmap, live probe docs, and setup hints now match behavior —
+  no hard CLI pin, repo-agnostic targets, review drift as warnings, reason web
+  default off, Codex `agents/run.mjs` / `GROK_AGENT_RUN`, dual-host surface.
 
 ## [1.2.8] - 2026-07-15
 

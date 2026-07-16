@@ -62,22 +62,20 @@ Two layers:
   **adversarial-review only**; opt-in for review, reason, and code. Reason forces
   no-web when `--input` is present unless `--web` is explicit.
 
-## Hardening record: the dual-lens review loop
+## Hardening record: two independent reviews
 
-The tool was hardened with a deliberate methodology worth reusing: **two independent
-adversarial lenses, run every round, iterating until BOTH come up empty.**
+The tool was hardened with a simple rule: **two independent reviews each round,
+repeat until both come up empty.**
 
-1. **Our lens - adversarial multi-agent review.** Cold-context agents read whole files
-   (never the diff, never our intent), each finding surfaced then adversarially verified
-   by independent skeptics whose job is to REFUTE it; a finding survives only if a
-   majority cannot refute it.
-2. **Grok's lens - dogfood.** The wrapper reviews its own engine (`/grok:review` on the
-   wrapper code). An independent model, reading cold, catches what an agent primed on the
-   changed surface misses.
+1. **Outside agents.** Cold-context reviewers read whole files (not just the diff, not
+   the author's intent). Each finding is checked by other reviewers whose job is to
+   refute it; a finding only sticks if it survives that.
+2. **Grok on its own engine.** Run `/grok:review` against the wrapper code. A different
+   model, reading cold, catches bugs a change-focused pass misses.
 
-Why both: the two lenses fail differently. Our agents scoped tightly to the changed
-surface; Grok read the whole wrapper cold and found pre-existing bugs. A single lens
-would have shipped them.
+Why both: they fail differently. Outside agents scoped tightly to the changed surface;
+Grok read the whole wrapper cold and found older bugs. One pass alone would have
+shipped those.
 
 ### What the rounds found (all confirmed findings fixed with tests)
 
@@ -123,7 +121,6 @@ after the first green fix.
 
 ## Current status
 
-The dual-lens loop is the ongoing quality bar for substantive changes: prefer shipping
-only after a round produces zero confirmed findings from both independent adversarial
-review and Grok dogfood, then merge with explicit human approval. See `docs/roadmap.md`
-for Waves 1-3 (live adversary, debate, autonomy) and Codex support.
+That two-review loop is still the quality bar for big changes: ship after a clean
+round from outside agents and from Grok reviewing its own engine, with a human
+approving the merge. See `docs/roadmap.md` for planned waves and Codex support.
