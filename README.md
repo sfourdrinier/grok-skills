@@ -174,6 +174,7 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 | `/grok:debate` | Two opposing Grok reason passes + synthesis on a topic. |
 | `/grok:status` | Jobs table, or read-only wrapper status with `--run-id` (lifecycle projection; exit 1 can mean a failed target). |
 | `/grok:jobs` | List recent companion-tracked jobs. |
+| `/grok:setup` | Optional readiness + prefs (`--run-mode`, `--notification-mode auto` for background completion signals). |
 | `/grok:result` | Stored job output (`--pretty` for Markdown). |
 | `/grok:cancel` | Cancel a running job by id. |
 | `/grok:transfer` | Package Claude session context into a Grok task pack. |

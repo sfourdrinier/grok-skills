@@ -14,6 +14,8 @@ allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 
 ```bash
 SKILL_BASE='<Base directory for this skill - absolute path from Skill tool>'
+# Required for completion notifications (see plugin/references/execution-context.md):
+export GROK_COMPANION_EXECUTION_CONTEXT=foreground   # or background
 node "$SKILL_BASE/run.mjs" <mode> [args...]
 ```
 
@@ -107,11 +109,17 @@ node "$SKILL_BASE/run.mjs" review --target '<target from $ARGUMENTS>' --task-fil
   issue the review reports.
 
 Background flow:
+- Set `export GROK_COMPANION_EXECUTION_CONTEXT=background` (canonical pattern in
+  `plugin/references/execution-context.md`).
 - Launch the same command with `Bash(run_in_background: true)`.
 - Do not wait for completion or read its output this turn.
 - Tell the user: "Grok review started in the background. Run `/grok:status
   --run-id <id>` to read the result envelope (the run id is printed when the run
-  finishes)."
+  finishes). If notifications are enabled (`setup --notification-mode auto`), a
+  completion signal may also fire when the job ends."
+
+Foreground flow must set `export GROK_COMPANION_EXECUTION_CONTEXT=foreground`
+before `node "$SKILL_BASE/run.mjs"`.
 
 If the companion prints an actionable "could not locate the Grok wrapper"
 message instead of an envelope, tell the user to run `/grok:setup`.

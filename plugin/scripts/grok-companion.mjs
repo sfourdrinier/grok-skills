@@ -29,13 +29,20 @@ import {
   formatJobsTable,
   getJob,
   getLastRescueJobId,
+  getNotificationConfig,
   getRunMode,
   listJobs,
   readJobStdout,
+  setNotificationConfig,
   setRunMode,
   storeJobStdout,
   updateJob,
 } from "./lib/jobs.mjs";
+import {
+  attemptNotify,
+  NOTIFY_ELIGIBLE_MODES,
+  wrapperChildEnv,
+} from "./lib/notify.mjs";
 import {
   buildAdversarialTask,
   buildBranchReviewTask,
@@ -80,6 +87,79 @@ const WRAPPER_MODES = new Set([
 
 function stderrLine(line) {
   process.stderr.write(`${line}\n`);
+}
+
+/**
+ * Thin companion hook: after a terminal live run, at-most-once notify attempt.
+ * Never throws; never fails the job. Uses notify.mjs only (DRY).
+ */
+function maybeNotifyAfterTerminal({ cwd, mode, runId, code, startedAtMs, stdoutText }) {
+  if (!NOTIFY_ELIGIBLE_MODES.has(mode)) {
+    return Promise.resolve();
+  }
+  if (!runId) {
+    return Promise.resolve();
+  }
+  const runDir = path.join(runsDirFor(process.env), runId);
+  if (!fs.existsSync(runDir)) {
+    // Direct mode synthetic ids have no durable run dir - skip (no marker home).
+    return Promise.resolve();
+  }
+  const prefs = getNotificationConfig(cwd, process.env);
+  let lifecycle = code === 0 ? "completed" : "failed";
+  if (stdoutText) {
+    const env = tryParseEnvelope(stdoutText);
+    if (env?.status === "success") {
+      lifecycle = "completed";
+    } else if (env?.status === "failure") {
+      lifecycle = "failed";
+    } else if (env?.status === "running") {
+      lifecycle = "running";
+    }
+  }
+  const durationSeconds = Math.max(
+    0,
+    Math.round((Date.now() - (startedAtMs || Date.now())) / 1000)
+  );
+  return attemptNotify({
+    runDir,
+    runId,
+    mode,
+    lifecycle,
+    durationSeconds,
+    notificationMode: prefs.notificationMode,
+    webhookUrl: prefs.notificationWebhookUrl,
+    env: process.env,
+  })
+    .then((result) => {
+      if (result.attempted) {
+        stderrLine(
+          `[grok-notify] ${result.sent ? "sent" : "failed"} (${result.reason}${
+            result.detail ? `: ${result.detail}` : ""
+          })`
+        );
+      }
+    })
+    .catch((err) => {
+      stderrLine(`[grok-notify] swallowed error: ${err.message}`);
+    });
+}
+
+function resolveRunIdFromJobAndStdout(cwd, job, stdoutText) {
+  if (job?.runId) {
+    return job.runId;
+  }
+  if (stdoutText) {
+    const env = tryParseEnvelope(stdoutText);
+    if (env?.runId) {
+      return env.runId;
+    }
+  }
+  if (job?.id) {
+    const latest = getJob(cwd, job.id);
+    return latest?.runId ?? null;
+  }
+  return null;
 }
 
 function stageStdinTaskFile(args) {
@@ -210,6 +290,7 @@ function maybeSchema(args) {
 }
 
 function captureAndTrack(wrapper, args, { cwd, mode, kind, runMode }) {
+  const startedAtMs = Date.now();
   const job = createJob(cwd, { kind, mode, runMode });
   appendJobLog(cwd, job.id, `dispatch ${args.join(" ")}`);
   stderrLine(`[grok-job] ${job.id} started (${mode}, ${runMode})`);
@@ -222,20 +303,21 @@ function captureAndTrack(wrapper, args, { cwd, mode, kind, runMode }) {
       summary: direct.code === 0 ? "direct grok finished" : "direct grok failed",
     });
     process.stdout.write(direct.envelopeText);
-    return direct.code;
+    // Direct has no durable runs/<id> for notified.json; skip push notify.
+    return Promise.resolve(direct.code);
   }
 
   const result = spawnSync(PYTHON, [wrapper, ...args], {
     cwd,
     encoding: "utf8",
-    env: process.env,
+    env: wrapperChildEnv(process.env),
     maxBuffer: 64 * 1024 * 1024,
   });
 
   if (result.error) {
     process.stderr.write(spawnFailedMessage(wrapper, result.error.message));
     updateJob(cwd, job.id, { status: "failure", error: result.error.message });
-    return SPAWN_FAILED_EXIT;
+    return Promise.resolve(SPAWN_FAILED_EXIT);
   }
 
   if (result.stderr) {
@@ -259,16 +341,29 @@ function captureAndTrack(wrapper, args, { cwd, mode, kind, runMode }) {
   }
 
   const code = typeof result.status === "number" ? result.status : SIGNAL_EXIT;
-  updateJob(cwd, job.id, {
+  const updated = updateJob(cwd, job.id, {
     status: code === 0 ? "success" : "failure",
     summary: code === 0 ? "completed" : `exit ${code}`,
     pid: null,
   });
-  return code;
+  const runId = resolveRunIdFromJobAndStdout(cwd, updated, stdout);
+  // Fire-and-forget is wrong for short sync path - wait so process does not exit mid-notify
+  // but never throw.
+  return maybeNotifyAfterTerminal({
+    cwd,
+    mode,
+    runId,
+    code,
+    startedAtMs,
+    stdoutText: stdout,
+  }).then(() => code);
 }
 
 function runPassthrough(wrapper, args) {
-  const result = spawnSync(PYTHON, [wrapper, ...args], { stdio: "inherit", env: process.env });
+  const result = spawnSync(PYTHON, [wrapper, ...args], {
+    stdio: "inherit",
+    env: wrapperChildEnv(process.env),
+  });
   if (result.error) {
     process.stderr.write(spawnFailedMessage(wrapper, result.error.message));
     return SPAWN_FAILED_EXIT;
@@ -283,6 +378,7 @@ function runPassthrough(wrapper, args) {
 }
 
 function runWithLiveRelay(wrapper, args, track) {
+  const startedAtMs = Date.now();
   const runsDir = runsDirFor(process.env);
   let knownRunIds;
   try {
@@ -291,7 +387,7 @@ function runWithLiveRelay(wrapper, args, track) {
     stderrLine(`[grok-relay] snapshot failed, continuing without live progress: ${err.message}`);
     knownRunIds = new Set();
   }
-  const relay = new LiveRelay({ runsDir, knownRunIds, startMs: Date.now(), sink: stderrLine });
+  const relay = new LiveRelay({ runsDir, knownRunIds, startMs: startedAtMs, sink: stderrLine });
   const cwd = process.cwd();
   const job = track
     ? createJob(cwd, {
@@ -315,16 +411,25 @@ function runWithLiveRelay(wrapper, args, track) {
       } catch (err) {
         stderrLine(`[grok-relay] stop failed: ${err.message}`);
       }
+      let jobAfter = job;
       if (job) {
         if (stdoutBuf) {
           storeJobStdout(cwd, job.id, stdoutBuf);
         }
-        updateJob(cwd, job.id, {
+        jobAfter = updateJob(cwd, job.id, {
           status: code === 0 ? "success" : "failure",
           summary: code === 0 ? "completed" : `exit ${code}`,
         });
       }
-      resolve(code);
+      const runId = resolveRunIdFromJobAndStdout(cwd, jobAfter, stdoutBuf);
+      maybeNotifyAfterTerminal({
+        cwd,
+        mode: track?.mode || "review",
+        runId,
+        code,
+        startedAtMs,
+        stdoutText: stdoutBuf,
+      }).finally(() => resolve(code));
     };
 
     let child;
@@ -333,7 +438,7 @@ function runWithLiveRelay(wrapper, args, track) {
       // targets the companion's group and must reach the wrapper as a descendant.
       child = spawn(PYTHON, [wrapper, ...args], {
         stdio: ["inherit", "pipe", "pipe"],
-        env: process.env,
+        env: wrapperChildEnv(process.env),
       });
       if (job && child.pid) {
         updateJob(cwd, job.id, { pid: child.pid, pgid: process.pid });
@@ -544,11 +649,20 @@ function cmdSetup(cwd, args) {
       setRunMode(cwd, mode);
     }
   }
+  const notifyModeIdx = args.indexOf("--notification-mode");
+  if (notifyModeIdx >= 0 && args[notifyModeIdx + 1]) {
+    setNotificationConfig(cwd, { notificationMode: args[notifyModeIdx + 1] });
+  }
+  const webhookIdx = args.indexOf("--notification-webhook-url");
+  if (webhookIdx >= 0 && args[webhookIdx + 1]) {
+    setNotificationConfig(cwd, { notificationWebhookUrl: args[webhookIdx + 1] });
+  }
   if (enable) writeGateConfig(cwd, true);
   if (disable) writeGateConfig(cwd, false);
 
   const gate = readGateConfig(cwd);
   const runMode = getRunMode(cwd);
+  const notifyPrefs = getNotificationConfig(cwd);
   const binary = grokBinaryAvailable();
   const wrapper = resolveWrapperPath(process.env);
   const rows = [
@@ -568,6 +682,13 @@ function cmdSetup(cwd, args) {
       detail: runMode,
     },
     {
+      name: "notifications",
+      ok: true,
+      detail: `${notifyPrefs.notificationMode}${
+        notifyPrefs.notificationWebhookUrl ? ` webhook=${notifyPrefs.notificationWebhookUrl}` : ""
+      }`,
+    },
+    {
       name: "stop-review gate",
       ok: true,
       detail: gate.stopReviewGate ? "ENABLED" : "disabled",
@@ -585,6 +706,11 @@ function cmdSetup(cwd, args) {
     hints.push("Direct mode uses your installed Grok home (like OpenAI's plugin uses installed Codex). Switch with: companion setup --run-mode hardened");
   } else {
     hints.push("Hardened mode is default. For installed-CLI posture: companion setup --run-mode direct");
+  }
+  if (notifyPrefs.notificationMode === "off") {
+    hints.push(
+      "Notifications are off. For background completion signals: setup --notification-mode auto (recommended)."
+    );
   }
 
   // Codex agents: remove managed, or ensure (also auto-run on SessionStart).
@@ -663,7 +789,7 @@ function cmdSetup(cwd, args) {
   return binary.ok && wrapper && agentsOk ? 0 : 1;
 }
 
-function cmdDebate(cwd, wrapper, args, runMode) {
+async function cmdDebate(cwd, wrapper, args, runMode) {
   // Bounded two-pass: Grok reason, then a second reason that critiques the first.
   const task = extractTask(args) || "Debate the design tradeoffs in this repository.";
   const round1 = [
@@ -673,7 +799,7 @@ function cmdDebate(cwd, wrapper, args, runMode) {
     task,
   ].join("\n");
   const inj1 = injectTaskFile(["reason"], round1);
-  const code1 = captureAndTrack(wrapper, inj1.args, {
+  const code1 = await captureAndTrack(wrapper, inj1.args, {
     cwd,
     mode: "reason",
     kind: "debate-a",
@@ -698,7 +824,7 @@ function cmdDebate(cwd, wrapper, args, runMode) {
     "End with: agreement points, disagreements, and a recommended resolution.",
   ].join("\n");
   const inj2 = injectTaskFile(["reason"], round2);
-  const code2 = captureAndTrack(wrapper, inj2.args, {
+  const code2 = await captureAndTrack(wrapper, inj2.args, {
     cwd,
     mode: "reason",
     kind: "debate-b",
@@ -872,13 +998,14 @@ function main() {
   };
 
   if (runMode === "direct") {
-    const code = captureAndTrack(null, wrapperArgs, {
-      cwd,
-      mode: wrapperMode,
-      kind: track.kind,
-      runMode: "direct",
-    });
-    return finishCleanups(code);
+    return Promise.resolve(
+      captureAndTrack(null, wrapperArgs, {
+        cwd,
+        mode: wrapperMode,
+        kind: track.kind,
+        runMode: "direct",
+      })
+    ).then(finishCleanups);
   }
 
   const wrapper = resolveWrapperPath(process.env);
@@ -906,13 +1033,14 @@ function main() {
   }
 
   if (WRAPPER_MODES.has(wrapperMode) || wrapperArgs[0]) {
-    const code = captureAndTrack(wrapper, wrapperArgs, {
-      cwd,
-      mode: wrapperMode,
-      kind: track.kind,
-      runMode: "hardened",
-    });
-    return finishCleanups(code);
+    return Promise.resolve(
+      captureAndTrack(wrapper, wrapperArgs, {
+        cwd,
+        mode: wrapperMode,
+        kind: track.kind,
+        runMode: "hardened",
+      })
+    ).then(finishCleanups);
   }
 
   return finishCleanups(runPassthrough(wrapper, wrapperArgs));

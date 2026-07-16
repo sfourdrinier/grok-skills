@@ -18,6 +18,41 @@ const JOB_ID_RE = /^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$/;
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
 
+/** Single source of jobs-index config defaults (design §11). */
+export const DEFAULT_JOBS_CONFIG = Object.freeze({
+  runMode: "hardened",
+  notificationMode: "off",
+  notificationWebhookUrl: null,
+  lastRescueJobId: null,
+});
+
+const NOTIFICATION_MODES = new Set(["off", "auto", "native", "webhook"]);
+
+function normalizeNotificationMode(value) {
+  const mode = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return NOTIFICATION_MODES.has(mode) ? mode : DEFAULT_JOBS_CONFIG.notificationMode;
+}
+
+function normalizeWebhookUrl(value) {
+  if (value == null || value === "") {
+    return null;
+  }
+  if (typeof value !== "string") {
+    return null;
+  }
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function normalizeConfig(raw) {
+  return {
+    runMode: raw?.runMode === "direct" ? "direct" : "hardened",
+    notificationMode: normalizeNotificationMode(raw?.notificationMode),
+    notificationWebhookUrl: normalizeWebhookUrl(raw?.notificationWebhookUrl),
+    lastRescueJobId: raw?.lastRescueJobId ?? null,
+  };
+}
+
 export function isValidJobId(jobId) {
   return typeof jobId === "string" && JOB_ID_RE.test(jobId);
 }
@@ -86,20 +121,17 @@ function loadIndex(cwd, env = process.env) {
   ensure(cwd, env);
   const file = indexPath(cwd, env);
   if (!fs.existsSync(file)) {
-    return { version: 1, jobs: [], config: { runMode: "hardened" } };
+    return { version: 1, jobs: [], config: { ...DEFAULT_JOBS_CONFIG } };
   }
   try {
     const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
     return {
       version: 1,
       jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [],
-      config: {
-        runMode: parsed.config?.runMode === "direct" ? "direct" : "hardened",
-        lastRescueJobId: parsed.config?.lastRescueJobId ?? null,
-      },
+      config: normalizeConfig(parsed.config),
     };
   } catch {
-    return { version: 1, jobs: [], config: { runMode: "hardened" } };
+    return { version: 1, jobs: [], config: { ...DEFAULT_JOBS_CONFIG } };
   }
 }
 
@@ -108,11 +140,14 @@ function saveIndex(cwd, index, env = process.env) {
   const jobs = [...(index.jobs ?? [])]
     .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")))
     .slice(0, MAX_JOBS);
+  const config = normalizeConfig(index.config);
   const payload = {
     version: 1,
     config: {
-      runMode: index.config?.runMode === "direct" ? "direct" : "hardened",
-      lastRescueJobId: index.config?.lastRescueJobId ?? null,
+      runMode: config.runMode,
+      notificationMode: config.notificationMode,
+      notificationWebhookUrl: config.notificationWebhookUrl,
+      lastRescueJobId: config.lastRescueJobId,
     },
     jobs,
   };
@@ -133,6 +168,33 @@ export function setRunMode(cwd, mode, env = process.env) {
   index.config.runMode = mode === "direct" ? "direct" : "hardened";
   saveIndex(cwd, index, env);
   return index.config.runMode;
+}
+
+/**
+ * @returns {{ notificationMode: string, notificationWebhookUrl: string|null }}
+ */
+export function getNotificationConfig(cwd, env = process.env) {
+  const config = loadIndex(cwd, env).config;
+  return {
+    notificationMode: config.notificationMode,
+    notificationWebhookUrl: config.notificationWebhookUrl,
+  };
+}
+
+/**
+ * @param {string} cwd
+ * @param {{ notificationMode?: string, notificationWebhookUrl?: string|null }} patch
+ */
+export function setNotificationConfig(cwd, patch, env = process.env) {
+  const index = loadIndex(cwd, env);
+  if (patch.notificationMode !== undefined) {
+    index.config.notificationMode = normalizeNotificationMode(patch.notificationMode);
+  }
+  if (patch.notificationWebhookUrl !== undefined) {
+    index.config.notificationWebhookUrl = normalizeWebhookUrl(patch.notificationWebhookUrl);
+  }
+  saveIndex(cwd, index, env);
+  return getNotificationConfig(cwd, env);
 }
 
 export function mintJobId() {

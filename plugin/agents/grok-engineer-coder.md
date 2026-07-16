@@ -29,9 +29,11 @@ if [ ! -f "$AGENT_RUN" ]; then
 fi
 ```
 
-Then always:
+Then always set execution context (canonical pattern:
+`plugin/references/execution-context.md`) and invoke:
 
 ```bash
+export GROK_COMPANION_EXECUTION_CONTEXT=foreground   # or background
 node "$AGENT_RUN" <mode> [args...]
 ```
 

@@ -14,6 +14,8 @@ allowed-tools: "Bash(node:*)"
 
 ```bash
 SKILL_BASE='<Base directory for this skill - absolute path from Skill tool>'
+# Required for completion notifications (plugin/references/execution-context.md):
+export GROK_COMPANION_EXECUTION_CONTEXT=foreground   # or background
 node "$SKILL_BASE/run.mjs" <mode> [args...]
 ```
 

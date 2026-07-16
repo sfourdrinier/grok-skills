@@ -40,6 +40,18 @@ test("run mode persists hardened vs direct", () => {
   assert.equal(setRunMode(cwd, "hardened", env), "hardened");
 });
 
+test("notification prefs default off and persist", async () => {
+  const { getNotificationConfig, setNotificationConfig, DEFAULT_JOBS_CONFIG } = await import(
+    "../lib/jobs.mjs"
+  );
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-notify-cfg-"));
+  const env = { CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata") };
+  assert.equal(getNotificationConfig(cwd, env).notificationMode, "off");
+  assert.equal(DEFAULT_JOBS_CONFIG.notificationMode, "off");
+  setNotificationConfig(cwd, { notificationMode: "auto" }, env);
+  assert.equal(getNotificationConfig(cwd, env).notificationMode, "auto");
+});
+
 test("direct mode rejects --isolated fail-closed", async () => {
   const { runDirectGrok } = await import("../lib/direct-grok.mjs");
   const result = runDirectGrok({
