@@ -1,16 +1,16 @@
-# Run lifecycle program — Implementation Plan (revision 9)
+# Run lifecycle program — Implementation Plan (revision 10)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Checkboxes track progress.
 
-**Goal:** Full run lifecycle with CAS, crash-consistent terminal persistence, read-only status, process finalize worker, **opt-in** isolated review, at-most-once notify attempts, and verified `code` implementation handoff — **four PRs**.
+**Goal:** Full run lifecycle with CAS, crash-consistent terminal persistence, read-only status, process finalize worker, **opt-in** isolated review, at-most-once notify attempts, verified `code` implementation handoff, and (later) **operator-driven notify retry** — **five PRs**.
 
-**Design:** [docs/superpowers/specs/2026-07-15-run-lifecycle-design.md](../specs/2026-07-15-run-lifecycle-design.md) **revision 9**.
+**Design:** [docs/superpowers/specs/2026-07-15-run-lifecycle-design.md](../specs/2026-07-15-run-lifecycle-design.md) **revision 10**.
 
-**Baseline:** v1.2.10; **PR1 shipped** on main as **1.3.x**. **Versions:** 1.3.x (done) → 1.4.0 → 1.5.0 → **1.6.0**.
+**Baseline:** v1.2.10; **PR1 shipped** on main as **1.3.x**. **Versions:** 1.3.x (done) → 1.4.0 → 1.5.0 → 1.6.0 → **1.7.0** (PR5).
 
-**Rule:** Design §4–§14 are authority. Rev 9 product change: PR2 isolation is **opt-in** (`--isolated` only); `--base` alone does **not** force isolation.
+**Rule:** Design §4–§14 are authority for PR1–PR4. Rev 9 product change: PR2 isolation is **opt-in** (`--isolated` only); `--base` alone does **not** force isolation. **Rev 10:** operator notify retry is **PR5 only** — not PR3, not automatic, not exactly-once delivery.
 
-**PR2 may proceed under revision 9 after user approval of this opt-in policy.**
+**PR1 done. PR2 (opt-in isolation) on branch / review. PR3–PR5 follow execution order below.**
 
 ---
 
@@ -116,7 +116,8 @@
 | `CHANGELOG.md` | 1.5.0 |
 | Packaging triple | **1.5.0** |
 
-**Not in PR3:** changes to `plugin/scripts/lib/skill-run.mjs` behavior (locked no-op).
+**Not in PR3:** changes to `plugin/scripts/lib/skill-run.mjs` behavior (locked no-op).  
+**Not in PR3:** operator notify retry, automatic retry of `pending`/`failed`, or exactly-once delivery claims — those are **PR5** (retry) or permanently out of scope (exactly-once / auto-retry).
 
 ### PR4 → 1.6.0
 
@@ -395,7 +396,8 @@ Design §11:
 
 ### Task 3.4 — Docs + 1.5.0
 
-- [ ] All PR3 docs; packaging **1.5.0**; tag `v1.5.0`.
+- [ ] All PR3 docs; packaging **1.5.0**; tag `v1.5.0`.  
+- [ ] Docs explicitly: **at-most-once attempt only**; operator retry is **PR5** if needed after dogfood.
 
 ---
 
@@ -503,6 +505,58 @@ Exact meaning design §14.17 — no “unacknowledged.”
 
 ---
 
+## PR5 — Operator notify retry (→ 1.7.0)
+
+**When:** After **PR3 is shipped and dogfooded** (and typically after PR4). Do **not** block 1.5.0/1.6.0 on this.
+
+**Product:** Optional, **operator-initiated** re-attempt of a notification for a finished run. Complements PR3’s at-most-once **automatic** attempt — does **not** replace it.
+
+### Policy (locked for PR5)
+
+| Rule | Decision |
+|------|----------|
+| Automatic retry of `pending` / `failed` | **Still never** (duplicate risk after crash-after-send) |
+| Exactly-once delivery | **Still not claimed**; not a PR5 goal |
+| Who may re-fire | **Operator only** (explicit skill/CLI flag/command) |
+| UX | Copy must state **may send a duplicate** notification |
+| Failure of retry | Must **not** fail or re-open a completed run’s terminal outcome |
+| Default | No change to `notificationMode` defaults from PR3 |
+
+### File map (exact)
+
+| Path | Role |
+|------|------|
+| `plugin/scripts/lib/notify.mjs` | Export operator `retryNotify` / force-attempt path distinct from automatic attempt |
+| `plugin/scripts/grok-companion.mjs` | Wire companion subcommand or flag for operator retry (e.g. `notify-retry --run-id`) |
+| `plugin/skills/setup/SKILL.md` and/or new thin skill / `status`/`result` docs | Document how to re-request notify |
+| `plugin/scripts/tests/notify.test.mjs` | Retry after `completed`+`failed`; refuse silent auto path; pending handling explicit |
+| `plugin/scripts/tests/grok-companion.test.mjs` | Operator path only |
+| `README.md`, `docs/COMPATIBILITY.md`, `SECURITY.md`, `CHANGELOG.md` | Retry surface + duplicate warning |
+| Packaging triple | **1.7.0** |
+
+**Not in PR5:** auto-retry loops, webhook delivery guarantees, Windows native notify (still platform-limited as in design).
+
+### Task 5.1 — Operator re-attempt API
+
+- [ ] Distinct from automatic at-most-once entry: e.g. require explicit `{force: true}` / CLI after terminal run.  
+- [ ] Document states: may re-fire when marker is `completed` with `result: failed`; policy for stuck `pending` (operator accepts duplicate risk — **do not** auto-fire).  
+- [ ] Always write a new completed marker result (or append attempt log if design prefers — pick one and test it). Prefer simple overwrite with `lastAttempt` fields over unbounded history.  
+- [ ] **Commit** `notify: operator re-attempt (may duplicate)`
+
+### Task 5.2 — Companion / skill surface
+
+- [ ] Operator-facing invocation (companion flag or small skill).  
+- [ ] Never invoked automatically from background job completion path.  
+- [ ] Tests for operator-only entry.  
+- [ ] **Commit** `companion: notify-retry operator path`
+
+### Task 5.3 — Docs + 1.7.0
+
+- [ ] Explicit: PR3 = one automatic attempt; PR5 = optional re-fire; neither is exactly-once.  
+- [ ] Packaging triple **1.7.0**; suites; tag `v1.7.0`.
+
+---
+
 ## Coverage matrix
 
 | Requirement | PR / Task |
@@ -516,6 +570,8 @@ Exact meaning design §14.17 — no “unacknowledged.”
 | Monotonic elapsed | PR1 / 1.4 |
 | Opt-in review isolation + ownership + `--ita-invisible-in-index` | PR2 (`--isolated` only) |
 | Execution context + notify attempt; skill-run no-op | PR3 |
+| Operator notify re-attempt (may duplicate); no auto-retry | PR5 |
+| Exactly-once notify / guaranteed delivery | **Out of program** |
 | Contract + scopes + order | PR4 / 4.1–4.3 |
 | Operator-trusted validation (no OS FS sandbox claim) | PR4 / 4.5 |
 | terminalOutcome ready + dual-condition handoff | PR4 / 4.7–4.8 |
@@ -540,14 +596,15 @@ Exact meaning design §14.17 — no “unacknowledged.”
 | Elapsed | Monotonic in owner process; UTC for status |
 | Dirty isolation (when `--isolated`) | `git diff --binary --full-index --ita-invisible-in-index HEAD --` |
 | Isolation trigger | **`--isolated` only**; `--base` alone = live |
-| Notify | At-most-once **attempt**; no auto-retry pending |
+| Notify (PR3) | At-most-once **attempt**; no auto-retry pending; **not** exactly-once |
+| Notify retry (PR5) | **Operator-only** re-attempt; may duplicate; still no automatic retry |
 | Background | `GROK_COMPANION_EXECUTION_CONTEXT` via skill/agent SKILL/md; skill-run **no-op** |
 | Handoff streaming | **No** |
 | Contract validation | Operator-trusted; no OS FS sandbox claim |
 | Handoff ready | `terminalOutcome` at write; dual-condition at `/grok:handoff` |
 | Temp index | Post-check; `temp-index-retained` blocks ready |
 | Multi-workspace gate | Out of PR4; one target |
-| Releases | Four minors 1.3–1.6 |
+| Releases | Five minors 1.3–1.7 (PR5 optional after dogfood) |
 | PROVENANCE.md | No edit in PR1–PR4 |
 
 ---
@@ -558,16 +615,21 @@ Exact meaning design §14.17 — no “unacknowledged.”
 2. PR2 → `v1.4.0`  
 3. PR3 → `v1.5.0`  
 4. PR4 → `v1.6.0`  
+5. PR5 → `v1.7.0` (operator notify retry; **after PR3 dogfood**; may trail PR4)
 
-No parallel tracks. No alternate designs during implementation.
+No parallel tracks for PR1–PR4. PR5 may wait on real notify demand after 1.5.0. No alternate designs during implementation of a given PR.
 
 ---
 
 ## Handoff
 
-Revision **9** product change after PR1 ship: **PR2 isolation is opt-in** (`--isolated` only). `--base` no longer requires isolation. Paths:
+Revision **9** product change after PR1 ship: **PR2 isolation is opt-in** (`--isolated` only). `--base` no longer requires isolation.
+
+Revision **10:** **PR5 = operator notify re-attempt only** (may duplicate). Not in PR3. Automatic retry and exactly-once delivery remain out of program.
+
+Paths:
 
 - `docs/superpowers/specs/2026-07-15-run-lifecycle-design.md`  
 - `docs/superpowers/plans/2026-07-15-run-lifecycle.md`  
 
-**PR1 is done on main (1.3.x). Approve revision 9 before implementing PR2.**
+**PR1 done on main (1.3.x). PR2 in flight. PR3–PR5 per execution order.**
