@@ -277,7 +277,9 @@ def run_worktree_mode(
         if progress is None:
             progress = ProgressWriter(paths.run_id, paths.progress_path)
         def _merge_worktree_meta() -> None:
-            # Non-terminal metadata only — must not set status success/failure
+            # Non-terminal metadata only — must not set status success/failure.
+            # Always include repository/target so cleanup can rebuild the worktree
+            # even when the earlier running-record CAS never landed.
             wt = holder.worktree if worktree_retained else None
             if wt is None:
                 return
@@ -287,6 +289,8 @@ def run_worktree_mode(
                 paths,
                 rev,
                 {
+                    "repository": repository,
+                    "targetWorkspace": target_workspace,
                     "worktreePath": str(wt.path),
                     "worktreeBranch": wt.branch,
                     "baseRevision": wt.base_revision,

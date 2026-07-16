@@ -459,6 +459,42 @@ class FinalizeWatchdogTests(unittest.TestCase):
             events,
         )
 
+    def test_worker_pid_cleared_after_success(self) -> None:
+        paths, env, rev = self._prepare_finalizing()
+        finalize_worker.run_finalize_parent(
+            paths,
+            mode="review",
+            envelope=env,
+            lifecycle="completed",
+            expected_revision=rev,
+            budget_seconds=60,
+        )
+        self.assertFalse((paths.run_dir / "finalize-worker.pid").is_file())
+        self.assertFalse(finalize_worker.finalize_worker_is_alive(paths.run_dir))
+
+    def test_terminalize_refuses_durable_write_while_worker_alive(self) -> None:
+        """SIGTERM recovery must not durable-cancel while finalize worker lives."""
+        from groklib.modes._envelope import terminalize_unexpected_failure
+        from groklib.progress import ProgressWriter
+
+        paths, env, rev = self._prepare_finalizing()
+        # Simulate a live worker via pid file pointing at this process.
+        finalize_worker.write_worker_pid(paths.run_dir, os.getpid())
+        self.assertTrue(finalize_worker.finalize_worker_is_alive(paths.run_dir))
+        progress = ProgressWriter(paths.run_id, paths.progress_path)
+        out = terminalize_unexpected_failure(
+            run_paths=paths,
+            mode="review",
+            progress=progress,
+            exc=KeyboardInterrupt(),
+            write_terminal_record=lambda: None,
+            log=lambda *_a, **_k: None,
+        )
+        self.assertTrue(out.get("doNotStore"))
+        self.assertFalse(paths.envelope_path.is_file())
+        self.assertEqual(runstate.load_run_record(paths.run_id)["lifecycle"], "finalizing")
+        finalize_worker.clear_worker_pid(paths.run_dir)
+
     def test_forced_finalize_failure_no_run_completed_done(self) -> None:
         """Unkillable finalize must not leave a 'run completed' done event."""
         from groklib.modes._shared import _publish_terminal_envelope

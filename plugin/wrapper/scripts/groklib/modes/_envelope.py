@@ -404,6 +404,29 @@ def terminalize_unexpected_failure(
 
     # Envelope-first durable terminalization (never lifecycle-before-envelope).
     # Emit progress "done" only after durable persist succeeds.
+    # Design §9.4: never durable-write while a finalize worker may still be alive
+    # (SIGTERM mid-join would otherwise race the worker's real success envelope).
+    try:
+        from groklib.modes.finalize_worker import finalize_worker_is_alive
+
+        if finalize_worker_is_alive(run_paths.run_dir):
+            log(
+                "terminalize_unexpected_failure",
+                "{} refusing durable terminalize while finalize worker is alive".format(
+                    run_paths.run_id
+                ),
+            )
+            envelope = dict(envelope)
+            envelope["doNotStore"] = True
+            return envelope
+    except Exception as liveness_exc:
+        log(
+            "terminalize_unexpected_failure",
+            "finalize worker liveness check failed for {}: {}".format(
+                run_paths.run_id, liveness_exc
+            ),
+        )
+
     try:
         # Optional non-terminal bookkeeping from caller (must not terminalize alone)
         try:
@@ -413,6 +436,53 @@ def terminalize_unexpected_failure(
                 "terminalize_unexpected_failure",
                 "non-terminal record merge failed for {}: {}".format(run_paths.run_id, record_exc),
             )
+        # Worker may have written envelope.json after liveness re-check: preserve it.
+        existing: Optional[dict] = None
+        if run_paths.envelope_path.is_file():
+            try:
+                import json as _json
+                from groklib import envelope as envelope_mod
+
+                candidate = _json.loads(run_paths.envelope_path.read_text(encoding="utf-8"))
+                if isinstance(candidate, dict) and not envelope_mod.validate_envelope(candidate):
+                    existing = candidate
+            except (OSError, ValueError, TypeError):
+                existing = None
+        if existing is not None:
+            try:
+                runstate.persist_terminal_envelope(run_paths, None, None)
+            except Exception as finish_exc:
+                log(
+                    "terminalize_unexpected_failure",
+                    "finish existing envelope failed for {}: {}".format(
+                        run_paths.run_id, finish_exc
+                    ),
+                )
+            try:
+                status = existing.get("status")
+                if status == "success":
+                    progress.safe_emit("done", "{} run completed".format(mode))
+                else:
+                    progress.safe_emit(
+                        "done",
+                        "{} failed: {}".format(
+                            mode,
+                            ((existing.get("error") or {}) if isinstance(existing.get("error"), dict) else {}).get(
+                                "class"
+                            )
+                            or "failure",
+                        ),
+                        level="error",
+                    )
+            except Exception as emit_exc:
+                log(
+                    "terminalize_unexpected_failure",
+                    "progress emit failed during terminalization of {}: {}".format(
+                        run_paths.run_id, emit_exc
+                    ),
+                )
+            return existing
+
         record = runstate.load_run_record(run_paths.run_id)
         rev = int(record.get("recordRevision", 0))
         life = record.get("lifecycle")

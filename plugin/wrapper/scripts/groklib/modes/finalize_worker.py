@@ -55,6 +55,51 @@ def finalize_budget_seconds(mode: str) -> int:
     return int(_DEFAULT_BUDGETS.get(mode, 120))
 
 
+def _worker_pid_path(run_dir: pathlib.Path) -> pathlib.Path:
+    return run_dir / "finalize-worker.pid"
+
+
+def write_worker_pid(run_dir: pathlib.Path, pid: int) -> None:
+    """Record the live finalize worker pid so SIGTERM recovery can observe liveness."""
+    try:
+        _write_private_text(_worker_pid_path(run_dir), str(int(pid)))
+    except OSError as exc:
+        _log("write_worker_pid", "could not write finalize-worker.pid: {}".format(exc))
+
+
+def clear_worker_pid(run_dir: pathlib.Path) -> None:
+    try:
+        path = _worker_pid_path(run_dir)
+        if path.is_file():
+            path.unlink()
+    except OSError as exc:
+        _log("clear_worker_pid", "could not remove finalize-worker.pid: {}".format(exc))
+
+
+def finalize_worker_is_alive(run_dir: pathlib.Path) -> bool:
+    """True if finalize-worker.pid names a still-running process (design §9.4 gate)."""
+    path = _worker_pid_path(run_dir)
+    if not path.is_file():
+        return False
+    try:
+        raw = path.read_text(encoding="utf-8").strip()
+        pid = int(raw)
+    except (OSError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but we cannot signal it — treat as alive (fail closed).
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def finalize_worker_main(payload_path: str) -> None:
     """Entry point for spawn Process(target=..., args=(payload_path,))."""
     path = pathlib.Path(payload_path)
@@ -185,29 +230,39 @@ def run_finalize_parent(
         name="grok-finalize",
     )
     proc.start()
-    proc.join(timeout=float(budget))
-    if proc.is_alive():
-        timed_out = True
-        proc.terminate()
-        proc.join(_TERMINATE_GRACE)
-    if proc.is_alive():
-        proc.kill()
-        proc.join(_KILL_GRACE)
+    # Persist pid so a SIGTERM mid-join can still observe worker liveness and
+    # refuse parent durable terminal writes while the worker may finish success.
+    worker_pid = getattr(proc, "pid", None)
+    if worker_pid is not None:
+        write_worker_pid(paths.run_dir, int(worker_pid))
+    try:
+        proc.join(timeout=float(budget))
+        if proc.is_alive():
+            timed_out = True
+            proc.terminate()
+            proc.join(_TERMINATE_GRACE)
+        if proc.is_alive():
+            proc.kill()
+            proc.join(_KILL_GRACE)
 
-    if proc.is_alive():
-        if progress is not None:
-            progress.safe_emit("finalizing", "finalization worker unkillable", level="error")
-        ephemeral = envelope_mod.failure_envelope(
-            run_id=paths.run_id,
-            mode=mode,
-            error_class="finalization-worker-unkillable",
-            message="finalization worker could not be terminated; no durable terminal write",
-            detail={"runId": paths.run_id},
-            progressStreamPath=str(paths.progress_path),
-        )
-        # doNotStore: entrypoint must not write envelope.json
-        ephemeral["doNotStore"] = True
-        return ephemeral, "finalization-worker-unkillable", False
+        if proc.is_alive():
+            if progress is not None:
+                progress.safe_emit("finalizing", "finalization worker unkillable", level="error")
+            ephemeral = envelope_mod.failure_envelope(
+                run_id=paths.run_id,
+                mode=mode,
+                error_class="finalization-worker-unkillable",
+                message="finalization worker could not be terminated; no durable terminal write",
+                detail={"runId": paths.run_id},
+                progressStreamPath=str(paths.progress_path),
+            )
+            # doNotStore: entrypoint must not write envelope.json
+            ephemeral["doNotStore"] = True
+            return ephemeral, "finalization-worker-unkillable", False
+    finally:
+        # Keep pid while still alive (unkillable); clear once confirmed dead.
+        if not proc.is_alive():
+            clear_worker_pid(paths.run_dir)
 
     # Recovery under lock semantics via persist API
     existing = _load_valid_envelope(paths)
