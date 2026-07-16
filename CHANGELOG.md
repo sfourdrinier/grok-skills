@@ -23,6 +23,13 @@ for marketplace / package tags.
 
 - Packaging triple **1.5.0**.
 
+### Fixed
+
+- **Isolation (post-PR2 Codex follow-ups):** owner marker written before
+  `git worktree add`; dirty patch vs pinned base SHA (not live HEAD); retain
+  owner marker if worktree still present after cleanup; ITA OIDs any all-zero
+  length (SHA-256); status porcelain captured as bytes for non-UTF-8 paths.
+
 ## [1.4.0] - 2026-07-16
 
 ### Added

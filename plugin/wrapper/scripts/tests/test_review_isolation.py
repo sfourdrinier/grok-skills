@@ -273,6 +273,96 @@ class ReviewIsolationHelperTests(unittest.TestCase):
         else:
             self.fail("expected a git diff invocation for isolation patch")
 
+    def test_dirty_patch_uses_pinned_base_not_live_head(self) -> None:
+        """Diff must target the worktree base_sha, not symbolic HEAD (concurrent moves)."""
+        (self.repo / "a.txt").write_text("alpha\nbeta\nedit\n", encoding="utf-8")
+        head_before = _git(self.repo, "rev-parse", "HEAD").strip()
+        captured_diff_bases = []
+        real = review_isolation._run_git_bytes
+
+        def _wrap(repo, args, **kwargs):
+            if args and args[0] == "diff" and "--binary" in args:
+                # argv: diff ... <base> -- .
+                try:
+                    dash = args.index("--")
+                    captured_diff_bases.append(args[dash - 1])
+                except ValueError:
+                    pass
+            return real(repo, args, **kwargs)
+
+        with mock.patch.object(review_isolation, "_run_git_bytes", side_effect=_wrap):
+            session = self._session()
+            try:
+                self.assertEqual(session.base_revision, head_before)
+                self.assertIn(head_before, captured_diff_bases)
+                self.assertNotIn("HEAD", captured_diff_bases)
+            finally:
+                review_isolation.cleanup_review_isolation(session)
+
+    def test_owner_marker_written_before_worktree_add(self) -> None:
+        """Crash window: marker must exist before git worktree add returns."""
+        order = []
+        real_write = runstate.write_owner_marker_file
+        real_git = worktree_mod._git
+
+        def _write(path, run_id):
+            order.append("marker")
+            return real_write(path, run_id)
+
+        def _git(repo, *args, **kwargs):
+            if args and args[0] == "worktree" and args[1] == "add":
+                order.append("worktree-add")
+                # Marker must already exist for the planned path.
+                # Find path arg: worktree add -b branch path base
+                wt_path = pathlib.Path(args[4])
+                marker = worktree_mod.marker_path_for(wt_path)
+                self.assertTrue(marker.is_file(), "owner marker must precede worktree add")
+            return real_git(repo, *args, **kwargs)
+
+        with mock.patch.object(runstate, "write_owner_marker_file", _write):
+            with mock.patch.object(worktree_mod, "_git", _git):
+                session = self._session()
+                review_isolation.cleanup_review_isolation(session)
+        self.assertEqual(order[:2], ["marker", "worktree-add"])
+
+    def test_cleanup_retains_marker_if_worktree_still_present(self) -> None:
+        session = self._session()
+        # Force path to look non-removable: leave a marker while path still exists
+        # by mocking rmtree/remove to no-op.
+        with mock.patch.object(
+            worktree_mod,
+            "_run_git",
+            return_value=subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="locked"),
+        ):
+            with mock.patch("shutil.rmtree", lambda *a, **k: None):
+                # path still exists after failed remove
+                review_isolation.cleanup_review_isolation(session)
+        self.assertTrue(session.worktree_path.exists())
+        self.assertTrue(
+            session.marker_path.is_file(),
+            "marker must remain while worktree exists for cleanup --confirm",
+        )
+        # Force real cleanup for teardown
+        import shutil
+
+        shutil.rmtree(session.worktree_path, ignore_errors=True)
+        if session.marker_path.exists():
+            session.marker_path.unlink()
+        if session.diff_path.exists():
+            session.diff_path.unlink()
+        subprocess.run(
+            ["git", "-C", str(self.repo), "branch", "-D", session.branch],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+
+    def test_is_all_zero_oid_accepts_sha256_length(self) -> None:
+        self.assertTrue(review_isolation._is_all_zero_oid("0" * 40))
+        self.assertTrue(review_isolation._is_all_zero_oid("0" * 64))
+        self.assertFalse(review_isolation._is_all_zero_oid("0" * 39))
+        self.assertFalse(review_isolation._is_all_zero_oid("a" * 40))
+
 
 class ReviewIsolationModeTests(ModeHarness):
     """End-to-end mode wiring: live path default, isolated path, failure class."""
