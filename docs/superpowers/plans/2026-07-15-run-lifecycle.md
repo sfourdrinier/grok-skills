@@ -1,16 +1,63 @@
-# Run lifecycle program — Implementation Plan (revision 10)
+# Run lifecycle program — Implementation Plan (revision 11)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Checkboxes track progress.
 
 **Goal:** Full run lifecycle with CAS, crash-consistent terminal persistence, read-only status, process finalize worker, **opt-in** isolated review, at-most-once notify attempts, verified `code` implementation handoff, and (later) **operator-driven notify retry** — **five PRs**.
 
-**Design:** [docs/superpowers/specs/2026-07-15-run-lifecycle-design.md](../specs/2026-07-15-run-lifecycle-design.md) **revision 10**.
+**Design:** [docs/superpowers/specs/2026-07-15-run-lifecycle-design.md](../specs/2026-07-15-run-lifecycle-design.md) **revision 11**.
 
 **Baseline:** v1.2.10; **PR1 shipped** on main as **1.3.x**. **Versions:** 1.3.x (done) → 1.4.0 → 1.5.0 → 1.6.0 → **1.7.0** (PR5).
 
-**Rule:** Design §4–§14 are authority for PR1–PR4. Rev 9 product change: PR2 isolation is **opt-in** (`--isolated` only); `--base` alone does **not** force isolation. **Rev 10:** operator notify retry is **PR5 only** — not PR3, not automatic, not exactly-once delivery.
+**Rule:** Design §4–§14 are authority for PR1–PR4. Rev 9: PR2 isolation is **opt-in** (`--isolated` only). **Rev 10:** operator notify retry is **PR5 only**. **Rev 11:** PR3–PR5 quality bar = failure-mode matrix first, **DRY (no duplicated logic)**, and **internal code review as a required PR task** — suites green alone is not “done.”
 
-**PR1 done. PR2 (opt-in isolation) on branch / review. PR3–PR5 follow execution order below.**
+**PR1 done. PR2 (opt-in isolation) on branch / review. PR3–PR5 follow execution order + quality gates below.**
+
+---
+
+## Quality gates (mandatory for PR3, PR4, PR5)
+
+Lesson from PR2: short diffs can still be under-hardened. **Green tests without a failure-mode matrix and without internal review is not done.**
+
+### Gate A — Failure-mode matrix (before product code)
+
+Commit or update the PR’s matrix table **in this plan** (or a linked checklist under `docs/superpowers/`) before implementing features. Columns:
+
+| Surface | Happy path | Crash after durable write | Silent wrong outcome | Bypass (direct/host/env) | External knobs | Fail closed / reason | Test id |
+
+Empty cells = **not ready to code**.
+
+### Gate B — DRY (non-negotiable)
+
+| Rule | Meaning |
+|------|---------|
+| **One implementation** | Shared behavior lives in **one** module/function; call sites only wire. |
+| **No copy-paste paths** | If two skills/agents need the same shell prefix, env, or spawn pattern, extract a **single** documented snippet helper or shared markdown fragment — do not retype N variants that can drift. Prefer one canonical include/pattern checked by a test or grep gate. |
+| **No dual writers** | One code path writes a durable marker/file (e.g. `notified.json`, handoff manifest); never a second “almost the same” writer. |
+| **No dual validators** | Writer and reader of a schema share **one** `validate_*` function. |
+| **PR5 reuses PR3** | Operator retry **must** call into `notify.mjs` core (force flag), not reimplement marker/spawn logic. |
+| **Review rejects** | Internal review **fails the PR** if it finds duplicated logic that should have been extracted. |
+
+### Gate C — Implementation + tests
+
+- Map every matrix row to a named test (or explicit accepted residual).  
+- Crash windows and silent-wrong outcomes are **required** tests, not “nice to have.”  
+- Prefer few hardened commits over many “fix review” commits.
+
+### Gate D — Internal code review (part of each PR)
+
+Each of PR3–PR5 **must** include an **internal review task** before packaging/tag:
+
+1. **Spec compliance pass** — matrix complete; design/plan behaviors present; no extra scope.  
+2. **Quality pass** — DRY, fail-closed, crash/cleanup, dual-host/direct if applicable, docs match flags.  
+3. **Evidence** — write `docs/superpowers/reviews/YYYY-MM-DD-prN-<topic>.md` (or PR comment with the same structure) listing findings + resolutions.  
+4. **Zero open remediable findings** — fix or document as accepted residual with owner.  
+5. Optional external bot review **after** Gate D, not instead of it.
+
+**Done criteria (PR3–PR5):** Gate A matrix filled · Gate B DRY held · suites green · Gate D review artifact present · packaging only after that · zero open remediable review threads.
+
+### Gate E — Definition of done (release PR)
+
+Packaging triple + CHANGELOG only after Gates A–D. Tag only after merge policy of the branch.
 
 ---
 
@@ -114,6 +161,7 @@
 | `docs/roadmap.md` | 1.5.0 |
 | `SECURITY.md` | webhook notify surface |
 | `CHANGELOG.md` | 1.5.0 |
+| `docs/superpowers/reviews/*-pr3-*.md` | Failure-mode matrix + internal review artifact |
 | Packaging triple | **1.5.0** |
 
 **Not in PR3:** changes to `plugin/scripts/lib/skill-run.mjs` behavior (locked no-op).  
@@ -141,6 +189,7 @@
 | `plugin/wrapper/scripts/tests/test_mode_code.py` | order, blockers, ready, operator-trusted validation |
 | `plugin/scripts/tests/grok-companion.test.mjs` | handoff non-streaming / no job |
 | Docs: `README.md`, `CHANGELOG.md`, `docs/roadmap.md`, `docs/COMPATIBILITY.md`, `docs/RELEASE.md`, `plugin/references/README.md`, `plugin/references/manual-smoke.md`, `plugin/wrapper/references/authority-policies.md`, `plugin/wrapper/SKILL.md` | all mandatory |
+| `docs/superpowers/reviews/*-pr4-*.md` | Failure-mode matrix + internal review artifact |
 | Packaging triple | **1.6.0** |
 | Claude/Codex manifests | packaging triple only (modes discovered from skills dirs; no separate mode list file) |
 
@@ -364,44 +413,109 @@ Implement design §10 exactly (only used when isolation is requested):
 
 ---
 
-## PR3 — Notifications
+## PR3 — Notifications (→ 1.5.0)
+
+**Authority:** design §11. **Quality:** Gates A–E above.  
+**DRY:** Single `notify.mjs` owns marker + adapters; companion only decides *whether* to call; skills share **one** env-prefix pattern (not N divergent shell lines).
+
+### Task 3.0 — Failure-mode matrix + DRY plan (Gate A)
+
+Fill before any product code. Minimal rows (expand if needed):
+
+| Surface | Crash / silent wrong | Bypass | Fail closed | Test |
+|---------|----------------------|--------|-------------|------|
+| `notified.json` create pending | Crash after pending before send → no auto-retry | Double companion completion | `already-attempted` | yes |
+| `notified.json` complete | Crash after send before complete → no auto-retry | — | next auto path skips | yes |
+| `off` | Never notify | misconfig | no-op | yes |
+| `auto` + FG | No native notify | missing context → FG default | no-op | yes |
+| `auto` + BG | Notify once | — | — | yes |
+| `native` FG/BG | Notify once each path | adapter missing | completed+failed | yes |
+| `webhook` | POST once; timeout | bad URL | completed+failed; job not failed | yes |
+| status/result/jobs/setup/handoff | Never notify | — | — | yes |
+| Wrapper env | Context never on wrapper child | — | strip/ignore | yes |
+| skill-run.mjs | Unchanged | accidental edit | review + test | yes |
+| Native spawn | shell false only | — | — | yes |
+
+- [ ] Matrix committed in plan or `docs/superpowers/reviews/…-pr3-matrix.md`.  
+- [ ] List **one** module each for: marker I/O, native adapter, webhook adapter, “shouldNotify(mode, context)”.  
+- [ ] **Commit** `docs: PR3 failure-mode matrix and DRY boundaries`
 
 ### Task 3.1 — Jobs config
 
-- [ ] Defaults `notificationMode: "off"`, `notificationWebhookUrl: null`.  
+- [ ] Defaults `notificationMode: "off"`, `notificationWebhookUrl: null` in **one** place in `jobs.mjs` (no duplicate defaults elsewhere).  
 - [ ] **Commit** `jobs: notification prefs`
 
-### Task 3.2 — `notify.mjs` at-most-once attempt
+### Task 3.2 — `notify.mjs` at-most-once attempt (only writer)
 
 Design §11:
 
 - Exclusive create `pending` before external call.  
-- Existing marker → skip `already-attempted` (no auto-retry).  
-- Always complete marker with result; never leave intentional retry loop.  
-- Prioritize no duplicate attempts over guaranteed delivery.  
-- Do not document as exactly-once.  
+- Existing marker → `already-attempted` (no auto-retry).  
+- Always complete marker; never intentional auto-retry loop.  
+- Priority: no duplicate attempts over delivery. **Not** exactly-once.  
+- Adapters: Darwin osascript / Linux notify-send / webhook; always `shell: false`.  
 
-- [ ] Tests: off; already-attempted; crash-left pending not auto-retried; spawn never shell true.  
+- [ ] Tests: off; already-attempted; crash-left pending not auto-retried; shell false; webhook failure still completed+failed.  
 - [ ] **Commit** `notify: at-most-once attempt semantics`
 
-### Task 3.3 — Companion execution context + hooks
+### Task 3.3 — Companion hooks + execution context
 
-- [ ] Update each PR3 skill/agent path in the file map to prefix `GROK_COMPANION_EXECUTION_CONTEXT=foreground|background` on wait vs background.  
-- [ ] **Do not** change `skill-run.mjs` behavior.  
-- [ ] Companion never forwards context to wrapper.  
-- [ ] `auto` only background; `native` both; `off` never.  
+- [ ] Companion reads `GROK_COMPANION_EXECUTION_CONTEXT`; never forwards to wrapper.  
+- [ ] Calls **only** `notify.mjs` APIs (no inline marker/spawn).  
+- [ ] `auto` only background; `native` both; `off` never; webhook per config.  
 - [ ] Never on status/handoff/result/jobs/setup alone.  
-- [ ] Tests: foreground + background for Claude skill path and Codex/agent path.  
+- [ ] **Do not** change `skill-run.mjs` behavior.  
+- [ ] Tests: FG + BG Claude skill path and Codex/agent path.  
 - [ ] **Commit** `companion: execution context and notify hooks`
 
-### Task 3.4 — Docs + 1.5.0
+### Task 3.4 — Skill/agent env prefix (DRY)
 
-- [ ] All PR3 docs; packaging **1.5.0**; tag `v1.5.0`.  
-- [ ] Docs explicitly: **at-most-once attempt only**; operator retry is **PR5** if needed after dogfood.
+- [ ] **One** canonical pattern for prefixing `GROK_COMPANION_EXECUTION_CONTEXT` (document once; all PR3 file-map skills/agents use it).  
+- [ ] Grep/test gate: every live mode skill/agent in the file map has the prefix instruction; no divergent variants.  
+- [ ] **Commit** `skills: shared execution-context prefix for notify`
+
+### Task 3.5 — Internal code review (Gate D)
+
+- [ ] Spec + quality pass (matrix, DRY, dual-host, no skill-run drift).  
+- [ ] Write review artifact `docs/superpowers/reviews/YYYY-MM-DD-pr3-notifications.md`.  
+- [ ] Zero open remediable findings.  
+- [ ] **Commit** `review: PR3 internal review artifact`
+
+### Task 3.6 — Docs + 1.5.0 (Gate E)
+
+- [ ] All PR3 docs; packaging **1.5.0**; suites green.  
+- [ ] Docs: at-most-once attempt only; operator retry = **PR5**.  
+- [ ] Tag `v1.5.0` after merge policy.  
+- [ ] **Commit** `release: 1.5.0 notifications`
 
 ---
 
 ## PR4 — Verified implementation handoff (→ 1.6.0)
+
+**Authority:** design §14. **Quality:** Gates A–E.  
+**DRY:** One contract parser; one handoff validator used by writer **and** `handoff` mode; one finalization order function; command evidence helper shared by all gate commands.
+
+### Task 4.0 — Failure-mode matrix + DRY plan (Gate A)
+
+Minimal rows:
+
+| Surface | Crash / silent wrong | Fail closed | Test |
+|---------|----------------------|-------------|------|
+| Finalization order §14.6 | Step skipped / reordered | assert order | yes |
+| Sentinel | Missing/symlink/user path | blocker | yes |
+| Unexpected commit | HEAD ≠ base | blocker; no reset | yes |
+| Write scopes | Escape / prefix confusion | blocker; forensics continue when safe | yes |
+| Temp index | Left on disk | `temp-index-retained` | yes |
+| Temp index delete race | Delete err but gone | warning only | yes |
+| requiredValidation | shell=true / cwd escape | reject; no OS-sandbox claim | yes |
+| Original checkout dirty after validation | — | ready false | yes |
+| Manifest then envelope | Crash between | dual-condition handoff not ready | yes |
+| Rewrite ready-true after terminal | — | forbidden | yes |
+| `/grok:handoff` | Spawns Grok | must not | yes |
+
+- [ ] Matrix committed.  
+- [ ] Name single modules: contract parse, patch builder, validate_implementation_handoff, run_post_grok_finalization (order), command_evidence.  
+- [ ] **Commit** `docs: PR4 failure-mode matrix and DRY boundaries`
 
 ### Task 4.1 — Contract module
 
@@ -410,18 +524,18 @@ Design §11:
 - [ ] Parse/validate schemaVersion, taskId, target, scopes, requiredValidation argv.  
 - [ ] `path_in_scopes` component semantics.  
 - [ ] Classify `implementation-contract-invalid`.  
-- [ ] Document trust model in module docstring.  
+- [ ] Trust model in module docstring.  
 - [ ] Tests: prefix confusion, traversal, absolute, empty scopes.  
 - [ ] **Commit** `contract: parse write scopes and validation descriptors`
 
 ### Task 4.2 — Unexpected commit as blocker
 
-- [ ] After Grok: HEAD must equal base; else append blocker `unexpected-commit`; no reset; continue if readable.  
+- [ ] After Grok: HEAD must equal base; else blocker `unexpected-commit`; no reset; continue if readable.  
 - [ ] **Commit** `code: unexpected-commit blocker without aborting forensics`
 
 ### Task 4.3 — Finalization order + write scopes
 
-Implement design §14.6 order exactly:
+Implement design §14.6 order in **one** function (no copy-pasted step lists in code/verify):
 
 ```text
 verify sentinel → remove exact sentinel → HEAD check → changed files
@@ -433,127 +547,142 @@ verify sentinel → remove exact sentinel → HEAD check → changed files
 - [ ] Malformed/missing/symlink sentinel fails.  
 - [ ] Cannot remove user-authored similarly named path.  
 - [ ] Scope violation → blocker + continue forensics when safe.  
+- [ ] Test asserts step order.  
 - [ ] **Commit** `code: locked post-Grok finalization order`
 
 ### Task 4.4 — Phase-1 forensic patch
 
-**Create** `implementation_handoff.py` phase 1: temp index uniquely named; `finally` delete + post-check per design §14.7; binary full-index patch; size limit; secret scan; permissions 0600/0700.
+**Create** `implementation_handoff.py` phase 1: unique temp index; `finally` delete + post-check §14.7; binary full-index patch; size limit; secret scan; 0600/0700.
 
-- [ ] If index still exists after cleanup → blocker `temp-index-retained`, ready false.  
-- [ ] If delete errors but path absent → warning only.  
-- [ ] Tests: add/modify/delete/rename/binary/symlink/mode; untracked in; ignored out; sentinel out; spaces/tabs/newlines/non-ASCII via `-z`; both cleanup cases.  
+- [ ] Index still exists → `temp-index-retained`, ready false.  
+- [ ] Delete errors but path absent → warning only.  
+- [ ] Tests: add/modify/delete/rename/binary/symlink/mode; untracked in; ignored out; sentinel out; `-z` odd paths; both cleanup cases.  
 - [ ] Apply to base → resultTreeOid.  
 - [ ] **Commit** `handoff: phase-1 immutable git patch`
 
 ### Task 4.5 — Execute contract validation (operator-trusted)
 
-**Dedicated task** (design §14.3, §14.9):
-
 - [ ] Run each requiredValidation after scopes + HEAD.  
 - [ ] cwd inside worktree; reject escape.  
 - [ ] shell=False; **no OS FS sandbox claim**.  
-- [ ] Post-command original-checkout unmodified assertion.  
-- [ ] Record evidence before interpreting exit.  
+- [ ] Post-command original-checkout unmodified.  
+- [ ] Evidence before interpreting exit.  
 - [ ] Nonzero → blocker; ready false.  
-- [ ] trustModel string `operator-contract-trusted-no-os-sandbox`.  
-- [ ] Tests: cwd escape rejected; shell not used; original-checkout dirty after validation blocks ready.  
-- [ ] **Do not** test or document “cannot write outside worktree” as OS guarantee.  
+- [ ] `trustModel` = `operator-contract-trusted-no-os-sandbox`.  
+- [ ] Tests: cwd escape; shell not used; checkout dirty blocks ready.  
+- [ ] **Do not** claim OS “cannot write outside worktree.”  
 - [ ] **Commit** `code: execute operator-trusted contract requiredValidation`
 
 ### Task 4.6 — Command evidence tails
 
-- [ ] sha256 + 4096 redacted tails + truncated flags.  
+- [ ] **One** helper: sha256 + 4096 redacted tails + truncated flags.  
 - [ ] Never full logs on envelope stdout.  
 - [ ] **Commit** `commands: bounded redacted evidence`
 
 ### Task 4.7 — Phase-2 handoff + ready from terminalOutcome
 
-- [ ] After gates: decide in-memory `terminalOutcome`; compute ready per §14.12 (not disk lifecycle).  
-- [ ] Write final `implementation-handoff.json` **before** `persist_terminal_envelope`.  
-- [ ] Then envelope-first terminal persist.  
-- [ ] `validate_implementation_handoff` single function used by writer.  
-- [ ] validation.sources authority fields (§14.10).  
-- [ ] Never rewrite ready-true manifest after terminal envelope published.  
-- [ ] Tests: sandbox/build/validation fail; success ready; multi-blocker; empty no-changes; crash between manifest and envelope; crash between envelope and lifecycle.  
+- [ ] In-memory `terminalOutcome`; ready per §14.12 (not disk lifecycle).  
+- [ ] Final `implementation-handoff.json` **before** `persist_terminal_envelope`.  
+- [ ] Envelope-first terminal persist.  
+- [ ] **`validate_implementation_handoff` single function** used by writer.  
+- [ ] validation.sources §14.10.  
+- [ ] Never rewrite ready-true after terminal envelope published.  
+- [ ] Tests: sandbox/build/validation fail; success ready; multi-blocker; empty; crash between manifest/envelope; crash between envelope/lifecycle.  
 - [ ] **Commit** `handoff: phase-2 manifest from terminalOutcome`
 
 ### Task 4.8 — Mode `handoff` (non-streaming)
 
 - [ ] WRAPPER_MODES only; not STREAMING_MODES.  
 - [ ] `runHandoff()` like status.  
-- [ ] Same validator as writer.  
-- [ ] Observed ready requires manifest ready **and** completed terminal envelope (§14.12).  
-- [ ] Rehash patch; integrity failure; unavailable; `terminal-envelope-incomplete` when manifest ready but envelope missing.  
+- [ ] **Same** `validate_implementation_handoff` as writer (DRY).  
+- [ ] Dual-condition ready §14.12.  
+- [ ] Rehash patch; integrity; unavailable; `terminal-envelope-incomplete`.  
 - [ ] Skill + run.mjs.  
-- [ ] Tests: no Grok process; no companion job; read-only; job id not required; dual-condition ready.  
+- [ ] Tests: no Grok; no companion job; read-only; dual-condition ready.  
 - [ ] **Commit** `handoff: read-only non-streaming /grok:handoff`
 
 ### Task 4.9 — Cleanup factual warning
 
-Exact meaning design §14.17 — no “unacknowledged.”
-
+- [ ] Exact meaning design §14.17 — no “unacknowledged.”  
 - [ ] **Commit** `cleanup: warn on integration-ready handoff removal`
 
-### Task 4.10 — Docs + dual-host smoke + 1.6.0
+### Task 4.10 — Internal code review (Gate D)
+
+- [ ] Spec + quality pass (order, dual-condition ready, DRY validators, no OS-sandbox lies).  
+- [ ] Artifact `docs/superpowers/reviews/YYYY-MM-DD-pr4-handoff.md`.  
+- [ ] Zero open remediable findings.  
+- [ ] **Commit** `review: PR4 internal review artifact`
+
+### Task 4.11 — Docs + dual-host smoke + 1.6.0 (Gate E)
 
 - [ ] All PR4 docs from file map.  
-- [ ] Parent protocol + parallel rules + transfer vs handoff.  
-- [ ] Path headers / skill frontmatter on all new files.  
+- [ ] Parent protocol + transfer vs handoff.  
+- [ ] Path headers / skill frontmatter.  
 - [ ] Suites + `claude plugin validate ./plugin --strict`.  
-- [ ] Dual-host smoke design §14.19.  
-- [ ] Packaging triple **1.6.0**; tag `v1.6.0`.
+- [ ] Dual-host smoke §14.19.  
+- [ ] Packaging triple **1.6.0**; tag after merge.  
+- [ ] **Commit** `release: 1.6.0 implementation handoff`
 
 ---
 
 ## PR5 — Operator notify retry (→ 1.7.0)
 
-**When:** After **PR3 is shipped and dogfooded** (and typically after PR4). Do **not** block 1.5.0/1.6.0 on this.
+**When:** After **PR3 shipped and dogfooded** (typically after PR4). Does not block 1.5.0/1.6.0.
 
-**Product:** Optional, **operator-initiated** re-attempt of a notification for a finished run. Complements PR3’s at-most-once **automatic** attempt — does **not** replace it.
+**Product:** Operator-initiated re-attempt. Complements PR3 automatic attempt; does not replace it.
 
-### Policy (locked for PR5)
+### Policy (locked)
 
 | Rule | Decision |
 |------|----------|
-| Automatic retry of `pending` / `failed` | **Still never** (duplicate risk after crash-after-send) |
-| Exactly-once delivery | **Still not claimed**; not a PR5 goal |
-| Who may re-fire | **Operator only** (explicit skill/CLI flag/command) |
-| UX | Copy must state **may send a duplicate** notification |
-| Failure of retry | Must **not** fail or re-open a completed run’s terminal outcome |
-| Default | No change to `notificationMode` defaults from PR3 |
+| Automatic retry of `pending` / `failed` | **Still never** |
+| Exactly-once delivery | **Still not claimed** |
+| Who may re-fire | **Operator only** |
+| UX | **May send a duplicate** |
+| Failure of retry | Must not fail/reopen terminal run outcome |
+| **DRY** | **Must call PR3 `notify.mjs`** with explicit force; **no** second marker/spawn implementation |
 
-### File map (exact)
+### Task 5.0 — Failure-mode matrix + DRY proof (Gate A)
 
-| Path | Role |
-|------|------|
-| `plugin/scripts/lib/notify.mjs` | Export operator `retryNotify` / force-attempt path distinct from automatic attempt |
-| `plugin/scripts/grok-companion.mjs` | Wire companion subcommand or flag for operator retry (e.g. `notify-retry --run-id`) |
-| `plugin/skills/setup/SKILL.md` and/or new thin skill / `status`/`result` docs | Document how to re-request notify |
-| `plugin/scripts/tests/notify.test.mjs` | Retry after `completed`+`failed`; refuse silent auto path; pending handling explicit |
-| `plugin/scripts/tests/grok-companion.test.mjs` | Operator path only |
-| `README.md`, `docs/COMPATIBILITY.md`, `SECURITY.md`, `CHANGELOG.md` | Retry surface + duplicate warning |
-| Packaging triple | **1.7.0** |
+| Surface | Silent wrong | Test |
+|---------|--------------|------|
+| Auto path after PR5 | Must never call force | yes |
+| Operator force after failed | Re-fire once; may duplicate | yes |
+| Stuck `pending` | No auto-fire; operator force only if policy allows + docs | yes |
+| Terminal outcome | Unchanged by retry | yes |
+| Duplicate adapter code | Forbidden (DRY) | review |
 
-**Not in PR5:** auto-retry loops, webhook delivery guarantees, Windows native notify (still platform-limited as in design).
+- [ ] Matrix committed.  
+- [ ] **Commit** `docs: PR5 failure-mode matrix`
 
-### Task 5.1 — Operator re-attempt API
+### Task 5.1 — Operator re-attempt API (extends notify.mjs only)
 
-- [ ] Distinct from automatic at-most-once entry: e.g. require explicit `{force: true}` / CLI after terminal run.  
-- [ ] Document states: may re-fire when marker is `completed` with `result: failed`; policy for stuck `pending` (operator accepts duplicate risk — **do not** auto-fire).  
-- [ ] Always write a new completed marker result (or append attempt log if design prefers — pick one and test it). Prefer simple overwrite with `lastAttempt` fields over unbounded history.  
+- [ ] Explicit `{ force: true }` / CLI; not used by automatic completion.  
+- [ ] States documented: `completed`+`failed` re-fire; stuck `pending` policy.  
+- [ ] Prefer overwrite with `lastAttempt` fields (no unbounded history unless required).  
+- [ ] Tests prove **zero** new spawn/marker helpers outside `notify.mjs`.  
 - [ ] **Commit** `notify: operator re-attempt (may duplicate)`
 
-### Task 5.2 — Companion / skill surface
+### Task 5.2 — Companion / skill surface (thin)
 
-- [ ] Operator-facing invocation (companion flag or small skill).  
-- [ ] Never invoked automatically from background job completion path.  
-- [ ] Tests for operator-only entry.  
+- [ ] Operator invocation only; never from auto completion path.  
+- [ ] Thin wrapper → `notify.mjs` force API.  
 - [ ] **Commit** `companion: notify-retry operator path`
 
-### Task 5.3 — Docs + 1.7.0
+### Task 5.3 — Internal code review (Gate D)
 
-- [ ] Explicit: PR3 = one automatic attempt; PR5 = optional re-fire; neither is exactly-once.  
-- [ ] Packaging triple **1.7.0**; suites; tag `v1.7.0`.
+- [ ] Spec + DRY + no auto path regression.  
+- [ ] Artifact `docs/superpowers/reviews/YYYY-MM-DD-pr5-notify-retry.md`.  
+- [ ] Zero open remediable findings.  
+- [ ] **Commit** `review: PR5 internal review artifact`
+
+### Task 5.4 — Docs + 1.7.0 (Gate E)
+
+- [ ] PR3 = one automatic attempt; PR5 = optional re-fire; neither exactly-once.  
+- [ ] Packaging **1.7.0**; suites; tag after merge.  
+- [ ] **Commit** `release: 1.7.0 operator notify retry`
+
+**Not in PR5:** auto-retry loops, delivery guarantees, Windows native notify.
 
 ---
 
@@ -569,11 +698,13 @@ Exact meaning design §14.17 — no “unacknowledged.”
 | Status exit 1 skill handling | PR1 / 1.6 |
 | Monotonic elapsed | PR1 / 1.4 |
 | Opt-in review isolation + ownership + `--ita-invisible-in-index` | PR2 (`--isolated` only) |
+| Failure-mode matrix + DRY + internal review gates | PR3–PR5 (Gate A/B/D) |
 | Execution context + notify attempt; skill-run no-op | PR3 |
-| Operator notify re-attempt (may duplicate); no auto-retry | PR5 |
+| Operator notify re-attempt reuses notify.mjs; no auto-retry | PR5 |
 | Exactly-once notify / guaranteed delivery | **Out of program** |
-| Contract + scopes + order | PR4 / 4.1–4.3 |
+| Contract + scopes + order (single finalization fn) | PR4 / 4.1–4.3 |
 | Operator-trusted validation (no OS FS sandbox claim) | PR4 / 4.5 |
+| Single validate_implementation_handoff for write + read | PR4 / 4.7–4.8 |
 | terminalOutcome ready + dual-condition handoff | PR4 / 4.7–4.8 |
 | Temp-index post-check blocker | PR4 / 4.4 |
 | Non-streaming handoff mode | PR4 / 4.8 |
@@ -597,8 +728,10 @@ Exact meaning design §14.17 — no “unacknowledged.”
 | Dirty isolation (when `--isolated`) | `git diff --binary --full-index --ita-invisible-in-index HEAD --` |
 | Isolation trigger | **`--isolated` only**; `--base` alone = live |
 | Notify (PR3) | At-most-once **attempt**; no auto-retry pending; **not** exactly-once |
-| Notify retry (PR5) | **Operator-only** re-attempt; may duplicate; still no automatic retry |
-| Background | `GROK_COMPANION_EXECUTION_CONTEXT` via skill/agent SKILL/md; skill-run **no-op** |
+| Notify retry (PR5) | **Operator-only** re-attempt via **same** notify.mjs; may duplicate |
+| DRY (PR3–PR5) | **No duplicated logic**; shared validators/writers; review fails on copy-paste |
+| Internal review (PR3–PR5) | **Required task** + artifact before packaging |
+| Background | `GROK_COMPANION_EXECUTION_CONTEXT` via shared skill pattern; skill-run **no-op** |
 | Handoff streaming | **No** |
 | Contract validation | Operator-trusted; no OS FS sandbox claim |
 | Handoff ready | `terminalOutcome` at write; dual-condition at `/grok:handoff` |
@@ -613,9 +746,9 @@ Exact meaning design §14.17 — no “unacknowledged.”
 
 1. PR1 → `v1.3.0`  
 2. PR2 → `v1.4.0`  
-3. PR3 → `v1.5.0`  
-4. PR4 → `v1.6.0`  
-5. PR5 → `v1.7.0` (operator notify retry; **after PR3 dogfood**; may trail PR4)
+3. PR3 → `v1.5.0` (matrix → implement → **internal review** → package)  
+4. PR4 → `v1.6.0` (same gate sequence)  
+5. PR5 → `v1.7.0` (after PR3 dogfood; may trail PR4; same gate sequence)
 
 No parallel tracks for PR1–PR4. PR5 may wait on real notify demand after 1.5.0. No alternate designs during implementation of a given PR.
 
@@ -623,13 +756,13 @@ No parallel tracks for PR1–PR4. PR5 may wait on real notify demand after 1.5.0
 
 ## Handoff
 
-Revision **9** product change after PR1 ship: **PR2 isolation is opt-in** (`--isolated` only). `--base` no longer requires isolation.
-
-Revision **10:** **PR5 = operator notify re-attempt only** (may duplicate). Not in PR3. Automatic retry and exactly-once delivery remain out of program.
+Revision **9:** PR2 isolation opt-in only.  
+Revision **10:** PR5 = operator notify re-attempt only.  
+Revision **11:** PR3–PR5 **quality gates** (failure-mode matrix, **DRY**, **internal code review as PR tasks**); suites alone are not done.
 
 Paths:
 
 - `docs/superpowers/specs/2026-07-15-run-lifecycle-design.md`  
 - `docs/superpowers/plans/2026-07-15-run-lifecycle.md`  
 
-**PR1 done on main (1.3.x). PR2 in flight. PR3–PR5 per execution order.**
+**PR1 done on main (1.3.x). PR2 in flight. PR3–PR5 per execution order + Gates A–E.**

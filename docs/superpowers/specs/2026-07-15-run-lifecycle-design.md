@@ -1,6 +1,6 @@
 # Run lifecycle, isolated review, completion signals, and implementation handoff
 
-**Status:** design revision 10 (PR1 shipped; PR2 opt-in isolation; **PR5** = operator notify re-attempt only — not PR3, not auto-retry, not exactly-once)  
+**Status:** design revision 11 (PR1 shipped; PR2 opt-in isolation; PR5 = operator notify re-attempt only; **PR3–PR5 quality:** failure-mode matrix, DRY, internal review before “done”)  
 **Date:** 2026-07-16  
 **Product:** grok-skills (Claude Code + Codex)  
 **Baseline:** v1.2.10 (PR1 lifecycle on main as 1.3.x)  
@@ -619,6 +619,8 @@ Add new classes to `envelope.ERROR_CLASSES` in the owning PR.
 | PR5 | 1.7.0 | **Operator** notify re-attempt (may duplicate); never auto-retry; **not** exactly-once |
 
 Release choice: consecutive minor releases for independent dogfood. PR5 may trail PR4 after PR3 notify dogfood.
+
+**Implementation quality (PR3–PR5, plan rev 11):** Before packaging each of PR3–PR5: (1) failure-mode matrix, (2) **DRY** — one module/function per behavior; PR5 reuses PR3 notify core; handoff writer and `/grok:handoff` share one validator, (3) **internal code review** as a required task with a written artifact and zero open remediable findings. External bot review does not replace (3). Green unit tests alone are not done.
 
 ## 14. PR4 — Verified implementation handoff
 
