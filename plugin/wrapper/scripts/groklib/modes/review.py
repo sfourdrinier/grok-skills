@@ -125,6 +125,32 @@ def run(args: argparse.Namespace) -> dict:
             isolation = review_isolation.prepare_review_isolation(
                 repo_root=repo_root, run_id=pre_paths.run_id
             )
+            # Persist worktree identity before Grok runs so cleanup can reap the
+            # worktree if this process is killed before the finally block.
+            try:
+                record = runstate.load_run_record(pre_paths.run_id)
+                rev = int(record.get("recordRevision", 0))
+                runstate.cas_update_run_record(
+                    pre_paths,
+                    rev,
+                    {
+                        "repository": str(repo_root),
+                        "targetWorkspace": target_repo_relative,
+                        "worktreePath": str(isolation.worktree_path),
+                        "worktreeBranch": isolation.branch,
+                        "baseRevision": isolation.base_revision,
+                        "status": "running",
+                    },
+                )
+            except Exception as exc:  # best-effort; still fail closed if CAS is broken
+                raise GrokWrapperError(
+                    "isolation-unavailable",
+                    "could not record isolation worktree on the run for cleanup: {}".format(exc),
+                    {
+                        "worktreePath": str(isolation.worktree_path),
+                        "worktreeBranch": isolation.branch,
+                    },
+                ) from exc
             # Map target into the isolation worktree (same relative path).
             if target_repo_relative:
                 cwd = isolation.worktree_path / target_repo_relative

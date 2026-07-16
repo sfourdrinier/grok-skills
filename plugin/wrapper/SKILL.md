@@ -81,10 +81,18 @@ python3 plugin/wrapper/scripts/grok_agent.py review \
   --task-file <path-to-task-file>
 ```
 
-Optional flags: `--web`, `--schema <path>`, `--model <id>` (default
+Optional flags: `--base <ref>` (comparison framing only; does **not** force
+isolation), `--isolated` (opt-in: owned external worktree at HEAD with tracked
+dirty applied; setup failures fail closed as `isolation-unavailable` with no
+silent live-tree fallback), `--web`, `--schema <path>`, `--model <id>` (default
 `grok-4.5`), `--timeout <seconds>` (default 900), optional `--max-turns <n>`
 (default: **unlimited** - flag omitted unless set). `--task <text>` may replace
 `--task-file` for a short prompt; exactly one of `--task` / `--task-file` is required.
+
+Default is the **live checkout**. Use `--isolated` when concurrent editor noise
+or a dirty tree would confuse the review; use `--base` alone when you only need
+branch-comparison framing. `--isolated` requires hardened mode (rejected under
+`GROK_SKILLS_MODE=direct`).
 
 ### `reason` - isolated artifact reasoning, cold second opinion
 

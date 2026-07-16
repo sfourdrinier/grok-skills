@@ -170,6 +170,17 @@ class ReviewIsolationHelperTests(unittest.TestCase):
         self.assertFalse(session.marker_path.exists())
         self.assertFalse(session.diff_path.exists())
 
+    def test_non_utf8_tracked_dirty_still_isolates(self) -> None:
+        """Tracked dirty with non-UTF-8 bytes must not raise UnicodeDecodeError."""
+        # latin-1 / binary-ish content that is not valid UTF-8 as a whole stream
+        dirty = b"alpha\n" + bytes([0xC3, 0x28]) + b"\n"  # invalid UTF-8 sequence
+        (self.repo / "a.txt").write_bytes(dirty)
+        session = self._session()
+        try:
+            self.assertEqual((session.worktree_path / "a.txt").read_bytes(), dirty)
+        finally:
+            review_isolation.cleanup_review_isolation(session)
+
     def test_dirty_submodule_rejected(self) -> None:
         real_run = worktree_mod._run_git
         gitlink_line = (
@@ -241,6 +252,20 @@ class ReviewIsolationModeTests(ModeHarness):
             pathlib.Path(self.state_home) / "grok-skills" / "worktrees" / "review"
         ).resolve()
         self.assertFalse((state_review / run_id).exists())
+        # Isolation identity was recorded on the run for crash/cleanup recovery
+        # (worktree path may already be cleaned; fields must still name the branch).
+        record = json.loads(
+            (
+                pathlib.Path(self.state_home)
+                / "grok-skills"
+                / "runs"
+                / run_id
+                / "run.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(record.get("worktreeBranch"), "grok/review/" + run_id)
+        self.assertIsNotNone(record.get("worktreePath"))
+        self.assertIn("/worktrees/review/" + run_id, str(record.get("worktreePath")))
 
     def test_isolated_setup_failure_terminalizes_real_run(self) -> None:
         repo = make_review_repo(pathlib.Path(self.tmp_root))

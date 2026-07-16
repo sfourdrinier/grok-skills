@@ -66,6 +66,31 @@ function toolsForMode(mode) {
  * Run a direct Grok CLI invocation. Returns { code, envelopeText }.
  */
 export function runDirectGrok({ mode, args, cwd, env = process.env }) {
+  // --isolated is wrapper-only (owned external worktree). Direct mode bypasses
+  // the hardened parser and must not silently review the live tree instead.
+  if (hasFlag(args, "--isolated")) {
+    const envelope = {
+      schemaVersion: 1,
+      mode,
+      status: "failure",
+      runId: `direct-${Date.now()}`,
+      error: {
+        class: "isolation-unavailable",
+        message:
+          "review --isolated requires hardened mode (owned worktree isolation is not available under runMode=direct)",
+        detail: {
+          hint: "re-run without --isolated, or set GROK_SKILLS_MODE=hardened / companion setup --run-mode hardened",
+        },
+      },
+      response: null,
+      warnings: [
+        "runMode=direct: --isolated is rejected fail-closed (no silent live-checkout fallback)",
+      ],
+      policy: { direct: true },
+    };
+    return { code: 1, envelopeText: `${JSON.stringify(envelope)}\n` };
+  }
+
   const binary = resolveGrokBinary(env);
   const task = readTask(args);
   if (!task.trim() && mode !== "preflight") {

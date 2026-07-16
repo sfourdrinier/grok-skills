@@ -11,7 +11,8 @@ import dataclasses
 import os
 import pathlib
 import stat
-from typing import Optional
+import subprocess
+from typing import List, Optional, Sequence
 
 from groklib import GrokWrapperError, log_stderr, platformsupport, runstate
 from groklib import worktree as worktree_mod
@@ -22,6 +23,36 @@ _FILE_MODE = 0o600
 
 def _log(function: str, message: str) -> None:
     log_stderr("review_isolation", function, message)
+
+
+def _run_git_bytes(repo: pathlib.Path, args: Sequence[str]) -> "subprocess.CompletedProcess":
+    """Run git capturing raw stdout bytes (no UTF-8 decode) for binary-safe patches.
+
+    ``worktree._run_git`` decodes stdout as UTF-8 and raises UnicodeDecodeError on
+    non-UTF-8 text hunks before a CompletedProcess exists; isolation patches must
+    survive arbitrary tracked dirty bytes (design §10).
+    """
+    argv = [
+        "git",
+        "-c",
+        "core.hooksPath={}".format(worktree_mod._EMPTY_GIT_HOOKS),
+        "-C",
+        str(repo),
+    ] + [str(arg) for arg in args]
+    try:
+        return subprocess.run(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=worktree_mod._git_env(None),
+            timeout=worktree_mod._GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise _iso_error(
+            "git could not be executed for isolation patch: {}".format(exc),
+            {"argv": argv},
+        ) from exc
 
 
 @dataclasses.dataclass(frozen=True)
@@ -87,7 +118,7 @@ def _reject_dirty_submodules(repo_root: pathlib.Path) -> None:
                 )
 
 
-def _intent_to_add_paths(repo_root: pathlib.Path) -> list:
+def _intent_to_add_paths(repo_root: pathlib.Path) -> List[str]:
     """Return paths marked intent-to-add (``git add -N``), excluded from isolation.
 
     Porcelain v2 reports ITA ordinary entries with both HEAD and index OIDs all
@@ -103,7 +134,7 @@ def _intent_to_add_paths(repo_root: pathlib.Path) -> list:
             {"stderr": (completed.stderr or "").strip()},
         )
     zero = "0" * 40
-    paths: list = []
+    paths: List[str] = []
     for entry in (completed.stdout or "").split("\0"):
         if not entry.startswith("1 "):
             continue
@@ -200,13 +231,14 @@ def prepare_review_isolation(*, repo_root: pathlib.Path, run_id: str) -> ReviewI
             # pathspec exclude; leading ./ keeps paths under repo root
             diff_argv.append(":(exclude){}".format(ita))
 
-        completed = worktree_mod._run_git(resolved_repo, diff_argv)
+        completed = _run_git_bytes(resolved_repo, diff_argv)
         if completed.returncode not in (0, 1):
+            stderr_text = (completed.stderr or b"").decode("utf-8", errors="replace").strip()
             raise _iso_error(
                 "could not generate isolation dirty patch",
-                {"stderr": (completed.stderr or "").strip()},
+                {"stderr": stderr_text},
             )
-        patch_bytes = (completed.stdout or "").encode("utf-8", errors="surrogateescape")
+        patch_bytes = completed.stdout or b""
         _write_private_bytes(diff_path, patch_bytes)
 
         if patch_bytes.strip():

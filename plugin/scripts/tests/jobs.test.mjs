@@ -40,6 +40,20 @@ test("run mode persists hardened vs direct", () => {
   assert.equal(setRunMode(cwd, "hardened", env), "hardened");
 });
 
+test("direct mode rejects --isolated fail-closed", async () => {
+  const { runDirectGrok } = await import("../lib/direct-grok.mjs");
+  const result = runDirectGrok({
+    mode: "review",
+    args: ["--target", ".", "--isolated", "--task", "Review"],
+    cwd: process.cwd(),
+  });
+  assert.equal(result.code, 1);
+  const env = JSON.parse(result.envelopeText);
+  assert.equal(env.status, "failure");
+  assert.equal(env.error.class, "isolation-unavailable");
+  assert.match(String(env.error.message), /hardened/i);
+});
+
 test("adversarial task framing is aggressive", () => {
   const t = buildAdversarialTask("auth");
   assert.match(t, /ADVERSARIAL/);

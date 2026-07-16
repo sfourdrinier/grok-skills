@@ -25,6 +25,8 @@ from groklib import GrokWrapperError, log_stderr
 from groklib import platformsupport, runstate
 
 _BRANCH_PREFIX = "grok/code/"
+# Run-bound branches that cleanup may delete (code + opt-in review isolation).
+_RUN_BOUND_BRANCH_PREFIXES = (_BRANCH_PREFIX, "grok/review/")
 _MARKER_SUFFIX = ".owner.json"
 _SLUG_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
 _GIT_TIMEOUT_SECONDS = 30
@@ -739,23 +741,21 @@ def remove_external_worktree(wt: ExternalWorktree, *, confirmed: bool, expected_
 
     branch_retained = False
     branch_retain_reason = None
-    expected_branch = _BRANCH_PREFIX + expected_run_id
-    if wt.branch != expected_branch:
-        # PR968 codex bind-branch-deletion: wt.branch is read from run.json and is
-        # NOT trusted to name THIS run's branch. A stale/corrupt record can pair the
-        # correct owner-marked worktree path (which passes the run-id binding above)
-        # with an UNRELATED branch name (e.g. a merged feature branch); a bare
-        # `git branch -d wt.branch` would then destroy that innocent branch and leave
-        # the real grok/code/<run> branch behind. Fail closed: never delete a branch
-        # that is not the run-bound grok/code/<run_id>. Retain and report it so the
-        # mismatch is observable instead of silently acting on the wrong branch.
+    # Bind branch deletion to this run id only. Accept either code or review
+    # isolation prefixes (``grok/code/<id>`` / ``grok/review/<id>``); never delete
+    # an unrelated recorded branch name from a stale/corrupt run.json.
+    expected_branches = {prefix + expected_run_id for prefix in _RUN_BOUND_BRANCH_PREFIXES}
+    if wt.branch not in expected_branches:
         branch_retained = True
-        branch_retain_reason = "recorded branch {!r} is not the run-bound branch {!r}".format(
-            wt.branch, expected_branch
+        branch_retain_reason = (
+            "recorded branch {!r} is not a run-bound branch for run id {!r} "
+            "(expected one of {})".format(wt.branch, expected_run_id, sorted(expected_branches))
         )
         _log(
             "remove_external_worktree",
-            "refusing to delete non-run-bound branch {!r} (expected {!r})".format(wt.branch, expected_branch),
+            "refusing to delete non-run-bound branch {!r} (expected one of {})".format(
+                wt.branch, sorted(expected_branches)
+            ),
         )
     elif not _branch_exists(wt.repo_root, wt.branch):
         # The branch is already gone (e.g. a prior cleanup attempt deleted it before a
