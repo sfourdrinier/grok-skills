@@ -39,10 +39,25 @@ node "${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}/scripts/grok-companion.mjs" <mode> ...
 
 Prefer `$SKILL_BASE/run.mjs` whenever the Skill tool loaded the skill.
 
+### Claude plugin agents (aligned)
+
+Shared self-locating entry: `agents/run.mjs` (plugin root = parent of `agents/`).
+
+```bash
+PLUGIN_INSTALL="${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}"
+node "$PLUGIN_INSTALL/agents/run.mjs" code ...
+```
+
+`agents/run.mjs` locates the companion from its own path (same family as skills).
+
 ### Codex custom agents
 
-Managed agents under `~/.codex/agents/` already embed an absolute
-`GROK_COMPANION=…/grok-companion.mjs` at SessionStart. No skill base needed.
+SessionStart installs managed TOML with absolute **`GROK_AGENT_RUN=…/agents/run.mjs`**
+(not a guessed cache path). Agents run:
+
+```bash
+node "$GROK_AGENT_RUN" code ...
+```
 
 ### Never invent
 

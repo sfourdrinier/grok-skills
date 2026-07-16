@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
+## [1.2.5] - 2026-07-16
+
+### Fixed
+
+- **Agents aligned with skills:** shared self-locating `agents/run.mjs` (same
+  `skill-run` family as `skills/*/run.mjs`). Claude agents use
+  `$PLUGIN_INSTALL/agents/run.mjs`; Codex managed TOML injects absolute
+  `GROK_AGENT_RUN` to that runner (not bare companion-only env).
+
 ## [1.2.4] - 2026-07-16
 
 ### Fixed

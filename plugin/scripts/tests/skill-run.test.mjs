@@ -7,13 +7,17 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { test } from "node:test";
 
-import { pluginRootFromSkillEntryUrl } from "../lib/skill-run.mjs";
+import {
+  pluginRootFromPluginEntryUrl,
+  pluginRootFromSkillEntryUrl,
+} from "../lib/skill-run.mjs";
 import { BUNDLED_PLUGIN_ROOT } from "../lib/resolve-plugin-root.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN = path.resolve(HERE, "..", "..");
 const PREFLIGHT_RUN = path.join(PLUGIN, "skills", "preflight", "run.mjs");
 const DUAL_LENS_RUN = path.join(PLUGIN, "skills", "dual-lens", "run.mjs");
+const AGENTS_RUN = path.join(PLUGIN, "agents", "run.mjs");
 
 const bareEnv = {
   PATH: process.env.PATH,
@@ -26,6 +30,21 @@ test("pluginRootFromSkillEntryUrl maps skills/<name>/run.mjs to plugin root", ()
   const url = pathToFileURL(PREFLIGHT_RUN).href;
   assert.equal(pluginRootFromSkillEntryUrl(url), PLUGIN);
   assert.equal(pluginRootFromSkillEntryUrl(url), BUNDLED_PLUGIN_ROOT);
+});
+
+test("pluginRootFromPluginEntryUrl maps agents/run.mjs to plugin root", () => {
+  assert.ok(fs.existsSync(AGENTS_RUN));
+  const url = pathToFileURL(AGENTS_RUN).href;
+  assert.equal(pluginRootFromPluginEntryUrl(url), PLUGIN);
+});
+
+test("agents/run.mjs works with no CLAUDE_PLUGIN_ROOT/PLUGIN_ROOT", () => {
+  const result = spawnSync(process.execPath, [AGENTS_RUN, "preflight"], {
+    encoding: "utf8",
+    env: bareEnv,
+  });
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
+  assert.match(result.stdout, /"status": "success"/);
 });
 
 test("every skill has a self-locating run.mjs", () => {

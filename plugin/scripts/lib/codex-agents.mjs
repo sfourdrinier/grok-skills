@@ -5,9 +5,8 @@
 //
 // Codex does not yet register plugin-bundled agents (openai/codex#18988), so we
 // materialize them into the global agents dir. Prefer ensureCodexAgents() from
-// SessionStart so install is zero-step for the user. Templates use the
-// __GROK_COMPANION_Q__ placeholder; install rewrites an absolute, single-quoted
-// path to grok-companion.mjs so agents never depend on PLUGIN_ROOT at spawn.
+// SessionStart so install is zero-step for the user. Templates use
+// __GROK_AGENT_RUN_Q__; install rewrites an absolute path to agents/run.mjs.
 
 import crypto from "node:crypto";
 import fs from "node:fs";
@@ -18,6 +17,8 @@ import { fileURLToPath } from "node:url";
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
 const MANAGED_BY = "grok-skills";
+const AGENT_RUN_PLACEHOLDER = "__GROK_AGENT_RUN_Q__";
+/** @deprecated legacy templates */
 const COMPANION_PLACEHOLDER = "__GROK_COMPANION_Q__";
 const MANAGED_NAME_PREFIX = "grok-";
 
@@ -56,6 +57,10 @@ export function resolveCompanionPath(pluginRoot = DEFAULT_PLUGIN_ROOT) {
   return path.resolve(pluginRoot, "scripts", "grok-companion.mjs");
 }
 
+export function resolveAgentRunPath(pluginRoot = DEFAULT_PLUGIN_ROOT) {
+  return path.resolve(pluginRoot, "agents", "run.mjs");
+}
+
 /** POSIX single-quote for embedding absolute paths in agent shell recipes. */
 export function shellSingleQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
@@ -70,24 +75,35 @@ function templateSha(sourceBody) {
 }
 
 /**
- * Build the installed TOML body: managed header + absolute companion path.
+ * Build the installed TOML body: managed header + absolute agents/run.mjs path.
+ * @param {string} sourceBody
+ * @param {string} agentRunAbs - absolute path to agents/run.mjs
+ * @param {string} [companionAbs] - optional companion path for header metadata
  */
-export function materializeAgentBody(sourceBody, companionAbs) {
-  const quoted = shellSingleQuote(companionAbs);
-  if (!String(sourceBody).includes(COMPANION_PLACEHOLDER)) {
+export function materializeAgentBody(sourceBody, agentRunAbs, companionAbs = null) {
+  const quoted = shellSingleQuote(agentRunAbs);
+  let rewritten = String(sourceBody);
+  if (rewritten.includes(AGENT_RUN_PLACEHOLDER)) {
+    rewritten = rewritten.split(AGENT_RUN_PLACEHOLDER).join(quoted);
+  } else if (rewritten.includes(COMPANION_PLACEHOLDER)) {
+    // Legacy templates pointed at companion; rewrite to agent runner instead.
+    rewritten = rewritten.split(COMPANION_PLACEHOLDER).join(quoted);
+  } else {
     throw new Error(
-      `template missing ${COMPANION_PLACEHOLDER} placeholder (refusing to install without absolute companion path)`
+      `template missing ${AGENT_RUN_PLACEHOLDER} placeholder (refusing to install without absolute agent runner path)`
     );
   }
-  const rewritten = String(sourceBody).split(COMPANION_PLACEHOLDER).join(quoted);
   const sha = templateSha(sourceBody);
   const header = [
     `# managed-by: ${MANAGED_BY}`,
-    `# companion: ${companionAbs}`,
+    `# agent-run: ${agentRunAbs}`,
+    companionAbs ? `# companion: ${companionAbs}` : null,
     `# template-sha256: ${sha}`,
     `# auto-installed by SessionStart / setup - re-runs update managed agents only`,
     "",
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
   const withoutOldInstallComments = rewritten.replace(/^(?:#.*\n)*?(?=name\s*=)/m, "");
   return header + withoutOldInstallComments;
 }
@@ -151,6 +167,7 @@ export function installCodexAgents({
     (env.CLAUDE_PLUGIN_ROOT || env.PLUGIN_ROOT || "").trim() ||
     DEFAULT_PLUGIN_ROOT;
   const companion = resolveCompanionPath(root);
+  const agentRun = resolveAgentRunPath(root);
   const dest = destDir || codexAgentsDir(env);
   const installed = [];
   const updated = [];
@@ -165,6 +182,7 @@ export function installCodexAgents({
       ok: false,
       destDir: dest,
       companion,
+      agentRun,
       installed,
       updated,
       skipped,
@@ -178,12 +196,27 @@ export function installCodexAgents({
       ok: false,
       destDir: dest,
       companion,
+      agentRun,
       installed,
       updated,
       skipped,
       skippedUser,
       backedUp,
       errors: [`companion not found at ${companion}`],
+    };
+  }
+  if (!fs.existsSync(agentRun)) {
+    return {
+      ok: false,
+      destDir: dest,
+      companion,
+      agentRun,
+      installed,
+      updated,
+      skipped,
+      skippedUser,
+      backedUp,
+      errors: [`agent runner not found at ${agentRun}`],
     };
   }
 
@@ -194,6 +227,7 @@ export function installCodexAgents({
       ok: false,
       destDir: dest,
       companion,
+      agentRun,
       installed,
       updated,
       skipped,
@@ -211,7 +245,7 @@ export function installCodexAgents({
     }
     try {
       const sourceBody = fs.readFileSync(t.source, "utf8");
-      const body = materializeAgentBody(sourceBody, companion);
+      const body = materializeAgentBody(sourceBody, agentRun, companion);
 
       if (!fs.existsSync(target)) {
         writePrivate(target, body);
@@ -253,6 +287,7 @@ export function installCodexAgents({
     ok: errors.length === 0,
     destDir: dest,
     companion,
+    agentRun,
     installed,
     updated,
     skipped,

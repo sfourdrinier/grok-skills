@@ -1,11 +1,9 @@
 // plugin/scripts/lib/skill-run.mjs
 //
-// Transparent Skill-tool entry: each skills/<name>/run.mjs calls runFromSkillEntry
-// with import.meta.url. Plugin root is derived from the on-disk location of that
-// file (skills/<name>/run.mjs -> plugin root). No CLAUDE_PLUGIN_ROOT required.
-//
-// The model only substitutes the host-provided Skill base directory:
-//   node "$SKILL_BASE/run.mjs" <companion-mode> [args...]
+// Self-locating entry for skills and agents:
+//   skills/<name>/run.mjs  -> plugin root = ../..
+//   agents/run.mjs         -> plugin root = ..
+// No CLAUDE_PLUGIN_ROOT required once the absolute path to run.mjs is known.
 
 import { spawnSync } from "node:child_process";
 import path from "node:path";
@@ -18,7 +16,7 @@ import {
 } from "./resolve-plugin-root.mjs";
 
 /**
- * Plugin root from a skill entry module URL (…/skills/<name>/run.mjs).
+ * Plugin root from a skill entry URL (…/skills/<name>/run.mjs).
  * @param {string} importMetaUrl
  * @returns {string}
  */
@@ -28,14 +26,35 @@ export function pluginRootFromSkillEntryUrl(importMetaUrl) {
 }
 
 /**
+ * Plugin root from any installed entry module:
+ * - …/skills/<name>/run.mjs
+ * - …/agents/run.mjs
+ * @param {string} importMetaUrl
+ * @returns {string}
+ */
+export function pluginRootFromPluginEntryUrl(importMetaUrl) {
+  const entryFile = fileURLToPath(importMetaUrl);
+  const entryDir = path.dirname(entryFile);
+  // agents/run.mjs lives directly under plugin/agents/
+  if (path.basename(entryDir) === "agents") {
+    return path.resolve(entryDir, "..");
+  }
+  // skills/<name>/run.mjs
+  if (path.basename(path.dirname(entryDir)) === "skills") {
+    return path.resolve(entryDir, "..", "..");
+  }
+  return pluginRootFromSkillDir(entryDir);
+}
+
+/**
  * Spawn grok-companion with argv. Returns process exit code.
- * @param {string} importMetaUrl - import.meta.url of skills/<name>/run.mjs
+ * @param {string} importMetaUrl - import.meta.url of skills/<name>/run.mjs or agents/run.mjs
  * @param {string[]} argv - forwarded to companion (mode + flags)
  * @param {NodeJS.ProcessEnv} [env]
  * @returns {number}
  */
-export function runFromSkillEntry(importMetaUrl, argv, env = process.env) {
-  const root = pluginRootFromSkillEntryUrl(importMetaUrl);
+export function runFromPluginEntry(importMetaUrl, argv, env = process.env) {
+  const root = pluginRootFromPluginEntryUrl(importMetaUrl);
   if (!isValidPluginRoot(root)) {
     process.stderr.write(
       `skill-run: invalid plugin root at ${root} (missing scripts/grok-companion.mjs)\n`
@@ -45,7 +64,6 @@ export function runFromSkillEntry(importMetaUrl, argv, env = process.env) {
   const companion = companionPath(root);
   const childEnv = {
     ...env,
-    // Propagate so nested wrapper resolution and child tools see a root.
     CLAUDE_PLUGIN_ROOT: (env.CLAUDE_PLUGIN_ROOT || "").trim() || root,
     PLUGIN_ROOT: (env.PLUGIN_ROOT || "").trim() || root,
   };
@@ -63,4 +81,9 @@ export function runFromSkillEntry(importMetaUrl, argv, env = process.env) {
     return 1;
   }
   return typeof result.status === "number" ? result.status : 1;
+}
+
+/** @deprecated use runFromPluginEntry */
+export function runFromSkillEntry(importMetaUrl, argv, env = process.env) {
+  return runFromPluginEntry(importMetaUrl, argv, env);
 }

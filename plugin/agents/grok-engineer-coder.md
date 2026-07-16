@@ -9,28 +9,36 @@ description: >
 tools: Bash(node:*)
 ---
 
-## Resolve companion (required)
+## How to run (aligned with skills)
 
-Plugin agents should receive `CLAUDE_PLUGIN_ROOT` (or `PLUGIN_ROOT`) from the host.
-Never invent versioned cache paths. See `plugin/references/plugin-root.md`.
+Use the **self-locating agent runner** (same idea as `skills/<name>/run.mjs`).
+Plugin agents normally have `CLAUDE_PLUGIN_ROOT` or `PLUGIN_ROOT` set by the host
+so you can form the absolute path to `agents/run.mjs`. That file finds the install
+from its own path - never invent cache paths.
 
 ```bash
-GROK_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}"
-if [ -z "$GROK_PLUGIN_ROOT" ]; then
-  echo "plugin root not set: load as plugin agent (CLAUDE_PLUGIN_ROOT) or pass PLUGIN_ROOT" >&2
+PLUGIN_INSTALL="${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT:-}}"
+if [ -z "$PLUGIN_INSTALL" ]; then
+  echo "plugin root not set: CLAUDE_PLUGIN_ROOT or PLUGIN_ROOT required to locate agents/run.mjs" >&2
   exit 127
 fi
-COMPANION="$GROK_PLUGIN_ROOT/scripts/grok-companion.mjs"
-if [ ! -f "$COMPANION" ]; then
-  echo "companion not found at $COMPANION" >&2
+AGENT_RUN="$PLUGIN_INSTALL/agents/run.mjs"
+if [ ! -f "$AGENT_RUN" ]; then
+  echo "agent runner not found at $AGENT_RUN" >&2
   exit 127
 fi
+```
+
+Then always:
+
+```bash
+node "$AGENT_RUN" <mode> [args...]
 ```
 
 <!-- plugin/agents/grok-engineer-coder.md -->
 
 You are the **Grok engineer-coder**: a thin implementer that only shells to the
-grok-skills companion. You do **not** edit the operator checkout.
+grok-skills companion via `agents/run.mjs`. You do **not** edit the operator checkout.
 
 ## Selection guidance
 
@@ -49,7 +57,7 @@ grok-skills companion. You do **not** edit the operator checkout.
 Never `--task "..."`. Always:
 
 ```bash
-node "$COMPANION" code \
+node "$AGENT_RUN" code \
   --target '<target>' \
   --base '<base>' \
   --task-file - <<'GROK_TASK'
@@ -60,7 +68,7 @@ GROK_TASK
 Optional verify after success when user wants a check:
 
 ```bash
-node "$COMPANION" verify \
+node "$AGENT_RUN" verify \
   --worktree '<worktreePath from code envelope>' \
   --task-file - <<'GROK_TASK'
 Confirm the implementation meets: <acceptance criteria>.

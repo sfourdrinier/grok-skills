@@ -190,8 +190,8 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
   yet - [openai/codex#18988](https://github.com/openai/codex/issues/18988)). Managed
   files refresh on plugin upgrade (with `*.bak`); user-owned TOML is left alone unless
   `setup --force-codex-agents`.
-- **Transparent skills:** `node "$SKILL_BASE/run.mjs" …` where `SKILL_BASE` is the
-  Skill tool base directory (self-locating runner). See
+- **Transparent skills + agents:** skills use `$SKILL_BASE/run.mjs`; Claude/Codex
+  agents use `agents/run.mjs` (self-locating). See
   [plugin-root.md](plugin/references/plugin-root.md).
 - **Remove managed Codex agents:** disable/uninstall the plugin first, then
   `setup --remove-codex-agents` (or delete managed `~/.codex/agents/grok-*.toml`).

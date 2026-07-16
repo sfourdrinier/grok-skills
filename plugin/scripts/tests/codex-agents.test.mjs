@@ -13,6 +13,7 @@ import {
   isManagedAgentBody,
   listTemplateAgents,
   materializeAgentBody,
+  resolveAgentRunPath,
   resolveCompanionPath,
   shellSingleQuote,
   uninstallCodexAgents,
@@ -29,12 +30,12 @@ test("listTemplateAgents finds shipped TOML agents", () => {
   assert.ok(names.includes("grok-rescue"));
 });
 
-test("shipped templates use absolute companion placeholder and sandbox_mode", () => {
+test("shipped templates use agent-run placeholder and sandbox_mode", () => {
   for (const t of listTemplateAgents(TEMPLATES)) {
     const body = fs.readFileSync(t.source, "utf8");
     assert.ok(
-      body.includes("__GROK_COMPANION_Q__"),
-      `${t.name} missing __GROK_COMPANION_Q__`
+      body.includes("__GROK_AGENT_RUN_Q__"),
+      `${t.name} missing __GROK_AGENT_RUN_Q__`
     );
     assert.ok(!body.includes("${PLUGIN_ROOT"), `${t.name} still uses PLUGIN_ROOT`);
     assert.ok(
@@ -42,10 +43,13 @@ test("shipped templates use absolute companion placeholder and sandbox_mode", ()
       `${t.name} still uses CLAUDE_PLUGIN_ROOT`
     );
     assert.ok(
-      body.includes("Never invent cache paths") || body.includes("NEVER invent cache paths"),
+      /do not invent cache paths|NEVER invent cache paths|do not invent cache paths/i.test(
+        body
+      ),
       `${t.name} missing never-invent-paths guidance`
     );
     assert.match(body, /sandbox_mode\s*=\s*"read-only"/);
+    assert.match(body, /GROK_AGENT_RUN/);
   }
 });
 
@@ -54,20 +58,21 @@ test("shellSingleQuote escapes embedded single quotes", () => {
   assert.equal(shellSingleQuote("/tmp/o'brien"), `'/tmp/o'\\''brien'`);
 });
 
-test("materializeAgentBody injects absolute companion and managed header", () => {
+test("materializeAgentBody injects absolute agent-run and managed header", () => {
   const src = fs.readFileSync(
     path.join(TEMPLATES, "grok-engineer-coder.toml"),
     "utf8"
   );
-  const companion = "/cache/grok/1.2.2/scripts/grok-companion.mjs";
-  const body = materializeAgentBody(src, companion);
+  const agentRun = "/cache/grok/1.2.5/agents/run.mjs";
+  const companion = "/cache/grok/1.2.5/scripts/grok-companion.mjs";
+  const body = materializeAgentBody(src, agentRun, companion);
   assert.ok(isManagedAgentBody(body));
-  assert.ok(body.includes(`companion: ${companion}`));
-  assert.ok(body.includes(`GROK_COMPANION='${companion}'`));
-  assert.ok(!body.includes("__GROK_COMPANION_Q__"));
+  assert.ok(body.includes(`agent-run: ${agentRun}`));
+  assert.ok(body.includes(`GROK_AGENT_RUN='${agentRun}'`));
+  assert.ok(!body.includes("__GROK_AGENT_RUN_Q__"));
 });
 
-test("installCodexAgents writes managed agents with absolute companion", () => {
+test("installCodexAgents writes managed agents with absolute agent-run", () => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-"));
   const env = { CODEX_HOME: home };
   const first = installCodexAgents({
@@ -81,10 +86,12 @@ test("installCodexAgents writes managed agents with absolute companion", () => {
 
   const dest = path.join(home, "agents", "grok-engineer-coder.toml");
   const body = fs.readFileSync(dest, "utf8");
+  const agentRun = resolveAgentRunPath(PLUGIN_ROOT);
   const companion = resolveCompanionPath(PLUGIN_ROOT);
   assert.ok(isManagedAgentBody(body));
-  assert.ok(body.includes(companion));
-  assert.ok(body.includes(`GROK_COMPANION=${shellSingleQuote(companion)}`));
+  assert.ok(body.includes(agentRun));
+  assert.ok(body.includes(`GROK_AGENT_RUN=${shellSingleQuote(agentRun)}`));
+  assert.ok(fs.existsSync(agentRun));
   assert.ok(fs.existsSync(companion));
 });
 
@@ -95,8 +102,11 @@ test("installCodexAgents backs up before updating managed agents", () => {
 
   const fakeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "plugin-root-"));
   const scriptsDir = path.join(fakeRoot, "scripts");
+  const agentsDir = path.join(fakeRoot, "agents");
   fs.mkdirSync(scriptsDir, { recursive: true });
+  fs.mkdirSync(agentsDir, { recursive: true });
   fs.writeFileSync(path.join(scriptsDir, "grok-companion.mjs"), "// stub\n");
+  fs.writeFileSync(path.join(agentsDir, "run.mjs"), "// stub agent run\n");
 
   const third = installCodexAgents({
     templatesDir: TEMPLATES,
