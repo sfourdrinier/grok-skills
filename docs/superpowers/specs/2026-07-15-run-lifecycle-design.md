@@ -1,6 +1,6 @@
 # Run lifecycle, isolated review, completion signals, and implementation handoff
 
-**Status:** design revision 9 (PR1 shipped; PR2 isolation is **opt-in** only — not required for `--base`)  
+**Status:** design revision 11 (PR1 shipped; PR2 opt-in isolation; PR5 = operator notify re-attempt only; **PR3–PR5 quality:** failure-mode matrix, DRY, internal review before “done”)  
 **Date:** 2026-07-16  
 **Product:** grok-skills (Claude Code + Codex)  
 **Baseline:** v1.2.10 (PR1 lifecycle on main as 1.3.x)  
@@ -49,7 +49,7 @@ Background and long-running Grok modes (especially `review`) are hard to trust:
 - `--allow-commits` for code mode (future; out of PR4).
 - Repurposing `/grok:transfer` for implementation output.
 - Status mode writing lifecycle or any run-directory bytes.
-- Automatic retry of failed/crashed notification attempts (operator-driven future PR).
+- Automatic retry of failed/crashed notification attempts (never auto; **operator re-attempt is PR5 only**).
 - Multi-workspace authoritative build gates in one `code` run (PR4 = one target).
 
 ## 4. Locked decisions
@@ -69,13 +69,13 @@ Background and long-running Grok modes (especially `review`) are hard to trust:
 | Review isolation | §10; **opt-in** (`--isolated` only). `--base` alone uses live checkout. No silent live-checkout fallback **when isolation was requested**. |
 | Notifications storage | **Only** jobs index `config` in `plugin/scripts/lib/jobs.mjs`. Never gate-state. |
 | Notifications default | `off`. Setup recommends `auto`. |
-| Notify contract | **At-most-once attempt:** prioritize no duplicate attempts over guaranteed delivery. **Not** exactly-once. No automatic retry of `pending`. |
+| Notify contract | **At-most-once attempt** (PR3): prioritize no duplicate attempts over guaranteed delivery. **Not** exactly-once. No automatic retry of `pending`. **Operator re-attempt = PR5 only** (may duplicate; never automatic). |
 | Background signal | Companion-only `GROK_COMPANION_EXECUTION_CONTEXT=foreground\|background` set by skill/agent shell prefixes; `skill-run.mjs` unchanged; never forwarded to wrapper; never inferred from TTY. |
 | Handoff mode | `WRAPPER_MODES` only; **not** `STREAMING_MODES`; `runHandoff()` like status passthrough. |
 | Contract validation | Explicit execution after scopes + HEAD; **operator-trusted argv, not OS-filesystem-sandboxed** (§14.3, §14.9). |
 | Handoff readiness | Computed from in-memory `terminalOutcome`, not persisted lifecycle. Manifest then envelope. `/grok:handoff` requires ready manifest **and** completed envelope (§14.6–14.12, §14.14). |
 | Code target scope | **One** cohesive `--target` workspace per `code` run in PR4. |
-| PR versions | PR1 **1.3.0**, PR2 **1.4.0**, PR3 **1.5.0**, PR4 **1.6.0** (four minor releases for independent dogfood). |
+| PR versions | PR1 **1.3.0**, PR2 **1.4.0**, PR3 **1.5.0**, PR4 **1.6.0**, PR5 **1.7.0** (operator notify retry; after PR3 dogfood). |
 | Packaging version paths | Exactly three: `plugin/.claude-plugin/plugin.json`, `plugin/.codex-plugin/plugin.json`, `.claude-plugin/marketplace.json`. |
 | PROVENANCE | No content change required for this program unless a release note needs a one-line D-log entry; **locked: no `docs/PROVENANCE.md` edit in PR1–PR4** unless a finding forces it. |
 
@@ -561,7 +561,7 @@ File: `{runDir}/notified.json`.
 4. Overwrite marker:  
    `{"state":"completed","attemptedAt":"…","completedAt":"…","adapter":"native|webhook","result":"sent|failed","detail":"…"}`  
 5. On send failure after create: still write `state: completed` with `result: failed` so automatic retry never re-fires.  
-6. Crash after send before complete write: marker may remain `pending`; next process **must not** auto-retry (duplicate risk). Operator-driven retry is a **future PR**, not this program.  
+6. Crash after send before complete write: marker may remain `pending`; next process **must not** auto-retry (duplicate risk). **Operator-driven re-attempt is PR5 only** (explicit; may duplicate) — never automatic in PR3 or later.  
 7. Never throw to fail the job.
 
 ### Native adapters (exact)
@@ -608,16 +608,19 @@ Reuse existing: `validation-failure`, `secret-material`, `wrong-working-director
 
 Add new classes to `envelope.ERROR_CLASSES` in the owning PR.
 
-## 13. Four PRs
+## 13. PRs (five minors)
 
 | PR | Version | Scope |
 |----|---------|--------|
 | PR1 | 1.3.0 | Lifecycle, CAS seed, single terminal writer, status read-only projection, progress, process finalize |
 | PR2 | 1.4.0 | **Opt-in** isolated review (`--isolated`) + ownership; `--base` alone stays live |
-| PR3 | 1.5.0 | Notifications + execution context |
+| PR3 | 1.5.0 | Notifications + execution context (**at-most-once attempt only**) |
 | PR4 | 1.6.0 | Verified implementation handoff |
+| PR5 | 1.7.0 | **Operator** notify re-attempt (may duplicate); never auto-retry; **not** exactly-once |
 
-Release choice: **four consecutive minor releases** for independent dogfood (accepted operational cost).
+Release choice: consecutive minor releases for independent dogfood. PR5 may trail PR4 after PR3 notify dogfood.
+
+**Implementation quality (PR3–PR5, plan rev 11):** Before packaging each of PR3–PR5: (1) failure-mode matrix, (2) **DRY** — one module/function per behavior; PR5 reuses PR3 notify core; handoff writer and `/grok:handoff` share one validator, (3) **internal code review** as a required task with a written artifact and zero open remediable findings. External bot review does not replace (3). Green unit tests alone are not done.
 
 ## 14. PR4 — Verified implementation handoff
 
@@ -961,9 +964,11 @@ As §12, §14.6–14.14 tests, dual-host smoke §14.19, packaging 1.6.0 on the t
 - Auto-apply handoff  
 - `--allow-commits`  
 - Status-driven durable interrupted persistence  
-- Automatic notification retry  
+- **Automatic** notification retry (never; PR5 is operator-only)  
+- Exactly-once / guaranteed notification delivery  
 - Multi-root build gates in one code run  
-- Operator notify-retry command (future PR)  
+
+**Scheduled as PR5 (not out of program):** operator-initiated notify re-attempt after a finished run (explicit duplicate risk).
 
 ## 17. New source file conventions
 

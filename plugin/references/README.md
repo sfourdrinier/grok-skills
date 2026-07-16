@@ -94,7 +94,7 @@ Canonical table: root [README.md](../../README.md) (skills + agents). Summary:
 |-------|--------------|-------|
 | `/grok:preflight` | `preflight` | Readiness (runnable CLI, auth, sandbox) |
 | `/grok:setup` | companion setup | Optional gate/mode; Codex agents auto on SessionStart |
-| `/grok:review` | `review` | Full-context read-only; `--web` opt-in |
+| `/grok:review` | `review` | Full-context read-only; live checkout by default; opt-in `--isolated` worktree; `--base` framing only; `--web` opt-in |
 | `/grok:adversarial-review` | `adversarial-review` | Hostile; web on by default |
 | `/grok:dual-lens` | companion | Adversarial then ordinary review |
 | `/grok:reason` | `reason` | Cold second opinion; web off by default |

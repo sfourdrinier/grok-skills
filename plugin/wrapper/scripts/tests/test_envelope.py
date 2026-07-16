@@ -197,6 +197,7 @@ class BuildEnvelopeTests(unittest.TestCase):
                 "finalization-timeout",
                 "finalization-worker-missing-result",
                 "finalization-worker-unkillable",
+                "isolation-unavailable",
             ),
         )
 

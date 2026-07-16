@@ -373,7 +373,8 @@ def _capture_review_fs_baseline(
     if not run.detect_unexpected_edits or not run.repository:
         return None
     try:
-        return worktree_escape.repo_change_fingerprint(pathlib.Path(run.repository))
+        root = getattr(run, "tree_fingerprint_root", None) or pathlib.Path(run.repository)
+        return worktree_escape.repo_change_fingerprint(pathlib.Path(root))
     except GrokWrapperError as exc:
         msg = (
             "Could not snapshot the tree before this review "
@@ -407,7 +408,8 @@ def _report_repo_fs_drift(
     if baseline is None:
         return
     try:
-        after = worktree_escape.repo_change_fingerprint(pathlib.Path(run.repository))
+        root = getattr(run, "tree_fingerprint_root", None) or pathlib.Path(run.repository)
+        after = worktree_escape.repo_change_fingerprint(pathlib.Path(root))
     except GrokWrapperError as exc:
         msg = (
             "Could not check whether files changed during this review "
@@ -591,7 +593,11 @@ def _clean_extra_temp_dirs(extra_temp_dirs: Tuple[pathlib.Path, ...], warnings: 
             _log("_clean_extra_temp_dirs", "rmtree failed for {}: {}".format(directory, exc))
 
 
-def run_grok_mode(run: ModeRun) -> dict:
+def run_grok_mode(
+    run: ModeRun,
+    *,
+    run_paths: Optional[runstate.RunPaths] = None,
+) -> dict:
     """Execute the shared Grok run lifecycle for ``run`` and return a validated C4 envelope.
 
     create_run -> run.json -> create_private_home -> (execute + verify) with a
@@ -603,8 +609,10 @@ def run_grok_mode(run: ModeRun) -> dict:
     lifecycle (a raw OSError, an envelope-build error) is terminalized under the
     REAL run id via ``terminalize_unexpected_failure`` so the entrypoint never
     synthesizes a dangling run id and run.json never stays at status="running".
+
+    When ``run_paths`` is supplied (e.g. opt-in review isolation that already
+    minted the run id for the worktree path), create_run is skipped.
     """
-    run_paths: Optional[runstate.RunPaths] = None
     progress: Optional[ProgressWriter] = None
     # Round5 cleanup-outcome-lost-on-terminalize: the body creates its HomeCleanup
     # locally; this one-element holder carries it back so the outer terminalizer
@@ -614,20 +622,22 @@ def run_grok_mode(run: ModeRun) -> dict:
     # F1-sigterm-drops-result: the same holder pattern for the completed Grok result, so
     # a SIGTERM escaping the body after Grok finished still carries the redacted answer.
     result_holder: List[Optional[grokcli.GrokRunResult]] = [None]
+    owned_paths = run_paths
     try:
         # create_run is INSIDE the try (F1-create-run-outside-try) so a mid-create
         # failure terminalizes the REAL run rather than orphaning its on-disk dir
         # under a synthesized id.
-        run_paths = runstate.create_run(run.mode)
-        progress = ProgressWriter(run_paths.run_id, run_paths.progress_path)
-        return _run_grok_mode_body(run, run_paths, progress, home_cleanup_holder, result_holder)
+        if owned_paths is None:
+            owned_paths = runstate.create_run(run.mode)
+        progress = ProgressWriter(owned_paths.run_id, owned_paths.progress_path)
+        return _run_grok_mode_body(run, owned_paths, progress, home_cleanup_holder, result_holder)
     except BaseException as exc:  # last-resort: terminalize under the REAL run id
         # BaseException (not just Exception) so a SIGTERM-driven SystemExit or a
         # KeyboardInterrupt mid-run still terminalizes the run, tears the private
         # home down (inner finally already ran), and emits exactly one C4 envelope
         # instead of exiting with run.json stuck at "running" and no stdout
         # envelope (F5-sigterm-bypasses-envelope).
-        paths = run_paths if run_paths is not None else getattr(exc, "run_paths", None)
+        paths = owned_paths if owned_paths is not None else getattr(exc, "run_paths", None)
         if paths is None:
             # create_run failed before a run directory of ours even existed; there
             # is nothing on disk to terminalize. Let the entrypoint handle it.

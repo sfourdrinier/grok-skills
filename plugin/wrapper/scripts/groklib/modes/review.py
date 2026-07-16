@@ -9,14 +9,21 @@
 # are informational notes only. Hard fails stay for real setup/safety (auth,
 # sandbox, runnable CLI check, model family). --schema is optional structured output.
 # Shared lifecycle: private-home isolation, execution, sandbox verify, teardown.
+#
+# Opt-in external isolation (design §10 rev 9): only when --isolated is set.
+# --base alone frames comparison in the prompt on the live checkout.
 
 import argparse
 import pathlib
+from typing import Optional
 
-from groklib import GrokWrapperError, log_stderr
+from groklib import GrokWrapperError, log_stderr, runstate
 from groklib import rules
 from groklib.projectconfig import load_project_config
 from groklib.modes import _shared
+from groklib.modes._envelope import terminalize_unexpected_failure
+from groklib.progress import ProgressWriter
+from groklib import review_isolation
 
 _TOOLS = ("read_file", "grep", "list_dir")
 
@@ -78,37 +85,127 @@ def _resolve_target(target_relative: str) -> "tuple[pathlib.Path, pathlib.Path, 
     return repo_root, target_abs, target_repo_relative
 
 
+def _frame_task_with_base(task_text: str, base: Optional[str]) -> str:
+    if not base or not str(base).strip():
+        return task_text
+    return (
+        "Comparison base ref for this review (framing only; not an isolation trigger): "
+        "{}\n\n{}".format(str(base).strip(), task_text)
+    )
+
+
 def run(args: argparse.Namespace) -> dict:
     """Prepare the C7 rules payload for --target and drive the shared read-only review run."""
     binary = _shared.resolve_binary(args)
     task_text = _shared.resolve_task_text(args)
     output_schema = _shared.load_output_schema(args)
+    task_text = _frame_task_with_base(task_text, getattr(args, "base", None))
 
     repo_root, target_abs, target_repo_relative = _resolve_target(args.target)
 
-    project_config = load_project_config(repo_root)
-    instructions = rules.discover_instruction_files(
-        repo_root, target_abs, require_parity=project_config.require_rule_file_parity
-    )
-    prompt_text = rules.build_prompt_payload(instructions, task_text)
-    instruction_entries = rules.instruction_envelope_entries(instructions)
-
     from groklib.web_defaults import resolve_web_access
 
-    mode_run = _shared.ModeRun(
-        mode="review",
-        binary=binary,
-        requested_model=args.model,
-        web_access=resolve_web_access("review", getattr(args, "web", None)),
-        output_schema=output_schema,
-        timeout_seconds=args.timeout,
-        max_turns=args.max_turns,
-        prompt_text=prompt_text,
-        cwd=target_abs,
-        tools=_TOOLS,
-        instructions=instruction_entries,
-        repository=str(repo_root),
-        target_workspace=target_repo_relative,
-        detect_unexpected_edits=True,
-    )
-    return _shared.run_grok_mode(mode_run)
+    cwd = target_abs
+    pre_paths = None
+    isolation = None
+    want_isolated = bool(getattr(args, "isolated", False))
+
+    try:
+        if want_isolated:
+            # Mint run id first so isolation worktree path is bound to the same id
+            # that owns the durable envelope (design §10).
+            pre_paths = runstate.create_run("review")
+            # Persist planned worktree identity BEFORE create so cleanup can reap
+            # if we crash mid-prepare after `git worktree add` / patch write.
+            planned = review_isolation.plan_review_isolation(
+                repo_root=repo_root, run_id=pre_paths.run_id
+            )
+            try:
+                record = runstate.load_run_record(pre_paths.run_id)
+                rev = int(record.get("recordRevision", 0))
+                runstate.cas_update_run_record(
+                    pre_paths,
+                    rev,
+                    {
+                        "repository": str(repo_root),
+                        "targetWorkspace": target_repo_relative,
+                        "worktreePath": str(planned.worktree_path),
+                        "worktreeBranch": planned.branch,
+                        "baseRevision": planned.base_revision,
+                        "status": "running",
+                    },
+                )
+            except Exception as exc:
+                raise GrokWrapperError(
+                    "isolation-unavailable",
+                    "could not record isolation worktree on the run for cleanup: {}".format(exc),
+                    {
+                        "worktreePath": str(planned.worktree_path),
+                        "worktreeBranch": planned.branch,
+                    },
+                ) from exc
+            isolation = review_isolation.prepare_review_isolation(
+                repo_root=repo_root, run_id=pre_paths.run_id
+            )
+            # Map target into the isolation worktree (same relative path).
+            if target_repo_relative:
+                cwd = isolation.worktree_path / target_repo_relative
+            else:
+                cwd = isolation.worktree_path
+            if not cwd.is_dir():
+                raise GrokWrapperError(
+                    "isolation-unavailable",
+                    "isolated worktree is missing the --target path {!r}".format(target_repo_relative),
+                    {"worktreePath": str(isolation.worktree_path), "target": target_repo_relative},
+                )
+
+        # Load rules/config from the tree Grok will see. Under --isolated that is
+        # the owned snapshot (HEAD + tracked dirty), not the live checkout - so
+        # untracked / intent-to-add AGENTS.md etc. cannot govern the prompt.
+        rules_root = isolation.worktree_path if isolation is not None else repo_root
+        rules_target = cwd
+        project_config = load_project_config(rules_root)
+        instructions = rules.discover_instruction_files(
+            rules_root, rules_target, require_parity=project_config.require_rule_file_parity
+        )
+        prompt_text = rules.build_prompt_payload(instructions, task_text)
+        instruction_entries = rules.instruction_envelope_entries(instructions)
+
+        mode_run = _shared.ModeRun(
+            mode="review",
+            binary=binary,
+            requested_model=args.model,
+            web_access=resolve_web_access("review", getattr(args, "web", None)),
+            output_schema=output_schema,
+            timeout_seconds=args.timeout,
+            max_turns=args.max_turns,
+            prompt_text=prompt_text,
+            cwd=cwd,
+            tools=_TOOLS,
+            instructions=instruction_entries,
+            repository=str(repo_root),
+            target_workspace=target_repo_relative,
+            detect_unexpected_edits=True,
+            tree_fingerprint_root=(
+                isolation.worktree_path if isolation is not None else None
+            ),
+        )
+        return _shared.run_grok_mode(mode_run, run_paths=pre_paths)
+    except BaseException as exc:
+        # Isolation setup (or target mapping) failed after create_run: terminalize
+        # under the REAL run id - never fall back to live checkout, never leave
+        # run.json stuck at "running" with a synthesized entrypoint id.
+        if pre_paths is None:
+            raise
+        progress = ProgressWriter(pre_paths.run_id, pre_paths.progress_path)
+        return terminalize_unexpected_failure(
+            run_paths=pre_paths,
+            mode="review",
+            progress=progress,
+            exc=exc,
+            write_terminal_record=lambda: None,
+            log=_log,
+        )
+    finally:
+        if isolation is not None:
+            review_isolation.cleanup_review_isolation(isolation)

@@ -174,6 +174,17 @@ def _build_parser() -> _Parser:
 
     review = _sub("review")
     review.add_argument("--target", required=True)
+    review.add_argument(
+        "--base",
+        default=None,
+        help="optional comparison base ref for review framing (does not force isolation)",
+    )
+    review.add_argument(
+        "--isolated",
+        action="store_true",
+        default=False,
+        help="opt-in: run review in an owned external worktree with tracked dirty applied",
+    )
     _add_task_group(review)
     _add_web_flags(review)
     review.add_argument("--schema")

@@ -6,6 +6,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
+## [1.4.0] - 2026-07-16
+
+### Added
+
+- **Opt-in isolated review (`--isolated`):** when set, `review` runs in an owned
+  external worktree under the state root (`worktrees/review/{run_id}`), applies
+  tracked dirty (staged + unstaged) from the live checkout, and cleans up always.
+  Intent-to-add (`git add -N`) and untracked files are excluded. Dirty submodules
+  fail closed. Setup failures emit `isolation-unavailable` with no silent
+  fallback to the live tree.
+- **`--base` remains live:** comparison framing only; does not force isolation.
+  Combine `--base` and `--isolated` when you want framing plus a snapshot tree.
+
+### Changed
+
+- Packaging triple **1.4.0**.
+
 ## [1.3.1] - 2026-07-16
 
 ### Fixed

@@ -1,6 +1,6 @@
 {
   "name": "grok",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "description": "Use Grok as a coding assistant from Codex / ChatGPT: review, reason, implement, and verify through a hardened sandboxed wrapper. Not affiliated with xAI.",
   "author": {
     "name": "Stephane Fourdrinier"
