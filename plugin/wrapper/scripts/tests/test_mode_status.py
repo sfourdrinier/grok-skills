@@ -37,22 +37,13 @@ class StatusModeTests(unittest.TestCase):
 
     def _seed_run(self, *, stored_envelope=None, with_progress=True):
         paths = runstate.create_run("review")
-        record = {
-            "schemaVersion": 1,
-            "runId": paths.run_id,
-            "mode": "review",
-            "createdAtUtc": "2026-07-14T00:00:00+00:00",
-            "status": "success",
-            "requestedModel": "grok-4.5",
-            "repository": None,
-            "targetWorkspace": None,
-            "worktreePath": None,
-            "worktreeBranch": None,
-            "baseRevision": None,
-            "progressStreamPath": str(paths.progress_path),
-            "envelopePath": str(paths.envelope_path),
-        }
-        runstate.write_run_record(paths, record)
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.cas_update_run_record(
+            paths,
+            1,
+            {"requestedModel": "grok-4.5", "status": "running"},
+        )
+        runstate.set_lifecycle(paths, 2, "finalizing")
 
         if with_progress:
             writer = ProgressWriter(paths.run_id, paths.progress_path)
@@ -63,7 +54,19 @@ class StatusModeTests(unittest.TestCase):
             stored_envelope = build_envelope(
                 run_id=paths.run_id, mode="review", status="success", response={"answer": "PONG"}
             )
-        paths.envelope_path.write_text(json.dumps(stored_envelope), encoding="utf-8")
+        violations = []
+        try:
+            from groklib import envelope as envelope_mod
+
+            violations = envelope_mod.validate_envelope(stored_envelope)
+        except Exception:
+            violations = ["invalid"]
+        if violations:
+            # Fixture for malformed stored document: write raw bytes, leave lifecycle finalizing
+            paths.envelope_path.write_text(json.dumps(stored_envelope), encoding="utf-8")
+        else:
+            # Envelope-first terminalization (never lifecycle without envelope)
+            runstate.persist_terminal_envelope(paths, 3, stored_envelope, lifecycle="completed")
         return paths
 
     def test_status_returns_stored_envelope_and_events(self) -> None:

@@ -449,17 +449,12 @@ def effective_lifecycle(
         if envelope_status == "success":
             return "completed", "envelope"
         return "failed", "envelope"
-    # Legacy records without lifecycle field: treat status success/failure as terminal
-    status = record.get("status")
-    if status == "success" and not has_valid_envelope:
-        # unfinished claims
-        pass
-    if status == "success":
-        return "completed", "record"
+    # Non-terminal lifecycle (or missing): never promote to completed without envelope
     if process_liveness == "dead":
         return "interrupted", "derived"
     if life in ("created", "running", "finalizing"):
         return str(life), "record"
+    status = record.get("status")
     if status == "running":
         return "running", "record"
     return "running", "record"
@@ -681,13 +676,13 @@ def allocate_leader_socket(private_home: pathlib.Path, run_id: str) -> pathlib.P
 
 
 def write_run_record(paths: RunPaths, record: dict) -> None:
-    """Merge ``record`` into run.json under lock without clobbering seed lifecycle fields.
+    """Merge non-terminal bookkeeping into run.json under lock.
 
-    Public full-replace is removed: this merges under ``run.lock``, preserves
-    ``runId``/``createdAtUtc``/``lifecycle``/``recordRevision`` from the seed when
-    the caller omits them, maps terminal status values onto lifecycle when safe,
-    and bumps ``recordRevision``. Prefer ``cas_update_run_record`` /
-    ``set_lifecycle`` / ``persist_terminal_envelope`` for new code.
+    **Never** sets a terminal lifecycle (completed/failed/canceled). Terminal
+    state is only written by ``persist_terminal_envelope`` (envelope-first).
+    Status values ``success``/``failure`` in the patch are **not** applied while
+    lifecycle is non-terminal (stored as ``running`` instead). Prefer
+    ``cas_update_run_record`` / ``set_lifecycle`` / ``persist_terminal_envelope``.
     """
     _verify_paths_owner(paths)
     with run_lock(paths):
@@ -702,25 +697,30 @@ def write_run_record(paths: RunPaths, record: dict) -> None:
         for key, value in record.items():
             if key in _PRESERVE_ON_MERGE and key in existing:
                 continue
+            if key == "lifecycle":
+                continue  # never via this API
             merged[key] = value
         merged["runId"] = paths.run_id
         if "createdAtUtc" not in merged or not merged["createdAtUtc"]:
             merged["createdAtUtc"] = existing.get("createdAtUtc") or _utc_now_iso()
-        # Lifecycle: preserve existing unless still non-terminal and status maps clearly
-        life = existing.get("lifecycle") or merged.get("lifecycle") or "created"
-        status_value = record.get("status")
-        if life not in _TERMINAL_LIFECYCLES:
-            if status_value == "success":
-                life = "completed"
-            elif status_value == "failure":
-                life = "failed"
-            elif status_value == "running" and life == "created":
-                life = "running"
+        # Preserve lifecycle; only allow created -> running for in-flight bookkeeping
+        life = existing.get("lifecycle") or "created"
+        if life not in _TERMINAL_LIFECYCLES and life == "created" and record.get("status") == "running":
+            life = "running"
         merged["lifecycle"] = life
-        if life in _TERMINAL_LIFECYCLES and status_value not in ("success", "failure"):
-            merged["status"] = "success" if life == "completed" else "failure"
-        elif "status" not in merged:
-            merged["status"] = "running"
+        status_value = record.get("status")
+        if life in _TERMINAL_LIFECYCLES:
+            # Already terminalized by persist_terminal_envelope — keep terminal status
+            if status_value in ("success", "failure"):
+                merged["status"] = status_value
+            elif "status" not in merged:
+                merged["status"] = "success" if life == "completed" else "failure"
+        else:
+            # Non-terminal: never store success/failure status without an envelope
+            if status_value in ("success", "failure", None):
+                merged["status"] = "running"
+            else:
+                merged["status"] = status_value
         if existing:
             merged["recordRevision"] = int(existing.get("recordRevision", 0)) + 1
         else:

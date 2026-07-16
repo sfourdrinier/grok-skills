@@ -782,3 +782,21 @@ class CreateRunSeedTests(unittest.TestCase):
         runstate.persist_terminal_envelope(paths, None, None)
         record = runstate.load_run_record(paths.run_id)
         self.assertEqual(record["lifecycle"], "completed")
+
+
+    def test_write_run_record_never_terminalizes_without_envelope(self) -> None:
+        paths = runstate.create_run("review")
+        runstate.write_run_record(
+            paths,
+            {
+                "schemaVersion": 1,
+                "runId": paths.run_id,
+                "mode": "review",
+                "status": "success",
+                "requestedModel": "grok-4.5",
+            },
+        )
+        record = runstate.load_run_record(paths.run_id)
+        self.assertNotIn(record.get("lifecycle"), ("completed", "failed", "canceled"))
+        self.assertEqual(record.get("status"), "running")
+        self.assertFalse(paths.envelope_path.is_file())

@@ -231,41 +231,45 @@ def _check_stale_audit(progress: ProgressWriter, checks: List[dict]) -> None:
     checks.append({"name": "staleHomeAudit", "ok": True, "detail": "removed {} stale home(s)".format(len(removed))})
 
 
-def _write_record(run_paths: runstate.RunPaths, status_value: str) -> None:
-    record = {
-        "schemaVersion": 1,
-        "runId": run_paths.run_id,
-        "mode": "preflight",
-        "createdAtUtc": _utc_now_iso(),
-        "status": status_value,
-        "requestedModel": _REQUESTED_MODEL,
-        "repository": None,
-        "targetWorkspace": None,
-        "worktreePath": None,
-        "worktreeBranch": None,
-        "baseRevision": None,
-        "progressStreamPath": str(run_paths.progress_path),
-        "envelopePath": str(run_paths.envelope_path),
-    }
-    runstate.write_run_record(run_paths, record)
+def _advance_preflight_running(run_paths: runstate.RunPaths) -> None:
+    """Non-terminal: seed created → running; never terminalize without envelope."""
+    record = runstate.load_run_record(run_paths.run_id)
+    rev = int(record.get("recordRevision", 0))
+    if record.get("lifecycle") == "created":
+        record = runstate.set_lifecycle(run_paths, rev, "running")
+        rev = int(record["recordRevision"])
+    runstate.cas_update_run_record(
+        run_paths,
+        rev,
+        {"requestedModel": _REQUESTED_MODEL, "status": "running"},
+    )
 
 
-def _best_effort_write_record(run_paths: runstate.RunPaths, status_value: str) -> None:
-    """Write the terminal preflight run.json, logging (not raising) on a write failure.
-
-    F3-write-run-record-unguarded: a run.json write failure in the tail must NOT
-    discard the already-determined preflight outcome (a passing run's entire
-    ``checks`` array, or a specific classified failure) by letting the exception
-    escape into the outer terminalizer's generic cli-failure. The failure is
-    logged with context and the caller still returns its determined envelope.
-    """
+def _persist_preflight_terminal(
+    run_paths: runstate.RunPaths,
+    envelope: dict,
+    *,
+    lifecycle: str,
+) -> dict:
+    """Envelope-first terminal persist for preflight (design §7.1)."""
     try:
-        _write_record(run_paths, status_value)
+        record = runstate.load_run_record(run_paths.run_id)
+        rev = int(record.get("recordRevision", 0))
+        life = record.get("lifecycle")
+        if life == "created":
+            record = runstate.set_lifecycle(run_paths, rev, "running")
+            rev = int(record["recordRevision"])
+            life = "running"
+        if life == "running":
+            record = runstate.set_lifecycle(run_paths, rev, "finalizing")
+            rev = int(record["recordRevision"])
+        runstate.persist_terminal_envelope(run_paths, rev, envelope, lifecycle=lifecycle)
     except Exception as exc:
         _log(
-            "_best_effort_write_record",
-            "could not persist terminal preflight run.json for {}: {}".format(run_paths.run_id, exc),
+            "_persist_preflight_terminal",
+            "could not persist terminal preflight envelope for {}: {}".format(run_paths.run_id, exc),
         )
+    return envelope
 
 
 def run(args: argparse.Namespace) -> dict:
@@ -305,7 +309,7 @@ def run(args: argparse.Namespace) -> dict:
             mode="preflight",
             progress=progress,
             exc=exc,
-            write_terminal_record=lambda: _write_record(paths, "failure"),
+            write_terminal_record=lambda: None,
             log=_log,
             cleanup=probe_cleanup_holder[0],
         )
@@ -318,7 +322,10 @@ def _run_preflight_body(
     probe_cleanup_holder: List[dict],
 ) -> dict:
     """Run every preflight check in order and return a validated C4 envelope (classified path)."""
-    _write_record(run_paths, "running")
+    try:
+        _advance_preflight_running(run_paths)
+    except Exception as exc:
+        _log("_run_preflight_body", "could not advance to running: {}".format(exc))
     progress.safe_emit("start", "preflight run created", data={"mode": "preflight"})
 
     checks: List[dict] = []
@@ -335,7 +342,6 @@ def _run_preflight_body(
     except GrokWrapperError as exc:
         _log("run", "preflight check failed: {} ({})".format(exc.error_class, exc))
         progress.safe_emit("done", "preflight failed: {}".format(exc.error_class), level="error")
-        _best_effort_write_record(run_paths, "failure")
         # F2 preflight-cleanup-field-on-classified-failure: thread the REAL probe-
         # home teardown outcome onto the top-level cleanup field, consistently with
         # the runners (modes/_shared._failure_envelope). Without this the classified
@@ -344,7 +350,7 @@ def _run_preflight_body(
         # not-applicable, hiding the possibly-leaked auth copy from anything polling
         # cleanup.status. The holder carries the last probe teardown outcome (the
         # failed one on a cleanup-failure), or not-applicable if no probe ran yet.
-        return failure_envelope(
+        envelope = failure_envelope(
             run_id=run_paths.run_id,
             mode="preflight",
             error_class=exc.error_class,
@@ -355,9 +361,9 @@ def _run_preflight_body(
             response={"checks": checks},
             cleanup=probe_cleanup_holder[0],
         )
+        return _persist_preflight_terminal(run_paths, envelope, lifecycle="failed")
 
     progress.safe_emit("done", "preflight complete", data={"checkCount": len(checks)})
-    _best_effort_write_record(run_paths, "success")
     response = {
         "platform": platformsupport.current_platform(),
         "platformProbed": platformsupport.current_platform() in platformsupport.PROBED_PLATFORMS,
@@ -372,7 +378,7 @@ def _run_preflight_body(
         from groklib import preflight_cache
 
         preflight_cache.write_ok(version_detail)
-    return build_envelope(
+    envelope = build_envelope(
         run_id=run_paths.run_id,
         mode="preflight",
         status="success",
@@ -380,3 +386,4 @@ def _run_preflight_body(
         progressStreamPath=str(run_paths.progress_path),
         response=response,
     )
+    return _persist_preflight_terminal(run_paths, envelope, lifecycle="completed")

@@ -277,30 +277,30 @@ def run_worktree_mode(
             raise
         if progress is None:
             progress = ProgressWriter(paths.run_id, paths.progress_path)
+        def _merge_worktree_meta() -> None:
+            # Non-terminal metadata only — must not set status success/failure
+            wt = holder.worktree if worktree_retained else None
+            if wt is None:
+                return
+            record = runstate.load_run_record(paths.run_id)
+            rev = int(record.get("recordRevision", 0))
+            runstate.cas_update_run_record(
+                paths,
+                rev,
+                {
+                    "worktreePath": str(wt.path),
+                    "worktreeBranch": wt.branch,
+                    "baseRevision": wt.base_revision,
+                    "status": "running",
+                },
+            )
+
         return terminalize_unexpected_failure(
             run_paths=paths,
             mode=mode,
             progress=progress,
             exc=exc,
-            write_terminal_record=lambda: runstate.write_run_record(
-                paths,
-                _run_record_fields(
-                    mode=mode,
-                    run_paths=paths,
-                    status_value="failure",
-                    requested_model=requested_model,
-                    repository=repository,
-                    target_workspace=target_workspace,
-                    # PR968 codex verify-adopted-worktree: only the OWNING run
-                    # (code, worktree_retained) records the worktree into its
-                    # cleanup record. A verify run merely ADOPTS the code run's
-                    # worktree; recording it here would make cleanup of the
-                    # verify run rebuild and try to reap a worktree whose path +
-                    # sibling marker name the ORIGINAL code run, wedging cleanup
-                    # on the run-id binding. The owning code run stays responsible.
-                    worktree=holder.worktree if worktree_retained else None,
-                ),
-            ),
+            write_terminal_record=_merge_worktree_meta,
             log=_log,
             cleanup=resolve_terminal_cleanup(holder.home_cleanup),
             result=holder.result_holder[0],
@@ -536,21 +536,26 @@ def _run_worktree_mode_body(
         fields["usage"] = usage_field
         fields["response"] = response_field
         envelope = build_envelope(run_id=run_paths.run_id, mode=mode, status="success", **fields)
-        # Record worktree metadata before terminal persist
-        best_effort_write_run_record(
-            run_paths,
-            _run_record_fields(
-                mode=mode,
-                run_paths=run_paths,
-                status_value="success",
-                requested_model=requested_model,
-                repository=repository,
-                target_workspace=target_workspace,
-                worktree=holder.worktree if worktree_retained else None,
-            ),
-            warnings,
-            _log,
-        )
+        # Non-terminal metadata only (worktree paths); never terminalize without envelope
+        try:
+            record = runstate.load_run_record(run_paths.run_id)
+            rev = int(record.get("recordRevision", 0))
+            wt = holder.worktree if worktree_retained else None
+            runstate.cas_update_run_record(
+                run_paths,
+                rev,
+                {
+                    "requestedModel": requested_model,
+                    "repository": repository,
+                    "targetWorkspace": target_workspace,
+                    "worktreePath": str(wt.path) if wt is not None else None,
+                    "worktreeBranch": wt.branch if wt is not None else None,
+                    "baseRevision": wt.base_revision if wt is not None else None,
+                    "status": "running",
+                },
+            )
+        except Exception as meta_exc:
+            _log("_run_worktree_mode_body", "non-terminal metadata merge failed: {}".format(meta_exc))
         return _publish_terminal_envelope(
             run_paths, mode, envelope, lifecycle="completed", progress=progress, warnings=warnings
         )
@@ -593,20 +598,25 @@ def _run_worktree_mode_body(
         detail=error.detail or None,
         **fields,
     )
-    best_effort_write_run_record(
-        run_paths,
-        _run_record_fields(
-            mode=mode,
-            run_paths=run_paths,
-            status_value="failure",
-            requested_model=requested_model,
-            repository=repository,
-            target_workspace=target_workspace,
-            worktree=holder.worktree if worktree_retained else None,
-        ),
-        warnings,
-        _log,
-    )
+    try:
+        record = runstate.load_run_record(run_paths.run_id)
+        rev = int(record.get("recordRevision", 0))
+        wt = holder.worktree if worktree_retained else None
+        runstate.cas_update_run_record(
+            run_paths,
+            rev,
+            {
+                "requestedModel": requested_model,
+                "repository": repository,
+                "targetWorkspace": target_workspace,
+                "worktreePath": str(wt.path) if wt is not None else None,
+                "worktreeBranch": wt.branch if wt is not None else None,
+                "baseRevision": wt.base_revision if wt is not None else None,
+                "status": "running",
+            },
+        )
+    except Exception as meta_exc:
+        _log("_run_worktree_mode_body", "non-terminal metadata merge failed: {}".format(meta_exc))
     return _publish_terminal_envelope(
         run_paths, mode, envelope, lifecycle="failed", progress=progress, warnings=warnings
     )

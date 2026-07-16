@@ -339,14 +339,6 @@ def terminalize_unexpected_failure(
     )
 
     try:
-        write_terminal_record()
-    except Exception as record_exc:  # best-effort: still emit under the real id
-        log(
-            "terminalize_unexpected_failure",
-            "could not write terminal run.json for {}: {}".format(run_paths.run_id, record_exc),
-        )
-
-    try:
         progress.safe_emit("done", "{} failed: {}".format(mode, error_class), level="error")
     except Exception as emit_exc:  # progress is best-effort; never block the envelope
         log(
@@ -383,12 +375,13 @@ def terminalize_unexpected_failure(
             primary_fields["warnings"] = stderr_warnings
 
     try:
-        return failure_envelope(
+        envelope = failure_envelope(
             run_id=run_paths.run_id,
             mode=mode,
             error_class=error_class,
             message=message,
             detail=detail,
+            progressStreamPath=str(run_paths.progress_path),
             **primary_fields,
         )
     except (InvalidEnvelopeError, SecretMaterialError) as build_exc:
@@ -403,10 +396,39 @@ def terminalize_unexpected_failure(
                 run_paths.run_id, build_exc
             ),
         )
-        return failure_envelope(
+        envelope = failure_envelope(
             run_id=run_paths.run_id,
             mode=mode,
             error_class="cli-failure",
             message="{} run failed and its failure detail could not be safely rendered".format(mode),
+            progressStreamPath=str(run_paths.progress_path),
             **cleanup_fields,
         )
+
+    # Envelope-first durable terminalization (never lifecycle-before-envelope)
+    try:
+        # Optional non-terminal bookkeeping from caller (must not terminalize alone)
+        try:
+            write_terminal_record()
+        except Exception as record_exc:
+            log(
+                "terminalize_unexpected_failure",
+                "non-terminal record merge failed for {}: {}".format(run_paths.run_id, record_exc),
+            )
+        record = runstate.load_run_record(run_paths.run_id)
+        rev = int(record.get("recordRevision", 0))
+        life = record.get("lifecycle")
+        if life == "created":
+            record = runstate.set_lifecycle(run_paths, rev, "running")
+            rev = int(record["recordRevision"])
+            life = "running"
+        if life == "running":
+            record = runstate.set_lifecycle(run_paths, rev, "finalizing")
+            rev = int(record["recordRevision"])
+        runstate.persist_terminal_envelope(run_paths, rev, envelope, lifecycle="failed")
+    except Exception as persist_exc:
+        log(
+            "terminalize_unexpected_failure",
+            "persist_terminal_envelope failed for {}: {}".format(run_paths.run_id, persist_exc),
+        )
+    return envelope

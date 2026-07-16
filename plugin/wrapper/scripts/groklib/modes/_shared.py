@@ -606,9 +606,7 @@ def run_grok_mode(run: ModeRun) -> dict:
             mode=run.mode,
             progress=progress,
             exc=exc,
-            write_terminal_record=lambda: runstate.write_run_record(
-                paths, _run_record(run, paths, "failure")
-            ),
+            write_terminal_record=lambda: None,
             log=_log,
             cleanup=resolve_terminal_cleanup(home_cleanup_holder[0]),
             result=result_holder[0],
