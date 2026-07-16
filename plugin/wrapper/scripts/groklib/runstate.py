@@ -21,7 +21,7 @@ import shutil
 import stat
 import tempfile
 import time
-from typing import Callable, Dict, List, Optional, Set
+from typing import Dict, List, Optional
 
 from groklib import GrokWrapperError, log_stderr
 from groklib import platformsupport

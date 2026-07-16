@@ -180,12 +180,14 @@ def _publish_terminal_envelope(
             progress=progress,
         )
         if ephemeral:
-            warnings.append("finalization worker unkillable; durable terminal state not written")
+            # ephemeral is an error-class string (unkillable, lifecycle-repair-failed, …)
+            note = "finalization ephemeral ({}): durable terminal state not written".format(
+                ephemeral
+            )
+            warnings.append(note)
             if isinstance(published, dict):
                 published = dict(published)
-                published["warnings"] = list(published.get("warnings") or []) + [
-                    "finalization worker unkillable; durable terminal state not written"
-                ]
+                published["warnings"] = list(published.get("warnings") or []) + [note]
                 published["doNotStore"] = True
             # No "done" progress event: durable terminalization did not complete.
             return published

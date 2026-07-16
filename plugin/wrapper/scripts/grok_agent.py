@@ -8,7 +8,6 @@
 # exiting 0 iff success. Diagnostics go to stderr; emit_envelope owns stdout.
 
 import argparse
-import json
 import os
 import pathlib
 import signal
@@ -24,7 +23,6 @@ from groklib.envelope import (
     exit_code_for,
     failure_envelope,
     redact_secret_value_text,
-    validate_envelope,
 )
 from groklib.modes import MODES
 
