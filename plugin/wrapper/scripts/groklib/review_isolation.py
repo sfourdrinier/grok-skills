@@ -3,7 +3,7 @@
 # Opt-in isolated review worktrees (design §10, rev 9): only when --isolated.
 # Path: {state_root}/worktrees/review/{run_id}; sibling owner marker; apply
 # tracked dirty from the live checkout; cleanup always. Fail closed with
-# isolation-unavailable — never silently fall back to the live tree.
+# isolation-unavailable - never silently fall back to the live tree.
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import os
 import pathlib
 import stat
 import subprocess
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 from groklib import GrokWrapperError, log_stderr, platformsupport, runstate
 from groklib import worktree as worktree_mod
@@ -23,6 +23,14 @@ _FILE_MODE = 0o600
 
 def _log(function: str, message: str) -> None:
     log_stderr("review_isolation", function, message)
+
+
+def _isolation_git_env() -> Dict[str, str]:
+    """Git env for isolation patches: scrub external diff helpers (GIT_EXTERNAL_DIFF)."""
+    env = worktree_mod._git_env(None)
+    # Empty value is not enough on all gits; drop the key so internal diff runs.
+    env.pop("GIT_EXTERNAL_DIFF", None)
+    return env
 
 
 def _run_git_bytes(repo: pathlib.Path, args: Sequence[str]) -> "subprocess.CompletedProcess":
@@ -44,7 +52,7 @@ def _run_git_bytes(repo: pathlib.Path, args: Sequence[str]) -> "subprocess.Compl
             argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=worktree_mod._git_env(None),
+            env=_isolation_git_env(),
             timeout=worktree_mod._GIT_TIMEOUT_SECONDS,
             check=False,
         )
@@ -64,6 +72,39 @@ class ReviewIsolation:
     run_id: str
     diff_path: pathlib.Path
     marker_path: pathlib.Path
+
+
+@dataclasses.dataclass(frozen=True)
+class PlannedReviewIsolation:
+    """Pre-create paths for run.json so cleanup can reap after a mid-prepare crash."""
+
+    worktree_path: pathlib.Path
+    branch: str
+    base_revision: str
+    diff_path: pathlib.Path
+    marker_path: pathlib.Path
+
+
+def plan_review_isolation(*, repo_root: pathlib.Path, run_id: str) -> PlannedReviewIsolation:
+    """Resolve HEAD and isolation paths without creating a worktree (design cleanup)."""
+    if not runstate.is_valid_run_id(run_id):
+        raise _iso_error("run id is not valid for review isolation: {!r}".format(run_id), {"runId": run_id})
+    resolved_repo = pathlib.Path(repo_root).resolve()
+    worktree_path = runstate.state_root() / "worktrees" / "review" / run_id
+    branch = _BRANCH_PREFIX + run_id
+    try:
+        base_revision = worktree_mod._resolve_base_sha(resolved_repo, "HEAD")
+    except GrokWrapperError as exc:
+        if exc.error_class == "isolation-unavailable":
+            raise
+        raise _iso_error(str(exc), dict(exc.detail or {}, mappedFrom=exc.error_class)) from exc
+    return PlannedReviewIsolation(
+        worktree_path=worktree_path,
+        branch=branch,
+        base_revision=base_revision,
+        diff_path=pathlib.Path(str(worktree_path) + ".diff"),
+        marker_path=worktree_mod.marker_path_for(worktree_path),
+    )
 
 
 def _iso_error(message: str, detail: Optional[dict] = None) -> GrokWrapperError:
@@ -99,8 +140,15 @@ def _line_has_gitlink(line: str) -> bool:
 
 
 def _reject_dirty_submodules(repo_root: pathlib.Path) -> None:
-    """Fail closed if any gitlink (submodule) differs from HEAD (design §10)."""
-    for args in (("diff", "--raw", "HEAD"), ("diff", "--raw", "--cached", "HEAD")):
+    """Fail closed if any gitlink (submodule) differs from HEAD (design §10).
+
+    Force ``--ignore-submodules=none`` so repo ``submodule.*.ignore=all`` /
+    ``diff.ignoreSubmodules=all`` cannot hide dirty gitlinks.
+    """
+    for args in (
+        ("diff", "--raw", "--ignore-submodules=none", "HEAD"),
+        ("diff", "--raw", "--ignore-submodules=none", "--cached", "HEAD"),
+    ):
         completed = worktree_mod._run_git(repo_root, list(args))
         if completed.returncode not in (0, 1):
             raise _iso_error(
@@ -220,6 +268,8 @@ def prepare_review_isolation(*, repo_root: pathlib.Path, run_id: str) -> ReviewI
         ita_paths = _intent_to_add_paths(resolved_repo)
         diff_argv = [
             "diff",
+            "--no-ext-diff",
+            "--no-textconv",
             "--binary",
             "--full-index",
             "--ita-invisible-in-index",

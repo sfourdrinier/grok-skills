@@ -115,11 +115,11 @@ def run(args: argparse.Namespace) -> dict:
             # Mint run id first so isolation worktree path is bound to the same id
             # that owns the durable envelope (design §10).
             pre_paths = runstate.create_run("review")
-            isolation = review_isolation.prepare_review_isolation(
+            # Persist planned worktree identity BEFORE create so cleanup can reap
+            # if we crash mid-prepare after `git worktree add` / patch write.
+            planned = review_isolation.plan_review_isolation(
                 repo_root=repo_root, run_id=pre_paths.run_id
             )
-            # Persist worktree identity before Grok runs so cleanup can reap the
-            # worktree if this process is killed before the finally block.
             try:
                 record = runstate.load_run_record(pre_paths.run_id)
                 rev = int(record.get("recordRevision", 0))
@@ -129,21 +129,24 @@ def run(args: argparse.Namespace) -> dict:
                     {
                         "repository": str(repo_root),
                         "targetWorkspace": target_repo_relative,
-                        "worktreePath": str(isolation.worktree_path),
-                        "worktreeBranch": isolation.branch,
-                        "baseRevision": isolation.base_revision,
+                        "worktreePath": str(planned.worktree_path),
+                        "worktreeBranch": planned.branch,
+                        "baseRevision": planned.base_revision,
                         "status": "running",
                     },
                 )
-            except Exception as exc:  # best-effort; still fail closed if CAS is broken
+            except Exception as exc:
                 raise GrokWrapperError(
                     "isolation-unavailable",
                     "could not record isolation worktree on the run for cleanup: {}".format(exc),
                     {
-                        "worktreePath": str(isolation.worktree_path),
-                        "worktreeBranch": isolation.branch,
+                        "worktreePath": str(planned.worktree_path),
+                        "worktreeBranch": planned.branch,
                     },
                 ) from exc
+            isolation = review_isolation.prepare_review_isolation(
+                repo_root=repo_root, run_id=pre_paths.run_id
+            )
             # Map target into the isolation worktree (same relative path).
             if target_repo_relative:
                 cwd = isolation.worktree_path / target_repo_relative
@@ -157,7 +160,7 @@ def run(args: argparse.Namespace) -> dict:
                 )
 
         # Load rules/config from the tree Grok will see. Under --isolated that is
-        # the owned snapshot (HEAD + tracked dirty), not the live checkout — so
+        # the owned snapshot (HEAD + tracked dirty), not the live checkout - so
         # untracked / intent-to-add AGENTS.md etc. cannot govern the prompt.
         rules_root = isolation.worktree_path if isolation is not None else repo_root
         rules_target = cwd
@@ -190,7 +193,7 @@ def run(args: argparse.Namespace) -> dict:
         return _shared.run_grok_mode(mode_run, run_paths=pre_paths)
     except BaseException as exc:
         # Isolation setup (or target mapping) failed after create_run: terminalize
-        # under the REAL run id — never fall back to live checkout, never leave
+        # under the REAL run id - never fall back to live checkout, never leave
         # run.json stuck at "running" with a synthesized entrypoint id.
         if pre_paths is None:
             raise

@@ -188,7 +188,7 @@ class ReviewIsolationHelperTests(unittest.TestCase):
         def _one(_i: int) -> None:
             try:
                 results.append(self._session())
-            except BaseException as exc:  # noqa: BLE001 — collect for assertion
+            except BaseException as exc:  # noqa: BLE001 - collect for assertion
                 errors.append(exc)
 
         with ThreadPoolExecutor(max_workers=3) as pool:
@@ -230,14 +230,16 @@ class ReviewIsolationHelperTests(unittest.TestCase):
             + " M\tvendor/lib\n"
         )
         fake_raw = subprocess.CompletedProcess(
-            args=["git", "diff", "--raw", "HEAD"],
+            args=["git", "diff", "--raw", "--ignore-submodules=none", "HEAD"],
             returncode=0,
             stdout=gitlink_line,
             stderr="",
         )
+        seen_ignore = []
 
         def _side_effect(repo, args, **kwargs):
             if args and args[0] == "diff" and "--raw" in args:
+                seen_ignore.append("--ignore-submodules=none" in args)
                 return fake_raw
             return real_run(repo, args, **kwargs)
 
@@ -246,6 +248,30 @@ class ReviewIsolationHelperTests(unittest.TestCase):
                 self._session()
         self.assertEqual(ctx.exception.error_class, "isolation-unavailable")
         self.assertIn("submodule", str(ctx.exception).lower())
+        self.assertTrue(seen_ignore and all(seen_ignore), "must force ignore-submodules=none")
+
+    def test_isolation_diff_disables_external_diff(self) -> None:
+        """Snapshot capture must use internal git diff (no GIT_EXTERNAL_DIFF / textconv)."""
+        (self.repo / "a.txt").write_text("alpha\nbeta\nedit\n", encoding="utf-8")
+        captured = []
+        real = review_isolation._run_git_bytes
+
+        def _wrap(repo, args, **kwargs):
+            captured.append(list(args))
+            return real(repo, args, **kwargs)
+
+        with mock.patch.dict(os.environ, {"GIT_EXTERNAL_DIFF": "/bin/false"}):
+            with mock.patch.object(review_isolation, "_run_git_bytes", side_effect=_wrap):
+                session = self._session()
+                review_isolation.cleanup_review_isolation(session)
+        self.assertTrue(captured)
+        for args in captured:
+            if args and args[0] == "diff":
+                self.assertIn("--no-ext-diff", args)
+                self.assertIn("--no-textconv", args)
+                break
+        else:
+            self.fail("expected a git diff invocation for isolation patch")
 
 
 class ReviewIsolationModeTests(ModeHarness):
@@ -268,6 +294,34 @@ class ReviewIsolationModeTests(ModeHarness):
         review_wt = pathlib.Path(self.state_home) / "grok-skills" / "worktrees" / "review"
         if review_wt.exists():
             self.assertEqual(list(review_wt.iterdir()), [])
+
+    def test_isolation_identity_recorded_before_prepare(self) -> None:
+        """run.json must name the worktree before prepare creates it (crash window)."""
+        repo = make_review_repo(pathlib.Path(self.tmp_root))
+        recorded = {}
+        real_prepare = review_isolation.prepare_review_isolation
+
+        def _prepare(**kwargs):
+            run_id = kwargs["run_id"]
+            run_dir = pathlib.Path(self.state_home) / "grok-skills" / "runs" / run_id
+            record = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            recorded["worktreePath"] = record.get("worktreePath")
+            recorded["worktreeBranch"] = record.get("worktreeBranch")
+            recorded["baseRevision"] = record.get("baseRevision")
+            # Path must already be planned and not yet exist (prepare creates it).
+            self.assertIsNotNone(recorded["worktreePath"])
+            self.assertFalse(pathlib.Path(recorded["worktreePath"]).exists())
+            return real_prepare(**kwargs)
+
+        with mock.patch.object(review_isolation, "prepare_review_isolation", _prepare):
+            exit_code, out = self.drive(
+                ["review", "--target", "pkg", "--isolated", "--task", "Review"],
+                repo_root=repo,
+            )
+        self.assertEqual(exit_code, 0, out)
+        self.assertTrue(str(recorded["worktreePath"]).endswith("/worktrees/review/" + json.loads(out)["runId"]))
+        self.assertEqual(recorded["worktreeBranch"], "grok/review/" + json.loads(out)["runId"])
+        self.assertTrue(isinstance(recorded["baseRevision"], str) and len(recorded["baseRevision"]) >= 7)
 
     def test_with_isolated_cwd_is_under_isolation_worktree(self) -> None:
         repo = make_review_repo(pathlib.Path(self.tmp_root))
