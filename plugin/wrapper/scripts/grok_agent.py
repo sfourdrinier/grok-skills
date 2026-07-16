@@ -141,10 +141,18 @@ def _add_task_group(sub: argparse.ArgumentParser) -> None:
     group.add_argument("--task-file")
 
 
-def _add_run_opts(sub: argparse.ArgumentParser, *, timeout: int, max_turns: int) -> None:
+def _add_run_opts(sub: argparse.ArgumentParser, *, timeout: int) -> None:
+    # No default max-turns: omit the CLI flag unless the operator sets --max-turns.
+    # Artificial turn caps discard review findings; Grok CLI subscription runs
+    # continue until EndTurn (or explicit timeout / optional --max-turns).
     sub.add_argument("--model", default="grok-4.5")
     sub.add_argument("--timeout", type=_bounded_positive_int("--timeout", _MAX_TIMEOUT_SECONDS), default=timeout)
-    sub.add_argument("--max-turns", type=_bounded_positive_int("--max-turns", _MAX_TURNS), default=max_turns)
+    sub.add_argument(
+        "--max-turns",
+        type=_bounded_positive_int("--max-turns", _MAX_TURNS),
+        default=None,
+        help="Optional Grok turn cap. Default: unlimited (flag omitted).",
+    )
 
 
 def _build_parser() -> _Parser:
@@ -169,7 +177,7 @@ def _build_parser() -> _Parser:
     _add_task_group(review)
     _add_web_flags(review)
     review.add_argument("--schema")
-    _add_run_opts(review, timeout=900, max_turns=30)
+    _add_run_opts(review, timeout=900)
 
     reason = _sub("reason")
     _add_task_group(reason)
@@ -177,19 +185,19 @@ def _build_parser() -> _Parser:
     reason.add_argument("--rules-file", action="append", default=[])
     _add_web_flags(reason)
     reason.add_argument("--schema")
-    _add_run_opts(reason, timeout=900, max_turns=30)
+    _add_run_opts(reason, timeout=900)
 
     code = _sub("code")
     code.add_argument("--target", required=True)
     code.add_argument("--base", required=True)
     _add_task_group(code)
     _add_web_flags(code)
-    _add_run_opts(code, timeout=3600, max_turns=120)
+    _add_run_opts(code, timeout=3600)
 
     verify = _sub("verify")
     verify.add_argument("--worktree", required=True)
     _add_task_group(verify)
-    _add_run_opts(verify, timeout=1800, max_turns=60)
+    _add_run_opts(verify, timeout=1800)
 
     status = _sub("status")
     status.add_argument("--run-id", required=True)

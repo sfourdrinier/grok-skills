@@ -230,7 +230,7 @@ class GrokRunSpec:
     allow_rules: "tuple[str, ...]"
     sandbox: SandboxPolicy
     permission_mode: str
-    max_turns: int
+    max_turns: "int|None"
     timeout_seconds: int
     leader_socket: pathlib.Path
     session_id: str
@@ -334,7 +334,10 @@ def build_argv(spec: GrokRunSpec) -> List[str]:
     argv.append("--no-plan")
 
     argv.extend(["--sandbox", spec.sandbox.profile])
-    argv.extend(["--max-turns", str(spec.max_turns)])
+    # Optional: only pass --max-turns when the operator set an explicit budget.
+    # Default is unlimited (no flag) so long reviews are not artificial-capped.
+    if spec.max_turns is not None:
+        argv.extend(["--max-turns", str(spec.max_turns)])
     argv.extend(["--session-id", spec.session_id])
     argv.extend(["--leader-socket", str(spec.leader_socket)])
 
@@ -732,29 +735,58 @@ def _relay_and_classify(
     fields = grokcli_output.extract_result_fields(parsed)
     stop_reason = fields["stop_reason"]
     num_turns = fields["num_turns"]
+    structured = fields["structured"]
+    usable = grokcli_output.has_usable_model_output(fields)
+    incomplete_stop = False
 
-    if grokcli_output.is_cancelled(stop_reason):
-        progress.safe_emit("grok", "grok run cancelled", level="error", data={"stopReason": stop_reason})
-        raise GrokWrapperError(
-            "cancelled",
-            "grok run was cancelled (stopReason {!r})".format(stop_reason),
-            {"stopReason": stop_reason, "exitStatus": exit_status},
-        )
-
+    # Turn budget (only when operator set --max-turns). Grok often reports the
+    # cap as stopReason "Cancelled"; check turn-exhaustion before plain cancel.
     if grokcli_output.is_turn_exhaustion(stop_reason, num_turns, spec.max_turns):
-        progress.safe_emit(
-            "grok",
-            "grok run exhausted its turn budget",
-            level="error",
-            data={"stopReason": stop_reason, "numTurns": num_turns, "maxTurns": spec.max_turns},
-        )
-        raise GrokWrapperError(
-            "turn-exhaustion",
-            "grok run exhausted its turn budget (stopReason {!r})".format(stop_reason),
-            {"stopReason": stop_reason, "numTurns": num_turns, "maxTurns": spec.max_turns},
-        )
+        if usable:
+            incomplete_stop = True
+            progress.safe_emit(
+                "grok",
+                "grok hit turn budget but produced usable output; continuing with findings",
+                level="warning",
+                data={"stopReason": stop_reason, "numTurns": num_turns, "maxTurns": spec.max_turns},
+            )
+        else:
+            progress.safe_emit(
+                "grok",
+                "grok run exhausted its turn budget",
+                level="error",
+                data={"stopReason": stop_reason, "numTurns": num_turns, "maxTurns": spec.max_turns},
+            )
+            raise GrokWrapperError(
+                "turn-exhaustion",
+                "grok run exhausted its turn budget (stopReason {!r})".format(stop_reason),
+                {"stopReason": stop_reason, "numTurns": num_turns, "maxTurns": spec.max_turns},
+            )
 
-    if exit_status != 0:
+    elif grokcli_output.is_cancelled(stop_reason):
+        # Incomplete stop with content: keep findings (do not response:null).
+        if usable:
+            incomplete_stop = True
+            progress.safe_emit(
+                "grok",
+                "grok stopReason Cancelled with usable output; continuing with findings",
+                level="warning",
+                data={"stopReason": stop_reason, "numTurns": num_turns, "exitStatus": exit_status},
+            )
+        else:
+            progress.safe_emit(
+                "grok",
+                "grok run cancelled",
+                level="error",
+                data={"stopReason": stop_reason},
+            )
+            raise GrokWrapperError(
+                "cancelled",
+                "grok run was cancelled (stopReason {!r})".format(stop_reason),
+                {"stopReason": stop_reason, "exitStatus": exit_status, "numTurns": num_turns},
+            )
+
+    elif exit_status != 0:
         # Valid JSON but a nonzero exit that is not a recognized cancelled /
         # turn-exhaustion stop reason: a clean grok run exits 0, so this is a
         # cli-failure with stderr preserved.
@@ -762,19 +794,41 @@ def _relay_and_classify(
         raise GrokWrapperError(
             "cli-failure",
             "grok cli exited with status {}".format(exit_status),
-            {"exitStatus": exit_status, "stderr": redact_secret_value_text(stderr), "stopReason": stop_reason},
+            {
+                "exitStatus": exit_status,
+                "stderr": redact_secret_value_text(stderr),
+                "stopReason": stop_reason,
+                "numTurns": num_turns,
+            },
         )
 
-    structured = fields["structured"]
     if spec.output_schema is not None:
         if structured is None:
-            progress.safe_emit("grok", "grok returned no structured output for a schema run", level="error")
-            raise GrokWrapperError(
-                "schema-mismatch",
-                "grok returned no structuredOutput for a schema-constrained run",
-                {"pointer": "/", "reason": "structured-output-missing"},
-            )
-        grokcli_output.validate_structured_output(structured, spec.output_schema)
+            if incomplete_stop and usable:
+                progress.safe_emit(
+                    "grok",
+                    "schema requested but structuredOutput missing on incomplete stop; keeping text findings",
+                    level="warning",
+                )
+            else:
+                progress.safe_emit("grok", "grok returned no structured output for a schema run", level="error")
+                raise GrokWrapperError(
+                    "schema-mismatch",
+                    "grok returned no structuredOutput for a schema-constrained run",
+                    {"pointer": "/", "reason": "structured-output-missing"},
+                )
+        else:
+            try:
+                grokcli_output.validate_structured_output(structured, spec.output_schema)
+            except GrokWrapperError:
+                if incomplete_stop and fields["final_text"]:
+                    progress.safe_emit(
+                        "grok",
+                        "structuredOutput failed schema on incomplete stop; keeping final text findings",
+                        level="warning",
+                    )
+                else:
+                    raise
 
     if stderr.strip():
         progress.safe_emit("grok", "grok emitted stderr diagnostics", level="warning")
@@ -782,7 +836,12 @@ def _relay_and_classify(
     progress.safe_emit(
         "grok",
         "grok run completed",
-        data={"stopReason": stop_reason, "durationSeconds": round(duration, 6)},
+        data={
+            "stopReason": stop_reason,
+            "numTurns": num_turns,
+            "maxTurns": spec.max_turns,
+            "durationSeconds": round(duration, 6),
+        },
     )
 
     return GrokRunResult(

@@ -296,11 +296,23 @@ def _scenario_stream_no_terminal(control: "dict") -> int:
 def _scenario_cancelled_stop(control: "dict") -> int:
     payload = _load_base_payload()
     payload["stopReason"] = "Cancelled"
+    # Empty body: hard cancel with no salvageable findings.
+    payload["text"] = ""
+    payload.pop("structuredOutput", None)
     _emit_result(payload)
     # Exit nonzero on purpose: a Cancelled stop reason must classify as
     # "cancelled" even when the process also exits nonzero, proving the
     # stop-reason classification wins over the raw exit code.
     return 1
+
+
+def _scenario_cancelled_with_text(control: "dict") -> int:
+    # Incomplete stop but real findings already in final text - must not be discarded.
+    payload = _load_base_payload()
+    payload["stopReason"] = "Cancelled"
+    payload["text"] = "CRITICAL finding: file:// protocol privilege is broken for local assets."
+    _emit_result(payload)
+    return 0
 
 
 def _scenario_model_mismatch(control: "dict") -> int:
@@ -374,6 +386,9 @@ def _scenario_nonzero_exit(control: "dict") -> int:
 def _scenario_turn_exhaustion(control: "dict") -> int:
     payload = _load_base_payload()
     payload["stopReason"] = "MaxTurns"
+    # Empty body: hard turn-exhaustion with nothing to salvage.
+    payload["text"] = ""
+    payload.pop("structuredOutput", None)
     max_turns = _arg_value("--max-turns")
     if max_turns is not None:
         try:
@@ -474,6 +489,7 @@ _SCENARIOS = {
     "partial-json": _scenario_partial_json,
     "stream-no-terminal": _scenario_stream_no_terminal,
     "cancelled-stop": _scenario_cancelled_stop,
+    "cancelled-with-text": _scenario_cancelled_with_text,
     "model-mismatch": _scenario_model_mismatch,
     "verifier-missing": _scenario_verifier_missing,
     "sandbox-fail-open": _scenario_sandbox_fail_open,

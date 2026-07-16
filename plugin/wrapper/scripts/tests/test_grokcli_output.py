@@ -41,13 +41,27 @@ class StopReasonPredicateTests(unittest.TestCase):
         self.assertTrue(grokcli_output.is_turn_exhaustion("MaxTurns", 30, 30))
         self.assertTrue(grokcli_output.is_turn_exhaustion("max_turns_reached", 5, 5))
         self.assertFalse(grokcli_output.is_turn_exhaustion("EndTurn", 1, 30))
+        # Grok reports turn-cap as Cancelled when num_turns hits the budget.
+        self.assertTrue(grokcli_output.is_turn_exhaustion("Cancelled", 30, 30))
+        # Cancelled well under budget is not turn-exhaustion.
         self.assertFalse(grokcli_output.is_turn_exhaustion("Cancelled", 1, 30))
+        # Unlimited (no max_turns): plain Cancelled is not turn-exhaustion.
+        self.assertFalse(grokcli_output.is_turn_exhaustion("Cancelled", 1, None))
+        self.assertFalse(grokcli_output.is_turn_exhaustion("Cancelled", None, None))
 
     def test_turn_exhaustion_num_turns_fallback(self) -> None:
         # Unknown non-terminal stop reason but the turn budget is spent.
         self.assertTrue(grokcli_output.is_turn_exhaustion("Aborting", 30, 30))
         # EndTurn at the budget is a clean finish, not exhaustion.
         self.assertFalse(grokcli_output.is_turn_exhaustion("EndTurn", 30, 30))
+        # Cancelled with missing num_turns but an explicit max_turns: treat as budget.
+        self.assertTrue(grokcli_output.is_turn_exhaustion("Cancelled", None, 30))
+
+    def test_has_usable_model_output(self) -> None:
+        self.assertTrue(grokcli_output.has_usable_model_output({"final_text": "findings here"}))
+        self.assertTrue(grokcli_output.has_usable_model_output({"structured": {"findings": []}}))
+        self.assertFalse(grokcli_output.has_usable_model_output({"final_text": "  ", "structured": None}))
+        self.assertFalse(grokcli_output.has_usable_model_output({"structured": {}}))
 
     def test_error_stop_at_turn_cap_is_not_turn_exhaustion(self) -> None:
         # Grok dogfood #13: an explicit error/refusal stop that coincides with the

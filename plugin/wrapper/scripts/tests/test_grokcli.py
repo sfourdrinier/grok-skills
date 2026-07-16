@@ -67,7 +67,7 @@ class GrokCliTestBase(unittest.TestCase):
                 mode="review", profile="read-only", writable_roots=(), secret_read_denial_proven=False
             ),
             permission_mode="auto",
-            max_turns=30,
+            max_turns=None,
             timeout_seconds=30,
             leader_socket=self.home.grok_dir / "leader.sock",
             session_id="11111111-1111-4111-8111-111111111111",
@@ -105,12 +105,13 @@ class BuildArgvTests(GrokCliTestBase):
             "--disable-web-search",
             "--no-plan",
             "--sandbox",
-            "--max-turns",
             "--session-id",
             "--leader-socket",
         ]
         for flag in required_flags:
             self.assertEqual(argv.count(flag), 1, "flag {} must appear exactly once".format(flag))
+        # Default: no --max-turns (unlimited). Explicit budget only when set.
+        self.assertNotIn("--max-turns", argv)
 
         # prompt is delivered via --prompt-file; the positional / -p / --single
         # single-turn forms are never used.
@@ -267,8 +268,15 @@ class ExecuteTests(GrokCliTestBase):
     def test_execute_turn_exhaustion_stop_reason_maps_to_turn_exhaustion_class(self) -> None:
         self._write_control("turn-exhaustion")
         with self.assertRaises(GrokWrapperError) as caught:
-            grokcli.execute(self._make_spec(max_turns=7), self._progress())
+            grokcli.execute(self._make_spec(max_turns=7), self._progress())  # explicit budget
         self.assertEqual(caught.exception.error_class, "turn-exhaustion")
+
+    def test_execute_cancelled_with_findings_is_success_not_discarded(self) -> None:
+        # Partial/incomplete stop must keep model text (do not response:null).
+        self._write_control("cancelled-with-text")
+        result = grokcli.execute(self._make_spec(), self._progress())
+        self.assertEqual(result.stop_reason, "Cancelled")
+        self.assertIn("finding", (result.final_text or "").lower())
 
     def test_execute_nonzero_exit_classifies_cli_failure_with_stderr_captured(self) -> None:
         self._write_control("nonzero-exit")

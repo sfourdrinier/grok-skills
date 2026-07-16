@@ -115,30 +115,62 @@ def is_cancelled(stop_reason: Optional[object]) -> bool:
 def is_turn_exhaustion(
     stop_reason: Optional[object], num_turns: Optional[object], max_turns: Optional[int]
 ) -> bool:
-    """True when the run hit its turn budget.
+    """True when the run hit an operator-set turn budget.
 
     Primary signal: the stop reason normalizes to a known max-turn token or
-    contains "maxturn". Fallback (for a real CLI whose max-turn stop reason
-    Task 0 did not capture): a present, non-clean, non-cancelled, NON-ERROR stop
-    reason accompanied by ``num_turns >= max_turns``. An explicit error/refusal
-    stop that merely coincides with the turn cap is NOT reclassified as
-    turn-exhaustion (Grok dogfood #13) -- it stays a cli-failure.
+    contains "maxturn".
+
+    Grok CLI often reports the turn cap as stopReason ``Cancelled`` (not a
+    distinct max-turn token). When the operator set ``max_turns`` and either
+    ``num_turns >= max_turns`` OR ``num_turns`` is missing under a Cancelled
+    stop, treat it as turn-exhaustion (not a user abort).
+
+    Without an operator ``max_turns`` (default: unlimited / flag omitted), this
+    never returns True for plain Cancelled.
+
+    An explicit error/refusal stop that coincides with the turn cap is NOT
+    reclassified (Grok dogfood #13).
     """
     normalized = _normalize_stop_reason(stop_reason)
     if normalized in _TURN_EXHAUSTION_STOP_TOKENS or "maxturn" in normalized:
         return True
+    if not isinstance(max_turns, int) or isinstance(max_turns, bool):
+        return False
+    if any(error_token in normalized for error_token in _ERROR_STOP_SUBSTRINGS):
+        return False
+    if normalized in _CLEAN_TERMINAL_STOP_TOKENS:
+        return False
+    turns_ok = isinstance(num_turns, int) and not isinstance(num_turns, bool)
+    if turns_ok and num_turns >= max_turns:
+        # Includes Cancelled at the budget (Grok's observed turn-cap stop token).
+        return True
+    # Cancelled with no num_turns but an explicit max_turns: Grok often omits
+    # num_turns on the end event when the budget is hit.
+    if normalized in _CANCELLED_STOP_TOKENS and not turns_ok:
+        return True
     if (
         normalized
-        and normalized not in _CLEAN_TERMINAL_STOP_TOKENS
         and normalized not in _CANCELLED_STOP_TOKENS
-        and not any(error_token in normalized for error_token in _ERROR_STOP_SUBSTRINGS)
-        and isinstance(num_turns, int)
-        and not isinstance(num_turns, bool)
-        and isinstance(max_turns, int)
+        and turns_ok
         and num_turns >= max_turns
     ):
         return True
     return False
+
+
+def has_usable_model_output(fields: "dict") -> bool:
+    """True when final text and/or structuredOutput is worth keeping on an incomplete stop."""
+    text = fields.get("final_text") if isinstance(fields, dict) else None
+    if isinstance(text, str) and text.strip():
+        return True
+    structured = fields.get("structured") if isinstance(fields, dict) else None
+    if structured is None:
+        return False
+    if isinstance(structured, dict) and not structured:
+        return False
+    if isinstance(structured, (list, str)) and len(structured) == 0:
+        return False
+    return True
 
 
 def _effective_model_from_usage(model_usage: Optional[object]) -> Optional[str]:
@@ -190,6 +222,17 @@ def extract_result_fields(parsed: Dict[str, object]) -> ResultFields:
     final_text = parsed.get("text")
     structured = parsed.get("structuredOutput")
     num_turns = parsed.get("num_turns")
+    if num_turns is None:
+        num_turns = parsed.get("numTurns")
+    if num_turns is None and isinstance(parsed.get("usage"), dict):
+        usage_obj = parsed["usage"]
+        num_turns = usage_obj.get("turns") or usage_obj.get("num_turns") or usage_obj.get("numTurns")
+
+    turns_value = None
+    if isinstance(num_turns, int) and not isinstance(num_turns, bool):
+        turns_value = num_turns
+    elif isinstance(num_turns, float) and num_turns == int(num_turns):
+        turns_value = int(num_turns)
 
     return {
         "stop_reason": stop_reason if isinstance(stop_reason, str) else None,
@@ -199,7 +242,7 @@ def extract_result_fields(parsed: Dict[str, object]) -> ResultFields:
         "effective_model": _effective_model_from_usage(model_usage),
         "final_text": final_text if isinstance(final_text, str) else None,
         "structured": structured,
-        "num_turns": num_turns if isinstance(num_turns, int) and not isinstance(num_turns, bool) else None,
+        "num_turns": turns_value,
     }
 
 

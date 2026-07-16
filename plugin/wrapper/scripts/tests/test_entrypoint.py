@@ -121,6 +121,11 @@ class UsageErrorTests(unittest.TestCase):
         self.assertEqual(args.timeout, 1200)
         self.assertEqual(args.max_turns, 40)
 
+    def test_default_max_turns_is_unlimited(self) -> None:
+        parser = grok_agent._build_parser()
+        args = parser.parse_args(["review", "--target", "pkg", "--task", "x"])
+        self.assertIsNone(args.max_turns)
+
     def test_task_and_task_file_mutually_exclusive(self) -> None:
         exit_code, out = _run_main(["reason", "--task", "hi", "--task-file", "/tmp/x.txt"])
         envelope = json.loads(out)

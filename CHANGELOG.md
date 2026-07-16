@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
+## [1.2.6] - 2026-07-16
+
+### Fixed
+
+- **No default max-turns:** review/reason/code/verify omit `--max-turns` unless
+  the operator sets it. Unlimited by default (subscription Grok CLI).
+- **Cancelled with findings is not a wipe:** if Grok stops with `Cancelled` (or
+  hits an explicit turn budget) but produced text/structured output, the wrapper
+  returns **success** with a warning and keeps findings (`response` populated).
+- **Turn-cap as Cancelled:** when `--max-turns` is set, Grok's observed
+  `stopReason: Cancelled` at the budget classifies as turn-exhaustion (or
+  salvage if content exists), not a silent user-cancel.
+- Capture `num_turns` from more end-event field shapes into classification.
+
 ## [1.2.5] - 2026-07-16
 
 ### Fixed

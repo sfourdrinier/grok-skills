@@ -78,9 +78,9 @@ python3 plugin/wrapper/scripts/grok_agent.py review \
 ```
 
 Optional flags: `--web`, `--schema <path>`, `--model <id>` (default
-`grok-4.5`), `--timeout <seconds>` (default 900), `--max-turns <n>` (default
-30). `--task <text>` may replace `--task-file` for a short prompt; exactly
-one of `--task` / `--task-file` is required.
+`grok-4.5`), `--timeout <seconds>` (default 900), optional `--max-turns <n>`
+(default: **unlimited** - flag omitted unless set). `--task <text>` may replace
+`--task-file` for a short prompt; exactly one of `--task` / `--task-file` is required.
 
 ### `reason` - isolated artifact reasoning, cold second opinion
 
@@ -99,8 +99,8 @@ python3 plugin/wrapper/scripts/grok_agent.py reason \
 ```
 
 `--input` and `--rules-file` may each be repeated. Optional flags: `--web`,
-`--schema <path>`, `--model`, `--timeout` (default 900), `--max-turns`
-(default 30).
+`--schema <path>`, `--model`, `--timeout` (default 900), optional `--max-turns`
+(default: unlimited).
 
 ### `code` - implementation in an isolated worktree
 
@@ -117,10 +117,10 @@ python3 plugin/wrapper/scripts/grok_agent.py code \
   --task-file <path-to-spec-file>
 ```
 
-Optional flags: `--web`, `--model`, `--timeout` (default 3600), `--max-turns`
-(default 120). If the task depends on uncommitted changes in the current
-checkout, `code` fails closed rather than approximating them - commit what
-the task needs first.
+Optional flags: `--web`, `--model`, `--timeout` (default 3600), optional
+`--max-turns` (default: unlimited). If the task depends on uncommitted changes
+in the current checkout, `code` fails closed rather than approximating them -
+commit what the task needs first.
 
 ### `verify` - independent verification, no source edits
 
@@ -138,8 +138,8 @@ python3 plugin/wrapper/scripts/grok_agent.py verify \
   --task-file <path-to-verification-task-file>
 ```
 
-Optional flags: `--model`, `--timeout` (default 1800), `--max-turns`
-(default 60). `verify` never accepts `--web` - independent verification
+Optional flags: `--model`, `--timeout` (default 1800), optional `--max-turns`
+(default: unlimited). `verify` never accepts `--web` - independent verification
 stays hermetic by design.
 
 ### `status` - read-only inspection of a prior run

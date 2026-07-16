@@ -96,7 +96,7 @@ class ModeRun:
     web_access: bool
     output_schema: Optional[dict]
     timeout_seconds: int
-    max_turns: int
+    max_turns: Optional[int]
     prompt_text: str
     cwd: pathlib.Path
     tools: Tuple[str, ...]
