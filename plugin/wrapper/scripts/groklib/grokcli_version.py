@@ -22,7 +22,7 @@ ACCEPTED_VERSION_FILE = pathlib.Path(__file__).resolve().parents[2] / "accepted-
 
 _VERSION_TIMEOUT_SECONDS = 30
 
-# Fail closed only when --version itself is unusable — not when it differs from
+# Fail closed only when --version itself is unusable - not when it differs from
 # a maintainer probe stamp.
 _VERSION_HINT = (
     "install the Grok CLI and confirm `grok --version` prints a version line"
@@ -40,7 +40,7 @@ def _log(function: str, message: str) -> None:
 def last_validated_version() -> Optional[str]:
     """Read the optional last-validated version stamp (advisory only).
 
-    Missing or malformed files return ``None`` — they never block a run.
+    Missing or malformed files return ``None`` - they never block a run.
     """
     try:
         raw = ACCEPTED_VERSION_FILE.read_text(encoding="utf-8")

@@ -99,7 +99,7 @@ def _write_worker_marker(run_dir: pathlib.Path, payload: Dict[str, Any]) -> None
 def mark_worker_starting(run_dir: pathlib.Path) -> None:
     """Gate durable parent terminalization before proc.start() obtains a real pid.
 
-    Raises OSError if the marker cannot be written — callers must abort spawn.
+    Raises OSError if the marker cannot be written - callers must abort spawn.
     """
     _write_worker_marker(
         run_dir,
@@ -130,56 +130,105 @@ def clear_worker_pid(run_dir: pathlib.Path) -> None:
         _log("clear_worker_pid", "could not remove finalize-worker.pid: {}".format(exc))
 
 
-def finalize_worker_is_alive(run_dir: pathlib.Path) -> bool:
-    """True if finalize is in progress (starting or live identified worker).
+# Tri-state finalize-worker liveness (design: unknown must NOT fail open as dead).
+_WORKER_LIVENESS_ALIVE = "alive"
+_WORKER_LIVENESS_DEAD = "dead"
+_WORKER_LIVENESS_UNKNOWN = "unknown"
 
-    - ``starting``: parent is mid-spawn (pre-pid); treat as live for the short window.
-    - ``running``: pid must be alive via platformsupport AND startToken must match
-      when both sides can provide one (pid-reuse safe, same as owner.pid).
+
+def finalize_worker_liveness(run_dir: pathlib.Path) -> str:
+    """Classify finalize worker as ``alive``, ``dead``, or ``unknown``.
+
+    - ``alive``: starting marker, or running pid live with matching startToken.
+    - ``dead``: no marker, or running pid gone / startToken proves reuse.
+    - ``unknown``: marker unreadable, malformed, or pid probe inconclusive.
+      Callers that durable-terminalize MUST treat unknown like alive (refuse).
     """
     path = _worker_pid_path(run_dir)
     if not path.is_file():
-        return False
+        return _WORKER_LIVENESS_DEAD
     try:
         raw = path.read_text(encoding="utf-8").strip()
     except OSError:
-        return False
+        return _WORKER_LIVENESS_UNKNOWN
     if not raw:
-        return False
+        return _WORKER_LIVENESS_UNKNOWN
     # Legacy plain-text markers from older builds
     if raw == _WORKER_STATE_STARTING:
-        return True
+        return _WORKER_LIVENESS_ALIVE
     try:
         as_int = int(raw)
     except ValueError:
         as_int = None
     if as_int is not None:
-        return bool(as_int > 0 and platformsupport.process_is_alive(as_int))
+        if as_int <= 0:
+            return _WORKER_LIVENESS_DEAD
+        try:
+            alive = platformsupport.process_is_alive(as_int)
+        except Exception:
+            return _WORKER_LIVENESS_UNKNOWN
+        return _WORKER_LIVENESS_ALIVE if alive else _WORKER_LIVENESS_DEAD
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError:
-        return False
+        return _WORKER_LIVENESS_UNKNOWN
     if not isinstance(payload, dict):
-        return False
+        return _WORKER_LIVENESS_UNKNOWN
     state = payload.get("state")
     if state == _WORKER_STATE_STARTING:
-        return True
+        return _WORKER_LIVENESS_ALIVE
     if state != _WORKER_STATE_RUNNING:
-        return False
+        return _WORKER_LIVENESS_UNKNOWN
     pid = payload.get("pid")
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-        return False
-    if not platformsupport.process_is_alive(pid):
-        return False
+        return _WORKER_LIVENESS_UNKNOWN
+    try:
+        alive = platformsupport.process_is_alive(pid)
+    except Exception:
+        return _WORKER_LIVENESS_UNKNOWN
+    if not alive:
+        return _WORKER_LIVENESS_DEAD
     stored_token = payload.get("startToken")
-    current_token = platformsupport.process_start_token(pid)
+    try:
+        current_token = platformsupport.process_start_token(pid)
+    except Exception:
+        return _WORKER_LIVENESS_UNKNOWN
     if isinstance(stored_token, str) and current_token is not None and stored_token != current_token:
-        return False
-    return True
+        return _WORKER_LIVENESS_DEAD
+    # Live pid; missing/unverifiable token is treated as alive (never fail open).
+    return _WORKER_LIVENESS_ALIVE
+
+
+def finalize_worker_is_alive(run_dir: pathlib.Path) -> bool:
+    """True when the worker is confirmed alive (not dead, not unknown)."""
+    return finalize_worker_liveness(run_dir) == _WORKER_LIVENESS_ALIVE
+
+
+def finalize_worker_blocks_durable_write(run_dir: pathlib.Path) -> bool:
+    """True when parent must refuse durable terminalization (alive or unknown)."""
+    return finalize_worker_liveness(run_dir) != _WORKER_LIVENESS_DEAD
+
+
+def _detach_worker_process_group() -> None:
+    """Leave the parent's process group so a stop-gate killpg cannot reap us.
+
+    The stop-review gate SIGTERM/SIGKILLs the companion's process group. Without
+    setsid, a non-daemon multiprocessing child inherits that group and dies mid
+    persist, stranding finalizing with no envelope. Best-effort: ignore if
+    already a session leader or platform lacks setsid.
+    """
+    if not hasattr(os, "setsid"):
+        return
+    try:
+        os.setsid()
+    except OSError as exc:
+        _log("_detach_worker_process_group", "setsid failed (continuing): {}".format(exc))
 
 
 def finalize_worker_main(payload_path: str) -> None:
     """Entry point for spawn Process(target=..., args=(payload_path,))."""
+    # First instruction: leave the parent/stop-gate process group (C1).
+    _detach_worker_process_group()
     path = pathlib.Path(payload_path)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -458,8 +507,16 @@ def run_finalize_parent(
         try:
             runstate.persist_terminal_envelope(paths, None, None)
         except Exception as exc:
+            # Envelope body is on disk but run.json may still be non-terminal.
+            # Do NOT claim durable_ok: caller must not emit "done"/success lifecycle.
             _log("run_finalize_parent", "idempotent finish failed: {}".format(exc))
-        # Always return the durable envelope, never a synthetic timeout
+            if progress is not None:
+                progress.safe_emit(
+                    "finalizing",
+                    "envelope present but lifecycle repair failed",
+                    level="error",
+                )
+            return existing, "lifecycle-repair-failed", False
         if progress is not None:
             if existing.get("status") == "success":
                 progress.safe_emit("finalizing", "finalization succeeded")

@@ -5,7 +5,7 @@
 # applicable repo rules (C7, root-to-target) are prepended to the task; native
 # tools are limited to read_file/grep/list_dir; the sandbox is read-only;
 # subagents, memory, and (by default) web tools are off. A finished review is
-# never discarded for tree drift or Grok listing change-shaped JSON keys — those
+# never discarded for tree drift or Grok listing change-shaped JSON keys - those
 # are informational notes only. Hard fails stay for real setup/safety (auth,
 # sandbox, runnable CLI check, model family). --schema is optional structured output.
 # Shared lifecycle: private-home isolation, execution, sandbox verify, teardown.

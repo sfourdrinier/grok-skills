@@ -155,7 +155,7 @@ class UsageErrorTests(unittest.TestCase):
         buffer = io.StringIO()
         with mock.patch.object(grok_agent, "emit_envelope", spy):
             with contextlib.redirect_stdout(buffer):
-                # usage error path — no mode persist
+                # usage error path - no mode persist
                 code = grok_agent.main(["not-a-mode"])
         self.assertEqual(code, 1)
         self.assertTrue(calls)

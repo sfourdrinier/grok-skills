@@ -407,12 +407,13 @@ def terminalize_unexpected_failure(
     # Design §9.4: never durable-write while a finalize worker may still be alive
     # (SIGTERM mid-join would otherwise race the worker's real success envelope).
     try:
-        from groklib.modes.finalize_worker import finalize_worker_is_alive
+        from groklib.modes.finalize_worker import finalize_worker_blocks_durable_write
 
-        if finalize_worker_is_alive(run_paths.run_dir):
+        # alive OR unknown: refuse competing durable write (never fail open as dead).
+        if finalize_worker_blocks_durable_write(run_paths.run_dir):
             log(
                 "terminalize_unexpected_failure",
-                "{} refusing durable terminalize while finalize worker is alive".format(
+                "{} refusing durable terminalize while finalize worker is alive or unknown".format(
                     run_paths.run_id
                 ),
             )
@@ -420,12 +421,16 @@ def terminalize_unexpected_failure(
             envelope["doNotStore"] = True
             return envelope
     except Exception as liveness_exc:
+        # Probe itself failed: fail closed (same as unknown), do not terminalize.
         log(
             "terminalize_unexpected_failure",
-            "finalize worker liveness check failed for {}: {}".format(
+            "finalize worker liveness check failed for {} (refusing durable write): {}".format(
                 run_paths.run_id, liveness_exc
             ),
         )
+        envelope = dict(envelope)
+        envelope["doNotStore"] = True
+        return envelope
 
     try:
         # Optional non-terminal bookkeeping from caller (must not terminalize alone)
@@ -458,6 +463,10 @@ def terminalize_unexpected_failure(
                         run_paths.run_id, finish_exc
                     ),
                 )
+                # Envelope on disk but lifecycle not repaired: do not claim done.
+                out = dict(existing)
+                out["doNotStore"] = True
+                return out
             try:
                 status = existing.get("status")
                 if status == "success":

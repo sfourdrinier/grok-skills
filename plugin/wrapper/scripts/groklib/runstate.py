@@ -157,7 +157,7 @@ def write_json_atomic(path: pathlib.Path, payload: object) -> None:
         platformsupport.restrict_file_permissions(path)
         # Durable directory entry for the replace (POSIX power-loss safety).
         # Skip on non-POSIX: Windows cannot O_RDONLY-open directories (PermissionError)
-        # and would fail every write after replace — platform probe-required is separate.
+        # and would fail every write after replace - platform probe-required is separate.
         if os.name == "posix":
             try:
                 dir_fd = os.open(str(parent), os.O_RDONLY)
@@ -238,7 +238,7 @@ def _verify_paths_owner(paths: RunPaths) -> None:
 
 
 # Lifecycle CAS / terminal persist live in run_lifecycle.py (900-line cap).
-from groklib.run_lifecycle import (  # noqa: E402 — re-export public API
+from groklib.run_lifecycle import (  # noqa: E402 - re-export public API
     CasConflictError,
     LifecycleError,
     cas_update_run_record,

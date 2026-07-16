@@ -812,7 +812,7 @@ def _run_grok_mode_body(
 
     result = result_holder[0]
     if outcome_error is None and result is not None and sandbox_obj is not None and effective_model is not None:
-        # Do not emit progress "done" here — that implies completion before durable
+        # Do not emit progress "done" here - that implies completion before durable
         # terminalization. _publish_terminal_envelope emits done only after durable_ok.
         envelope = _success_envelope(
             run, run_paths, result, sandbox_obj, effective_model, cleanup_field, warnings

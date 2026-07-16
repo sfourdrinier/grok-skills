@@ -66,6 +66,23 @@ def _load_stored_envelope(
             progressStreamPath=None,
         )
 
+    # Bind stored envelope to the requested run (never project a foreign runId).
+    if stored.get("runId") != run_id:
+        _log(
+            "_load_stored_envelope",
+            "stored envelope runId {!r} does not match requested {!r}".format(
+                stored.get("runId"), run_id
+            ),
+        )
+        return None, envelope_mod.failure_envelope(
+            run_id=run_id,
+            mode="status",
+            error_class="output-malformed",
+            message="stored envelope for run {} belongs to a different runId".format(run_id),
+            detail={"requestedRunId": run_id, "storedRunId": stored.get("runId")},
+            progressStreamPath=None,
+        )
+
     return stored, None
 
 
@@ -240,12 +257,17 @@ def run(args: argparse.Namespace) -> dict:
     # still persist the real terminal envelope. Treat that as process-alive so
     # finalizing runs project as in-progress, not derived interrupted.
     try:
-        from groklib.modes.finalize_worker import finalize_worker_is_alive
+        from groklib.modes.finalize_worker import finalize_worker_blocks_durable_write
 
-        if finalize_worker_is_alive(run_dir):
+        # alive or unknown: project as still in progress (never derived interrupted).
+        if finalize_worker_blocks_durable_write(run_dir):
             process_liveness = "alive"
     except Exception as liveness_exc:
-        _log("run", "finalize worker liveness check failed: {}".format(liveness_exc))
+        _log(
+            "run",
+            "finalize worker liveness check failed (treating as alive): {}".format(liveness_exc),
+        )
+        process_liveness = "alive"
     record_status = record.get("status") if isinstance(record.get("status"), str) else None
     envelope_status = stored.get("status") if isinstance(stored, dict) else None
     envelope_error_class = None

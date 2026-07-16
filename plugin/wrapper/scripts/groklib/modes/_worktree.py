@@ -277,7 +277,7 @@ def run_worktree_mode(
         if progress is None:
             progress = ProgressWriter(paths.run_id, paths.progress_path)
         def _merge_worktree_meta() -> None:
-            # Non-terminal metadata only — must not set status success/failure.
+            # Non-terminal metadata only - must not set status success/failure.
             # Always include repository/target so cleanup can rebuild the worktree
             # even when the earlier running-record CAS never landed.
             wt = holder.worktree if worktree_retained else None
@@ -555,11 +555,12 @@ def _run_worktree_mode_body(
         fields["usage"] = usage_field
         fields["response"] = response_field
         envelope = build_envelope(run_id=run_paths.run_id, mode=mode, status="success", **fields)
-        # Non-terminal metadata only (worktree paths); never terminalize without envelope
+        # Worktree ownership metadata is safety-critical when a worktree is retained:
+        # fail closed if CAS cannot record paths for cleanup (H9).
+        wt = holder.worktree if worktree_retained else None
         try:
             record = runstate.load_run_record(run_paths.run_id)
             rev = int(record.get("recordRevision", 0))
-            wt = holder.worktree if worktree_retained else None
             runstate.cas_update_run_record(
                 run_paths,
                 rev,
@@ -575,6 +576,23 @@ def _run_worktree_mode_body(
             )
         except Exception as meta_exc:
             _log("_run_worktree_mode_body", "non-terminal metadata merge failed: {}".format(meta_exc))
+            if wt is not None:
+                # Retained worktree without durable metadata would strand the branch.
+                return failure_envelope(
+                    run_id=run_paths.run_id,
+                    mode=mode,
+                    error_class="state-ownership-violation",
+                    message="could not persist worktree ownership metadata before terminal success",
+                    detail={"reason": "worktree-metadata-cas-failed", "error": str(meta_exc)},
+                    progressStreamPath=str(run_paths.progress_path),
+                    warnings=list(warnings) + ["worktree metadata CAS failed; refusing silent success"],
+                    **{
+                        "worktreePath": str(wt.path),
+                        "worktreeBranch": wt.branch,
+                        "baseRevision": wt.base_revision,
+                        "repository": repository,
+                    },
+                )
         return _publish_terminal_envelope(
             run_paths, mode, envelope, lifecycle="completed", progress=progress, warnings=warnings
         )
@@ -616,10 +634,10 @@ def _run_worktree_mode_body(
         detail=error.detail or None,
         **fields,
     )
+    wt = holder.worktree if worktree_retained else None
     try:
         record = runstate.load_run_record(run_paths.run_id)
         rev = int(record.get("recordRevision", 0))
-        wt = holder.worktree if worktree_retained else None
         runstate.cas_update_run_record(
             run_paths,
             rev,
@@ -635,6 +653,25 @@ def _run_worktree_mode_body(
         )
     except Exception as meta_exc:
         _log("_run_worktree_mode_body", "non-terminal metadata merge failed: {}".format(meta_exc))
+        if wt is not None:
+            warnings = list(warnings) + [
+                "worktree metadata CAS failed; worktree may need manual cleanup"
+            ]
+            # Prefer recording the original failure; metadata note is a warning.
+            # Still fail closed for silent loss of worktree identity by ensuring
+            # the failure envelope carries path fields from the live holder.
+            envelope = failure_envelope(
+                run_id=run_paths.run_id,
+                mode=mode,
+                error_class=error.error_class,
+                message=str(error),
+                detail=dict(error.detail or {}, worktreeMetadataCasFailed=True),
+                **fields,
+            )
+            envelope["warnings"] = list(envelope.get("warnings") or []) + warnings
+            envelope["worktreePath"] = str(wt.path)
+            envelope["worktreeBranch"] = wt.branch
+            envelope["baseRevision"] = wt.base_revision
     return _publish_terminal_envelope(
         run_paths, mode, envelope, lifecycle="failed", progress=progress, warnings=warnings
     )

@@ -308,8 +308,13 @@ def _process_is_alive_for(platform: str, pid: int) -> bool:
         except PermissionError:
             return True
         except OSError as exc:
-            _log("_process_is_alive_for", "os.kill(0) failed for pid {}: {}".format(pid, exc))
-            return False
+            # Unexpected probe error: fail closed as alive so reapers and
+            # finalize-parent recovery never treat an inconclusive probe as dead.
+            _log(
+                "_process_is_alive_for",
+                "os.kill(0) inconclusive for pid {} (treating as alive): {}".format(pid, exc),
+            )
+            return True
         return True
     return False
 

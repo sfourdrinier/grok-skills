@@ -1,7 +1,7 @@
 # wrapper/scripts/groklib/run_lifecycle.py
 #
 # Durable run lifecycle: seed/CAS/set_lifecycle, envelope-first terminal persist,
-# and read-only effective_lifecycle projection (design §§6–7). Split from
+# and read-only effective_lifecycle projection (design §§6-7). Split from
 # runstate.py to keep the state-layout broker under the 900-line file cap
 # (AGENTS.md). Import-isolated: stdlib + groklib errors + runstate primitives.
 
@@ -223,6 +223,27 @@ def _terminal_pair_compatible(lifecycle: str, envelope_status: str) -> bool:
     return False
 
 
+def _assert_envelope_bound_to_run(
+    envelope: dict,
+    paths: "runstate.RunPaths",
+    record: dict,
+) -> None:
+    """Refuse envelopes whose runId/mode do not match the owning run (H6)."""
+    env_run = envelope.get("runId")
+    if env_run != paths.run_id:
+        raise LifecycleError(
+            "envelope runId {!r} does not match owning run {!r}".format(env_run, paths.run_id),
+            {"envelopeRunId": env_run, "runId": paths.run_id},
+        )
+    record_mode = record.get("mode")
+    env_mode = envelope.get("mode")
+    if isinstance(record_mode, str) and isinstance(env_mode, str) and env_mode != record_mode:
+        raise LifecycleError(
+            "envelope mode {!r} does not match run record mode {!r}".format(env_mode, record_mode),
+            {"envelopeMode": env_mode, "recordMode": record_mode, "runId": paths.run_id},
+        )
+
+
 def persist_terminal_envelope(
     paths: "runstate.RunPaths",
     expected_revision: Optional[int],
@@ -254,6 +275,7 @@ def persist_terminal_envelope(
                 existing_env = None
 
         if existing_env is not None:
+            _assert_envelope_bound_to_run(existing_env, paths, record)
             implied = _lifecycle_from_envelope(existing_env)
             # Prefer canceled recovery if already recorded
             current_life = record.get("lifecycle")
@@ -267,8 +289,8 @@ def persist_terminal_envelope(
                         {"lifecycle": current_life, "envelopeStatus": env_status},
                     )
                 return record
-            # Finish lifecycle only (recovery): success→completed;
-            # cancelled failure→canceled; other failure→failed.
+            # Finish lifecycle only (recovery): success->completed;
+            # cancelled failure->canceled; other failure->failed.
             finish = implied
             record = dict(record)
             record["lifecycle"] = finish
@@ -287,6 +309,12 @@ def persist_terminal_envelope(
         if envelope is None:
             raise LifecycleError(
                 "no terminal envelope on disk and none provided to persist",
+                {"runId": paths.run_id},
+            )
+        _assert_envelope_bound_to_run(envelope, paths, record)
+        if envelope.get("doNotStore") is True:
+            raise LifecycleError(
+                "refusing to durable-persist an ephemeral doNotStore envelope",
                 {"runId": paths.run_id},
             )
         if expected_revision is None:
@@ -375,10 +403,19 @@ def effective_lifecycle(
     """Return ``(lifecycle, lifecycleSource)`` without writing (design §6).
 
     When a valid envelope is already on disk but run.json is still non-terminal,
-    project from the envelope body — including cancelled → ``canceled``.
+    project from the envelope body - including cancelled -> ``canceled``.
+
+    A terminal run.json without a valid matching envelope is NOT reported as
+    completed/success (H7): project ``interrupted`` so status fails closed.
     """
     life = record.get("lifecycle")
     if life in _TERMINAL_LIFECYCLES:
+        if not has_valid_envelope:
+            return "interrupted", "derived"
+        if envelope_status is not None and not _terminal_pair_compatible(
+            str(life), str(envelope_status)
+        ):
+            return "interrupted", "derived"
         return str(life), "record"
     if has_valid_envelope:
         if envelope_status == "success":
@@ -395,5 +432,3 @@ def effective_lifecycle(
     if status == "running":
         return "running", "record"
     return "running", "record"
-
-

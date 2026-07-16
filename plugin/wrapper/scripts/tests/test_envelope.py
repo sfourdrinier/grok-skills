@@ -867,6 +867,25 @@ class EmitEnvelopeTests(unittest.TestCase):
             stored = json.load(handle)
         self.assertEqual(stored, envelope)
 
+
+    def test_do_not_store_is_valid_optional_field(self) -> None:
+        env = failure_envelope(run_id=_RUN_ID, mode="review", error_class="cancelled", message="x")
+        self.assertEqual(validate_envelope(env), [])
+        env["doNotStore"] = True
+        self.assertEqual(validate_envelope(env), [])
+
+    def test_emit_strips_do_not_store_from_stored_copy(self) -> None:
+        env = failure_envelope(run_id=_RUN_ID, mode="review", error_class="cancelled", message="x")
+        env["doNotStore"] = True
+        envelope_path = pathlib.Path(self.tmp_root) / "ephemeral.json"
+        captured = io.StringIO()
+        with contextlib.redirect_stdout(captured):
+            emit_envelope(env, envelope_path)
+        stdout_doc = json.loads(captured.getvalue())
+        self.assertTrue(stdout_doc.get("doNotStore"))
+        stored = json.loads(envelope_path.read_text(encoding="utf-8"))
+        self.assertNotIn("doNotStore", stored)
+
     def test_emit_envelope_stored_copy_matches_stdout_document(self) -> None:
         envelope = failure_envelope(run_id=_RUN_ID, mode="code", error_class="timeout", message="took too long")
         envelope_path = pathlib.Path(self.tmp_root) / "envelope.json"

@@ -69,16 +69,41 @@ class CleanupModeTests(unittest.TestCase):
             rev = int(rec["recordRevision"])
         runstate.cas_update_run_record(paths, rev, {"status": "running", "requestedModel": record.get("requestedModel"), "worktreePath": record.get("worktreePath"), "worktreeBranch": record.get("worktreeBranch"), "baseRevision": record.get("baseRevision"), "repository": record.get("repository")})
 
-    def _seed_run_without_worktree(self):
+
+    def _terminalize(self, paths, status="success"):
+        """Mark run terminal so cleanup --confirm is allowed with a live test pid."""
+        from groklib.envelope import build_envelope, failure_envelope
+        rec = runstate.load_run_record(paths.run_id)
+        rev = int(rec.get("recordRevision", 0))
+        life = rec.get("lifecycle")
+        if life == "created":
+            rec = runstate.set_lifecycle(paths, rev, "running")
+            rev = int(rec["recordRevision"])
+            life = "running"
+        if life == "running":
+            rec = runstate.set_lifecycle(paths, rev, "finalizing")
+            rev = int(rec["recordRevision"])
+        if status == "success":
+            env = build_envelope(run_id=paths.run_id, mode=rec.get("mode") or "code", status="success", response={"ok": True})
+            runstate.persist_terminal_envelope(paths, rev, env, lifecycle="completed")
+        else:
+            env = failure_envelope(run_id=paths.run_id, mode=rec.get("mode") or "code", error_class="cli-failure", message="x")
+            runstate.persist_terminal_envelope(paths, rev, env, lifecycle="failed")
+
+    def _seed_run_without_worktree(self, terminal=True):
         paths = runstate.create_run("code")
         self._write_record(paths, worktree=None)
+        if terminal:
+            self._terminalize(paths)
         return paths
 
-    def _seed_run_with_worktree(self):
+    def _seed_run_with_worktree(self, terminal=True):
         paths = runstate.create_run("code")
         worktree = create_external_worktree(repo_root=self.repo_root, base=self.base, run_id=paths.run_id)
-        self._write_record(paths, worktree=worktree)
         self.addCleanup(self._force_remove_worktree, worktree)
+        self._write_record(paths, worktree=worktree)
+        if terminal:
+            self._terminalize(paths)
         return paths, worktree
 
     def _force_remove_worktree(self, worktree):
@@ -158,6 +183,9 @@ class CleanupModeTests(unittest.TestCase):
         paths_b, worktree_b = self._seed_run_with_worktree()
         paths_a = runstate.create_run("code")
         self._write_record(paths_a, worktree=worktree_b)  # A's record -> B's worktree
+        # Terminalize A so cleanup proceeds past the active-run guard into the
+        # worktree ownership check (the subject of this test).
+        self._terminalize(paths_a)
 
         exit_code, out = _run_cleanup(paths_a.run_id, confirm=True)
         envelope = json.loads(out)
@@ -366,6 +394,17 @@ class CleanupModeTests(unittest.TestCase):
         self.assertEqual(second["status"], "success")
         self.assertTrue(second["response"]["runDirRemoved"])
         self.assertFalse(paths.run_dir.exists(), "the retry must reap the run dir")
+
+    def test_confirm_refuses_nonterminal_when_owner_alive(self) -> None:
+        paths = self._seed_run_without_worktree(terminal=False)
+        # create_run already wrote a live owner.pid; lifecycle is non-terminal.
+        runstate.write_home_liveness_marker(paths.run_dir, os.getpid())
+        code, out = _run_cleanup(paths.run_id, confirm=True)
+        self.assertEqual(code, 1)
+        env = json.loads(out)
+        self.assertEqual(env["status"], "failure")
+        self.assertEqual(env["error"]["class"], "state-ownership-violation")
+        self.assertTrue(paths.run_dir.is_dir())
 
     def test_cleanup_confirm_removes_dirty_owner_marked_worktree(self) -> None:
         # Grok dogfood-2 #8: code mode leaves the worktree dirty by design, so a
