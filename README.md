@@ -35,12 +35,25 @@ implementation in an isolated worktree.
    Full URL `https://github.com/sfourdrinier/grok-skills.git` works too; GitHub
    shorthand is equivalent. Then `/reload-plugins` (Claude) or start a new session
    (Codex agents materialize on **SessionStart** - no manual setup).
-3. Optional readiness check (gate/mode/notification prefs; agents already auto-install).
-   For background completion toasts: `setup --notification-mode auto`.
+3. Optional readiness check (agents already auto-install on SessionStart):
 
    ```text
    /grok:setup
    ```
+
+   For **background completion signals** (OS toast / webhook when a job finishes
+   while you are not watching), enable auto and run live skills in the background
+   with the execution-context env set by the skill (see
+   [execution-context.md](plugin/references/execution-context.md)):
+
+   ```text
+   /grok:setup --notification-mode auto
+   ```
+
+   Defaults stay **off** (no toast). Use `--notification-mode webhook` plus
+   `--notification-webhook-url <https-url>` for SSH/CI/Windows (native toast is
+   macOS/Linux desktop only). Full smoke:
+   [manual-smoke.md](plugin/references/manual-smoke.md).
 
 4. Try a review or ask the host to use **grok-engineer-coder** for implementation.
 
@@ -165,7 +178,7 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 | Skill | What it does |
 |-------|----------------|
 | `/grok:preflight` | Readiness only: Grok CLI runnable (`grok --version`), auth, sandbox policy, private-home lifecycle. No task. No exact CLI build pin. |
-| `/grok:setup` | Optional readiness report + gate/mode toggles. Codex agents auto-install on SessionStart. |
+| `/grok:setup` | Optional readiness + prefs (`--run-mode`, **`--notification-mode auto`** for background completion). Codex agents auto-install on SessionStart. |
 | `/grok:review` | Read-only review. Target defaults to `.`; optional `--base` (framing only); opt-in `--isolated` for owned worktree snapshot. |
 | `/grok:adversarial-review` | Hostile review that challenges design; web on by default. |
 | `/grok:dual-lens` | Adversarial pass, then ordinary review on the same target. |
@@ -175,7 +188,6 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 | `/grok:debate` | Two opposing Grok reason passes + synthesis on a topic. |
 | `/grok:status` | Jobs table, or read-only wrapper status with `--run-id` (lifecycle projection; exit 1 can mean a failed target). |
 | `/grok:jobs` | List recent companion-tracked jobs. |
-| `/grok:setup` | Optional readiness + prefs (`--run-mode`, `--notification-mode auto` for background completion signals). |
 | `/grok:result` | Stored job output (`--pretty` for Markdown). |
 | `/grok:cancel` | Cancel a running job by id. |
 | `/grok:transfer` | Package Claude session context into a Grok task pack. |
@@ -210,7 +222,7 @@ Two postures, same skills:
 | Mode | How | What you get |
 |------|-----|----------------|
 | **hardened** (default) | omit, or `/grok:setup` with `--run-mode hardened` | Private Grok home, sandbox verification, worktree isolation, secret redaction. |
-| **direct** | `GROK_SKILLS_MODE=direct` or companion `setup --run-mode direct` | Uses your **installed Grok CLI** and normal `~/.grok` auth — same idea as OpenAI's plugin using your installed Codex. Faster, less isolation. |
+| **direct** | `GROK_SKILLS_MODE=direct` or companion `setup --run-mode direct` | Uses your **installed Grok CLI** and normal `~/.grok` auth - same idea as OpenAI's plugin using your installed Codex. Faster, less isolation. Direct mode does **not** push completion notify in 1.5.0 (job still tracked). |
 
 ```bash
 # Prefer skill runner after Skill tool load:
@@ -219,6 +231,28 @@ node "$SKILL_BASE/run.mjs" setup --run-mode hardened
 # Or from a known install:
 node "${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}/scripts/grok-companion.mjs" setup --run-mode hardened
 ```
+
+### Completion notifications (optional, 1.5.0+)
+
+Default is **off**. Turn on for background jobs:
+
+```text
+/grok:setup --notification-mode auto
+```
+
+| Mode | When you get a signal |
+|------|------------------------|
+| `off` (default) | Never |
+| `auto` | Native toast only if the skill ran with `GROK_COMPANION_EXECUTION_CONTEXT=background` |
+| `native` | OS toast on macOS/Linux desktop (FG or BG) |
+| `webhook` | POST JSON if you also set `--notification-webhook-url https://...` |
+
+Skills set the execution-context env in their bash fences (foreground vs
+background). You do not invent that env by hand for normal slash use; for a
+**background** host task, the skill path uses `background` so `auto` can fire.
+At-most-once attempt only (`runs/<runId>/notified.json`); details:
+[execution-context.md](plugin/references/execution-context.md),
+[manual-smoke.md](plugin/references/manual-smoke.md).
 
 ### Useful flags (live modes)
 
@@ -341,6 +375,7 @@ Compatibility notes and versions tested: [docs/COMPATIBILITY.md](docs/COMPATIBIL
 | Review ends Cancelled / empty | Default is unlimited turns. If you set `--max-turns`, incomplete runs with real findings still return success + warning; empty shells fail. |
 | Want managed Codex agents gone | Disable/uninstall plugin first (SessionStart reinstalls while enabled), then `setup --remove-codex-agents`. |
 | Review notes files changed during the run | Informational only (dev servers, logs, other editors, or Grok listing paths). Review still **succeeds**; findings apply. Not a failure. See [over-conservatism audit](docs/reviews/2026-07-15-over-conservatism-audit.md). |
+| No completion toast after a long job | Notifications default **off**. Run `/grok:setup --notification-mode auto` and use a **background** skill run (execution context). Headless/Windows: use `webhook`. Direct mode has no push notify in 1.5.0. |
 
 ---
 
