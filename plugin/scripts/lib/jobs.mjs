@@ -26,10 +26,19 @@ export const DEFAULT_JOBS_CONFIG = Object.freeze({
   lastRescueJobId: null,
 });
 
-// Keep in sync with notify.mjs NOTIFY_MODES (single product set of strings).
+/** Single product set of notification mode strings (notify + setup import this). */
 export const NOTIFICATION_MODES = Object.freeze(["off", "auto", "native", "webhook"]);
 const NOTIFICATION_MODE_SET = new Set(NOTIFICATION_MODES);
 
+/**
+ * @param {unknown} value
+ * @returns {value is string}
+ */
+export function isNotificationMode(value) {
+  return typeof value === "string" && NOTIFICATION_MODE_SET.has(value.trim().toLowerCase());
+}
+
+/** Normalize stored/corrupt config values to a known mode (default off). */
 function normalizeNotificationMode(value) {
   const mode = typeof value === "string" ? value.trim().toLowerCase() : "";
   return NOTIFICATION_MODE_SET.has(mode) ? mode : DEFAULT_JOBS_CONFIG.notificationMode;
@@ -190,7 +199,10 @@ export function getNotificationConfig(cwd, env = process.env) {
 export function setNotificationConfig(cwd, patch, env = process.env) {
   const index = loadIndex(cwd, env);
   if (patch.notificationMode !== undefined) {
-    index.config.notificationMode = normalizeNotificationMode(patch.notificationMode);
+    // Invalid modes leave prior prefs unchanged (never clobber auto -> off).
+    if (isNotificationMode(patch.notificationMode)) {
+      index.config.notificationMode = String(patch.notificationMode).trim().toLowerCase();
+    }
   }
   if (patch.notificationWebhookUrl !== undefined) {
     index.config.notificationWebhookUrl = normalizeWebhookUrl(patch.notificationWebhookUrl);

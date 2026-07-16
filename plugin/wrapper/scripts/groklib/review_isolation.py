@@ -211,7 +211,7 @@ def prepare_review_isolation(
     run_id: str,
     base_revision: Optional[str] = None,
 ) -> ReviewIsolation:
-    """Create owned review worktree at HEAD, apply tracked dirty, return session.
+    """Create owned review worktree at a pinned base, apply tracked dirty, return session.
 
     Raises GrokWrapperError(isolation-unavailable) on any setup failure after
     best-effort cleanup of partial state.
@@ -221,6 +221,7 @@ def prepare_review_isolation(
 
     When ``base_revision`` is supplied (from plan_review_isolation), that pin is
     used for worktree create and dirty patch so run.json and worktree agree.
+    When omitted, the pin is resolved from live HEAD at prepare time.
     """
     if not runstate.is_valid_run_id(run_id):
         raise _iso_error("run id is not valid for review isolation: {!r}".format(run_id), {"runId": run_id})

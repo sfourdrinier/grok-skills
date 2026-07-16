@@ -32,7 +32,9 @@ import {
   getLastRescueJobId,
   getNotificationConfig,
   getRunMode,
+  isNotificationMode,
   listJobs,
+  NOTIFICATION_MODES,
   readJobStdout,
   setNotificationConfig,
   setRunMode,
@@ -304,12 +306,13 @@ function maybeSchema(args) {
   return args;
 }
 
-function captureAndTrack(wrapper, args, { cwd, mode, kind, runMode, notifyMode }) {
+function captureAndTrack(wrapper, args, { cwd, mode, kind, runMode, notifyMode, skipNotify }) {
   const startedAtMs = Date.now();
-  const job = createJob(cwd, { kind, mode, runMode });
-  appendJobLog(cwd, job.id, `dispatch ${args.join(" ")}`);
-  stderrLine(`[grok-job] ${job.id} started (${mode}, ${runMode})`);
+  // Job registry stores skill mode (e.g. adversarial-review), not wrapper remaps.
   const skillMode = notifyMode || mode;
+  const job = createJob(cwd, { kind, mode: skillMode, runMode });
+  appendJobLog(cwd, job.id, `dispatch ${args.join(" ")}`);
+  stderrLine(`[grok-job] ${job.id} started (${skillMode}, ${runMode})`);
 
   if (runMode === "direct") {
     const direct = runDirectGrok({ mode, args, cwd, env: process.env });
@@ -363,6 +366,9 @@ function captureAndTrack(wrapper, args, { cwd, mode, kind, runMode, notifyMode }
     summary: code === 0 ? "completed" : `exit ${code}`,
     pid: null,
   });
+  if (skipNotify) {
+    return Promise.resolve(code);
+  }
   const runId = resolveRunIdFromJobAndStdout(cwd, updated, stdout);
   // Fire-and-forget is wrong for short sync path - wait so process does not exit mid-notify
   // but never throw.
@@ -406,15 +412,16 @@ function runWithLiveRelay(wrapper, args, track) {
   }
   const relay = new LiveRelay({ runsDir, knownRunIds, startMs: startedAtMs, sink: stderrLine });
   const cwd = process.cwd();
+  const skillMode = track?.notifyMode || track?.mode || "review";
   const job = track
     ? createJob(cwd, {
         kind: track.kind || "run",
-        mode: track.mode,
+        mode: skillMode,
         runMode: track.runMode || "hardened",
       })
     : null;
   if (job) {
-    stderrLine(`[grok-job] ${job.id} started (${track.mode})`);
+    stderrLine(`[grok-job] ${job.id} started (${skillMode})`);
   }
 
   return new Promise((resolve) => {
@@ -441,7 +448,7 @@ function runWithLiveRelay(wrapper, args, track) {
       const runId = resolveRunIdFromJobAndStdout(cwd, jobAfter, stdoutBuf);
       maybeNotifyAfterTerminal({
         cwd,
-        mode: track?.notifyMode || track?.mode || "review",
+        mode: skillMode,
         runId,
         code,
         startedAtMs,
@@ -670,7 +677,7 @@ function cmdSetup(cwd, args) {
   const notifyModeIdx = args.indexOf("--notification-mode");
   if (notifyModeIdx >= 0 && args[notifyModeIdx + 1]) {
     const rawMode = String(args[notifyModeIdx + 1]).trim().toLowerCase();
-    if (!["off", "auto", "native", "webhook"].includes(rawMode)) {
+    if (!isNotificationMode(rawMode)) {
       invalidNotificationMode = rawMode;
     } else {
       setNotificationConfig(cwd, { notificationMode: rawMode });
@@ -743,7 +750,7 @@ function cmdSetup(cwd, args) {
   }
   if (invalidNotificationMode) {
     hints.push(
-      "Valid --notification-mode values: off | auto | native | webhook. Prefs were not changed."
+      `Valid --notification-mode values: ${NOTIFICATION_MODES.join(" | ")}. Prefs were not changed.`
     );
   } else if (notifyPrefs.notificationMode === "off") {
     hints.push(
@@ -827,7 +834,7 @@ function cmdSetup(cwd, args) {
   }
 
   process.stdout.write(renderSetupReport({ rows, runMode, hints }));
-  return binary.ok && wrapper && agentsOk ? 0 : 1;
+  return binary.ok && wrapper && agentsOk && !invalidNotificationMode ? 0 : 1;
 }
 
 async function cmdDebate(cwd, wrapper, args, runMode) {
@@ -840,11 +847,13 @@ async function cmdDebate(cwd, wrapper, args, runMode) {
     task,
   ].join("\n");
   const inj1 = injectTaskFile(["reason"], round1);
+  // Intermediate debate round: no completion notify (final round only).
   const code1 = await captureAndTrack(wrapper, inj1.args, {
     cwd,
     mode: "reason",
     kind: "debate-a",
     runMode,
+    skipNotify: true,
   });
   inj1.cleanup();
   if (code1 !== 0) {

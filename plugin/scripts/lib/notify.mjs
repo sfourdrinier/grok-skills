@@ -13,13 +13,12 @@ import https from "node:https";
 import path from "node:path";
 import { URL } from "node:url";
 
+import { isNotificationMode } from "./jobs.mjs";
+
 const FILE_MODE = 0o600;
 const NATIVE_TIMEOUT_MS = 5000;
 const WEBHOOK_TIMEOUT_MS = 3000;
 const TITLE = "Grok Skills";
-
-// Keep in sync with jobs.mjs NOTIFICATION_MODES.
-const NOTIFY_MODES = new Set(["off", "auto", "native", "webhook"]);
 
 /**
  * @param {NodeJS.ProcessEnv} [env]
@@ -38,7 +37,10 @@ export function getExecutionContext(env = process.env) {
  * @returns {{ notify: boolean, reason: string }}
  */
 export function shouldNotify({ notificationMode, executionContext, webhookUrl = null }) {
-  const mode = NOTIFY_MODES.has(notificationMode) ? notificationMode : "off";
+  const mode =
+    typeof notificationMode === "string" && isNotificationMode(notificationMode)
+      ? notificationMode.trim().toLowerCase()
+      : "off";
   if (mode === "off") {
     return { notify: false, reason: "mode-off" };
   }
@@ -312,7 +314,10 @@ export async function attemptNotify(opts) {
 
     // ASCII body (AGENTS.md); design middle-dot rendered as " / "
     const bodyText = `${mode} ${lifecycle} / ${runId} / ${durationSeconds}s`;
-    const effectiveMode = NOTIFY_MODES.has(notificationMode) ? notificationMode : "off";
+    const effectiveMode =
+      typeof notificationMode === "string" && isNotificationMode(notificationMode)
+        ? notificationMode.trim().toLowerCase()
+        : "off";
     let sendResult;
 
     if (effectiveMode === "webhook") {

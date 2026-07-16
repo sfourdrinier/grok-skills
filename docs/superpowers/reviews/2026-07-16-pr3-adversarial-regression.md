@@ -77,12 +77,27 @@
 2. Headless native often fails; marker still `completed`+`failed` (correct).  
 3. Webhook may target private IPs if operator sets URL (operator-trusted config).  
 
+## Post-Codex-simulation fixes (same branch)
+
+| Finding | Fix |
+|---------|-----|
+| invalid setNotificationConfig clobber | leave prior prefs unchanged |
+| setup exit ignores invalid mode | exit 1 when mode invalid |
+| triple mode list | `NOTIFICATION_MODES` + `isNotificationMode` from jobs.mjs only |
+| dual-lens missing context | skill + contract test |
+| code/reason/verify FG fences | export execution context |
+| debate double notify | `skipNotify` on debate-a |
+| prepare docstring HEAD | pinned base wording |
+| job mode vs skill mode | createJob uses skill mode |
+| PR body suite counts | updated on PR |
+
 ## Gate criteria
 
 - [x] Gate A matrix  
 - [x] Gate B DRY  
 - [x] Regression tests above green  
-- [x] Full Node suite green (157)  
+- [x] Full Node suite green  
 - [x] Full Python suite green  
 - [x] Docs refreshed (COMPATIBILITY/RELEASE/SECURITY/manual-smoke/references)  
 - [x] No open remediable findings from internal adversarial pass  
+- [x] Codex-simulation findings closed (table above)  

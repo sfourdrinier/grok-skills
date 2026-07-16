@@ -11,7 +11,9 @@ import {
   getJob,
   getNotificationConfig,
   getRunMode,
+  isNotificationMode,
   listJobs,
+  NOTIFICATION_MODES,
   setNotificationConfig,
   setRunMode,
   storeJobStdout,
@@ -51,6 +53,23 @@ test("notification prefs default off and persist", () => {
   assert.equal(DEFAULT_JOBS_CONFIG.notificationMode, "off");
   setNotificationConfig(cwd, { notificationMode: "auto" }, env);
   assert.equal(getNotificationConfig(cwd, env).notificationMode, "auto");
+});
+
+test("NOTIFICATION_MODES is the single product set", () => {
+  assert.deepEqual([...NOTIFICATION_MODES], ["off", "auto", "native", "webhook"]);
+  assert.equal(isNotificationMode("auto"), true);
+  assert.equal(isNotificationMode("telepathy"), false);
+});
+
+test("createJob records skill mode (e.g. adversarial-review)", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-jobs-skill-"));
+  const env = { CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata") };
+  const job = createJob(
+    cwd,
+    { kind: "adversarial-review", mode: "adversarial-review", runMode: "hardened" },
+    env
+  );
+  assert.equal(getJob(cwd, job.id, env).mode, "adversarial-review");
 });
 
 test("direct mode rejects --isolated fail-closed", () => {

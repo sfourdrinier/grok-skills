@@ -156,8 +156,7 @@ function runSetup(args, envExtras = {}) {
 }
 
 test("setup rejects invalid --notification-mode without changing prefs", () => {
-  // setup exits 1 when grok CLI is missing (CI) even if notify prefs apply.
-  // Assert durable prefs + report text, not overall process status.
+  // Valid mode may exit 1 when grok CLI is missing (CI); prefs still apply.
   const first = runSetup(["--notification-mode", "auto", "--skip-codex-agents"]);
   assert.ok(first.result.status === 0 || first.result.status === 1);
   assert.match(first.result.stdout + first.result.stderr, /notifications/i);
@@ -175,6 +174,8 @@ test("setup rejects invalid --notification-mode without changing prefs", () => {
       env: { ...process.env, CLAUDE_PLUGIN_DATA: first.pdata },
     }
   );
+  // Invalid mode always fails setup exit (independent of grok CLI).
+  assert.equal(bad.status, 1);
   const badOut = bad.stdout + bad.stderr;
   assert.match(badOut, /invalid mode/i);
   assert.match(badOut, /telepathy/);
@@ -208,7 +209,7 @@ test("setup redacts webhook URL query/userinfo from report", () => {
   );
 });
 
-test("companion never maps terminal lifecycle to running (source contract)", async () => {
+test("companion never maps terminal lifecycle to running (source contract)", () => {
   const src = fs.readFileSync(COMPANION, "utf8");
   // Guard against re-introducing envelope status "running" as notify lifecycle.
   assert.equal(
@@ -218,4 +219,24 @@ test("companion never maps terminal lifecycle to running (source contract)", asy
   );
   assert.match(src, /safeRunIdForRunsDir|sanitizeRunId/);
   assert.match(src, /notifyMode/);
+  // Debate intermediate round must skip notify; final round may notify.
+  assert.match(src, /skipNotify:\s*true/);
+  assert.match(src, /isNotificationMode/);
+});
+
+test("code/reason/verify dual-lens fenced runs export execution context", () => {
+  const root = path.resolve(SCRIPT_DIR, "../..");
+  for (const rel of [
+    "skills/code/SKILL.md",
+    "skills/reason/SKILL.md",
+    "skills/verify/SKILL.md",
+    "skills/dual-lens/SKILL.md",
+  ]) {
+    const text = fs.readFileSync(path.join(root, rel), "utf8");
+    assert.match(
+      text,
+      /export GROK_COMPANION_EXECUTION_CONTEXT=foreground/,
+      `${rel} fenced runs must set execution context`
+    );
+  }
 });

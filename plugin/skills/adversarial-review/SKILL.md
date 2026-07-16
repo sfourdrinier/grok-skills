@@ -34,6 +34,7 @@ use `--task-file -` with a single-quoted heredoc.
 Never `--task "..."`. Example:
 
 ```bash
+export GROK_COMPANION_EXECUTION_CONTEXT=foreground
 node "$SKILL_BASE/run.mjs" adversarial-review [flags from $ARGUMENTS, values single-quoted] --task-file - <<'GROK_TASK'
 <operator focus>
 GROK_TASK

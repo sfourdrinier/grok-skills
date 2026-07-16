@@ -14,6 +14,8 @@ allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 
 ```bash
 SKILL_BASE='<Base directory for this skill - absolute path from Skill tool>'
+# Required for completion notifications (plugin/references/execution-context.md):
+export GROK_COMPANION_EXECUTION_CONTEXT=foreground   # or background
 node "$SKILL_BASE/run.mjs" <mode> [args...]
 ```
 
@@ -29,9 +31,13 @@ use `--task-file -` with a single-quoted heredoc.
 
 ## Procedure
 
+Set the same execution context for both passes (two terminal runs may each
+attempt a completion notify when notifications are enabled).
+
 1. Adversarial pass (web on by default):
 
 ```bash
+export GROK_COMPANION_EXECUTION_CONTEXT=foreground
 node "$SKILL_BASE/run.mjs" adversarial-review [flags from "$ARGUMENTS"] --task-file - <<'GROK_TASK'
 <operator focus or paste the task>
 GROK_TASK
@@ -40,6 +46,7 @@ GROK_TASK
 2. Normal review on the **same target**:
 
 ```bash
+export GROK_COMPANION_EXECUTION_CONTEXT=foreground
 node "$SKILL_BASE/run.mjs" review [same --target] --task-file - <<'GROK_TASK'
 Confirm or refute high/critical findings from the adversarial pass. Prefer residual risks.
 GROK_TASK

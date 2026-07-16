@@ -303,6 +303,7 @@ test("skills declare execution context prefix (contract)", () => {
     "skills/reason/SKILL.md",
     "skills/verify/SKILL.md",
     "skills/adversarial-review/SKILL.md",
+    "skills/dual-lens/SKILL.md",
     "agents/grok-engineer-coder.md",
     "agents/grok-rescue.md",
     "references/execution-context.md",
@@ -317,16 +318,18 @@ test("skills declare execution context prefix (contract)", () => {
   }
 });
 
-test("setNotificationConfig rejects invalid mode (keeps default)", () => {
+test("setNotificationConfig rejects invalid mode without clobbering prior prefs", () => {
   const cwd = tempCwd();
   const env = { CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata") };
   setRunMode(cwd, "hardened", env);
+  // Invalid while still at default: leave default off
   setNotificationConfig(cwd, { notificationMode: "telepathy" }, env);
   assert.equal(getNotificationConfig(cwd, env).notificationMode, "off");
   setNotificationConfig(cwd, { notificationMode: "auto" }, env);
+  assert.equal(getNotificationConfig(cwd, env).notificationMode, "auto");
   setNotificationConfig(cwd, { notificationMode: "BOGUS" }, env);
-  // invalid normalize falls back to default off, not previous auto
-  assert.equal(getNotificationConfig(cwd, env).notificationMode, "off");
+  // Invalid must not clobber prior auto to off
+  assert.equal(getNotificationConfig(cwd, env).notificationMode, "auto");
 });
 
 test("adversarial-review is notify-eligible and webhook body uses skill mode", async () => {
