@@ -99,12 +99,22 @@ def _write_worker_marker(run_dir: pathlib.Path, payload: Dict[str, Any]) -> None
 def mark_worker_starting(run_dir: pathlib.Path) -> None:
     """Gate durable parent terminalization before proc.start() obtains a real pid.
 
+    Binds the starting window to the **parent** process identity so a SIGKILL/OOM
+    of the parent (no BaseException cleanup) cannot leave an immortal ``starting``
+    marker that blocks recovery forever.
+
     Raises OSError if the marker cannot be written - callers must abort spawn.
     """
-    _write_worker_marker(
-        run_dir,
-        {"schemaVersion": 1, "state": _WORKER_STATE_STARTING},
-    )
+    parent_pid = os.getpid()
+    payload: Dict[str, Any] = {
+        "schemaVersion": 1,
+        "state": _WORKER_STATE_STARTING,
+        "parentPid": parent_pid,
+    }
+    parent_token = platformsupport.process_start_token(parent_pid)
+    if isinstance(parent_token, str) and parent_token:
+        payload["parentStartToken"] = parent_token
+    _write_worker_marker(run_dir, payload)
 
 
 def write_worker_pid(run_dir: pathlib.Path, pid: int) -> None:
@@ -153,9 +163,9 @@ def finalize_worker_liveness(run_dir: pathlib.Path) -> str:
         return _WORKER_LIVENESS_UNKNOWN
     if not raw:
         return _WORKER_LIVENESS_UNKNOWN
-    # Legacy plain-text markers from older builds
+    # Legacy plain-text "starting" has no parent identity — unknown (fail closed).
     if raw == _WORKER_STATE_STARTING:
-        return _WORKER_LIVENESS_ALIVE
+        return _WORKER_LIVENESS_UNKNOWN
     try:
         as_int = int(raw)
     except ValueError:
@@ -176,6 +186,30 @@ def finalize_worker_liveness(run_dir: pathlib.Path) -> str:
         return _WORKER_LIVENESS_UNKNOWN
     state = payload.get("state")
     if state == _WORKER_STATE_STARTING:
+        # Starting means "parent is about to spawn". If the parent is gone (or
+        # pid-reused), no worker was left running — treat as dead so status and
+        # terminalize can recover instead of hanging on finalizing forever.
+        parent_pid = payload.get("parentPid")
+        if not isinstance(parent_pid, int) or isinstance(parent_pid, bool) or parent_pid <= 0:
+            # Legacy starting markers without parent identity: unknown (fail closed).
+            return _WORKER_LIVENESS_UNKNOWN
+        try:
+            parent_alive = platformsupport.process_is_alive(parent_pid)
+        except Exception:
+            return _WORKER_LIVENESS_UNKNOWN
+        if not parent_alive:
+            return _WORKER_LIVENESS_DEAD
+        stored_parent_token = payload.get("parentStartToken")
+        try:
+            current_parent_token = platformsupport.process_start_token(parent_pid)
+        except Exception:
+            return _WORKER_LIVENESS_UNKNOWN
+        if (
+            isinstance(stored_parent_token, str)
+            and current_parent_token is not None
+            and stored_parent_token != current_parent_token
+        ):
+            return _WORKER_LIVENESS_DEAD
         return _WORKER_LIVENESS_ALIVE
     if state != _WORKER_STATE_RUNNING:
         return _WORKER_LIVENESS_UNKNOWN
@@ -355,6 +389,26 @@ def run_finalize_parent(
 
     def _spawn_failure_result(message: str, reason: str) -> Tuple[dict, Optional[str], bool]:
         clear_worker_pid(paths.run_dir)
+        # If a worker already wrote a valid envelope (post-start pid-marker failure
+        # race), preserve that body — never report synthetic cli-failure over it.
+        existing = _load_valid_envelope(paths)
+        if existing is not None:
+            try:
+                runstate.persist_terminal_envelope(paths, None, None)
+            except Exception as finish_exc:
+                _log(
+                    "run_finalize_parent",
+                    "spawn-failure finish of existing envelope failed: {}".format(finish_exc),
+                )
+            if progress is not None:
+                if existing.get("status") == "success":
+                    progress.safe_emit("finalizing", "finalization succeeded")
+                else:
+                    progress.safe_emit(
+                        "finalizing", "finalization finished with durable failure"
+                    )
+            return existing, None, True
+
         fail = envelope_mod.failure_envelope(
             run_id=paths.run_id,
             mode=mode,
@@ -369,8 +423,18 @@ def run_finalize_parent(
             runstate.persist_terminal_envelope(paths, rev, fail, lifecycle="failed")
         except Exception as persist_exc:
             _log("run_finalize_parent", "spawn-failure persist failed: {}".format(persist_exc))
+            # Re-check: persist may have finished an existing envelope on conflict.
+            existing_after = _load_valid_envelope(paths)
+            if existing_after is not None:
+                return existing_after, None, True
             fail["doNotStore"] = True
             return fail, None, False
+        # Persist may have preserved a concurrent worker success body.
+        existing_after = _load_valid_envelope(paths)
+        if existing_after is not None and existing_after.get("status") == "success":
+            if progress is not None:
+                progress.safe_emit("finalizing", "finalization succeeded")
+            return existing_after, None, True
         if progress is not None:
             progress.safe_emit("finalizing", "finalization worker spawn failed", level="error")
         return fail, None, True

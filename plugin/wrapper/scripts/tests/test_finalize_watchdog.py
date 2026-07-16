@@ -840,6 +840,55 @@ class FinalizeWatchdogTests(unittest.TestCase):
                     )
         self.assertEqual(len(abandoned), 1)
 
+    def test_spawn_failure_returns_existing_worker_envelope(self) -> None:
+        """Post-start failure path must not mask a durable success envelope."""
+        paths, env, rev = self._prepare_finalizing()
+        runstate.persist_terminal_envelope(paths, rev, env, lifecycle="completed")
+
+        class FakeProc:
+            def __init__(self):
+                self.pid = 424242
+                self.daemon = False
+                self.exitcode = 0
+
+            def start(self):
+                return None
+
+            def join(self, timeout=None):
+                return None
+
+            def is_alive(self):
+                return False
+
+            def terminate(self):
+                return None
+
+            def kill(self):
+                return None
+
+        class FakeCtx:
+            def Process(self, **kwargs):
+                return FakeProc()
+
+        with mock.patch.object(
+            finalize_worker.multiprocessing, "get_context", return_value=FakeCtx()
+        ):
+            with mock.patch.object(
+                finalize_worker, "write_worker_pid", side_effect=OSError("disk full")
+            ):
+                out, ephemeral, durable = finalize_worker.run_finalize_parent(
+                    paths,
+                    mode="review",
+                    envelope=env,
+                    lifecycle="completed",
+                    expected_revision=rev + 10,
+                    budget_seconds=5,
+                )
+        self.assertIsNone(ephemeral)
+        self.assertTrue(durable)
+        self.assertEqual(out["status"], "success")
+        self.assertEqual(out["response"]["answer"], env["response"]["answer"])
+
 
 class FinalizeLivenessFailClosedTests(unittest.TestCase):
     """C2: unknown marker state must not fail open as dead."""
@@ -886,6 +935,24 @@ class FinalizeLivenessFailClosedTests(unittest.TestCase):
             fw._detach_worker_process_group()
         self.assertTrue(called)
 
+    def test_starting_marker_dead_parent_is_dead(self) -> None:
+        """SIGKILL after starting marker: parent gone => not forever-alive."""
+        from groklib.modes import finalize_worker as fw
 
+        path = self.run_dir / "finalize-worker.pid"
+        path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "state": "starting",
+                    "parentPid": 999999999,
+                    "parentStartToken": "not-a-real-token",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        self.assertEqual(fw.finalize_worker_liveness(self.run_dir), "dead")
+        self.assertFalse(fw.finalize_worker_blocks_durable_write(self.run_dir))
 if __name__ == "__main__":
     unittest.main()
