@@ -13,8 +13,8 @@ pick up after they refresh marketplaces.
   - **MINOR** — new skills/agents/modes, non-breaking
   - **MAJOR** — breaking skill/CLI/envelope contracts
 
-Pin bumps for the Grok CLI (`accepted-version.json`) follow
-[CONTRIBUTING.md](../CONTRIBUTING.md) revalidation first, then this release flow.
+Optional last-validated CLI stamp updates (`accepted-version.json`, advisory
+only) follow [CONTRIBUTING.md](../CONTRIBUTING.md) — never as a user allowlist.
 
 ## Checklist (every release)
 

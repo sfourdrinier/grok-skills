@@ -22,13 +22,13 @@
 # Usage:
 #   python3 live_probes.py                 run every probe, print a summary,
 #                                           exit 0 iff every GATING probe passed;
-#                                           the version pin is NOT touched.
+#                                           the last-validated stamp is NOT touched.
 #   python3 live_probes.py --revalidate    run every probe and, ONLY on a fully
 #                                           green gating run, rewrite
-#                                           accepted-version.json with the
-#                                           installed version, a fresh UTC
-#                                           timestamp, and the evidence pointer.
-#                                           A red run leaves the pin untouched.
+#                                           accepted-version.json (advisory stamp)
+#                                           with the installed version, timestamp,
+#                                           evidence pointer, enforcement: none.
+#                                           A red run leaves the stamp untouched.
 #   python3 live_probes.py --evidence-out PATH   also write the machine-readable
 #                                           evidence JSON to PATH.
 #
@@ -611,12 +611,17 @@ def run_all_probes() -> List[ProbeResult]:
 
 
 def _rewrite_pin(installed_version: str) -> Dict[str, object]:
-    """Rewrite accepted-version.json with the installed version, a fresh timestamp, and the evidence pointer."""
+    """Rewrite last-validated stamp (advisory only; never a runtime allowlist)."""
     document = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "enforcement": "none",
         "version": installed_version,
         "validatedAtUtc": _utc_now_iso_z(),
         "probeEvidence": _EVIDENCE_POINTER,
+        "note": (
+            "Last maintainer-validated Grok CLI build (advisory only). "
+            "Runtime does NOT require this exact version."
+        ),
     }
     _ACCEPTED_VERSION_FILE.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
     return document

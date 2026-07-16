@@ -62,7 +62,7 @@ def _check_version(binary: pathlib.Path, progress: ProgressWriter, checks: List[
             {"binary": str(binary)},
         )
     version = grokcli.check_version(binary)
-    progress.safe_emit("grok", "grok binary present; version matches pin", data={"version": version})
+    progress.safe_emit("grok", "grok binary present and reports a version", data={"version": version})
     checks.append({"name": "grokVersion", "ok": True, "detail": version})
 
 

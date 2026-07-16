@@ -23,7 +23,7 @@ Prerequisites:
 - Python 3
 - Node.js (for plugin unit tests)
 - Optional: Claude Code CLI (`claude`) and Codex CLI (`codex`) for install validation
-- Optional: authenticated Grok CLI matching `plugin/wrapper/accepted-version.json`
+- Optional: authenticated Grok CLI (`grok --version` works; any build)
 
 No `pip install` or `npm install` is required for unit tests.
 
@@ -61,26 +61,23 @@ export CLAUDE_PLUGIN_ROOT="$PWD/plugin"
 node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" preflight
 ```
 
-## Revalidating the Grok CLI version pin
+## Last-validated Grok CLI stamp (advisory only)
 
-**Hygiene rule:** the pin is a security boundary. A new Grok CLI build is not
-trusted until re-probed. Never bump `accepted-version.json` because
-`grok --version` changed on your laptop alone.
+**Users are never blocked on CLI build mismatch.** Runtime only requires a
+working `grok --version`. `plugin/wrapper/accepted-version.json` records the
+last maintainer-validated build for probe evidence / docs (`enforcement: none`).
 
-Procedure (detail in `plugin/wrapper/references/cli-reference.md`):
+When you want to update that stamp after probing a new CLI:
 
 1. Install the candidate Grok CLI build.
-2. Confirm `grok --version` first line exactly matches what you intend to pin.
-3. Run the documented probe / revalidate suite against that build
-   (`plugin/wrapper/scripts/tests/live/` and cli-reference revalidation).
-4. Only then rewrite `plugin/wrapper/accepted-version.json` (`version`,
-   `validatedAtUtc`, `probeEvidence`).
-5. Run wrapper unit tests + a live `preflight` from a clean plugin install.
-6. Invalidate preflight cache (or wait for TTL): version mismatch must re-probe.
-7. Document the pin bump in `CHANGELOG.md` and `docs/COMPATIBILITY.md` if host
-   versions were re-checked.
+2. Run the documented probe suite (`plugin/wrapper/scripts/tests/live/` and
+   `plugin/wrapper/references/cli-reference.md`).
+3. Rewrite `accepted-version.json` (`version`, `validatedAtUtc`, `probeEvidence`;
+   keep `"enforcement": "none"`).
+4. Run wrapper unit tests + a live `preflight`.
+5. Note the stamp update in `CHANGELOG.md` if sandbox/auth behavior changed.
 
-Never hand-edit the pin without re-probing sandbox and auth behavior.
+Do not reintroduce exact-match fail-closed checks.
 
 ## Code style
 

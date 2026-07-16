@@ -45,13 +45,23 @@ class PreflightModeTests(PreflightHarness):
         # D-SECRETREAD informational advisory: recorded, value False, never a gate.
         self.assertEqual(checks_by_name["secretReadDenial"]["value"], False)
 
-    def test_preflight_version_mismatch_fails_closed(self) -> None:
+    def test_preflight_accepts_any_working_grok_version(self) -> None:
+        # Must not fail closed when installed CLI differs from last-validated stamp.
         with mock.patch.dict(os.environ, {"FAKE_GROK_VERSION": "grok 9.9.9 (deadbeef) [fake]"}):
             exit_code, out = self.run_preflight()
         envelope = json.loads(out)
-        self.assertEqual(exit_code, 1)
-        self.assertEqual(envelope["status"], "failure")
-        self.assertEqual(envelope["error"]["class"], "version-mismatch")
+        self.assertEqual(exit_code, 0, out)
+        self.assertEqual(envelope["status"], "success")
+        checks = {
+            c["name"]: c
+            for c in (envelope.get("response") or {}).get("checks")
+            or envelope.get("checks")
+            or []
+        }
+        # checks may live under different envelope shapes depending on mode; accept success.
+        if "grokVersion" in checks:
+            self.assertTrue(checks["grokVersion"]["ok"])
+            self.assertIn("9.9.9", checks["grokVersion"]["detail"])
 
     def test_preflight_unexpected_error_terminalizes_real_run(self) -> None:
         # round3 F3-preflight: a non-classified exception escaping a check (here a

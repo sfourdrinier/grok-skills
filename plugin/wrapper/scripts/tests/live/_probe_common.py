@@ -48,7 +48,7 @@ def _utc_now_iso_z() -> str:
 
 
 def _installed_version_first_line() -> str:
-    """First line of `grok --version`, the exact string the C6 pin compares against."""
+    """First line of `grok --version` (stamp evidence; not a runtime allowlist)."""
     completed = subprocess.run(
         [str(_GROK_BINARY), "--version"],
         stdout=subprocess.PIPE,

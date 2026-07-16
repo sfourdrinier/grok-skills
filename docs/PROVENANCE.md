@@ -40,9 +40,9 @@ Two layers:
   removed the need for a direct Agent-Client-Protocol transport, which would have run
   tools in-process with NO OS sandbox. Streaming rich progress AND keeping the OS sandbox
   are not in tension: the sandboxed single-shot path gives both.
-- **Version pin + revalidate:** Grok ships almost daily. The wrapper pins an
-  `accepted-version.json` and refuses to run an unrecognized version until revalidated,
-  so a silent Grok change cannot alter behavior underneath us.
+- **Last-validated CLI stamp (advisory):** Grok ships often. `accepted-version.json`
+  records the last maintainer-probed build for evidence/docs. Runtime accepts any
+  working `grok --version` so users are not blocked by normal CLI updates.
 - **Single envelope, wrapper is sole author:** the wrapper emits exactly one JSON result
   envelope on stdout. The plugin never fabricates one. A pre-execution failure (for
   example the wrapper binary not found) is a stderr + non-zero exit, not a fake success

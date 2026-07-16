@@ -7,8 +7,9 @@
 # the C6 invocation baseline, never guessed.
 #
 # Responsibilities:
-#   - accepted_version / check_version: enforce the C6 version pin (exact
-#     first-line match against accepted-version.json) before any run.
+#   - accepted_version / check_version: ensure the installed Grok CLI runs
+#     and reports a version line (any working build). accepted-version.json
+#     is last-validated maintainer evidence only — not a runtime allowlist.
 #   - build_argv: emit the EXACT C6 baseline argv (every flag once, no silent
 #     additions), delivering the prompt via --prompt-file (never the
 #     positional/-p/--single form) and honoring the D-WEB web-access toggle.

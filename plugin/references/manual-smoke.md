@@ -9,7 +9,7 @@ already cover the companion, gate, and wrapper contracts.
 ## Preconditions
 
 - Node and `python3` on PATH.
-- Grok CLI installed, authenticated, matching `wrapper/accepted-version.json`.
+- Grok CLI installed, authenticated (`grok --version` works; any build).
 - Plugin installed via marketplace (cache path) **or** `--plugin-dir ./plugin`.
 - No `GROK_AGENT_WRAPPER` set (prove the bundled layout works).
 

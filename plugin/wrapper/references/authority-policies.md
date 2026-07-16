@@ -59,7 +59,7 @@ each class implies and what to do next.
 | Error class | What it means | What to do |
 | --- | --- | --- |
 | `auth-missing` | `~/.grok/auth.json` is absent, or the private-home login probe (`grok models`) reports not logged in. | Log in with the real `grok` CLI, confirm `~/.grok/auth.json` exists, then retry. |
-| `version-mismatch` | The installed `grok --version` first line does not exactly match `accepted-version.json`, or the pin file itself is missing/malformed. | Do not work around it. Run the Task 13 live probe suite with `--revalidate` (see `cli-reference.md`) to re-pin, or install the pinned version. |
+| `version-mismatch` | `grok --version` could not run, exited nonzero, or printed no usable Grok version line. (Exact build mismatch is **not** an error.) | Install/fix the Grok CLI so `grok --version` works. |
 | `model-unavailable` | The requested model (default `grok-4.5`) is not in the selectable model list from `grok models`, or the run's effective model was not in the requested model family. | Check account/model access; do not silently switch models. |
 | `invalid-target` | `--target`, `--worktree`, `--input`, `--rules-file`, or `--task-file` resolved outside the repo, does not exist, or is otherwise malformed. | Fix the path argument; paths are always resolved relative to the repository the wrapper lives in, not your shell's cwd. |
 | `rules-parity-failure` | With `ruleFileParity` enabled, the `AGENTS.md`/`CLAUDE.md` pair at some directory level is missing one file, fails the path-header convention, or the bodies differ after line 1. | Fix the pair so both files exist with matching bodies (and valid headers), or disable `ruleFileParity` in `.grok-skills.json`; the wrapper will not guess which file is authoritative. |

@@ -1,28 +1,35 @@
 # wrapper/scripts/groklib/grokcli_version.py
 #
-# C6 version-pin enforcement: read the accepted-version pin and verify the
-# installed Grok binary matches it exactly, failing closed as version-mismatch.
-# Split out of grokcli.py (one clear responsibility per file, 900-line cap): this
-# has no process-orchestration or stream concerns, only the pin file and a single
-# `grok --version` probe. grokcli re-exports accepted_version / check_version so
-# callers keep using grokcli.check_version(...).
+# Verify the installed Grok CLI is runnable. Does NOT hard-pin a specific CLI
+# build: Grok ships frequently and a public plugin must accept any working
+# install. `accepted-version.json` is last-validated maintainer evidence only
+# (advisory), never a runtime allowlist.
+#
+# Split out of grokcli.py (one clear responsibility per file). grokcli re-exports
+# accepted_version / check_version so callers keep using grokcli.check_version(...).
 
 import json
 import pathlib
+import re
 import subprocess
+from typing import Optional
 
 from groklib import GrokWrapperError, log_stderr
 
-# C6 pin file: wrapper/accepted-version.json. __file__ is
-# .../grok-cli/scripts/groklib/grokcli_version.py, so parents[2] is the grok-cli
-# skill root (same anchor as grokcli.py, which also lives in groklib/).
+# Last-validated evidence file (NOT a runtime gate). Path is relative to the
+# wrapper skill root (…/wrapper/accepted-version.json).
 ACCEPTED_VERSION_FILE = pathlib.Path(__file__).resolve().parents[2] / "accepted-version.json"
 
 _VERSION_TIMEOUT_SECONDS = 30
 
-_REVALIDATION_HINT = (
-    "run the live compatibility revalidation suite to re-pin accepted-version.json before running Grok"
+# Fail closed only when --version itself is unusable — not when it differs from
+# a maintainer probe stamp.
+_VERSION_HINT = (
+    "install the Grok CLI and confirm `grok --version` prints a version line"
 )
+
+# Accept lines that look like real Grok CLI output (not empty / garbage).
+_GROK_VERSION_RE = re.compile(r"^grok\b", re.IGNORECASE)
 
 
 def _log(function: str, message: str) -> None:
@@ -30,60 +37,49 @@ def _log(function: str, message: str) -> None:
     log_stderr("grokcli", function, message)
 
 
-def accepted_version() -> str:
-    """Read the C6 accepted-version pin, failing closed as version-mismatch.
+def last_validated_version() -> Optional[str]:
+    """Read the optional last-validated version stamp (advisory only).
 
-    A missing, unreadable, malformed, or version-less pin file is a
-    fail-closed ``version-mismatch`` whose message names the revalidation
-    suite: the wrapper never runs Grok against an unverifiable pin.
+    Missing or malformed files return ``None`` — they never block a run.
     """
     try:
         raw = ACCEPTED_VERSION_FILE.read_text(encoding="utf-8")
-    except OSError as exc:
-        _log("accepted_version", "cannot read pin file {}: {}".format(ACCEPTED_VERSION_FILE, exc))
-        raise GrokWrapperError(
-            "version-mismatch",
-            "accepted-version pin file is missing or unreadable; {}".format(_REVALIDATION_HINT),
-            {"pinFile": str(ACCEPTED_VERSION_FILE)},
-        )
+    except OSError:
+        return None
     try:
         document = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        _log("accepted_version", "pin file {} is malformed JSON: {}".format(ACCEPTED_VERSION_FILE, exc))
-        raise GrokWrapperError(
-            "version-mismatch",
-            "accepted-version pin file is malformed JSON; {}".format(_REVALIDATION_HINT),
-            {"pinFile": str(ACCEPTED_VERSION_FILE)},
-        )
+    except json.JSONDecodeError:
+        return None
     if not isinstance(document, dict):
-        _log("accepted_version", "pin file {} is not a JSON object".format(ACCEPTED_VERSION_FILE))
-        raise GrokWrapperError(
-            "version-mismatch",
-            "accepted-version pin file is not a JSON object; {}".format(_REVALIDATION_HINT),
-            {"pinFile": str(ACCEPTED_VERSION_FILE)},
-        )
+        return None
     version = document.get("version")
     if not isinstance(version, str) or not version.strip():
-        _log("accepted_version", "pin file {} has no usable version field".format(ACCEPTED_VERSION_FILE))
-        raise GrokWrapperError(
-            "version-mismatch",
-            "accepted-version pin file has no usable version field; {}".format(_REVALIDATION_HINT),
-            {"pinFile": str(ACCEPTED_VERSION_FILE)},
-        )
-    return version
+        return None
+    return version.strip()
+
+
+def accepted_version() -> str:
+    """Backward-compatible name for the last-validated stamp when present.
+
+    Prefer :func:`last_validated_version` for new code. Returns empty string when
+    no stamp is available (never raises for a missing pin).
+    """
+    return last_validated_version() or ""
 
 
 def check_version(binary: pathlib.Path) -> str:
-    """Verify the installed Grok matches the accepted pin exactly, failing closed otherwise.
+    """Verify the installed Grok CLI runs and reports a version line.
 
-    Runs ``grok --version`` and compares its first line, verbatim, to
-    ``accepted_version()`` (C6). Any failure - the binary cannot run, exits
-    nonzero, produces no version line, or a mismatched line - is a
-    fail-closed ``version-mismatch`` whose message names the revalidation
-    suite. The parent env is inherited here because ``--version`` needs no
-    private HOME and produces no auth-sensitive side effect.
+    Runs ``grok --version`` and returns its first line. Failures only when:
+
+    - the binary cannot be executed
+    - ``--version`` exits nonzero
+    - stdout has no usable version line (empty or not Grok-shaped)
+
+    A version that differs from ``accepted-version.json`` is **allowed**. That
+    file is last-validated maintainer evidence, not an allowlist. When a stamp
+    exists and differs, a stderr log note is emitted for diagnostics only.
     """
-    expected = accepted_version()
     argv = [str(binary), "--version"]
     try:
         completed = subprocess.run(
@@ -99,7 +95,7 @@ def check_version(binary: pathlib.Path) -> str:
         _log("check_version", "could not run grok --version: {}".format(exc))
         raise GrokWrapperError(
             "version-mismatch",
-            "could not run grok --version; {}".format(_REVALIDATION_HINT),
+            "could not run grok --version; {}".format(_VERSION_HINT),
             {"reason": "version-command-failed"},
         )
 
@@ -107,20 +103,26 @@ def check_version(binary: pathlib.Path) -> str:
         _log("check_version", "grok --version exited {}".format(completed.returncode))
         raise GrokWrapperError(
             "version-mismatch",
-            "grok --version exited with status {}; {}".format(completed.returncode, _REVALIDATION_HINT),
+            "grok --version exited with status {}; {}".format(completed.returncode, _VERSION_HINT),
             {"exitStatus": completed.returncode},
         )
 
     stdout = completed.stdout or ""
     lines = stdout.splitlines()
     first_line = lines[0].strip() if lines else ""
-    if first_line != expected:
-        _log("check_version", "installed version {!r} != accepted pin {!r}".format(first_line, expected))
+    if not first_line or not _GROK_VERSION_RE.match(first_line):
+        _log("check_version", "unusable grok --version output {!r}".format(first_line))
         raise GrokWrapperError(
             "version-mismatch",
-            "installed grok version {!r} does not match accepted pin {!r}; {}".format(
-                first_line, expected, _REVALIDATION_HINT
-            ),
-            {"installed": first_line, "expected": expected},
+            "grok --version did not report a usable version line; {}".format(_VERSION_HINT),
+            {"installed": first_line, "reason": "version-output-unusable"},
+        )
+
+    reference = last_validated_version()
+    if reference and first_line != reference:
+        _log(
+            "check_version",
+            "installed version {!r} differs from last-validated stamp {!r} "
+            "(allowed; stamp is advisory only)".format(first_line, reference),
         )
     return first_line

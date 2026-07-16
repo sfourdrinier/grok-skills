@@ -12,14 +12,14 @@ over. It is **not** a complete sandbox against an adversarial model.
 - **Private auth home** per run (isolated `HOME`, 0600 credential copy, teardown).
 - **Exactly one machine-readable result envelope** on stdout, scanned/redacted for
   known secret shapes and for exact injected credential values.
-- **Fail-closed defaults** when the platform, sandbox, version pin, or stream cannot be
-  verified.
+- **Fail-closed defaults** when the platform, sandbox, or stream cannot be
+  verified (not when Grok CLI build string differs from last-validated stamp).
 - **Worktree isolation** for `code` (external worktree + escape detection).
 - **Build-gate script integrity** (D1): gate scripts modified by the run are refused.
 
 ### Accepted limits (please read)
 
-- The OS sandbox on the pinned Grok CLI confines **writes**, not arbitrary **reads**
+- The OS sandbox on the Grok CLI confines **writes**, not arbitrary **reads**
   (D-SECRETREAD). Absolute-path reads of host secrets are possible; network egress is
   permitted so the model can work as designed. Do not treat `deny_read_globs` as enforced.
 - `verify` disables first-party web tools but still allows `run_terminal_command`; it is
@@ -39,8 +39,8 @@ Full design notes: [docs/OPEN-SECURITY-DECISIONS.md](docs/OPEN-SECURITY-DECISION
 
 ## Supported platforms
 
-- **macOS** with Seatbelt: live modes supported when the Grok CLI pin matches
-  `plugin/wrapper/accepted-version.json`.
+- **macOS** with Seatbelt: live modes supported when a working Grok CLI is installed
+  and logged in (any build; platform probe gate still applies).
 - **Linux / Windows**: live modes fail closed with `probe-required` until a sandbox profile
   is verified for that platform.
 

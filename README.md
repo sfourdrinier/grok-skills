@@ -15,9 +15,9 @@ implementation in an isolated worktree.
 
 ## First 5 minutes
 
-1. Install **Grok CLI**, log in, confirm `grok --version` matches
-   [`plugin/wrapper/accepted-version.json`](plugin/wrapper/accepted-version.json)
-   (macOS for live modes; Python 3 + Node on `PATH`).
+1. Install **Grok CLI**, log in, confirm `grok --version` works
+   (macOS for live modes; Python 3 + Node on `PATH`). Any working Grok CLI
+   build is accepted — there is no exact version lock.
 2. Add the marketplace and install the plugin (no manual clone needed):
 
    ```text
@@ -69,7 +69,9 @@ You need all of these:
 
 1. **macOS** for live modes (Seatbelt). Linux/Windows stop with `probe-required` until a sandbox profile is validated for them.
 2. **Python 3** and **Node.js** on your `PATH` (stdlib only; no pip/npm packages for this tool).
-3. **Grok CLI installed and logged in** (`grok --version` works). This project pins a known-good build in `plugin/wrapper/accepted-version.json`. If your CLI version does not match, the wrapper refuses to run until you revalidate (see [CONTRIBUTING.md](CONTRIBUTING.md)).
+3. **Grok CLI installed and logged in** (`grok --version` works). Any working
+   Grok CLI is accepted. `plugin/wrapper/accepted-version.json` is **last
+   maintainer-validated evidence only** (advisory) — not a runtime allowlist.
 
 You do **not** need a manual clone for normal use. Claude Code and Codex both install from this GitHub repo as a **plugin marketplace** (they clone it, then copy `plugin/` into their install cache).
 
@@ -321,7 +323,7 @@ Compatibility notes and versions tested: [docs/COMPATIBILITY.md](docs/COMPATIBIL
 | Symptom | What to try |
 |---------|-------------|
 | “Could not locate the Grok wrapper” | Reinstall the plugin from this repo. Confirm the cache (or `--plugin-dir`) contains `wrapper/scripts/grok_agent.py`. Advanced only: `GROK_AGENT_WRAPPER` + `GROK_ALLOW_WRAPPER_OVERRIDE=1`. |
-| `version-mismatch` | Your `grok --version` does not match `plugin/wrapper/accepted-version.json`. Revalidate or install the pinned build ([cli-reference](plugin/wrapper/references/cli-reference.md)). |
+| `version-mismatch` | `grok --version` failed, exited nonzero, or did not print a usable Grok version line. Fix/install the Grok CLI; the plugin does **not** require a specific CLI build. |
 | Auth / login checks fail in preflight | Log in with the Grok CLI itself, then re-run `/grok:preflight`. |
 | `probe-required` on Linux/Windows | Expected until that platform’s sandbox is live-probed. |
 | Skills missing after install | Claude: `/reload-plugins`. Codex: check `codex plugin list`. Desktop: restart after install. |

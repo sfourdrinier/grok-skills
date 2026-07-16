@@ -5,30 +5,29 @@
 This distills the Task 0 grounding-probe evidence
 (`../scripts/tests/fixtures/probe-report.md`) and the Task 6 custom-sandbox
 probe (`../scripts/tests/fixtures/sandbox-custom-probe.md`) into the
-facts an operator needs: the pinned version, the exact invocation baseline,
-how process isolation works, what the sandbox does and does not enforce, and
-how to move the pin forward when Grok releases a new build. Nothing here is
-guessed - every value below has a live-probe citation.
+facts an operator needs: last-validated CLI evidence, the exact invocation
+baseline, how process isolation works, and what the sandbox does and does not
+enforce. Nothing here is guessed - every value below has a live-probe citation.
 
-## Pinned version
+## Last-validated version (advisory — not a runtime lock)
 
-`plugin/wrapper/accepted-version.json`:
+`plugin/wrapper/accepted-version.json` records the last maintainer-probed Grok
+CLI build. **Runtime does not require this exact string.** `grokcli.check_version`
+only requires that `grok --version` runs and prints a usable Grok version line.
+Any working install is accepted so users are not broken by normal CLI updates.
 
 ```json
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "enforcement": "none",
   "version": "grok 0.2.101 (5bc4b5dfadcf) [stable]",
   "validatedAtUtc": "2026-07-14T17:31:02Z",
   "probeEvidence": "scripts/tests/fixtures/probe-report.md"
 }
 ```
 
-`grokcli.check_version` compares this string EXACTLY against the first line
-of `grok --version` before every run. Any mismatch - a different version, a
-different build hash, or a missing/unreadable pin file - fails closed as
-error class `version-mismatch`. The pin is a DATA file, never a code
-constant, because Grok releases near-daily; see "Revalidating a new Grok CLI
-release" below for the only sanctioned way to change it.
+Update the stamp after a full probe suite if you want docs/evidence accuracy.
+See "Revalidating a new Grok CLI release" below.
 
 ## C6 invocation baseline: flags actually used
 
@@ -184,24 +183,20 @@ Pins confirmed live against the wrapper's assumptions:
   `num_turns >= max_turns` fallback), so no wrapper change was needed; a future
   revalidation run can pin the exact token if it ever surfaces.
 
-## Revalidating a new Grok CLI release
+## Updating the last-validated stamp after a new Grok CLI release
 
-Grok ships near-daily. `accepted-version.json` is rewritten ONLY by a fully
-green run of the live probe suite with `--revalidate`:
+Grok ships frequently. Users are **not** blocked when their CLI differs from
+`accepted-version.json`. Maintainers may still refresh the stamp after a fully
+green probe suite so docs/evidence stay accurate:
 
 ```bash
 python3 plugin/wrapper/scripts/tests/live/live_probes.py --revalidate
 ```
 
-On a fully green run, this re-runs the full probe suite against the
-currently installed binary and rewrites `accepted-version.json` with the new
-version string, a fresh timestamp, and a fresh evidence pointer. On ANY red
-run, the old pin is left untouched and the wrapper stays fail-closed with
-`version-mismatch` against the new binary until the suite passes.
-`accepted-version.json` must never be hand-edited - a hand edit would pin a
-version whose sandbox and permission-mode behavior was never re-probed,
-defeating the entire fail-closed design. If a probe fails, fix the wrapper's
-assumptions (or escalate), never the probe itself.
+On a fully green run, rewrite `accepted-version.json` with the new version
+string, timestamp, evidence pointer, and keep `"enforcement": "none"`. On a red
+run, leave the stamp alone and fix wrapper assumptions (or escalate) — do not
+fake-green the stamp. The stamp is evidence, not a user allowlist.
 
 ## Per-platform live-probe gate
 

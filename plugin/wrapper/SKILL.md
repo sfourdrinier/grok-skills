@@ -52,7 +52,7 @@ summary, AFTER relaying the raw envelope - never instead of it.
 ### `preflight` - readiness check, no task
 
 Run this first in a session, or whenever something downstream looks wrong.
-It is read-only: it verifies the `grok` binary and version pin, the presence
+It is read-only: it verifies the `grok` binary is runnable, the presence
 of `~/.grok/auth.json`, a full private-home create/login/inspect/destroy
 cycle, sandbox policy resolution for every live mode, the state root
 permissions, and the stale-home audit. It never spawns a task-bearing Grok

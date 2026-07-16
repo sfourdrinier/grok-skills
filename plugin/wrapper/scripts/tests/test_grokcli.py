@@ -195,14 +195,21 @@ class ChildEnvTests(GrokCliTestBase):
 
 
 class VersionTests(GrokCliTestBase):
-    """check_version compares the first line of grok --version to the accepted pin, failing closed."""
+    """check_version requires a runnable Grok, not an exact build pin."""
 
-    def test_check_version_matches_pin(self) -> None:
+    def test_check_version_returns_installed_line(self) -> None:
         returned = grokcli.check_version(_FAKE_BINARY)
-        self.assertEqual(returned, grokcli.accepted_version())
+        self.assertTrue(returned.lower().startswith("grok"))
 
-    def test_version_mismatch_fails_closed(self) -> None:
+    def test_any_working_grok_version_is_accepted(self) -> None:
+        # Public plugin: users must not be blocked when their CLI is newer/older
+        # than the last maintainer-validated stamp.
         with mock.patch.dict(os.environ, {"FAKE_GROK_VERSION": "grok 9.9.9 (deadbeef) [fake]"}, clear=False):
+            returned = grokcli.check_version(_FAKE_BINARY)
+        self.assertEqual(returned, "grok 9.9.9 (deadbeef) [fake]")
+
+    def test_unusable_version_output_fails_closed(self) -> None:
+        with mock.patch.dict(os.environ, {"FAKE_GROK_VERSION": "not-a-grok-cli"}, clear=False):
             with self.assertRaises(GrokWrapperError) as caught:
                 grokcli.check_version(_FAKE_BINARY)
         self.assertEqual(caught.exception.error_class, "version-mismatch")

@@ -137,7 +137,7 @@ def _auth_present() -> "tuple[bool, list]":
 def ensure_ready(binary: pathlib.Path, *, force: bool = False) -> str:
     """Return the resolved Grok version if readiness is cached or re-verified.
 
-    On cache miss (or ``force``), re-checks version pin + auth material presence.
+    On cache miss (or ``force``), re-checks runnable Grok version + auth material.
     On cache hit, STILL re-checks auth presence (cheap; prevents stale green after
     auth deletion). Heavier probes stay on explicit ``preflight`` / setup.
     """
