@@ -342,42 +342,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         return _emit(env, None)
 
-    if mode in _NON_STORING_MODES:
-        return _emit(env, None)
-    run_id = env.get("runId")
-    if not isinstance(run_id, str) or not run_id:
-        # A storing mode returned an envelope without a usable runId. Reading
-        # env["runId"] here (outside the try/except above) would let a
-        # KeyError escape with no stdout envelope emitted, breaking the
-        # exactly-one-envelope guarantee. Guard it so every path still emits
-        # exactly one envelope (here: without a stored copy).
-        log_stderr(
-            "grok_agent",
-            "main",
-            "storing mode {!r} produced an envelope without a usable runId; emitting without a stored copy".format(mode),
-        )
-        return _emit(env, None)
-    # Modes that already terminalized via persist_terminal_envelope (or that
-    # must not write while a worker may still be alive) set doNotStore.
-    if env.get("doNotStore") is True:
-        clean = dict(env)
+    # PR1 single terminal writer: modes own durable envelope.json via
+    # persist_terminal_envelope. Entrypoint never O_TRUNC-stores a second copy.
+    clean = dict(env) if isinstance(env, dict) else env
+    if isinstance(clean, dict):
         clean.pop("doNotStore", None)
-        return _emit(clean, None)
-    envelope_path = runstate.state_root() / "runs" / run_id / "envelope.json"
-    # If a valid terminal envelope already exists, never O_TRUNC-replace it.
-    if envelope_path.is_file():
-        try:
-            existing = json.loads(envelope_path.read_text(encoding="utf-8"))
-            if isinstance(existing, dict) and not validate_envelope(existing):
-                clean = dict(env)
-                clean.pop("doNotStore", None)
-                return _emit(clean, None)
-        except (OSError, json.JSONDecodeError):
-            pass
-    # Strip non-C4 helper keys before store
-    clean = dict(env)
-    clean.pop("doNotStore", None)
-    return _emit(clean, envelope_path)
+    return _emit(clean, None)
 
 
 if __name__ == "__main__":

@@ -193,3 +193,80 @@ class FinalizeWatchdogTests(unittest.TestCase):
         self.assertTrue(durable)
         self.assertEqual(out["status"], "success")
         self.assertEqual(paths.envelope_path.read_bytes(), body)
+
+    def test_nonzero_exit_cli_failure(self) -> None:
+        paths, env, rev = self._prepare_finalizing()
+
+        class FakeProc:
+            def __init__(self):
+                self.exitcode = 7
+            def start(self):
+                return None
+            def join(self, timeout=None):
+                return None
+            def is_alive(self):
+                return False
+            def terminate(self):
+                return None
+            def kill(self):
+                return None
+
+        class FakeCtx:
+            def Process(self, **kwargs):
+                return FakeProc()
+
+        with mock.patch.object(finalize_worker.multiprocessing, "get_context", return_value=FakeCtx()):
+            out, ephemeral, durable = finalize_worker.run_finalize_parent(
+                paths, mode="review", envelope=env, lifecycle="completed",
+                expected_revision=rev, budget_seconds=5,
+            )
+        self.assertIsNone(ephemeral)
+        self.assertEqual(out["error"]["class"], "cli-failure")
+        self.assertEqual(runstate.load_run_record(paths.run_id)["lifecycle"], "failed")
+
+    def test_timeout_path_durable_failure(self) -> None:
+        paths, env, rev = self._prepare_finalizing()
+        # Worker appears alive then dead after kill; timed_out True, no envelope
+        state = {"alive_checks": 0}
+
+        class FakeProc:
+            def __init__(self):
+                self.exitcode = None
+            def start(self):
+                return None
+            def join(self, timeout=None):
+                return None
+            def is_alive(self):
+                # After budget join and after terminate: alive; after kill: dead
+                state["alive_checks"] += 1
+                return state["alive_checks"] <= 2
+            def terminate(self):
+                return None
+            def kill(self):
+                self.exitcode = -9
+                return None
+
+        class FakeCtx:
+            def Process(self, **kwargs):
+                return FakeProc()
+
+        with mock.patch.object(finalize_worker.multiprocessing, "get_context", return_value=FakeCtx()):
+            out, ephemeral, durable = finalize_worker.run_finalize_parent(
+                paths, mode="review", envelope=env, lifecycle="completed",
+                expected_revision=rev, budget_seconds=1,
+            )
+        self.assertIsNone(ephemeral)
+        self.assertEqual(out["error"]["class"], "finalization-timeout")
+        self.assertEqual(runstate.load_run_record(paths.run_id)["lifecycle"], "failed")
+        self.assertTrue(paths.envelope_path.is_file())
+
+    def test_stderr_private_permissions(self) -> None:
+        import stat as statmod
+        paths, env, rev = self._prepare_finalizing()
+        # Force worker path that writes stderr by calling worker main with bad persist
+        # Simpler: call _write_private_text
+        err = paths.run_dir / "finalize-worker.stderr"
+        finalize_worker._write_private_text(err, "boom")
+        mode = statmod.S_IMODE(err.stat().st_mode)
+        self.assertEqual(mode, 0o600)
+

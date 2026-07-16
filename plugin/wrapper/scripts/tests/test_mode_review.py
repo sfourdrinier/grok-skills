@@ -201,6 +201,11 @@ class ReviewModeTests(ModeHarness):
         record = _run_record_for(self.state_home, env["runId"])
         self.assertEqual(record["status"], "failure", "run.json must be terminal, not stuck at running")
         self.assertEqual(
+            record.get("lifecycle"),
+            "canceled",
+            "operator cancel must durable-terminalize as lifecycle canceled",
+        )
+        self.assertEqual(
             self.temp_home_prefix_dirs() - before, set(), "the private home must be torn down on SIGTERM"
         )
 

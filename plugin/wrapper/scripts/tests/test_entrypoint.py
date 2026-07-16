@@ -141,6 +141,26 @@ class UsageErrorTests(unittest.TestCase):
         json.loads(out)  # the entire capture parses as a single JSON document
 
 
+
+    def test_main_never_stores_envelope_path_argument(self) -> None:
+        """Entrypoint always emits with envelope_path=None (PR1 single writer)."""
+        calls = []
+        real = grok_agent.emit_envelope
+
+        def spy(env, path):
+            calls.append(path)
+            return real(env, None)
+
+        from groklib.modes import preflight
+        buffer = io.StringIO()
+        with mock.patch.object(grok_agent, "emit_envelope", spy):
+            with contextlib.redirect_stdout(buffer):
+                # usage error path — no mode persist
+                code = grok_agent.main(["not-a-mode"])
+        self.assertEqual(code, 1)
+        self.assertTrue(calls)
+        self.assertTrue(all(c is None for c in calls), calls)
+
 class EntrypointSuccessTests(PreflightHarness):
     """The success and stored-write-failure paths each emit exactly one envelope."""
 
@@ -241,3 +261,20 @@ class EntrypointSuccessTests(PreflightHarness):
 
 if __name__ == "__main__":
     unittest.main()
+
+class EntrypointStorePolicyTests(unittest.TestCase):
+    def test_main_emits_with_no_store_path(self) -> None:
+        calls = []
+        real = grok_agent.emit_envelope
+
+        def spy(env, path):
+            calls.append(path)
+            real(env, None)
+
+        buffer = io.StringIO()
+        with mock.patch.object(grok_agent, "emit_envelope", spy):
+            with contextlib.redirect_stdout(buffer):
+                code = grok_agent.main(["not-a-mode"])
+        self.assertEqual(code, 1)
+        self.assertTrue(calls)
+        self.assertTrue(all(c is None for c in calls), calls)

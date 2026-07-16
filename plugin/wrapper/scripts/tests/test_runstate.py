@@ -788,22 +788,57 @@ class CreateRunSeedTests(unittest.TestCase):
         self.assertEqual(record["lifecycle"], "completed")
 
 
-    def test_write_run_record_never_terminalizes_without_envelope(self) -> None:
+    def test_public_write_run_record_removed(self) -> None:
+        self.assertFalse(hasattr(runstate, "write_run_record"))
+
+    def test_cas_cannot_set_success_status_while_nonterminal(self) -> None:
         paths = runstate.create_run("review")
-        runstate.write_run_record(
-            paths,
-            {
-                "schemaVersion": 1,
-                "runId": paths.run_id,
-                "mode": "review",
-                "status": "success",
-                "requestedModel": "grok-4.5",
-            },
+        updated = runstate.cas_update_run_record(
+            paths, 0, {"requestedModel": "grok-4.5", "status": "success"}
         )
-        record = runstate.load_run_record(paths.run_id)
-        self.assertNotIn(record.get("lifecycle"), ("completed", "failed", "canceled"))
-        self.assertEqual(record.get("status"), "running")
+        self.assertEqual(updated["status"], "running")
+        self.assertEqual(updated["lifecycle"], "created")
         self.assertFalse(paths.envelope_path.is_file())
+
+    def test_concurrent_cas_conflict(self) -> None:
+        import threading
+        paths = runstate.create_run("review")
+        results = []
+        barrier = threading.Barrier(2)
+
+        def worker():
+            barrier.wait()
+            try:
+                runstate.cas_update_run_record(paths, 0, {"repository": "/r"})
+                results.append("ok")
+            except runstate.CasConflictError:
+                results.append("conflict")
+
+        t1 = threading.Thread(target=worker)
+        t2 = threading.Thread(target=worker)
+        t1.start(); t2.start()
+        t1.join(); t2.join()
+        self.assertEqual(sorted(results), ["conflict", "ok"])
+        self.assertEqual(runstate.load_run_record(paths.run_id)["recordRevision"], 1)
+
+    def test_effective_lifecycle_resolution_order(self) -> None:
+        rec = {"lifecycle": "completed", "status": "success"}
+        life, src = runstate.effective_lifecycle(
+            rec, has_valid_envelope=True, envelope_status="failure", process_liveness="dead"
+        )
+        self.assertEqual(life, "completed")
+        self.assertEqual(src, "record")
+        rec = {"lifecycle": "finalizing", "status": "running"}
+        life, src = runstate.effective_lifecycle(
+            rec, has_valid_envelope=True, envelope_status="success", process_liveness="dead"
+        )
+        self.assertEqual(life, "completed")
+        self.assertEqual(src, "envelope")
+        life, src = runstate.effective_lifecycle(
+            rec, has_valid_envelope=False, envelope_status=None, process_liveness="dead"
+        )
+        self.assertEqual(life, "interrupted")
+        self.assertEqual(src, "derived")
 
     def test_persist_requires_revision_and_matching_lifecycle(self) -> None:
         from groklib.envelope import build_envelope, failure_envelope

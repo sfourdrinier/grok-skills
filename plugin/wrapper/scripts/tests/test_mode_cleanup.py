@@ -61,7 +61,13 @@ class CleanupModeTests(unittest.TestCase):
             "progressStreamPath": str(paths.progress_path),
             "envelopePath": str(paths.envelope_path),
         }
-        runstate.write_run_record(paths, record)
+        # CAS seed running metadata
+        rec = runstate.load_run_record(paths.run_id)
+        rev = int(rec.get("recordRevision", 0))
+        if rec.get("lifecycle") == "created":
+            rec = runstate.set_lifecycle(paths, rev, "running")
+            rev = int(rec["recordRevision"])
+        runstate.cas_update_run_record(paths, rev, {"status": "running", "requestedModel": record.get("requestedModel"), "worktreePath": record.get("worktreePath"), "worktreeBranch": record.get("worktreeBranch"), "baseRevision": record.get("baseRevision"), "repository": record.get("repository")})
 
     def _seed_run_without_worktree(self):
         paths = runstate.create_run("code")

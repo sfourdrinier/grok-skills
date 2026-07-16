@@ -251,7 +251,9 @@ def _persist_preflight_terminal(
     *,
     lifecycle: str,
 ) -> dict:
-    """Envelope-first terminal persist for preflight (design §7.1)."""
+    """Envelope-first terminal persist for preflight (design §7.1). Fail closed."""
+    from groklib.envelope import failure_envelope
+
     try:
         record = runstate.load_run_record(run_paths.run_id)
         rev = int(record.get("recordRevision", 0))
@@ -264,12 +266,22 @@ def _persist_preflight_terminal(
             record = runstate.set_lifecycle(run_paths, rev, "finalizing")
             rev = int(record["recordRevision"])
         runstate.persist_terminal_envelope(run_paths, rev, envelope, lifecycle=lifecycle)
+        return envelope
     except Exception as exc:
         _log(
             "_persist_preflight_terminal",
             "could not persist terminal preflight envelope for {}: {}".format(run_paths.run_id, exc),
         )
-    return envelope
+        fail = failure_envelope(
+            run_id=run_paths.run_id,
+            mode="preflight",
+            error_class="finalization-worker-missing-result",
+            message="preflight terminal persist failed: {}".format(exc),
+            detail={"runId": run_paths.run_id},
+            progressStreamPath=str(run_paths.progress_path),
+        )
+        fail["doNotStore"] = True
+        return fail
 
 
 def run(args: argparse.Namespace) -> dict:

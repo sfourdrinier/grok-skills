@@ -771,53 +771,8 @@ def allocate_leader_socket(private_home: pathlib.Path, run_id: str) -> pathlib.P
     return socket_path
 
 
-def write_run_record(paths: RunPaths, record: dict) -> None:
-    """Legacy merge helper for non-terminal bookkeeping only.
-
-    Prefer ``cas_update_run_record`` / ``set_lifecycle`` / ``persist_terminal_envelope``.
-    Refuses to mutate terminal runs. Never sets terminal lifecycle. Never stores
-    status success/failure while non-terminal.
-    """
-    _verify_paths_owner(paths)
-    with run_lock(paths):
-        existing: dict = {}
-        record_path = paths.run_dir / "run.json"
-        if record_path.is_file():
-            try:
-                existing = _load_run_json_unlocked(paths)
-            except UnknownRunError:
-                existing = {}
-        if existing.get("lifecycle") in _TERMINAL_LIFECYCLES:
-            raise LifecycleError(
-                "refusing to mutate terminal run via write_run_record",
-                {"runId": paths.run_id, "lifecycle": existing.get("lifecycle")},
-            )
-        merged = dict(existing)
-        for key, value in record.items():
-            if key in _PRESERVE_ON_MERGE and key in existing:
-                continue
-            if key == "lifecycle":
-                continue
-            if key not in _CAS_ALLOWED_KEYS and key not in ("schemaVersion", "mode"):
-                continue  # drop unknown keys
-            merged[key] = value
-        merged["runId"] = paths.run_id
-        if "createdAtUtc" not in merged or not merged["createdAtUtc"]:
-            merged["createdAtUtc"] = existing.get("createdAtUtc") or _utc_now_iso()
-        life = existing.get("lifecycle") or "created"
-        if life == "created" and record.get("status") == "running":
-            life = "running"
-        merged["lifecycle"] = life
-        status_value = record.get("status")
-        if status_value in ("success", "failure", None):
-            merged["status"] = "running"
-        else:
-            merged["status"] = status_value
-        if existing:
-            merged["recordRevision"] = int(existing.get("recordRevision", 0)) + 1
-        else:
-            merged["recordRevision"] = int(record.get("recordRevision", 0) or 0)
-        write_json_atomic(record_path, merged)
+# Public write_run_record removed in PR1: use cas_update_run_record / set_lifecycle /
+# persist_terminal_envelope only.
 
 
 def load_run_record(run_id: str) -> dict:

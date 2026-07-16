@@ -51,7 +51,6 @@ from groklib.modes._shared import (
     _publish_terminal_envelope,
     _run_record_fields,
     _write_prompt_file,
-    best_effort_write_run_record,
     grok_usage_response_fields,
     resolve_terminal_cleanup,
     source_grok_dir,
@@ -345,18 +344,24 @@ def _run_worktree_mode_body(
         )
     except Exception as exc:
         _log("_run_worktree_mode_body", "lifecycle advance failed: {}".format(exc))
-        runstate.write_run_record(
-            run_paths,
-            _run_record_fields(
-                mode=mode,
-                run_paths=run_paths,
-                status_value="running",
-                requested_model=requested_model,
-                repository=repository,
-                target_workspace=target_workspace,
-                worktree=None,
-            ),
-        )
+        try:
+            record = runstate.load_run_record(run_paths.run_id)
+            rev = int(record.get("recordRevision", 0))
+            if record.get("lifecycle") == "created":
+                record = runstate.set_lifecycle(run_paths, rev, "running")
+                rev = int(record["recordRevision"])
+            runstate.cas_update_run_record(
+                run_paths,
+                rev,
+                {
+                    "requestedModel": requested_model,
+                    "repository": repository,
+                    "targetWorkspace": target_workspace,
+                    "status": "running",
+                },
+            )
+        except Exception as retry_exc:
+            _log("_run_worktree_mode_body", "retry lifecycle advance failed: {}".format(retry_exc))
     progress.safe_emit("start", "{} run created".format(mode), data={"mode": mode})
 
     # Reap a crashed prior run's stranded credential-bearing private home on live

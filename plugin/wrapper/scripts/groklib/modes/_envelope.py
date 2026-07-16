@@ -315,21 +315,26 @@ def terminalize_unexpected_failure(
     programmer error), a minimal detail-free failure envelope is emitted as the
     final fallback so exactly one envelope always reaches the entrypoint.
     """
+    terminal_lifecycle = "failed"
     if isinstance(exc, GrokWrapperError):
         error_class = exc.error_class
         message = str(exc)
         detail: Optional[dict] = exc.detail or None
+        terminal_lifecycle = "failed"
     elif isinstance(exc, (SystemExit, KeyboardInterrupt)):
         # A SIGTERM-driven SystemExit or a Ctrl-C KeyboardInterrupt is an external
         # cancellation, not a wrapper bug: classify it as "cancelled" so the
         # terminal envelope is honest (F5-sigterm-bypasses-envelope).
+        # Durable lifecycle uses American spelling "canceled" (design §6).
         error_class = "cancelled"
         message = "{} run was cancelled by an external signal".format(mode)
         detail = {"reason": "external-termination", "exceptionType": type(exc).__name__}
+        terminal_lifecycle = "canceled"
     else:
         error_class = "cli-failure"
         message = "{} run failed with an unexpected error".format(mode)
         detail = {"reason": "unexpected-error", "exceptionType": type(exc).__name__}
+        terminal_lifecycle = "failed"
 
     log(
         "terminalize_unexpected_failure",
@@ -425,10 +430,14 @@ def terminalize_unexpected_failure(
         if life == "running":
             record = runstate.set_lifecycle(run_paths, rev, "finalizing")
             rev = int(record["recordRevision"])
-        runstate.persist_terminal_envelope(run_paths, rev, envelope, lifecycle="failed")
+        runstate.persist_terminal_envelope(
+            run_paths, rev, envelope, lifecycle=terminal_lifecycle
+        )
     except Exception as persist_exc:
         log(
             "terminalize_unexpected_failure",
             "persist_terminal_envelope failed for {}: {}".format(run_paths.run_id, persist_exc),
         )
+        envelope = dict(envelope)
+        envelope["doNotStore"] = True
     return envelope

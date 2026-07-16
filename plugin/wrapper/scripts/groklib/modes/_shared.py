@@ -144,20 +144,6 @@ def repo_root_for_path(anchor: pathlib.Path) -> pathlib.Path:
     return pathlib.Path(root)
 
 
-def best_effort_write_run_record(
-    run_paths: runstate.RunPaths, record: dict, warnings: List[str], log: Callable[[str, str], None]
-) -> None:
-    """Merge run.json under lock, degrading to a warning (never raising) on failure."""
-    try:
-        runstate.write_run_record(run_paths, record)
-    except Exception as exc:
-        log(
-            "best_effort_write_run_record",
-            "could not persist terminal run.json for {}: {}".format(run_paths.run_id, exc),
-        )
-        warnings.append("the terminal run record could not be persisted (see stderr for detail)")
-
-
 def _publish_terminal_envelope(
     run_paths: runstate.RunPaths,
     mode: str,
@@ -674,7 +660,25 @@ def _run_grok_mode_body(
         )
     except Exception as exc:
         _log("_run_grok_mode_body", "could not advance lifecycle to running: {}".format(exc))
-        runstate.write_run_record(run_paths, _run_record(run, run_paths, "running"))
+        # Best-effort re-read revision and retry once (no public write_run_record)
+        try:
+            record = runstate.load_run_record(run_paths.run_id)
+            rev = int(record.get("recordRevision", 0))
+            if record.get("lifecycle") == "created":
+                record = runstate.set_lifecycle(run_paths, rev, "running")
+                rev = int(record["recordRevision"])
+            runstate.cas_update_run_record(
+                run_paths,
+                rev,
+                {
+                    "requestedModel": run.requested_model,
+                    "repository": run.repository,
+                    "targetWorkspace": run.target_workspace,
+                    "status": "running",
+                },
+            )
+        except Exception as retry_exc:
+            _log("_run_grok_mode_body", "retry advance lifecycle failed: {}".format(retry_exc))
     progress.safe_emit("start", "{} run created".format(run.mode), data={"mode": run.mode})
 
     # Reap a crashed prior run's stranded credential-bearing private home on live
