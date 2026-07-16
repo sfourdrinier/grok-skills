@@ -752,6 +752,19 @@ class CreateRunSeedTests(unittest.TestCase):
         self.assertEqual(finished["status"], "failure")
 
 
+    def test_persist_cancelled_envelope_coerces_failed_to_canceled(self) -> None:
+        from groklib.envelope import failure_envelope
+
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.set_lifecycle(paths, 1, "finalizing")
+        env = failure_envelope(
+            run_id=paths.run_id, mode="review", error_class="cancelled", message="bye"
+        )
+        rec = runstate.persist_terminal_envelope(paths, 2, env, lifecycle="failed")
+        self.assertEqual(rec["lifecycle"], "canceled")
+
+
     def test_write_json_atomic_fsyncs_parent_directory(self) -> None:
         """After os.replace, parent dir is fsync'd for power-loss durability."""
         path = pathlib.Path(self.tmp_root) / "durable.json"

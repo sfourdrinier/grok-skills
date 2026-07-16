@@ -82,28 +82,43 @@ def finalize_budget_seconds(mode: str) -> int:
     return int(_DEFAULT_BUDGETS.get(mode, 120))
 
 
-# Liveness file content "starting" = parent is about to spawn / mid-start (no pid yet).
-_WORKER_STARTING_TOKEN = "starting"
+# Liveness marker JSON (atomic write). state=starting before spawn; running after pid known.
+_WORKER_STATE_STARTING = "starting"
+_WORKER_STATE_RUNNING = "running"
 
 
 def _worker_pid_path(run_dir: pathlib.Path) -> pathlib.Path:
     return run_dir / "finalize-worker.pid"
 
 
+def _write_worker_marker(run_dir: pathlib.Path, payload: Dict[str, Any]) -> None:
+    """Atomic write of finalize-worker.pid; raises OSError on failure (fail closed)."""
+    _write_private_text(_worker_pid_path(run_dir), json.dumps(payload, sort_keys=True) + "\n")
+
+
 def mark_worker_starting(run_dir: pathlib.Path) -> None:
-    """Gate durable parent terminalization before proc.start() obtains a real pid."""
-    try:
-        _write_private_text(_worker_pid_path(run_dir), _WORKER_STARTING_TOKEN)
-    except OSError as exc:
-        _log("mark_worker_starting", "could not write finalize-worker.pid: {}".format(exc))
+    """Gate durable parent terminalization before proc.start() obtains a real pid.
+
+    Raises OSError if the marker cannot be written — callers must abort spawn.
+    """
+    _write_worker_marker(
+        run_dir,
+        {"schemaVersion": 1, "state": _WORKER_STATE_STARTING},
+    )
 
 
 def write_worker_pid(run_dir: pathlib.Path, pid: int) -> None:
-    """Record the live finalize worker pid so SIGTERM recovery can observe liveness."""
-    try:
-        _write_private_text(_worker_pid_path(run_dir), str(int(pid)))
-    except OSError as exc:
-        _log("write_worker_pid", "could not write finalize-worker.pid: {}".format(exc))
+    """Record live finalize worker pid + startToken (pid-reuse safe). Raises OSError."""
+    pid_i = int(pid)
+    start_token = platformsupport.process_start_token(pid_i)
+    payload: Dict[str, Any] = {
+        "schemaVersion": 1,
+        "state": _WORKER_STATE_RUNNING,
+        "pid": pid_i,
+    }
+    if isinstance(start_token, str) and start_token:
+        payload["startToken"] = start_token
+    _write_worker_marker(run_dir, payload)
 
 
 def clear_worker_pid(run_dir: pathlib.Path) -> None:
@@ -116,11 +131,11 @@ def clear_worker_pid(run_dir: pathlib.Path) -> None:
 
 
 def finalize_worker_is_alive(run_dir: pathlib.Path) -> bool:
-    """True if finalize is in progress (starting or live pid) — design §9.4 gate.
+    """True if finalize is in progress (starting or live identified worker).
 
-    The ``starting`` token closes the race between ``proc.start()`` and writing
-    the real pid: SIGTERM in that window must not durable-cancel while a worker
-    may already be running.
+    - ``starting``: parent is mid-spawn (pre-pid); treat as live for the short window.
+    - ``running``: pid must be alive via platformsupport AND startToken must match
+      when both sides can provide one (pid-reuse safe, same as owner.pid).
     """
     path = _worker_pid_path(run_dir)
     if not path.is_file():
@@ -129,22 +144,36 @@ def finalize_worker_is_alive(run_dir: pathlib.Path) -> bool:
         raw = path.read_text(encoding="utf-8").strip()
     except OSError:
         return False
-    if raw == _WORKER_STARTING_TOKEN:
+    if not raw:
+        return False
+    # Legacy plain-text markers from older builds
+    if raw == _WORKER_STATE_STARTING:
         return True
     try:
-        pid = int(raw)
+        as_int = int(raw)
     except ValueError:
-        return False
-    if pid <= 0:
-        return False
+        as_int = None
+    if as_int is not None:
+        return bool(as_int > 0 and platformsupport.process_is_alive(as_int))
     try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
         return False
-    except PermissionError:
-        # Process exists but we cannot signal it — treat as alive (fail closed).
+    if not isinstance(payload, dict):
+        return False
+    state = payload.get("state")
+    if state == _WORKER_STATE_STARTING:
         return True
-    except OSError:
+    if state != _WORKER_STATE_RUNNING:
+        return False
+    pid = payload.get("pid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return False
+    if not platformsupport.process_is_alive(pid):
+        return False
+    stored_token = payload.get("startToken")
+    current_token = platformsupport.process_start_token(pid)
+    if isinstance(stored_token, str) and current_token is not None and stored_token != current_token:
         return False
     return True
 
@@ -272,30 +301,17 @@ def run_finalize_parent(
         progress.safe_emit("finalizing", "entering finalization")
 
     timed_out = False
-    # Liveness marker BEFORE start so SIGTERM cannot durable-cancel in the
-    # start→pid-write window (worker may already be running).
-    mark_worker_starting(paths.run_dir)
-    ctx = multiprocessing.get_context("spawn")
-    proc = ctx.Process(
-        target=finalize_worker_main,
-        args=(str(payload_path),),
-        name="grok-finalize",
-    )
-    # Non-daemon: if parent is cancelled (SIGTERM) while waiting, the worker must
-    # keep running to finish durable envelope persist. Unkillable path abandons
-    # the child from the process join set so interpreter exit does not hang.
-    proc.daemon = False
-    try:
-        proc.start()
-    except Exception as spawn_exc:
+    started = False
+    proc = None  # type: ignore[assignment]
+
+    def _spawn_failure_result(message: str, reason: str) -> Tuple[dict, Optional[str], bool]:
         clear_worker_pid(paths.run_dir)
-        _log("run_finalize_parent", "finalize worker spawn failed: {}".format(spawn_exc))
         fail = envelope_mod.failure_envelope(
             run_id=paths.run_id,
             mode=mode,
             error_class="cli-failure",
-            message="finalize worker could not be started: {}".format(spawn_exc),
-            detail={"runId": paths.run_id, "reason": "finalize-spawn-failed"},
+            message=message,
+            detail={"runId": paths.run_id, "reason": reason},
             progressStreamPath=str(paths.progress_path),
         )
         try:
@@ -310,10 +326,80 @@ def run_finalize_parent(
             progress.safe_emit("finalizing", "finalization worker spawn failed", level="error")
         return fail, None, True
 
-    worker_pid = getattr(proc, "pid", None)
-    if worker_pid is not None:
-        write_worker_pid(paths.run_dir, int(worker_pid))
     try:
+        # Liveness marker BEFORE start so SIGTERM cannot durable-cancel in the
+        # start→pid-write window. Fail closed if the marker cannot be written.
+        try:
+            mark_worker_starting(paths.run_dir)
+        except OSError as mark_exc:
+            _log("run_finalize_parent", "could not write starting marker: {}".format(mark_exc))
+            return _spawn_failure_result(
+                "finalize liveness marker could not be written: {}".format(mark_exc),
+                "finalize-liveness-marker-failed",
+            )
+
+        ctx = multiprocessing.get_context("spawn")
+        proc = ctx.Process(
+            target=finalize_worker_main,
+            args=(str(payload_path),),
+            name="grok-finalize",
+        )
+        # Non-daemon: if parent is cancelled (SIGTERM) while waiting, the worker must
+        # keep running to finish durable envelope persist. Unkillable path abandons
+        # the child from the process join set so interpreter exit does not hang.
+        proc.daemon = False
+        try:
+            proc.start()
+        except Exception as spawn_exc:
+            _log("run_finalize_parent", "finalize worker spawn failed: {}".format(spawn_exc))
+            return _spawn_failure_result(
+                "finalize worker could not be started: {}".format(spawn_exc),
+                "finalize-spawn-failed",
+            )
+        started = True
+
+        worker_pid = getattr(proc, "pid", None)
+        if worker_pid is not None:
+            try:
+                write_worker_pid(paths.run_dir, int(worker_pid))
+            except OSError as pid_exc:
+                _log(
+                    "run_finalize_parent",
+                    "could not write worker pid marker: {}".format(pid_exc),
+                )
+                try:
+                    if proc.is_alive():
+                        proc.terminate()
+                        proc.join(_TERMINATE_GRACE)
+                    if proc.is_alive():
+                        proc.kill()
+                        proc.join(_KILL_GRACE)
+                except Exception:
+                    pass
+                if proc.is_alive():
+                    _abandon_process_for_shutdown(proc)
+                return _spawn_failure_result(
+                    "finalize worker pid marker could not be written: {}".format(pid_exc),
+                    "finalize-pid-marker-failed",
+                )
+        elif proc.is_alive():
+            # Live worker with no observable pid cannot be tracked safely.
+            try:
+                proc.terminate()
+                proc.join(_TERMINATE_GRACE)
+                if proc.is_alive():
+                    proc.kill()
+                    proc.join(_KILL_GRACE)
+            except Exception:
+                pass
+            if proc.is_alive():
+                _abandon_process_for_shutdown(proc)
+            return _spawn_failure_result(
+                "finalize worker started without a pid",
+                "finalize-spawn-no-pid",
+            )
+        # Dead already without a pid: keep starting marker until finally clears.
+
         try:
             proc.join(timeout=float(budget))
             if proc.is_alive():
@@ -337,11 +423,7 @@ def run_finalize_parent(
                     detail={"runId": paths.run_id},
                     progressStreamPath=str(paths.progress_path),
                 )
-                # doNotStore: entrypoint must not write envelope.json
                 ephemeral["doNotStore"] = True
-                # Keep pid file while returning so concurrent terminalize still sees
-                # the worker as live. Abandon join-on-exit so a stuck child cannot
-                # hang CLI shutdown (worker stays non-daemon for cancel/success path).
                 _abandon_process_for_shutdown(proc)
                 return ephemeral, "finalization-worker-unkillable", False
         except BaseException:
@@ -356,10 +438,16 @@ def run_finalize_parent(
                     "abandon after join interrupt failed: {}".format(abandon_exc),
                 )
             raise
+    except BaseException:
+        # Pre-start cancel (starting marker written, worker never launched): clear
+        # the marker so status/terminalize do not treat the run as finalizing forever.
+        if not started:
+            clear_worker_pid(paths.run_dir)
+        raise
     finally:
         # Keep pid while still alive (unkillable / interrupted); clear once dead.
         try:
-            if not proc.is_alive():
+            if proc is not None and not proc.is_alive():
                 clear_worker_pid(paths.run_dir)
         except Exception:
             pass

@@ -248,11 +248,17 @@ def run(args: argparse.Namespace) -> dict:
         _log("run", "finalize worker liveness check failed: {}".format(liveness_exc))
     record_status = record.get("status") if isinstance(record.get("status"), str) else None
     envelope_status = stored.get("status") if isinstance(stored, dict) else None
+    envelope_error_class = None
+    if isinstance(stored, dict) and isinstance(stored.get("error"), dict):
+        ec = stored["error"].get("class")
+        if isinstance(ec, str):
+            envelope_error_class = ec
     effective_life, lifecycle_source = runstate.effective_lifecycle(
         record,
         has_valid_envelope=stored is not None,
         envelope_status=envelope_status if isinstance(envelope_status, str) else None,
         process_liveness=process_liveness,
+        envelope_error_class=envelope_error_class,
     )
 
     target = _build_target_info(

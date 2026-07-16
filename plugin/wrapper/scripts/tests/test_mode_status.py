@@ -534,5 +534,24 @@ class StatusModeTests(unittest.TestCase):
         finally:
             finalize_worker.clear_worker_pid(paths.run_dir)
 
+
+    def test_status_envelope_only_cancelled_projects_canceled(self) -> None:
+        """Durable cancel envelope with non-terminal run.json projects canceled."""
+        from groklib.envelope import failure_envelope
+
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.set_lifecycle(paths, 1, "finalizing")
+        env = failure_envelope(
+            run_id=paths.run_id, mode="review", error_class="cancelled", message="bye"
+        )
+        runstate.write_json_atomic(paths.envelope_path, env)
+        exit_code, out = _run_status(paths.run_id)
+        envelope = json.loads(out)
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(envelope["status"], "failure")
+        self.assertEqual(envelope["response"]["target"]["lifecycle"], "canceled")
+        self.assertEqual(envelope["response"]["target"]["lifecycleSource"], "envelope")
+
 if __name__ == "__main__":
     unittest.main()

@@ -54,6 +54,7 @@ class FinalizeWatchdogTests(unittest.TestCase):
 
         class FakeProc:
             def __init__(self):
+                self.pid = 424242
                 self._alive = True
                 self.exitcode = None
 
@@ -119,6 +120,7 @@ class FinalizeWatchdogTests(unittest.TestCase):
 
         class FakeProc:
             def __init__(self):
+                self.pid = 424242
                 self.exitcode = 0
 
             def start(self):
@@ -160,6 +162,7 @@ class FinalizeWatchdogTests(unittest.TestCase):
 
         class FakeProc:
             def __init__(self):
+                self.pid = 424242
                 self.exitcode = None
 
             def start(self):
@@ -199,6 +202,7 @@ class FinalizeWatchdogTests(unittest.TestCase):
 
         class FakeProc:
             def __init__(self):
+                self.pid = 424242
                 self.exitcode = 7
             def start(self):
                 return None
@@ -231,6 +235,7 @@ class FinalizeWatchdogTests(unittest.TestCase):
 
         class FakeProc:
             def __init__(self):
+                self.pid = 424242
                 self.exitcode = None
             def start(self):
                 return None
@@ -318,6 +323,7 @@ class FinalizeWatchdogTests(unittest.TestCase):
 
                 class FakeProc:
                     def __init__(self):
+                        self.pid = 424242
                         self.exitcode = 0 if case == "missing" else (7 if case == "cli" else None)
 
                     def start(self):
@@ -379,6 +385,7 @@ class FinalizeWatchdogTests(unittest.TestCase):
 
         class FakeProc:
             def __init__(self):
+                self.pid = 424242
                 self.exitcode = None
 
             def start(self):
@@ -642,11 +649,65 @@ class FinalizeWatchdogTests(unittest.TestCase):
         paths, env, rev = self._prepare_finalizing()
         path = paths.run_dir / "finalize-worker.pid"
         finalize_worker.mark_worker_starting(paths.run_dir)
-        self.assertEqual(path.read_text(encoding="utf-8"), "starting")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(payload.get("state"), "starting")
         finalize_worker.write_worker_pid(paths.run_dir, 4242)
-        self.assertEqual(path.read_text(encoding="utf-8").strip(), "4242")
-        # No leftover tmp siblings
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(payload.get("state"), "running")
+        self.assertEqual(payload.get("pid"), 4242)
         self.assertEqual(list(paths.run_dir.glob("finalize-worker.pid.tmp.*")), [])
+
+    def test_prestart_interrupt_clears_starting_marker(self) -> None:
+        """BaseException before proc.start clears starting marker (no forever-finalizing)."""
+        paths, env, rev = self._prepare_finalizing()
+
+        class FakeProc:
+            def __init__(self):
+                self.daemon = False
+                self.pid = None
+
+            def start(self):
+                raise KeyboardInterrupt()
+
+            def is_alive(self):
+                return False
+
+        class FakeCtx:
+            def Process(self, **kwargs):
+                return FakeProc()
+
+        with mock.patch.object(
+            finalize_worker.multiprocessing, "get_context", return_value=FakeCtx()
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                finalize_worker.run_finalize_parent(
+                    paths,
+                    mode="review",
+                    envelope=env,
+                    lifecycle="completed",
+                    expected_revision=rev,
+                    budget_seconds=5,
+                )
+        self.assertFalse(finalize_worker.finalize_worker_is_alive(paths.run_dir))
+        self.assertFalse((paths.run_dir / "finalize-worker.pid").is_file())
+
+    def test_mark_starting_failure_aborts_without_spawn(self) -> None:
+        paths, env, rev = self._prepare_finalizing()
+        with mock.patch.object(
+            finalize_worker, "mark_worker_starting", side_effect=OSError("disk full")
+        ):
+            with mock.patch.object(finalize_worker.multiprocessing, "get_context") as gc:
+                out, ephemeral, durable = finalize_worker.run_finalize_parent(
+                    paths,
+                    mode="review",
+                    envelope=env,
+                    lifecycle="completed",
+                    expected_revision=rev,
+                    budget_seconds=5,
+                )
+                gc.assert_not_called()
+        self.assertEqual(out["error"]["class"], "cli-failure")
+        self.assertIn("liveness", (out["error"].get("detail") or {}).get("reason", ""))
 
     def test_terminalize_refuses_durable_write_while_worker_alive(self) -> None:
         """SIGTERM recovery must not durable-cancel while finalize worker lives."""
@@ -682,6 +743,7 @@ class FinalizeWatchdogTests(unittest.TestCase):
 
         class FakeProc:
             def __init__(self):
+                self.pid = 424242
                 self.exitcode = None
                 self._alive = True
 

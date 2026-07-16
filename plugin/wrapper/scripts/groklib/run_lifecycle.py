@@ -203,8 +203,13 @@ def _envelope_matches_lifecycle(envelope: dict, lifecycle: str) -> bool:
     status = envelope.get("status")
     if lifecycle == "completed":
         return status == "success"
-    if lifecycle in ("failed", "canceled"):
-        return status == "failure"
+    error = envelope.get("error") if isinstance(envelope.get("error"), dict) else {}
+    error_class = error.get("class")
+    if lifecycle == "canceled":
+        return status == "failure" and error_class == "cancelled"
+    if lifecycle == "failed":
+        # Cancelled failure envelopes must use lifecycle "canceled", not "failed".
+        return status == "failure" and error_class != "cancelled"
     return False
 
 
@@ -305,6 +310,14 @@ def persist_terminal_envelope(
                 "lifecycle is required when writing a new terminal envelope",
                 {"runId": paths.run_id},
             )
+        # Coerce failed→canceled when envelope is a cancelled failure so normal
+        # cancel paths that pass lifecycle="failed" still land as canceled.
+        try:
+            derived = _lifecycle_from_envelope(envelope)
+        except LifecycleError:
+            derived = None
+        if derived == "canceled" and lifecycle == "failed":
+            lifecycle = "canceled"
         if lifecycle not in _TERMINAL_LIFECYCLES:
             raise LifecycleError(
                 "lifecycle must be completed|failed|canceled, got {!r}".format(lifecycle),
@@ -312,10 +325,22 @@ def persist_terminal_envelope(
             )
         if not _envelope_matches_lifecycle(envelope, lifecycle):
             raise LifecycleError(
-                "lifecycle {!r} does not match envelope status {!r}".format(
-                    lifecycle, envelope.get("status")
+                "lifecycle {!r} does not match envelope status/error {!r}/{!r}".format(
+                    lifecycle,
+                    envelope.get("status"),
+                    ((envelope.get("error") or {}) if isinstance(envelope.get("error"), dict) else {}).get(
+                        "class"
+                    ),
                 ),
-                {"lifecycle": lifecycle, "envelopeStatus": envelope.get("status")},
+                {
+                    "lifecycle": lifecycle,
+                    "envelopeStatus": envelope.get("status"),
+                    "errorClass": (
+                        (envelope.get("error") or {}).get("class")
+                        if isinstance(envelope.get("error"), dict)
+                        else None
+                    ),
+                },
             )
         allowed = _PERSIST_LIFECYCLE_TRANSITIONS.get(str(current_life), frozenset())
         if lifecycle not in allowed:
@@ -345,14 +370,21 @@ def effective_lifecycle(
     has_valid_envelope: bool,
     envelope_status: Optional[str],
     process_liveness: str,
+    envelope_error_class: Optional[str] = None,
 ) -> tuple:
-    """Return ``(lifecycle, lifecycleSource)`` without writing (design §6)."""
+    """Return ``(lifecycle, lifecycleSource)`` without writing (design §6).
+
+    When a valid envelope is already on disk but run.json is still non-terminal,
+    project from the envelope body — including cancelled → ``canceled``.
+    """
     life = record.get("lifecycle")
     if life in _TERMINAL_LIFECYCLES:
         return str(life), "record"
     if has_valid_envelope:
         if envelope_status == "success":
             return "completed", "envelope"
+        if envelope_error_class == "cancelled":
+            return "canceled", "envelope"
         return "failed", "envelope"
     # Non-terminal lifecycle (or missing): never promote to completed without envelope
     if process_liveness == "dead":
