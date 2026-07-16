@@ -217,9 +217,9 @@ test("setup invalid mode does not apply webhook in same invocation (atomic prefs
   assert.match(bad.stdout + bad.stderr, /No notification prefs were written|prefs unchanged/i);
 });
 
-test("setup redacts webhook URL query/userinfo from report", () => {
+test("setup redacts webhook path/query/userinfo from report", () => {
   const secretUrl =
-    "https://user:token@hooks.example.com/notify?secret=super-secret-token";
+    "https://user:token@hooks.slack.com/services/T00/B00/super-secret-token?x=1";
   const { result, cwd, pdata } = runSetup([
     "--notification-mode",
     "webhook",
@@ -232,11 +232,31 @@ test("setup redacts webhook URL query/userinfo from report", () => {
   const out = result.stdout + result.stderr;
   assert.doesNotMatch(out, /super-secret-token/);
   assert.doesNotMatch(out, /user:token@/);
-  assert.match(out, /hooks\.example\.com/);
+  assert.doesNotMatch(out, /\/services\//);
+  assert.match(out, /hooks\.slack\.com/);
   // Prefs still persist the full URL; redaction is display-only.
   assert.equal(
     getNotificationConfig(cwd, { CLAUDE_PLUGIN_DATA: pdata }).notificationWebhookUrl,
     secretUrl
+  );
+});
+
+test("setup rejects --notification-mode without a value", () => {
+  const first = runSetup(["--notification-mode", "auto", "--skip-codex-agents"]);
+  const bad = spawnSync(
+    process.execPath,
+    [COMPANION, "setup", "--notification-mode", "--skip-codex-agents"],
+    {
+      encoding: "utf8",
+      cwd: first.cwd,
+      env: { ...process.env, CLAUDE_PLUGIN_DATA: first.pdata },
+    }
+  );
+  assert.equal(bad.status, 1);
+  assert.match(bad.stdout + bad.stderr, /invalid mode|missing value/i);
+  assert.equal(
+    getNotificationConfig(first.cwd, { CLAUDE_PLUGIN_DATA: first.pdata }).notificationMode,
+    "auto"
   );
 });
 
@@ -272,14 +292,16 @@ test("companion never maps terminal lifecycle to running (source contract)", () 
     false,
     "maybeNotifyAfterTerminal must not set lifecycle to running"
   );
-  assert.match(src, /safeRunIdForRunsDir|sanitizeRunId/);
+  assert.match(src, /sanitizeRunId|companion-terminal-notify/);
   assert.match(src, /notifyMode/);
   // Debate intermediate round and --no-notify must skip notify.
   assert.match(src, /skipNotify:\s*true/);
   assert.match(src, /shouldAttemptTerminalNotify/);
   assert.match(src, /--no-notify/);
-  assert.match(src, /parseNotificationMode/);
-  assert.match(src, /preflightOk/);
+  assert.match(src, /companion-setup/);
+  // Maintainability: entrypoint stays under the AGENTS 900-line cap.
+  const lines = src.split("\n").length;
+  assert.ok(lines <= 900, `grok-companion.mjs is ${lines} lines (cap 900)`);
 });
 
 test("code/reason/verify dual-lens fenced runs export execution context", () => {

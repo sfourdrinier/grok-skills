@@ -68,3 +68,28 @@ export function parseWebhookUrl(value) {
 export function shouldAttemptTerminalNotify(opts = {}) {
   return opts.skipNotify !== true;
 }
+
+/**
+ * Setup-report display for a stored webhook URL: scheme + host only.
+ * Never include userinfo, path, query, or fragment (Slack/Discord put secrets in the path).
+ *
+ * @param {string|null|undefined} urlString
+ * @returns {string} e.g. "https://hooks.example.com" or "(set)" or "none"
+ */
+export function formatWebhookDisplay(urlString) {
+  if (urlString == null || urlString === "") {
+    return "none";
+  }
+  if (typeof urlString !== "string") {
+    return "(set)";
+  }
+  try {
+    const u = new URL(urlString.trim());
+    if (u.protocol !== "http:" && u.protocol !== "https:") {
+      return "(set)";
+    }
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return "(set)";
+  }
+}

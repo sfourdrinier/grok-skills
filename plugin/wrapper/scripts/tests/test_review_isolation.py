@@ -421,12 +421,8 @@ class ReviewIsolationHelperTests(unittest.TestCase):
         self.assertTrue(paths[0].startswith("file-"))
 
     def test_worktree_add_failure_removes_prewritten_marker(self) -> None:
-        """If worktree add fails after marker write, marker must not be left behind."""
+        """If worktree add fails with no path left, drop the prewritten marker."""
         run_id = runstate.new_run_id()
-        marker = (
-            runstate.state_root() / "worktrees" / "review" / (run_id + ".owner.json")
-        )
-        # marker path is sibling of worktree path: worktrees/review/<id>.owner.json
         wt = runstate.state_root() / "worktrees" / "review" / run_id
         expected_marker = worktree_mod.marker_path_for(wt)
 
@@ -438,8 +434,56 @@ class ReviewIsolationHelperTests(unittest.TestCase):
             with self.assertRaises(GrokWrapperError) as ctx:
                 review_isolation.prepare_review_isolation(repo_root=self.repo, run_id=run_id)
         self.assertEqual(ctx.exception.error_class, "isolation-unavailable")
-        self.assertFalse(expected_marker.exists(), "orphan marker must be cleaned on add failure")
+        self.assertFalse(expected_marker.exists(), "orphan marker must be cleaned when path is gone")
         self.assertFalse(wt.exists())
+
+    def test_worktree_add_failure_retains_marker_if_path_remains(self) -> None:
+        """Partial worktree left after add failure must keep owner marker for cleanup."""
+        run_id = runstate.new_run_id()
+        wt = runstate.state_root() / "worktrees" / "review" / run_id
+        expected_marker = worktree_mod.marker_path_for(wt)
+
+        real_git = worktree_mod._git
+        real_run_git = worktree_mod._run_git
+
+        def _git(repo, *args, **kwargs):
+            if args and args[0] == "worktree" and args[1] == "add":
+                wt.parent.mkdir(parents=True, exist_ok=True)
+                wt.mkdir(parents=True, exist_ok=True)
+                (wt / "README").write_text("partial\n", encoding="utf-8")
+                raise GrokWrapperError("worktree-failure", "simulated partial worktree add failure")
+            return real_git(repo, *args, **kwargs)
+
+        def _run_git(repo, args, env=None):
+            # Fail only cleanup reaps so the partial path remains.
+            if args and args[0] == "worktree" and args[1] in ("remove", "prune"):
+                return subprocess.CompletedProcess(
+                    args=[], returncode=1, stdout="", stderr="locked"
+                )
+            if args and args[0] == "branch":
+                return subprocess.CompletedProcess(
+                    args=[], returncode=1, stdout="", stderr="locked"
+                )
+            return real_run_git(repo, args, env=env)
+
+        with mock.patch.object(worktree_mod, "_git", side_effect=_git):
+            with mock.patch.object(worktree_mod, "_run_git", side_effect=_run_git):
+                with mock.patch("shutil.rmtree", lambda *a, **k: None):
+                    with self.assertRaises(GrokWrapperError) as ctx:
+                        review_isolation.prepare_review_isolation(
+                            repo_root=self.repo, run_id=run_id
+                        )
+        self.assertEqual(ctx.exception.error_class, "isolation-unavailable")
+        self.assertTrue(wt.exists(), "simulated partial worktree still present")
+        self.assertTrue(
+            expected_marker.is_file(),
+            "owner marker must remain so cleanup --confirm can reap",
+        )
+        import shutil
+
+        shutil.rmtree(wt, ignore_errors=True)
+        if expected_marker.exists():
+            expected_marker.unlink()
 
 
 class ReviewIsolationModeTests(ModeHarness):

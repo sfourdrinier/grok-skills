@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  formatWebhookDisplay,
   isNotificationMode,
   NOTIFICATION_MODES,
   parseNotificationMode,
@@ -41,4 +42,20 @@ test("shouldAttemptTerminalNotify honors skipNotify", () => {
   assert.equal(shouldAttemptTerminalNotify({}), true);
   assert.equal(shouldAttemptTerminalNotify({ skipNotify: false }), true);
   assert.equal(shouldAttemptTerminalNotify({ skipNotify: true }), false);
+});
+
+test("formatWebhookDisplay shows host only (no path secrets)", () => {
+  assert.equal(formatWebhookDisplay(null), "none");
+  assert.equal(
+    formatWebhookDisplay("https://hooks.slack.com/services/T00/B00/secret-token"),
+    "https://hooks.slack.com"
+  );
+  assert.equal(
+    formatWebhookDisplay("https://user:pass@discord.com/api/webhooks/1/xyz?x=1"),
+    "https://discord.com"
+  );
+  assert.doesNotMatch(
+    formatWebhookDisplay("https://hooks.slack.com/services/T00/B00/secret-token"),
+    /secret-token/
+  );
 });

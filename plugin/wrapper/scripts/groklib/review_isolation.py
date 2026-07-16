@@ -264,10 +264,42 @@ def prepare_review_isolation(
                 resolved_repo, "worktree", "add", "-b", branch, str(worktree_path), base_sha
             )
         except BaseException:
+            # worktree add may have created a partial path/registration. Try to
+            # reap it; only drop the owner marker when the path is gone so a
+            # later cleanup --confirm can still prove ownership if reaping failed.
             try:
-                marker_path.unlink()
-            except OSError:
+                worktree_mod._run_git(
+                    resolved_repo, ["worktree", "remove", "--force", str(worktree_path)]
+                )
+            except Exception:
                 pass
+            try:
+                if worktree_path.exists():
+                    import shutil
+
+                    shutil.rmtree(str(worktree_path), ignore_errors=True)
+            except Exception:
+                pass
+            try:
+                worktree_mod._run_git(resolved_repo, ["worktree", "prune"])
+            except Exception:
+                pass
+            try:
+                worktree_mod._run_git(resolved_repo, ["branch", "-D", branch])
+            except Exception:
+                pass
+            if not worktree_path.exists():
+                try:
+                    marker_path.unlink()
+                except OSError:
+                    pass
+            else:
+                _log(
+                    "prepare_review_isolation",
+                    "worktree add failed and path still present at {}; retaining owner marker".format(
+                        worktree_path
+                    ),
+                )
             raise
     except GrokWrapperError as exc:
         if exc.error_class == "isolation-unavailable":
