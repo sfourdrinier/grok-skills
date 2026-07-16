@@ -27,6 +27,38 @@ const bareEnv = {
   USER: process.env.USER,
 };
 
+/**
+ * Assert self-locating entry reached the real wrapper and produced an envelope.
+ *
+ * These tests prove plugin-root resolution and companion spawn — not host grok
+ * readiness. On CI (no ~/.grok/bin/grok) preflight returns failure /
+ * tool-unavailable with exit 1; with a binary it may return success / 0.
+ * Either path proves the entry located the install and ran the pipeline.
+ */
+function assertSelfLocatingPreflight(result, { forbidExit = [] } = {}) {
+  const text = `${result.stderr}\n${result.stdout}`;
+  assert.notEqual(result.status, 127, `plugin-root failure:\n${text}`);
+  for (const code of forbidExit) {
+    assert.notEqual(result.status, code, `unexpected exit ${code}:\n${text}`);
+  }
+  assert.doesNotMatch(text, /plugin root not set/i);
+  assert.doesNotMatch(text, /invalid plugin root/i);
+  assert.doesNotMatch(text, /skill-run: failed to spawn companion/i);
+  // Envelope on stdout: mode preflight + classified status (success or failure).
+  assert.match(result.stdout, /"mode":\s*"preflight"/, text);
+  assert.match(result.stdout, /"status":\s*"(success|failure)"/, text);
+  // Real pipeline exit codes for preflight: 0 (ready) or 1 (classified fail).
+  assert.ok(
+    result.status === 0 || result.status === 1,
+    `expected exit 0 or 1, got ${result.status}:\n${text}`
+  );
+  if (result.status === 0) {
+    assert.match(result.stdout, /"status":\s*"success"/, text);
+  } else {
+    assert.match(result.stdout, /"status":\s*"failure"/, text);
+  }
+}
+
 test("pluginRootFromSkillEntryUrl maps skills/<name>/run.mjs to plugin root", () => {
   const url = pathToFileURL(PREFLIGHT_RUN).href;
   assert.equal(pluginRootFromSkillEntryUrl(url), PLUGIN);
@@ -44,8 +76,7 @@ test("agents/run.mjs works with no CLAUDE_PLUGIN_ROOT/PLUGIN_ROOT", () => {
     encoding: "utf8",
     env: bareEnv,
   });
-  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
-  assert.match(result.stdout, /"status": "success"/);
+  assertSelfLocatingPreflight(result);
 });
 
 test("every skill has a self-locating run.mjs", () => {
@@ -69,8 +100,7 @@ test("preflight run.mjs works with no CLAUDE_PLUGIN_ROOT/PLUGIN_ROOT", () => {
     encoding: "utf8",
     env: bareEnv,
   });
-  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
-  assert.match(result.stdout, /"status": "success"/);
+  assertSelfLocatingPreflight(result);
 });
 
 test("run.mjs forces entry-derived root over stale CLAUDE_PLUGIN_ROOT", () => {
@@ -84,9 +114,7 @@ test("run.mjs forces entry-derived root over stale CLAUDE_PLUGIN_ROOT", () => {
       PLUGIN_ROOT: "/tmp/stale-grok-plugin-root-does-not-exist",
     },
   });
-  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
-  assert.match(result.stdout, /"status": "success"/);
-  assert.doesNotMatch(`${result.stderr}\n${result.stdout}`, /plugin root not set/i);
+  assertSelfLocatingPreflight(result);
 });
 
 test("run.mjs prefers entry tree over a second valid plugin root in env", () => {
@@ -111,9 +139,8 @@ test("run.mjs prefers entry tree over a second valid plugin root in env", () => 
         PLUGIN_ROOT: tmp,
       },
     });
-    // Real preflight succeeds (0). Stale companion would exit 42.
-    assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`);
-    assert.match(result.stdout, /"status": "success"/);
+    // Stale companion would exit 42. Real entry tree yields 0 or classified 1.
+    assertSelfLocatingPreflight(result, { forbidExit: [42] });
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
