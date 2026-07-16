@@ -731,6 +731,36 @@ class CreateRunSeedTests(unittest.TestCase):
         self.assertEqual(json.loads(path.read_text())["a"], 2)
         self.assertEqual(list(path.parent.glob("x.json.tmp.*")), [])
 
+    def test_write_json_atomic_fsyncs_parent_directory(self) -> None:
+        """After os.replace, parent dir is fsync'd for power-loss durability."""
+        path = pathlib.Path(self.tmp_root) / "durable.json"
+        fsynced_fds = []
+        real_fsync = os.fsync
+        real_open = os.open
+
+        def tracking_fsync(fd):
+            fsynced_fds.append(fd)
+            return real_fsync(fd)
+
+        dir_fds = []
+
+        def tracking_open(path_str, flags, *args, **kwargs):
+            fd = real_open(path_str, flags, *args, **kwargs)
+            # O_RDONLY open of parent (no O_WRONLY) is the dir fsync path
+            if flags == os.O_RDONLY and path_str == str(path.parent):
+                dir_fds.append(fd)
+            return fd
+
+        with mock.patch.object(os, "fsync", side_effect=tracking_fsync):
+            with mock.patch.object(os, "open", side_effect=tracking_open):
+                runstate.write_json_atomic(path, {"ok": True})
+        self.assertTrue(dir_fds, "expected O_RDONLY open of parent directory")
+        self.assertTrue(
+            any(fd in fsynced_fds for fd in dir_fds),
+            "expected fsync on parent directory fd after replace",
+        )
+        self.assertEqual(json.loads(path.read_text())["ok"], True)
+
     def test_cas_update_and_conflict(self) -> None:
         paths = runstate.create_run("review")
         updated = runstate.cas_update_run_record(paths, 0, {"repository": "/repo"})

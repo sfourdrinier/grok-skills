@@ -366,6 +366,16 @@ def _run_worktree_mode_body(
             )
         except Exception as retry_exc:
             _log("_run_worktree_mode_body", "retry lifecycle advance failed: {}".format(retry_exc))
+            raise GrokWrapperError(
+                "state-ownership-violation",
+                "could not advance run record to running after retry: {}".format(retry_exc),
+                {
+                    "reason": "run-record-cas-failed",
+                    "runId": run_paths.run_id,
+                    "firstError": str(exc),
+                    "retryError": str(retry_exc),
+                },
+            ) from retry_exc
     progress.safe_emit("start", "{} run created".format(mode), data={"mode": mode})
 
     # Reap a crashed prior run's stranded credential-bearing private home on live

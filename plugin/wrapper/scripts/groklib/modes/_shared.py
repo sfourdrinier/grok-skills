@@ -690,6 +690,18 @@ def _run_grok_mode_body(
             )
         except Exception as retry_exc:
             _log("_run_grok_mode_body", "retry advance lifecycle failed: {}".format(retry_exc))
+            # Fail closed: do not run preflight/private-home/Grok without a
+            # trustworthy durable run record (state ownership model).
+            raise GrokWrapperError(
+                "state-ownership-violation",
+                "could not advance run record to running after retry: {}".format(retry_exc),
+                {
+                    "reason": "run-record-cas-failed",
+                    "runId": run_paths.run_id,
+                    "firstError": str(exc),
+                    "retryError": str(retry_exc),
+                },
+            ) from retry_exc
     progress.safe_emit("start", "{} run created".format(run.mode), data={"mode": run.mode})
 
     # Reap a crashed prior run's stranded credential-bearing private home on live

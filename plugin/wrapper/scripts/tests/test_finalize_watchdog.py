@@ -472,6 +472,121 @@ class FinalizeWatchdogTests(unittest.TestCase):
         self.assertFalse((paths.run_dir / "finalize-worker.pid").is_file())
         self.assertFalse(finalize_worker.finalize_worker_is_alive(paths.run_dir))
 
+    def test_starting_token_gates_terminalize_before_real_pid(self) -> None:
+        """SIGTERM window before pid write: 'starting' token => worker treated alive."""
+        from groklib.modes._envelope import terminalize_unexpected_failure
+        from groklib.progress import ProgressWriter
+
+        paths, env, rev = self._prepare_finalizing()
+        finalize_worker.mark_worker_starting(paths.run_dir)
+        self.assertTrue(finalize_worker.finalize_worker_is_alive(paths.run_dir))
+        progress = ProgressWriter(paths.run_id, paths.progress_path)
+        out = terminalize_unexpected_failure(
+            run_paths=paths,
+            mode="review",
+            progress=progress,
+            exc=KeyboardInterrupt(),
+            write_terminal_record=lambda: None,
+            log=lambda *_a, **_k: None,
+        )
+        self.assertTrue(out.get("doNotStore"))
+        self.assertFalse(paths.envelope_path.is_file())
+        self.assertEqual(runstate.load_run_record(paths.run_id)["lifecycle"], "finalizing")
+        finalize_worker.clear_worker_pid(paths.run_dir)
+
+    def test_spawn_failure_persists_terminal_failure(self) -> None:
+        """proc.start() failure: durable failed envelope (no orphan finalizing)."""
+        paths, env, rev = self._prepare_finalizing()
+
+        class FakeProc:
+            def __init__(self):
+                self.daemon = False
+                self.exitcode = None
+                self.pid = None
+
+            def start(self):
+                raise OSError("simulated spawn failure")
+
+            def is_alive(self):
+                return False
+
+            def join(self, timeout=None):
+                return None
+
+            def terminate(self):
+                return None
+
+            def kill(self):
+                return None
+
+        class FakeCtx:
+            def Process(self, **kwargs):
+                return FakeProc()
+
+        with mock.patch.object(
+            finalize_worker.multiprocessing, "get_context", return_value=FakeCtx()
+        ):
+            out, ephemeral, durable = finalize_worker.run_finalize_parent(
+                paths,
+                mode="review",
+                envelope=env,
+                lifecycle="completed",
+                expected_revision=rev,
+                budget_seconds=5,
+            )
+        self.assertIsNone(ephemeral)
+        self.assertTrue(durable)
+        self.assertEqual(out["status"], "failure")
+        self.assertEqual(out["error"]["class"], "cli-failure")
+        self.assertEqual(runstate.load_run_record(paths.run_id)["lifecycle"], "failed")
+        self.assertTrue(paths.envelope_path.is_file())
+        self.assertFalse(finalize_worker.finalize_worker_is_alive(paths.run_dir))
+
+    def test_finalize_process_is_daemon(self) -> None:
+        """Unkillable path must use a daemon Process so shutdown does not hang."""
+        paths, env, rev = self._prepare_finalizing()
+        seen = {}
+
+        class FakeProc:
+            def __init__(self):
+                self.daemon = False
+                self.exitcode = 0
+                self.pid = 12345
+
+            def start(self):
+                seen["daemon"] = self.daemon
+                return None
+
+            def join(self, timeout=None):
+                return None
+
+            def is_alive(self):
+                return False
+
+            def terminate(self):
+                return None
+
+            def kill(self):
+                return None
+
+        class FakeCtx:
+            def Process(self, **kwargs):
+                return FakeProc()
+
+        with mock.patch.object(
+            finalize_worker.multiprocessing, "get_context", return_value=FakeCtx()
+        ):
+            # Missing envelope after exit 0 → missing-result path (spawn succeeded)
+            finalize_worker.run_finalize_parent(
+                paths,
+                mode="review",
+                envelope=env,
+                lifecycle="completed",
+                expected_revision=rev,
+                budget_seconds=5,
+            )
+        self.assertTrue(seen.get("daemon"), "finalize Process must be daemon=True before start")
+
     def test_terminalize_refuses_durable_write_while_worker_alive(self) -> None:
         """SIGTERM recovery must not durable-cancel while finalize worker lives."""
         from groklib.modes._envelope import terminalize_unexpected_failure

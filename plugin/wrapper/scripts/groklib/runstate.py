@@ -137,7 +137,11 @@ def _write_json_0600(path: pathlib.Path, payload: object) -> None:
 
 
 def write_json_atomic(path: pathlib.Path, payload: object) -> None:
-    """Atomically write JSON: temp sibling ``path.name + '.tmp.' + pid`` then ``os.replace``, mode 0600."""
+    """Atomically write JSON: temp sibling, fsync file, ``os.replace``, fsync parent dir.
+
+    Parent-directory fsync makes the rename durable across power loss on POSIX
+    (envelope-first crash consistency for ``run.json`` / ``envelope.json``).
+    """
     serialized = json.dumps(payload, indent=2, sort_keys=True) + "\n"
     parent = path.parent
     tmp_name = "{}.tmp.{}".format(path.name, os.getpid())
@@ -151,6 +155,19 @@ def write_json_atomic(path: pathlib.Path, payload: object) -> None:
         platformsupport.restrict_file_permissions(tmp_path)
         os.replace(str(tmp_path), str(path))
         platformsupport.restrict_file_permissions(path)
+        # Durable directory entry for the replace (POSIX power-loss safety).
+        try:
+            dir_fd = os.open(str(parent), os.O_RDONLY)
+        except OSError as dir_open_exc:
+            _log_stderr(
+                "write_json_atomic",
+                "could not open parent dir for fsync after writing {}: {}".format(path, dir_open_exc),
+            )
+            raise
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
     except OSError as exc:
         _log_stderr("write_json_atomic", "failed writing {}: {}".format(path, exc))
         try:

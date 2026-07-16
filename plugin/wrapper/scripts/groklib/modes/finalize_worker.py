@@ -55,8 +55,20 @@ def finalize_budget_seconds(mode: str) -> int:
     return int(_DEFAULT_BUDGETS.get(mode, 120))
 
 
+# Liveness file content "starting" = parent is about to spawn / mid-start (no pid yet).
+_WORKER_STARTING_TOKEN = "starting"
+
+
 def _worker_pid_path(run_dir: pathlib.Path) -> pathlib.Path:
     return run_dir / "finalize-worker.pid"
+
+
+def mark_worker_starting(run_dir: pathlib.Path) -> None:
+    """Gate durable parent terminalization before proc.start() obtains a real pid."""
+    try:
+        _write_private_text(_worker_pid_path(run_dir), _WORKER_STARTING_TOKEN)
+    except OSError as exc:
+        _log("mark_worker_starting", "could not write finalize-worker.pid: {}".format(exc))
 
 
 def write_worker_pid(run_dir: pathlib.Path, pid: int) -> None:
@@ -77,14 +89,24 @@ def clear_worker_pid(run_dir: pathlib.Path) -> None:
 
 
 def finalize_worker_is_alive(run_dir: pathlib.Path) -> bool:
-    """True if finalize-worker.pid names a still-running process (design §9.4 gate)."""
+    """True if finalize is in progress (starting or live pid) — design §9.4 gate.
+
+    The ``starting`` token closes the race between ``proc.start()`` and writing
+    the real pid: SIGTERM in that window must not durable-cancel while a worker
+    may already be running.
+    """
     path = _worker_pid_path(run_dir)
     if not path.is_file():
         return False
     try:
         raw = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    if raw == _WORKER_STARTING_TOKEN:
+        return True
+    try:
         pid = int(raw)
-    except (OSError, ValueError):
+    except ValueError:
         return False
     if pid <= 0:
         return False
@@ -223,15 +245,42 @@ def run_finalize_parent(
         progress.safe_emit("finalizing", "entering finalization")
 
     timed_out = False
+    # Liveness marker BEFORE start so SIGTERM cannot durable-cancel in the
+    # start→pid-write window (worker may already be running).
+    mark_worker_starting(paths.run_dir)
     ctx = multiprocessing.get_context("spawn")
     proc = ctx.Process(
         target=finalize_worker_main,
         args=(str(payload_path),),
         name="grok-finalize",
     )
-    proc.start()
-    # Persist pid so a SIGTERM mid-join can still observe worker liveness and
-    # refuse parent durable terminal writes while the worker may finish success.
+    # Daemon: unkillable path must not hang interpreter shutdown joining the child.
+    proc.daemon = True
+    try:
+        proc.start()
+    except Exception as spawn_exc:
+        clear_worker_pid(paths.run_dir)
+        _log("run_finalize_parent", "finalize worker spawn failed: {}".format(spawn_exc))
+        fail = envelope_mod.failure_envelope(
+            run_id=paths.run_id,
+            mode=mode,
+            error_class="cli-failure",
+            message="finalize worker could not be started: {}".format(spawn_exc),
+            detail={"runId": paths.run_id, "reason": "finalize-spawn-failed"},
+            progressStreamPath=str(paths.progress_path),
+        )
+        try:
+            record = runstate.load_run_record(paths.run_id)
+            rev = int(record.get("recordRevision", 0))
+            runstate.persist_terminal_envelope(paths, rev, fail, lifecycle="failed")
+        except Exception as persist_exc:
+            _log("run_finalize_parent", "spawn-failure persist failed: {}".format(persist_exc))
+            fail["doNotStore"] = True
+            return fail, None, False
+        if progress is not None:
+            progress.safe_emit("finalizing", "finalization worker spawn failed", level="error")
+        return fail, None, True
+
     worker_pid = getattr(proc, "pid", None)
     if worker_pid is not None:
         write_worker_pid(paths.run_dir, int(worker_pid))
@@ -258,6 +307,11 @@ def run_finalize_parent(
             )
             # doNotStore: entrypoint must not write envelope.json
             ephemeral["doNotStore"] = True
+            # Daemon child will not block shutdown; drop liveness gate so later
+            # status/cleanup is not permanently blocked by a stuck "alive" pid file
+            # once the parent process exits (file may outlive the process).
+            # Keep pid file while THIS process is still handling the return so a
+            # concurrent terminalize still sees the worker.
             return ephemeral, "finalization-worker-unkillable", False
     finally:
         # Keep pid while still alive (unkillable); clear once confirmed dead.
