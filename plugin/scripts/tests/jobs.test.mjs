@@ -6,14 +6,20 @@ import { test } from "node:test";
 
 import {
   createJob,
+  DEFAULT_JOBS_CONFIG,
   formatJobsTable,
   getJob,
+  getNotificationConfig,
   getRunMode,
+  isNotificationMode,
   listJobs,
+  NOTIFICATION_MODES,
+  setNotificationConfig,
   setRunMode,
   storeJobStdout,
   updateJob,
 } from "../lib/jobs.mjs";
+import { runDirectGrok } from "../lib/direct-grok.mjs";
 import { renderEnvelopePretty, tryParseEnvelope } from "../lib/render.mjs";
 import { buildAdversarialTask } from "../lib/git-context.mjs";
 
@@ -40,8 +46,33 @@ test("run mode persists hardened vs direct", () => {
   assert.equal(setRunMode(cwd, "hardened", env), "hardened");
 });
 
-test("direct mode rejects --isolated fail-closed", async () => {
-  const { runDirectGrok } = await import("../lib/direct-grok.mjs");
+test("notification prefs default off and persist", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-notify-cfg-"));
+  const env = { CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata") };
+  assert.equal(getNotificationConfig(cwd, env).notificationMode, "off");
+  assert.equal(DEFAULT_JOBS_CONFIG.notificationMode, "off");
+  setNotificationConfig(cwd, { notificationMode: "auto" }, env);
+  assert.equal(getNotificationConfig(cwd, env).notificationMode, "auto");
+});
+
+test("NOTIFICATION_MODES re-exports the shared product set", () => {
+  assert.deepEqual([...NOTIFICATION_MODES], ["off", "auto", "native", "webhook"]);
+  assert.equal(isNotificationMode("auto"), true);
+  assert.equal(isNotificationMode("telepathy"), false);
+});
+
+test("createJob records skill mode (e.g. adversarial-review)", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-jobs-skill-"));
+  const env = { CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata") };
+  const job = createJob(
+    cwd,
+    { kind: "adversarial-review", mode: "adversarial-review", runMode: "hardened" },
+    env
+  );
+  assert.equal(getJob(cwd, job.id, env).mode, "adversarial-review");
+});
+
+test("direct mode rejects --isolated fail-closed", () => {
   const result = runDirectGrok({
     mode: "review",
     args: ["--target", ".", "--isolated", "--task", "Review"],

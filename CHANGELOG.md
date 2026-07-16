@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
+## [1.5.0] - 2026-07-16
+
+### Added
+
+- **Completion notifications (companion):** optional push when a live run finishes.
+  Jobs config: `notificationMode` (`off` default, recommend `auto` for background),
+  `notificationWebhookUrl`. At-most-once attempt via `notified.json` (no auto-retry,
+  not exactly-once). Native OS notify (macOS/Linux) and webhook POST.
+- **Execution context:** skills/agents set `GROK_COMPANION_EXECUTION_CONTEXT` to
+  `foreground` or `background` (never forwarded to the wrapper). `auto` notifies
+  only for background.
+- Setup flags: `--notification-mode`, `--notification-webhook-url`.
+
+### Changed
+
+- Packaging triple **1.5.0**.
+
+### Fixed
+
+- **Isolation (post-PR2 Codex follow-ups):** owner marker written before
+  `git worktree add`; dirty patch vs pinned base SHA (not live HEAD); retain
+  owner marker if worktree still present after cleanup; ITA OIDs any all-zero
+  length (SHA-256); status porcelain captured as bytes for non-UTF-8 paths.
+
 ## [1.4.0] - 2026-07-16
 
 ### Added

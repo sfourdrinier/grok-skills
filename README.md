@@ -35,7 +35,8 @@ implementation in an isolated worktree.
    Full URL `https://github.com/sfourdrinier/grok-skills.git` works too; GitHub
    shorthand is equivalent. Then `/reload-plugins` (Claude) or start a new session
    (Codex agents materialize on **SessionStart** - no manual setup).
-3. Optional readiness check (gate/mode toggles only; agents already auto-install):
+3. Optional readiness check (gate/mode/notification prefs; agents already auto-install).
+   For background completion toasts: `setup --notification-mode auto`.
 
    ```text
    /grok:setup
@@ -174,6 +175,7 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 | `/grok:debate` | Two opposing Grok reason passes + synthesis on a topic. |
 | `/grok:status` | Jobs table, or read-only wrapper status with `--run-id` (lifecycle projection; exit 1 can mean a failed target). |
 | `/grok:jobs` | List recent companion-tracked jobs. |
+| `/grok:setup` | Optional readiness + prefs (`--run-mode`, `--notification-mode auto` for background completion signals). |
 | `/grok:result` | Stored job output (`--pretty` for Markdown). |
 | `/grok:cancel` | Cancel a running job by id. |
 | `/grok:transfer` | Package Claude session context into a Grok task pack. |

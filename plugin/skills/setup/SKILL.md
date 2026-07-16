@@ -1,7 +1,7 @@
 ---
 name: "setup"
 description: "Check Grok readiness and optionally toggle stop gate / run mode (Codex agents auto-install on SessionStart)"
-argument-hint: "[--enable-review-gate | --disable-review-gate] [--run-mode hardened|direct] [--force-codex-agents] [--skip-codex-agents] [--remove-codex-agents]"
+argument-hint: "[--enable-review-gate | --disable-review-gate] [--run-mode hardened|direct] [--notification-mode off|auto|native|webhook] [--notification-webhook-url <url>] [--force-codex-agents] [--skip-codex-agents] [--remove-codex-agents]"
 allowed-tools: "Bash(node:*)"
 ---
 
@@ -53,6 +53,8 @@ Supported flags:
 |------|--------|
 | `--run-mode hardened` | Persist hardened mode (default) |
 | `--run-mode direct` | Persist direct (installed Grok CLI home) |
+| `--notification-mode off\|auto\|native\|webhook` | Completion signal prefs (default `off`; **auto** recommended for background jobs) |
+| `--notification-webhook-url <url>` | Webhook URL when mode is `webhook` |
 | `--enable-review-gate` | Opt-in stop-time review gate |
 | `--disable-review-gate` | Turn gate off |
 | `--force-codex-agents` | Overwrite user-owned `~/.codex/agents/grok-*.toml` (writes `*.bak` first) |
@@ -64,6 +66,7 @@ Examples:
 ```bash
 node "$SKILL_BASE/run.mjs" setup
 node "$SKILL_BASE/run.mjs" setup --run-mode hardened
+node "$SKILL_BASE/run.mjs" setup --notification-mode auto
 node "$SKILL_BASE/run.mjs" setup --force-codex-agents
 node "$SKILL_BASE/run.mjs" setup --remove-codex-agents
 node "$SKILL_BASE/run.mjs" setup --enable-review-gate

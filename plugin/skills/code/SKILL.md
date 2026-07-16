@@ -14,6 +14,8 @@ allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 
 ```bash
 SKILL_BASE='<Base directory for this skill - absolute path from Skill tool>'
+# Required for completion notifications (plugin/references/execution-context.md):
+export GROK_COMPANION_EXECUTION_CONTEXT=foreground   # or background
 node "$SKILL_BASE/run.mjs" <mode> [args...]
 ```
 
@@ -88,6 +90,7 @@ Execution mode (foreground vs background):
 Foreground flow (one Bash call, then relay verbatim). When the arguments carry a
 `--task <text>`, route that text through STDIN so it is never shell-evaluated:
 ```bash
+export GROK_COMPANION_EXECUTION_CONTEXT=foreground
 node "$SKILL_BASE/run.mjs" code --target '<target from $ARGUMENTS>' --base '<base from $ARGUMENTS>' [other non-task flags from $ARGUMENTS, each substituted value single-quoted] --task-file - <<'GROK_TASK'
 <the --task text from $ARGUMENTS, verbatim>
 GROK_TASK
@@ -95,12 +98,15 @@ GROK_TASK
 When the arguments already use `--task-file <path>`, drop the heredoc and pass
 every flag as single-quoted argv tokens:
 ```bash
+export GROK_COMPANION_EXECUTION_CONTEXT=foreground
 node "$SKILL_BASE/run.mjs" code --target '<target from $ARGUMENTS>' --base '<base from $ARGUMENTS>' --task-file '<path from $ARGUMENTS>' [other non-task flags from $ARGUMENTS, each substituted value single-quoted]
 ```
 - Return the command stdout envelope VERBATIM. Do not paraphrase, summarize, or
   add commentary before or after it. Preserve the exit status.
 
 Background flow:
+- Set `export GROK_COMPANION_EXECUTION_CONTEXT=background` (see
+  `plugin/references/execution-context.md`).
 - Launch the same command with `Bash(run_in_background: true)`.
 - Do not wait for completion or read its output this turn.
 - Tell the user: "Grok code run started in the background. Run `/grok:status

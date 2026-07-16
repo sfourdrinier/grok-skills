@@ -32,6 +32,7 @@ import {
   redactSecretTextStream,
   renderRunProgress,
   runsDirFor,
+  safeRunIdForRunsDir,
   snapshotRunIds,
 } from "../progress-relay.mjs";
 
@@ -74,6 +75,19 @@ test("RUN_ID_RE accepts the real shape and rejects near-misses", () => {
   assert.ok(!RUN_ID_RE.test("20260715T025610Z-DAB154")); // uppercase hex
   assert.ok(!RUN_ID_RE.test("nope"));
   assert.ok(!RUN_ID_RE.test("../etc"));
+});
+
+test("safeRunIdForRunsDir accepts valid ids under runsDir and rejects traversal", () => {
+  const runsDir = path.join("/tmp", "grok-skills-runs");
+  assert.equal(safeRunIdForRunsDir(VALID_RUN_ID, runsDir), VALID_RUN_ID);
+  assert.equal(safeRunIdForRunsDir("../etc", runsDir), null);
+  assert.equal(safeRunIdForRunsDir("direct-123", runsDir), null);
+  assert.equal(safeRunIdForRunsDir(null, runsDir), null);
+  assert.equal(safeRunIdForRunsDir(VALID_RUN_ID, ""), null);
+  // Shape-valid ids are accepted; path containment is belt-and-suspenders
+  // after resolve (RUN_ID_RE already forbids ../ and path separators).
+  const resolved = path.resolve(runsDir, VALID_RUN_ID);
+  assert.ok(resolved.startsWith(path.resolve(runsDir) + path.sep));
 });
 
 test("formatProgressLine renders phase + message and a token-text preview", () => {

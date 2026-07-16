@@ -14,6 +14,8 @@ allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 
 ```bash
 SKILL_BASE='<Base directory for this skill - absolute path from Skill tool>'
+# Required for completion notifications (see plugin/references/execution-context.md):
+export GROK_COMPANION_EXECUTION_CONTEXT=foreground   # or background
 node "$SKILL_BASE/run.mjs" <mode> [args...]
 ```
 
@@ -93,6 +95,7 @@ Execution mode (foreground vs background):
 Foreground flow (one Bash call, then relay verbatim). When the arguments carry a
 `--task <text>`, route that text through STDIN so it is never shell-evaluated:
 ```bash
+export GROK_COMPANION_EXECUTION_CONTEXT=foreground
 node "$SKILL_BASE/run.mjs" review --target '<target from $ARGUMENTS>' [other non-task flags from $ARGUMENTS, each substituted value single-quoted] --task-file - <<'GROK_TASK'
 <the --task text from $ARGUMENTS, verbatim>
 GROK_TASK
@@ -100,6 +103,7 @@ GROK_TASK
 When the arguments already use `--task-file <path>`, drop the heredoc and pass
 every flag as single-quoted argv tokens:
 ```bash
+export GROK_COMPANION_EXECUTION_CONTEXT=foreground
 node "$SKILL_BASE/run.mjs" review --target '<target from $ARGUMENTS>' --task-file '<path from $ARGUMENTS>' [other non-task flags from $ARGUMENTS, each substituted value single-quoted]
 ```
 - Return the command stdout envelope VERBATIM. Do not paraphrase, summarize, or
@@ -107,11 +111,17 @@ node "$SKILL_BASE/run.mjs" review --target '<target from $ARGUMENTS>' --task-fil
   issue the review reports.
 
 Background flow:
+- Set `export GROK_COMPANION_EXECUTION_CONTEXT=background` (canonical pattern in
+  `plugin/references/execution-context.md`).
 - Launch the same command with `Bash(run_in_background: true)`.
 - Do not wait for completion or read its output this turn.
 - Tell the user: "Grok review started in the background. Run `/grok:status
   --run-id <id>` to read the result envelope (the run id is printed when the run
-  finishes)."
+  finishes). If notifications are enabled (`setup --notification-mode auto`), a
+  completion signal may also fire when the job ends."
+
+Foreground flow must set `export GROK_COMPANION_EXECUTION_CONTEXT=foreground`
+before `node "$SKILL_BASE/run.mjs"`.
 
 If the companion prints an actionable "could not locate the Grok wrapper"
 message instead of an envelope, tell the user to run `/grok:setup`.

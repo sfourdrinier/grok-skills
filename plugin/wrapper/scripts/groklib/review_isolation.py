@@ -166,24 +166,33 @@ def _reject_dirty_submodules(repo_root: pathlib.Path) -> None:
                 )
 
 
+def _is_all_zero_oid(token: str) -> bool:
+    """True for all-zero git OIDs (SHA-1 40 hex or SHA-256 64 hex, etc.)."""
+    if not token or not isinstance(token, str):
+        return False
+    return set(token) == {"0"} and len(token) >= 40
+
+
 def _intent_to_add_paths(repo_root: pathlib.Path) -> List[str]:
     """Return paths marked intent-to-add (``git add -N``), excluded from isolation.
 
     Porcelain v2 reports ITA ordinary entries with both HEAD and index OIDs all
-    zeros (design §10 / R5). ``--ita-invisible-in-index`` alone is insufficient
-    on modern git for ``git diff HEAD`` (still emits ITA as new-file patches).
+    zeros (design §10 / R5). SHA-256 repos use 64 zero hex digits; do not assume 40.
+    Capture status as bytes (non-UTF-8 pathnames).
     """
-    completed = worktree_mod._run_git(
+    completed = _run_git_bytes(
         repo_root, ["status", "--porcelain=v2", "-z", "--untracked-files=no"]
     )
     if completed.returncode != 0:
+        stderr_text = (completed.stderr or b"").decode("utf-8", errors="replace").strip()
         raise _iso_error(
             "could not list intent-to-add paths for isolation",
-            {"stderr": (completed.stderr or "").strip()},
+            {"stderr": stderr_text},
         )
-    zero = "0" * 40
+    # Decode pathnames with surrogateescape so non-UTF-8 bytes survive pathspecs.
+    stdout_text = (completed.stdout or b"").decode("utf-8", errors="surrogateescape")
     paths: List[str] = []
-    for entry in (completed.stdout or "").split("\0"):
+    for entry in stdout_text.split("\0"):
         if not entry.startswith("1 "):
             continue
         # 1 <XY> <sub> <mH> <mI> <mW> <hH> <hI> <path>
@@ -191,16 +200,28 @@ def _intent_to_add_paths(repo_root: pathlib.Path) -> List[str]:
         if len(parts) < 9:
             continue
         head_oid, index_oid, path = parts[6], parts[7], parts[8]
-        if head_oid == zero and index_oid == zero and path:
+        if _is_all_zero_oid(head_oid) and _is_all_zero_oid(index_oid) and path:
             paths.append(path)
     return paths
 
 
-def prepare_review_isolation(*, repo_root: pathlib.Path, run_id: str) -> ReviewIsolation:
-    """Create owned review worktree at HEAD, apply tracked dirty, return session.
+def prepare_review_isolation(
+    *,
+    repo_root: pathlib.Path,
+    run_id: str,
+    base_revision: Optional[str] = None,
+) -> ReviewIsolation:
+    """Create owned review worktree at a pinned base, apply tracked dirty, return session.
 
     Raises GrokWrapperError(isolation-unavailable) on any setup failure after
     best-effort cleanup of partial state.
+
+    Order for crash-safe cleanup authority:
+    parent dir -> owner marker -> worktree add -> permissions -> dirty patch.
+
+    When ``base_revision`` is supplied (from plan_review_isolation), that pin is
+    used for worktree create and dirty patch so run.json and worktree agree.
+    When omitted, the pin is resolved from live HEAD at prepare time.
     """
     if not runstate.is_valid_run_id(run_id):
         raise _iso_error("run id is not valid for review isolation: {!r}".format(run_id), {"runId": run_id})
@@ -228,17 +249,61 @@ def prepare_review_isolation(*, repo_root: pathlib.Path, run_id: str) -> ReviewI
             {"branch": branch},
         )
 
+    base_sha: Optional[str] = None
     try:
         _reject_dirty_submodules(resolved_repo)
-        base_sha = worktree_mod._resolve_base_sha(resolved_repo, "HEAD")
+        if base_revision and isinstance(base_revision, str) and base_revision.strip():
+            base_sha = worktree_mod._resolve_base_sha(resolved_repo, base_revision.strip())
+        else:
+            base_sha = worktree_mod._resolve_base_sha(resolved_repo, "HEAD")
         worktree_mod._make_secure_dir(worktree_path.parent)
-        worktree_mod._git(
-            resolved_repo, "worktree", "add", "-b", branch, str(worktree_path), base_sha
-        )
+        # Marker BEFORE worktree so cleanup can prove ownership if we crash after add.
+        runstate.write_owner_marker_file(marker_path, run_id)
+        try:
+            worktree_mod._git(
+                resolved_repo, "worktree", "add", "-b", branch, str(worktree_path), base_sha
+            )
+        except BaseException:
+            # worktree add may have created a partial path/registration. Try to
+            # reap it; only drop the owner marker when the path is gone so a
+            # later cleanup --confirm can still prove ownership if reaping failed.
+            try:
+                worktree_mod._run_git(
+                    resolved_repo, ["worktree", "remove", "--force", str(worktree_path)]
+                )
+            except Exception:
+                pass
+            try:
+                if worktree_path.exists():
+                    import shutil
+
+                    shutil.rmtree(str(worktree_path), ignore_errors=True)
+            except Exception:
+                pass
+            try:
+                worktree_mod._run_git(resolved_repo, ["worktree", "prune"])
+            except Exception:
+                pass
+            try:
+                worktree_mod._run_git(resolved_repo, ["branch", "-D", branch])
+            except Exception:
+                pass
+            if not worktree_path.exists():
+                try:
+                    marker_path.unlink()
+                except OSError:
+                    pass
+            else:
+                _log(
+                    "prepare_review_isolation",
+                    "worktree add failed and path still present at {}; retaining owner marker".format(
+                        worktree_path
+                    ),
+                )
+            raise
     except GrokWrapperError as exc:
         if exc.error_class == "isolation-unavailable":
             raise
-        # Map worktree-failure from helpers into isolation-unavailable
         raise _iso_error(str(exc), dict(exc.detail or {}, mappedFrom=exc.error_class)) from exc
     except OSError as exc:
         raise _iso_error("could not create review isolation worktree: {}".format(exc)) from exc
@@ -261,10 +326,7 @@ def prepare_review_isolation(*, repo_root: pathlib.Path, run_id: str) -> ReviewI
                 "could not harden review isolation worktree permissions: {}".format(exc)
             ) from exc
 
-        runstate.write_owner_marker_file(marker_path, run_id)
-
-        # Tracked dirty (staged+unstaged). Keep --ita-invisible-in-index (design)
-        # and exclude ITA paths explicitly so modern git cannot still emit them.
+        # Tracked dirty vs the pinned worktree base (not live HEAD, which may move).
         ita_paths = _intent_to_add_paths(resolved_repo)
         diff_argv = [
             "diff",
@@ -273,7 +335,7 @@ def prepare_review_isolation(*, repo_root: pathlib.Path, run_id: str) -> ReviewI
             "--binary",
             "--full-index",
             "--ita-invisible-in-index",
-            "HEAD",
+            base_sha,
             "--",
             ".",
         ]
@@ -310,7 +372,11 @@ def prepare_review_isolation(*, repo_root: pathlib.Path, run_id: str) -> ReviewI
 
 
 def cleanup_review_isolation(session: ReviewIsolation) -> None:
-    """Best-effort always cleanup: worktree, branch, marker, diff (design §10)."""
+    """Best-effort always cleanup: worktree, branch, marker, diff (design §10).
+
+    Owner marker is retained while the worktree directory still exists so a later
+    ``cleanup --confirm`` can still prove ownership via remove_external_worktree.
+    """
     repo = session.repo_root
     path = session.worktree_path
     try:
@@ -339,10 +405,24 @@ def cleanup_review_isolation(session: ReviewIsolation) -> None:
     except GrokWrapperError as exc:
         _log("cleanup_review_isolation", "branch delete failed: {}".format(exc))
 
-    for p in (session.marker_path, session.diff_path):
-        try:
-            p.unlink()
-        except FileNotFoundError:
-            pass
-        except OSError as exc:
-            _log("cleanup_review_isolation", "could not remove {}: {}".format(p, exc))
+    # Diff can always go; marker only after worktree is gone (cleanup authority).
+    try:
+        session.diff_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        _log("cleanup_review_isolation", "could not remove {}: {}".format(session.diff_path, exc))
+
+    if path.exists():
+        _log(
+            "cleanup_review_isolation",
+            "worktree still present at {}; retaining owner marker for later cleanup".format(path),
+        )
+        return
+
+    try:
+        session.marker_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        _log("cleanup_review_isolation", "could not remove {}: {}".format(session.marker_path, exc))

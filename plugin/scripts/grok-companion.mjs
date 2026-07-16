@@ -32,10 +32,16 @@ import {
   getRunMode,
   listJobs,
   readJobStdout,
-  setRunMode,
   storeJobStdout,
   updateJob,
 } from "./lib/jobs.mjs";
+import { shouldAttemptTerminalNotify, wrapperChildEnv } from "./lib/notify.mjs";
+import {
+  maybeNotifyAfterTerminal,
+  resolveRunIdFromJobAndStdout,
+  sanitizeRunId,
+} from "./lib/companion-terminal-notify.mjs";
+import { cmdSetup as setupCmd } from "./lib/companion-setup.mjs";
 import {
   buildAdversarialTask,
   buildBranchReviewTask,
@@ -43,17 +49,15 @@ import {
   defaultReviewTarget,
   shortstat,
 } from "./lib/git-context.mjs";
-import { grokBinaryAvailable, runDirectGrok } from "./lib/direct-grok.mjs";
-import { renderEnvelopePretty, renderSetupReport, tryParseEnvelope } from "./lib/render.mjs";
+import { runDirectGrok } from "./lib/direct-grok.mjs";
+import { renderEnvelopePretty, tryParseEnvelope } from "./lib/render.mjs";
 import { resolveSpawnedGroupPid, terminateReviewTree } from "./lib/gate-kill.mjs";
-import { readGateConfig, writeGateConfig } from "./lib/gate-state.mjs";
 import {
   buildTransferTaskBody,
   readSessionStamp,
   resolveTransferSource,
   writeTransferPack,
 } from "./lib/session-stamp.mjs";
-import { installCodexAgents, uninstallCodexAgents } from "./lib/codex-agents.mjs";
 
 const PYTHON = process.env.GROK_PYTHON?.trim() || "python3";
 const WRAPPER_NOT_FOUND_EXIT = 3;
@@ -118,6 +122,7 @@ function stripFlags(args) {
   let base = null;
   let resume = false;
   let fresh = false;
+  let noNotify = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--pretty") {
@@ -136,6 +141,11 @@ function stripFlags(args) {
       fresh = true;
       continue;
     }
+    // Companion-only: suppress terminal completion notify for this invocation.
+    if (a === "--no-notify") {
+      noNotify = true;
+      continue;
+    }
     if (a === "--run-mode" && args[i + 1]) {
       runMode = args[++i];
       continue;
@@ -147,7 +157,7 @@ function stripFlags(args) {
     }
     out.push(a);
   }
-  return { args: out, pretty, runMode, jsonOut, base, resume, fresh };
+  return { args: out, pretty, runMode, jsonOut, base, resume, fresh, noNotify };
 }
 
 function extractTask(args) {
@@ -209,10 +219,13 @@ function maybeSchema(args) {
   return args;
 }
 
-function captureAndTrack(wrapper, args, { cwd, mode, kind, runMode }) {
-  const job = createJob(cwd, { kind, mode, runMode });
+function captureAndTrack(wrapper, args, { cwd, mode, kind, runMode, notifyMode, skipNotify }) {
+  const startedAtMs = Date.now();
+  // Job registry stores skill mode (e.g. adversarial-review), not wrapper remaps.
+  const skillMode = notifyMode || mode;
+  const job = createJob(cwd, { kind, mode: skillMode, runMode });
   appendJobLog(cwd, job.id, `dispatch ${args.join(" ")}`);
-  stderrLine(`[grok-job] ${job.id} started (${mode}, ${runMode})`);
+  stderrLine(`[grok-job] ${job.id} started (${skillMode}, ${runMode})`);
 
   if (runMode === "direct") {
     const direct = runDirectGrok({ mode, args, cwd, env: process.env });
@@ -222,27 +235,28 @@ function captureAndTrack(wrapper, args, { cwd, mode, kind, runMode }) {
       summary: direct.code === 0 ? "direct grok finished" : "direct grok failed",
     });
     process.stdout.write(direct.envelopeText);
-    return direct.code;
+    // Direct has no durable runs/<id> for notified.json; skip push notify.
+    return Promise.resolve(direct.code);
   }
 
   const result = spawnSync(PYTHON, [wrapper, ...args], {
     cwd,
     encoding: "utf8",
-    env: process.env,
+    env: wrapperChildEnv(process.env),
     maxBuffer: 64 * 1024 * 1024,
   });
 
   if (result.error) {
     process.stderr.write(spawnFailedMessage(wrapper, result.error.message));
     updateJob(cwd, job.id, { status: "failure", error: result.error.message });
-    return SPAWN_FAILED_EXIT;
+    return Promise.resolve(SPAWN_FAILED_EXIT);
   }
 
   if (result.stderr) {
     process.stderr.write(result.stderr);
     for (const line of result.stderr.split("\n")) {
       const runId = parseRunIdMarker(line);
-      if (runId) {
+      if (runId && sanitizeRunId(runId)) {
         updateJob(cwd, job.id, { runId });
       }
     }
@@ -253,22 +267,40 @@ function captureAndTrack(wrapper, args, { cwd, mode, kind, runMode }) {
     process.stdout.write(stdout.endsWith("\n") ? stdout : `${stdout}\n`);
     storeJobStdout(cwd, job.id, stdout);
     const env = tryParseEnvelope(stdout);
-    if (env?.runId) {
-      updateJob(cwd, job.id, { runId: env.runId });
+    const safe = sanitizeRunId(env?.runId);
+    if (safe) {
+      updateJob(cwd, job.id, { runId: safe });
     }
   }
 
   const code = typeof result.status === "number" ? result.status : SIGNAL_EXIT;
-  updateJob(cwd, job.id, {
+  const updated = updateJob(cwd, job.id, {
     status: code === 0 ? "success" : "failure",
     summary: code === 0 ? "completed" : `exit ${code}`,
     pid: null,
   });
-  return code;
+  if (!shouldAttemptTerminalNotify({ skipNotify })) {
+    return Promise.resolve(code);
+  }
+  const runId = resolveRunIdFromJobAndStdout(cwd, updated, stdout);
+  // Fire-and-forget is wrong for short sync path - wait so process does not exit mid-notify
+  // but never throw.
+  return maybeNotifyAfterTerminal({
+    cwd,
+    mode: skillMode,
+    runId,
+    code,
+    startedAtMs,
+    stdoutText: stdout,
+    stderrLine,
+  }).then(() => code);
 }
 
 function runPassthrough(wrapper, args) {
-  const result = spawnSync(PYTHON, [wrapper, ...args], { stdio: "inherit", env: process.env });
+  const result = spawnSync(PYTHON, [wrapper, ...args], {
+    stdio: "inherit",
+    env: wrapperChildEnv(process.env),
+  });
   if (result.error) {
     process.stderr.write(spawnFailedMessage(wrapper, result.error.message));
     return SPAWN_FAILED_EXIT;
@@ -283,6 +315,7 @@ function runPassthrough(wrapper, args) {
 }
 
 function runWithLiveRelay(wrapper, args, track) {
+  const startedAtMs = Date.now();
   const runsDir = runsDirFor(process.env);
   let knownRunIds;
   try {
@@ -291,17 +324,18 @@ function runWithLiveRelay(wrapper, args, track) {
     stderrLine(`[grok-relay] snapshot failed, continuing without live progress: ${err.message}`);
     knownRunIds = new Set();
   }
-  const relay = new LiveRelay({ runsDir, knownRunIds, startMs: Date.now(), sink: stderrLine });
+  const relay = new LiveRelay({ runsDir, knownRunIds, startMs: startedAtMs, sink: stderrLine });
   const cwd = process.cwd();
+  const skillMode = track?.notifyMode || track?.mode || "review";
   const job = track
     ? createJob(cwd, {
         kind: track.kind || "run",
-        mode: track.mode,
+        mode: skillMode,
         runMode: track.runMode || "hardened",
       })
     : null;
   if (job) {
-    stderrLine(`[grok-job] ${job.id} started (${track.mode})`);
+    stderrLine(`[grok-job] ${job.id} started (${skillMode})`);
   }
 
   return new Promise((resolve) => {
@@ -315,16 +349,30 @@ function runWithLiveRelay(wrapper, args, track) {
       } catch (err) {
         stderrLine(`[grok-relay] stop failed: ${err.message}`);
       }
+      let jobAfter = job;
       if (job) {
         if (stdoutBuf) {
           storeJobStdout(cwd, job.id, stdoutBuf);
         }
-        updateJob(cwd, job.id, {
+        jobAfter = updateJob(cwd, job.id, {
           status: code === 0 ? "success" : "failure",
           summary: code === 0 ? "completed" : `exit ${code}`,
         });
       }
-      resolve(code);
+      if (!shouldAttemptTerminalNotify({ skipNotify: track?.skipNotify })) {
+        resolve(code);
+        return;
+      }
+      const runId = resolveRunIdFromJobAndStdout(cwd, jobAfter, stdoutBuf);
+      maybeNotifyAfterTerminal({
+        cwd,
+        mode: skillMode,
+        runId,
+        code,
+        startedAtMs,
+        stdoutText: stdoutBuf,
+        stderrLine,
+      }).finally(() => resolve(code));
     };
 
     let child;
@@ -333,7 +381,7 @@ function runWithLiveRelay(wrapper, args, track) {
       // targets the companion's group and must reach the wrapper as a descendant.
       child = spawn(PYTHON, [wrapper, ...args], {
         stdio: ["inherit", "pipe", "pipe"],
-        env: process.env,
+        env: wrapperChildEnv(process.env),
       });
       if (job && child.pid) {
         updateJob(cwd, job.id, { pid: child.pid, pgid: process.pid });
@@ -363,7 +411,7 @@ function runWithLiveRelay(wrapper, args, track) {
           const line = stderrBuffer.slice(0, newlineIndex);
           stderrBuffer = stderrBuffer.slice(newlineIndex + 1);
           const runId = parseRunIdMarker(line);
-          if (runId) {
+          if (runId && sanitizeRunId(runId)) {
             try {
               relay.adoptRunId(runId);
             } catch (err) {
@@ -531,139 +579,13 @@ function cmdTransfer(cwd, args) {
   return 0;
 }
 
+
 function cmdSetup(cwd, args) {
-  const enable = args.includes("--enable-review-gate");
-  const disable = args.includes("--disable-review-gate");
-  const skipCodexAgents = args.includes("--skip-codex-agents");
-  const forceCodexAgents = args.includes("--force-codex-agents");
-  const removeCodexAgents = args.includes("--remove-codex-agents");
-  if (args.includes("--run-mode") || args.includes("direct") || args.includes("hardened")) {
-    const idx = args.indexOf("--run-mode");
-    const mode = idx >= 0 ? args[idx + 1] : args.find((a) => a === "direct" || a === "hardened");
-    if (mode === "direct" || mode === "hardened") {
-      setRunMode(cwd, mode);
-    }
-  }
-  if (enable) writeGateConfig(cwd, true);
-  if (disable) writeGateConfig(cwd, false);
-
-  const gate = readGateConfig(cwd);
-  const runMode = getRunMode(cwd);
-  const binary = grokBinaryAvailable();
-  const wrapper = resolveWrapperPath(process.env);
-  const rows = [
-    {
-      name: "grok CLI",
-      ok: binary.ok,
-      detail: binary.ok ? binary.version : binary.detail || "missing",
-    },
-    {
-      name: "wrapper",
-      ok: Boolean(wrapper),
-      detail: wrapper || "not found",
-    },
-    {
-      name: "run mode",
-      ok: true,
-      detail: runMode,
-    },
-    {
-      name: "stop-review gate",
-      ok: true,
-      detail: gate.stopReviewGate ? "ENABLED" : "disabled",
-    },
-  ];
-  const hints = [];
-  if (!binary.ok) {
-    hints.push("Install and authenticate the Grok CLI, then re-run /grok:setup.");
-    hints.push("See https://x.ai for Grok CLI install docs for your platform.");
-  }
-  if (!wrapper) {
-    hints.push("Reinstall the plugin so plugin/wrapper/scripts/grok_agent.py is present.");
-  }
-  if (runMode === "direct") {
-    hints.push("Direct mode uses your installed Grok home (like OpenAI's plugin uses installed Codex). Switch with: companion setup --run-mode hardened");
-  } else {
-    hints.push("Hardened mode is default. For installed-CLI posture: companion setup --run-mode direct");
-  }
-
-  // Codex agents: remove managed, or ensure (also auto-run on SessionStart).
-  let agentsResult = null;
-  let agentsOk = true;
-  if (removeCodexAgents) {
-    agentsResult = uninstallCodexAgents({ env: process.env, backup: true });
-    const detail = agentsResult.ok
-      ? `removed=[${agentsResult.removed.join(", ") || "none"}] user-owned-kept=[${agentsResult.skippedUser.join(", ") || "none"}] backups=[${agentsResult.backedUp.join(", ") || "none"}] → ${agentsResult.destDir}`
-      : `errors: ${agentsResult.errors.join("; ")}`;
-    rows.push({ name: "codex agents", ok: agentsResult.ok, detail });
-    agentsOk = agentsResult.ok;
-    if (agentsResult.removed.length) {
-      hints.push(
-        "Removed managed Codex agents (backups as *.toml.bak). SessionStart will reinstall while the plugin is enabled."
-      );
-    }
-  } else if (!skipCodexAgents) {
-    agentsResult = installCodexAgents({
-      env: process.env,
-      force: forceCodexAgents,
-      updateManaged: true,
-      pluginRoot: PLUGIN_ROOT,
-      backup: true,
-    });
-    const parts = [
-      `installed=[${agentsResult.installed.join(", ") || "none"}]`,
-      `updated=[${agentsResult.updated.join(", ") || "none"}]`,
-      `skipped=[${agentsResult.skipped.join(", ") || "none"}]`,
-      agentsResult.skippedUser?.length
-        ? `user-owned=[${agentsResult.skippedUser.join(", ")}]`
-        : null,
-      agentsResult.backedUp?.length ? `backups=[${agentsResult.backedUp.join(", ")}]` : null,
-      `→ ${agentsResult.destDir}`,
-    ].filter(Boolean);
-    const detail = agentsResult.ok
-      ? parts.join(" ")
-      : `errors: ${agentsResult.errors.join("; ")}`;
-    rows.push({
-      name: "codex agents",
-      ok: agentsResult.ok,
-      detail,
-    });
-    agentsOk = agentsResult.ok;
-    if (agentsResult.installed.length || agentsResult.updated.length) {
-      hints.push(
-        "Codex agents ready (absolute GROK_AGENT_RUN → agents/run.mjs): grok-engineer-coder, grok-rescue. Also auto-installed on SessionStart."
-      );
-    } else if (agentsResult.skippedUser?.length) {
-      hints.push(
-        "Some ~/.codex/agents/grok-*.toml look user-owned (no managed-by header). Use setup --force-codex-agents to overwrite (creates .bak)."
-      );
-    } else if (agentsResult.skipped.length && !agentsResult.installed.length) {
-      hints.push(
-        "Codex agents already up to date under ~/.codex/agents (SessionStart keeps managed agents in sync)."
-      );
-    }
-  }
-
-  // Also run hardened preflight when wrapper exists and mode is hardened
-  if (wrapper && runMode === "hardened") {
-    const pre = spawnSync(PYTHON, [wrapper, "preflight"], { encoding: "utf8", env: process.env });
-    if (pre.stdout) {
-      const env = tryParseEnvelope(pre.stdout);
-      if (env?.response?.checks) {
-        for (const c of env.response.checks) {
-          rows.push({ name: `preflight:${c.name}`, ok: Boolean(c.ok), detail: c.detail || "" });
-        }
-      } else {
-        process.stderr.write(pre.stderr || "");
-      }
-    }
-  }
-
-  process.stdout.write(renderSetupReport({ rows, runMode, hints }));
-  return binary.ok && wrapper && agentsOk ? 0 : 1;
+  return setupCmd(cwd, args, { python: PYTHON, pluginRoot: PLUGIN_ROOT });
 }
 
-function cmdDebate(cwd, wrapper, args, runMode) {
+
+async function cmdDebate(cwd, wrapper, args, runMode) {
   // Bounded two-pass: Grok reason, then a second reason that critiques the first.
   const task = extractTask(args) || "Debate the design tradeoffs in this repository.";
   const round1 = [
@@ -673,11 +595,13 @@ function cmdDebate(cwd, wrapper, args, runMode) {
     task,
   ].join("\n");
   const inj1 = injectTaskFile(["reason"], round1);
-  const code1 = captureAndTrack(wrapper, inj1.args, {
+  // Intermediate debate round: no completion notify (final round only).
+  const code1 = await captureAndTrack(wrapper, inj1.args, {
     cwd,
     mode: "reason",
     kind: "debate-a",
     runMode,
+    skipNotify: true,
   });
   inj1.cleanup();
   if (code1 !== 0) {
@@ -698,7 +622,7 @@ function cmdDebate(cwd, wrapper, args, runMode) {
     "End with: agreement points, disagreements, and a recommended resolution.",
   ].join("\n");
   const inj2 = injectTaskFile(["reason"], round2);
-  const code2 = captureAndTrack(wrapper, inj2.args, {
+  const code2 = await captureAndTrack(wrapper, inj2.args, {
     cwd,
     mode: "reason",
     kind: "debate-b",
@@ -755,6 +679,7 @@ function main() {
     base: baseRef,
     resume,
     fresh,
+    noNotify,
   } = stripFlags(rawArgs);
 
   let staged;
@@ -861,8 +786,11 @@ function main() {
 
   const track = {
     kind: mode === "adversarial-review" ? "adversarial-review" : mode === "code" ? "code" : "run",
+    // Keep skill name for notify payload (adversarial-review), wrapperMode for argv.
     mode: wrapperMode,
+    notifyMode: mode === "adversarial-review" ? "adversarial-review" : wrapperMode,
     runMode,
+    skipNotify: Boolean(noNotify),
   };
 
   const finishCleanups = (code) => {
@@ -872,13 +800,16 @@ function main() {
   };
 
   if (runMode === "direct") {
-    const code = captureAndTrack(null, wrapperArgs, {
-      cwd,
-      mode: wrapperMode,
-      kind: track.kind,
-      runMode: "direct",
-    });
-    return finishCleanups(code);
+    return Promise.resolve(
+      captureAndTrack(null, wrapperArgs, {
+        cwd,
+        mode: wrapperMode,
+        kind: track.kind,
+        runMode: "direct",
+        notifyMode: track.notifyMode,
+        skipNotify: track.skipNotify,
+      })
+    ).then(finishCleanups);
   }
 
   const wrapper = resolveWrapperPath(process.env);
@@ -906,13 +837,16 @@ function main() {
   }
 
   if (WRAPPER_MODES.has(wrapperMode) || wrapperArgs[0]) {
-    const code = captureAndTrack(wrapper, wrapperArgs, {
-      cwd,
-      mode: wrapperMode,
-      kind: track.kind,
-      runMode: "hardened",
-    });
-    return finishCleanups(code);
+    return Promise.resolve(
+      captureAndTrack(wrapper, wrapperArgs, {
+        cwd,
+        mode: wrapperMode,
+        kind: track.kind,
+        runMode: "hardened",
+        notifyMode: track.notifyMode,
+        skipNotify: track.skipNotify,
+      })
+    ).then(finishCleanups);
   }
 
   return finishCleanups(runPassthrough(wrapper, wrapperArgs));

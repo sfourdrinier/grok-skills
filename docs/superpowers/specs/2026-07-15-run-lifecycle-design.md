@@ -1,6 +1,6 @@
 # Run lifecycle, isolated review, completion signals, and implementation handoff
 
-**Status:** design revision 11 (PR1 shipped; PR2 opt-in isolation; PR5 = operator notify re-attempt only; **PR3–PR5 quality:** failure-mode matrix, DRY, internal review before “done”)  
+**Status:** design revision 12 (PR1 + PR2 on main; PR3 notifications 1.5.0; PR5 = notify dogfood follow-ups: operator re-attempt + direct-mode signal + headless honesty → 1.7.0; **PR3–PR5 quality:** matrix, DRY, internal review)  
 **Date:** 2026-07-16  
 **Product:** grok-skills (Claude Code + Codex)  
 **Baseline:** v1.2.10 (PR1 lifecycle on main as 1.3.x)  
@@ -69,13 +69,13 @@ Background and long-running Grok modes (especially `review`) are hard to trust:
 | Review isolation | §10; **opt-in** (`--isolated` only). `--base` alone uses live checkout. No silent live-checkout fallback **when isolation was requested**. |
 | Notifications storage | **Only** jobs index `config` in `plugin/scripts/lib/jobs.mjs`. Never gate-state. |
 | Notifications default | `off`. Setup recommends `auto`. |
-| Notify contract | **At-most-once attempt** (PR3): prioritize no duplicate attempts over guaranteed delivery. **Not** exactly-once. No automatic retry of `pending`. **Operator re-attempt = PR5 only** (may duplicate; never automatic). |
+| Notify contract | **At-most-once attempt** (PR3): prioritize no duplicate attempts over guaranteed delivery. **Not** exactly-once. No automatic retry of `pending`. **PR5 (1.7.0):** operator re-attempt (may duplicate); direct-mode job-scoped signal; headless/native honesty — never automatic retry. |
 | Background signal | Companion-only `GROK_COMPANION_EXECUTION_CONTEXT=foreground\|background` set by skill/agent shell prefixes; `skill-run.mjs` unchanged; never forwarded to wrapper; never inferred from TTY. |
 | Handoff mode | `WRAPPER_MODES` only; **not** `STREAMING_MODES`; `runHandoff()` like status passthrough. |
 | Contract validation | Explicit execution after scopes + HEAD; **operator-trusted argv, not OS-filesystem-sandboxed** (§14.3, §14.9). |
 | Handoff readiness | Computed from in-memory `terminalOutcome`, not persisted lifecycle. Manifest then envelope. `/grok:handoff` requires ready manifest **and** completed envelope (§14.6–14.12, §14.14). |
 | Code target scope | **One** cohesive `--target` workspace per `code` run in PR4. |
-| PR versions | PR1 **1.3.0**, PR2 **1.4.0**, PR3 **1.5.0**, PR4 **1.6.0**, PR5 **1.7.0** (operator notify retry; after PR3 dogfood). |
+| PR versions | PR1 **1.3.0**, PR2 **1.4.0**, PR3 **1.5.0**, PR4 **1.6.0**, PR5 **1.7.0** (notify dogfood follow-ups after PR3; see §13). |
 | Packaging version paths | Exactly three: `plugin/.claude-plugin/plugin.json`, `plugin/.codex-plugin/plugin.json`, `.claude-plugin/marketplace.json`. |
 | PROVENANCE | No content change required for this program unless a release note needs a one-line D-log entry; **locked: no `docs/PROVENANCE.md` edit in PR1–PR4** unless a finding forces it. |
 
@@ -482,7 +482,7 @@ Operators who want a clean HEAD+tracked-dirty tree opt in with `--isolated`.
 1. From **repository root** (git toplevel of original checkout):  
 
 ```text
-git diff --binary --full-index --ita-invisible-in-index HEAD --
+git diff --no-ext-diff --no-textconv --binary --full-index --ita-invisible-in-index <pinned-base-sha> --
 ```
 
 2. This combines **staged and unstaged tracked** modifications relative to HEAD.  
@@ -573,7 +573,8 @@ File: `{runDir}/notified.json`.
 | Windows | no-op, reason `windows-native-unsupported` | n/a |
 | Other | no-op | n/a |
 
-Always `shell: false`. Title `Grok Skills`. Body `"{mode} {lifecycle} · {runId} · {durationSeconds}s"`.
+Always `shell: false`. Title `Grok Skills`. Body
+`"{mode} {lifecycle} / {runId} / {durationSeconds}s"` (ASCII separators).
 
 ### Webhook (exact)
 
@@ -616,7 +617,7 @@ Add new classes to `envelope.ERROR_CLASSES` in the owning PR.
 | PR2 | 1.4.0 | **Opt-in** isolated review (`--isolated`) + ownership; `--base` alone stays live |
 | PR3 | 1.5.0 | Notifications + execution context (**at-most-once attempt only**) |
 | PR4 | 1.6.0 | Verified implementation handoff |
-| PR5 | 1.7.0 | **Operator** notify re-attempt (may duplicate); never auto-retry; **not** exactly-once |
+| PR5 | 1.7.0 | Notify dogfood follow-ups: **(A)** operator re-attempt (may duplicate); **(B)** direct-mode job-scoped completion signal; **(C)** headless/native honesty (setup + docs). Never auto-retry; **not** exactly-once |
 
 Release choice: consecutive minor releases for independent dogfood. PR5 may trail PR4 after PR3 notify dogfood.
 
@@ -959,16 +960,22 @@ As §12, §14.6–14.14 tests, dual-host smoke §14.19, packaging 1.6.0 on the t
 
 - Host chat completion APIs  
 - Untracked under review `--isolated`  
-- Windows native notify  
+- Windows native toast implementation (1.5.0 residual; PR5-C documents webhook instead; implement only with a Windows smoke host)  
 - Ignore-list review safety  
 - Auto-apply handoff  
 - `--allow-commits`  
 - Status-driven durable interrupted persistence  
-- **Automatic** notification retry (never; PR5 is operator-only)  
+- **Automatic** notification retry (never; PR5-A is operator-only)  
 - Exactly-once / guaranteed notification delivery  
 - Multi-root build gates in one code run  
 
-**Scheduled as PR5 (not out of program):** operator-initiated notify re-attempt after a finished run (explicit duplicate risk).
+**Scheduled as PR5 → 1.7.0 (not out of program):**
+
+| Track | Item |
+|-------|------|
+| **PR5-A** | Operator-initiated notify re-attempt after a finished run (explicit duplicate risk; force into same `notify.mjs`) |
+| **PR5-B** | Direct-mode completion push via **job-scoped** marker home (hardened keeps `runs/<runId>/notified.json`) |
+| **PR5-C** | Headless/native honesty: setup report + docs recommend webhook for SSH/CI/**Windows** (native toast remains macOS/Linux desktop only; no Windows toast without a smoke host); optional native-fail hint |
 
 ## 17. New source file conventions
 

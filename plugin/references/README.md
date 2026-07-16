@@ -93,7 +93,7 @@ Canonical table: root [README.md](../../README.md) (skills + agents). Summary:
 | Skill | Wrapper mode | Notes |
 |-------|--------------|-------|
 | `/grok:preflight` | `preflight` | Readiness (runnable CLI, auth, sandbox) |
-| `/grok:setup` | companion setup | Optional gate/mode; Codex agents auto on SessionStart |
+| `/grok:setup` | companion setup | Optional gate/mode/notifications; Codex agents auto on SessionStart |
 | `/grok:review` | `review` | Full-context read-only; live checkout by default; opt-in `--isolated` worktree; `--base` framing only; `--web` opt-in |
 | `/grok:adversarial-review` | `adversarial-review` | Hostile; web on by default |
 | `/grok:dual-lens` | companion | Adversarial then ordinary review |
@@ -104,6 +104,20 @@ Canonical table: root [README.md](../../README.md) (skills + agents). Summary:
 | `/grok:status` / `jobs` / `result` / `cancel` | companion | Job inspection |
 | `/grok:transfer` | companion | Claude session → task pack |
 | `/grok:cleanup` | `cleanup` | Dry-run by default; `--confirm` removes |
+
+## Execution context and notifications (1.5.0+)
+
+Canonical skill/agent prefix: [execution-context.md](execution-context.md).
+
+Completion push (OS toast / webhook) is companion-only, default **off**, at-most-once
+attempt after terminal live runs (hardened durable `runs/<id>`). Prefer
+`setup --notification-mode auto` for background jobs. Never status/jobs alone.
+
+**Not in 1.5.0 (PR5 → 1.7.0):** operator re-attempt; direct-mode push notify;
+headless/native honesty polish (setup/docs). Native toasts need a **macOS/Linux
+desktop session** today; they are **not** implemented on Windows. Use
+`webhook` for SSH/CI/**Windows** (and any headless host) until PR5 docs/setup
+polish; Windows toast stays out until a smoke-test host exists.
 
 ## Optional stop-review gate
 

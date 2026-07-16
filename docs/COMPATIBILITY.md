@@ -9,6 +9,38 @@ well-formed status envelope (relay the JSON regardless). Durable runs seed
 `run.json` before publishing a run id; terminal results use envelope-first
 persist via a spawn finalize worker.
 
+## Opt-in isolated review (1.4.0+)
+
+`review --isolated` (hardened only) creates an owned worktree under the state
+root, applies tracked dirty against a pinned base SHA, and cleans up after the
+run. `--base` alone is framing only (live checkout). Direct mode rejects
+`--isolated` (`isolation-unavailable`). Fail closed; no silent live fallback.
+
+## Completion notifications (1.5.0+)
+
+Companion-only push after a terminal **live** run (review/reason/code/verify/
+adversarial-review). Not status/jobs/result/setup alone.
+
+| Pref | Behavior |
+|------|----------|
+| `notificationMode: off` (default) | No push |
+| `auto` | Native OS notify only when `GROK_COMPANION_EXECUTION_CONTEXT=background` |
+| `native` | OS notify (macOS/Linux) for FG and BG |
+| `webhook` | POST JSON if `notificationWebhookUrl` set |
+
+At-most-once **attempt** via `runs/<runId>/notified.json` for hardened durable
+runs (no auto-retry; not exactly-once). Skills/agents must set execution context
+per `plugin/references/execution-context.md`. Context is never forwarded to the
+Python wrapper.
+
+**1.5.0 residuals deferred to PR5 (1.7.0):**
+
+| Item | Note |
+|------|------|
+| Operator re-attempt | Explicit re-fire after failed/stuck notify (may duplicate) |
+| Direct-mode push notify | Job-scoped marker home (direct has no wrapper `runs/<id>`) |
+| Headless / native honesty | Setup + docs: native needs a desktop session (macOS/Linux); **Windows** stays unsupported for native toast — use **webhook** |
+
 Verified against local installs on 2026-07-15:
 
 | Host | Version tested |

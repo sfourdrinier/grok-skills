@@ -10,6 +10,14 @@ import os from "node:os";
 import path from "node:path";
 
 import { resolveWorkspaceRoot } from "./gate-state.mjs";
+import {
+  isNotificationMode,
+  NOTIFICATION_MODES,
+  parseNotificationMode,
+  parseWebhookUrl,
+} from "./notification-modes.mjs";
+
+export { isNotificationMode, NOTIFICATION_MODES, parseNotificationMode, parseWebhookUrl };
 
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
 const FALLBACK = path.join(os.tmpdir(), "grok-companion");
@@ -17,6 +25,34 @@ const MAX_JOBS = 50;
 const JOB_ID_RE = /^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$/;
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
+
+/** Single source of jobs-index config defaults (design §11). */
+export const DEFAULT_JOBS_CONFIG = Object.freeze({
+  runMode: "hardened",
+  notificationMode: "off",
+  notificationWebhookUrl: null,
+  lastRescueJobId: null,
+});
+
+/** Normalize stored/corrupt config values to a known mode (default off). */
+function normalizeNotificationMode(value) {
+  return parseNotificationMode(value) ?? DEFAULT_JOBS_CONFIG.notificationMode;
+}
+
+/** Stored corrupt webhook URLs fall back to null. */
+function normalizeWebhookUrl(value) {
+  const parsed = parseWebhookUrl(value);
+  return parsed.ok ? parsed.url : null;
+}
+
+function normalizeConfig(raw) {
+  return {
+    runMode: raw?.runMode === "direct" ? "direct" : "hardened",
+    notificationMode: normalizeNotificationMode(raw?.notificationMode),
+    notificationWebhookUrl: normalizeWebhookUrl(raw?.notificationWebhookUrl),
+    lastRescueJobId: raw?.lastRescueJobId ?? null,
+  };
+}
 
 export function isValidJobId(jobId) {
   return typeof jobId === "string" && JOB_ID_RE.test(jobId);
@@ -86,20 +122,17 @@ function loadIndex(cwd, env = process.env) {
   ensure(cwd, env);
   const file = indexPath(cwd, env);
   if (!fs.existsSync(file)) {
-    return { version: 1, jobs: [], config: { runMode: "hardened" } };
+    return { version: 1, jobs: [], config: { ...DEFAULT_JOBS_CONFIG } };
   }
   try {
     const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
     return {
       version: 1,
       jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [],
-      config: {
-        runMode: parsed.config?.runMode === "direct" ? "direct" : "hardened",
-        lastRescueJobId: parsed.config?.lastRescueJobId ?? null,
-      },
+      config: normalizeConfig(parsed.config),
     };
   } catch {
-    return { version: 1, jobs: [], config: { runMode: "hardened" } };
+    return { version: 1, jobs: [], config: { ...DEFAULT_JOBS_CONFIG } };
   }
 }
 
@@ -108,11 +141,14 @@ function saveIndex(cwd, index, env = process.env) {
   const jobs = [...(index.jobs ?? [])]
     .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")))
     .slice(0, MAX_JOBS);
+  const config = normalizeConfig(index.config);
   const payload = {
     version: 1,
     config: {
-      runMode: index.config?.runMode === "direct" ? "direct" : "hardened",
-      lastRescueJobId: index.config?.lastRescueJobId ?? null,
+      runMode: config.runMode,
+      notificationMode: config.notificationMode,
+      notificationWebhookUrl: config.notificationWebhookUrl,
+      lastRescueJobId: config.lastRescueJobId,
     },
     jobs,
   };
@@ -133,6 +169,41 @@ export function setRunMode(cwd, mode, env = process.env) {
   index.config.runMode = mode === "direct" ? "direct" : "hardened";
   saveIndex(cwd, index, env);
   return index.config.runMode;
+}
+
+/**
+ * @returns {{ notificationMode: string, notificationWebhookUrl: string|null }}
+ */
+export function getNotificationConfig(cwd, env = process.env) {
+  const config = loadIndex(cwd, env).config;
+  return {
+    notificationMode: config.notificationMode,
+    notificationWebhookUrl: config.notificationWebhookUrl,
+  };
+}
+
+/**
+ * @param {string} cwd
+ * @param {{ notificationMode?: string, notificationWebhookUrl?: string|null }} patch
+ */
+export function setNotificationConfig(cwd, patch, env = process.env) {
+  const index = loadIndex(cwd, env);
+  if (patch.notificationMode !== undefined) {
+    // Invalid modes leave prior prefs unchanged (never clobber auto -> off).
+    const mode = parseNotificationMode(patch.notificationMode);
+    if (mode) {
+      index.config.notificationMode = mode;
+    }
+  }
+  if (patch.notificationWebhookUrl !== undefined) {
+    // Invalid non-empty URLs leave prior webhook unchanged; empty clears.
+    const parsed = parseWebhookUrl(patch.notificationWebhookUrl);
+    if (parsed.ok) {
+      index.config.notificationWebhookUrl = parsed.url;
+    }
+  }
+  saveIndex(cwd, index, env);
+  return getNotificationConfig(cwd, env);
 }
 
 export function mintJobId() {

@@ -1,14 +1,14 @@
-# Run lifecycle program — Implementation Plan (revision 11)
+# Run lifecycle program — Implementation Plan (revision 12)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Checkboxes track progress.
 
-**Goal:** Full run lifecycle with CAS, crash-consistent terminal persistence, read-only status, process finalize worker, **opt-in** isolated review, at-most-once notify attempts, verified `code` implementation handoff, and (later) **operator-driven notify retry** — **five PRs**.
+**Goal:** Full run lifecycle with CAS, crash-consistent terminal persistence, read-only status, process finalize worker, **opt-in** isolated review, at-most-once notify attempts, verified `code` implementation handoff, and (later) **notify dogfood follow-ups as PR5** — **five PRs**.
 
-**Design:** [docs/superpowers/specs/2026-07-15-run-lifecycle-design.md](../specs/2026-07-15-run-lifecycle-design.md) **revision 11**.
+**Design:** [docs/superpowers/specs/2026-07-15-run-lifecycle-design.md](../specs/2026-07-15-run-lifecycle-design.md) **revision 12**.
 
 **Baseline:** v1.2.10; **PR1 shipped** on main as **1.3.x**. **Versions:** 1.3.x (done) → 1.4.0 → 1.5.0 → 1.6.0 → **1.7.0** (PR5).
 
-**Rule:** Design §4–§14 are authority for PR1–PR4. Rev 9: PR2 isolation is **opt-in** (`--isolated` only). **Rev 10:** operator notify retry is **PR5 only**. **Rev 11:** PR3–PR5 quality bar = failure-mode matrix first, **DRY (no duplicated logic)**, and **internal code review as a required PR task** — suites green alone is not “done.”
+**Rule:** Design §4–§14 are authority for PR1–PR4. Rev 9: PR2 isolation is **opt-in** (`--isolated` only). **Rev 10:** operator notify retry is **PR5**. **Rev 11:** quality gates. **Rev 12:** PR5 scope = (A) operator re-attempt, (B) direct-mode completion signal, (C) headless/native honesty — after PR3 dogfood.
 
 **PR1 done. PR2 (opt-in isolation) on branch / review. PR3–PR5 follow execution order + quality gates below.**
 
@@ -165,7 +165,12 @@ Packaging triple + CHANGELOG only after Gates A–D. Tag only after merge policy
 | Packaging triple | **1.5.0** |
 
 **Not in PR3:** changes to `plugin/scripts/lib/skill-run.mjs` behavior (locked no-op).  
-**Not in PR3:** operator notify retry, automatic retry of `pending`/`failed`, or exactly-once delivery claims — those are **PR5** (retry) or permanently out of scope (exactly-once / auto-retry).
+**Not in PR3 (→ PR5 or permanent non-goal):**
+- Operator notify re-attempt (**PR5-A**)
+- Direct-mode push notify / job-side marker home (**PR5-B**)
+- Headless/native honesty (setup + docs; optional native-fail hint) (**PR5-C**)
+- Automatic retry of `pending`/`failed` (permanent non-goal)
+- Exactly-once / guaranteed delivery (permanent non-goal)
 
 ### PR4 → 1.6.0
 
@@ -382,7 +387,7 @@ Implement design §10 exactly (only used when isolation is requested):
 
 - Owner marker sibling `{worktree_path}.owner.json`.  
 - Never reuse existing path.  
-- Dirty: `git diff --binary --full-index --ita-invisible-in-index HEAD --` from repo root; apply in worktree; reject dirty submodules.  
+- Dirty: `git diff --no-ext-diff --no-textconv --binary --full-index --ita-invisible-in-index <pinned-base-sha> --` from repo root; apply in worktree; reject dirty submodules.  
 - Cleanup always: remove worktree, prune, marker, diff.  
 
 - [x] **Commit** `review: isolation helper with ownership`
@@ -436,57 +441,43 @@ Fill before any product code. Minimal rows (expand if needed):
 | skill-run.mjs | Unchanged | accidental edit | review + test | yes |
 | Native spawn | shell false only | — | — | yes |
 
-- [ ] Matrix committed in plan or `docs/superpowers/reviews/…-pr3-matrix.md`.  
-- [ ] List **one** module each for: marker I/O, native adapter, webhook adapter, “shouldNotify(mode, context)”.  
-- [ ] **Commit** `docs: PR3 failure-mode matrix and DRY boundaries`
+- [x] Matrix: `docs/superpowers/reviews/2026-07-16-pr3-notifications-matrix.md`.  
+- [x] Single modules: `notify.mjs`, `jobs.mjs` defaults, companion thin hook.  
+- [x] Committed on feature branch.
 
 ### Task 3.1 — Jobs config
 
-- [ ] Defaults `notificationMode: "off"`, `notificationWebhookUrl: null` in **one** place in `jobs.mjs` (no duplicate defaults elsewhere).  
-- [ ] **Commit** `jobs: notification prefs`
+- [x] Defaults off / null via `DEFAULT_JOBS_CONFIG`.  
+- [x] Committed.
 
 ### Task 3.2 — `notify.mjs` at-most-once attempt (only writer)
 
-Design §11:
+Design §11: exclusive pending; already-attempted; complete marker; shell false; not exactly-once.
 
-- Exclusive create `pending` before external call.  
-- Existing marker → `already-attempted` (no auto-retry).  
-- Always complete marker; never intentional auto-retry loop.  
-- Priority: no duplicate attempts over delivery. **Not** exactly-once.  
-- Adapters: Darwin osascript / Linux notify-send / webhook; always `shell: false`.  
-
-- [ ] Tests: off; already-attempted; crash-left pending not auto-retried; shell false; webhook failure still completed+failed.  
-- [ ] **Commit** `notify: at-most-once attempt semantics`
+- [x] Implemented + `notify.test.mjs`.  
+- [x] Committed.
 
 ### Task 3.3 — Companion hooks + execution context
 
-- [ ] Companion reads `GROK_COMPANION_EXECUTION_CONTEXT`; never forwards to wrapper.  
-- [ ] Calls **only** `notify.mjs` APIs (no inline marker/spawn).  
-- [ ] `auto` only background; `native` both; `off` never; webhook per config.  
-- [ ] Never on status/handoff/result/jobs/setup alone.  
-- [ ] **Do not** change `skill-run.mjs` behavior.  
-- [ ] Tests: FG + BG Claude skill path and Codex/agent path.  
-- [ ] **Commit** `companion: execution context and notify hooks`
+- [x] `wrapperChildEnv`; `maybeNotifyAfterTerminal`; eligible modes; skill-run unchanged.  
+- [x] Committed.
 
 ### Task 3.4 — Skill/agent env prefix (DRY)
 
-- [ ] **One** canonical pattern for prefixing `GROK_COMPANION_EXECUTION_CONTEXT` (document once; all PR3 file-map skills/agents use it).  
-- [ ] Grep/test gate: every live mode skill/agent in the file map has the prefix instruction; no divergent variants.  
-- [ ] **Commit** `skills: shared execution-context prefix for notify`
+- [x] `plugin/references/execution-context.md` + skills/agents/codex-agents.  
+- [x] Committed.
 
 ### Task 3.5 — Internal code review (Gate D)
 
-- [ ] Spec + quality pass (matrix, DRY, dual-host, no skill-run drift).  
-- [ ] Write review artifact `docs/superpowers/reviews/YYYY-MM-DD-pr3-notifications.md`.  
-- [ ] Zero open remediable findings.  
-- [ ] **Commit** `review: PR3 internal review artifact`
+- [x] `docs/superpowers/reviews/2026-07-16-pr3-full-review.md` (+ matrix/internal).  
+- [x] Includes PR2 late isolation carry-forward.  
+- [x] Zero open remediable findings.
 
 ### Task 3.6 — Docs + 1.5.0 (Gate E)
 
-- [ ] All PR3 docs; packaging **1.5.0**; suites green.  
-- [ ] Docs: at-most-once attempt only; operator retry = **PR5**.  
-- [ ] Tag `v1.5.0` after merge policy.  
-- [ ] **Commit** `release: 1.5.0 notifications`
+- [x] Packaging **1.5.0**; CHANGELOG; COMPATIBILITY; RELEASE; SECURITY; manual-smoke; references.  
+- [x] Docs: at-most-once only; operator retry = PR5.  
+- [ ] Tag `v1.5.0` after merge to main.
 
 ---
 
@@ -625,22 +616,29 @@ verify sentinel → remove exact sentinel → HEAD check → changed files
 
 ---
 
-## PR5 — Operator notify retry (→ 1.7.0)
+## PR5 — Notify dogfood follow-ups (→ 1.7.0)
 
 **When:** After **PR3 shipped and dogfooded** (typically after PR4). Does not block 1.5.0/1.6.0.
 
-**Product:** Operator-initiated re-attempt. Complements PR3 automatic attempt; does not replace it.
+**Product (three tracks):**
 
-### Policy (locked)
+| Track | Name | Why |
+|-------|------|-----|
+| **PR5-A** | Operator re-attempt | Recover from failed/stuck notify without auto-retry |
+| **PR5-B** | Direct-mode completion signal | Direct has no durable `runs/<id>`; still needs a marker home for push |
+| **PR5-C** | Headless / native honesty | Setup + docs (and optional native-fail hint) so operators prefer webhook off-desktop |
+
+### Policy (locked, all tracks)
 
 | Rule | Decision |
 |------|----------|
 | Automatic retry of `pending` / `failed` | **Still never** |
 | Exactly-once delivery | **Still not claimed** |
-| Who may re-fire | **Operator only** |
-| UX | **May send a duplicate** |
-| Failure of retry | Must not fail/reopen terminal run outcome |
-| **DRY** | **Must call PR3 `notify.mjs`** with explicit force; **no** second marker/spawn implementation |
+| Who may re-fire (A) | **Operator only**; may duplicate |
+| Failure of notify / retry | Must not fail/reopen terminal run outcome |
+| **DRY** | Reuse PR3 `notify.mjs` + `notification-modes.mjs`; **no** second marker/spawn stack |
+| Direct marker home (B) | Prefer **job-scoped** marker under companion jobs state (not inventing fake wrapper runs) |
+| Headless (C) | Do not claim native works without a desktop session |
 
 ### Task 5.0 — Failure-mode matrix + DRY proof (Gate A)
 
@@ -649,13 +647,16 @@ verify sentinel → remove exact sentinel → HEAD check → changed files
 | Auto path after PR5 | Must never call force | yes |
 | Operator force after failed | Re-fire once; may duplicate | yes |
 | Stuck `pending` | No auto-fire; operator force only if policy allows + docs | yes |
-| Terminal outcome | Unchanged by retry | yes |
+| Terminal outcome | Unchanged by retry / direct notify | yes |
+| Direct without job id | Fail closed or skip; never invent wrapper run dir | yes |
+| Direct + hardened | Separate marker roots; no cross-write | yes |
+| Native headless | Setup/docs honest; optional stderr hint | yes |
 | Duplicate adapter code | Forbidden (DRY) | review |
 
-- [ ] Matrix committed.  
+- [ ] Matrix committed (covers A+B+C).  
 - [ ] **Commit** `docs: PR5 failure-mode matrix`
 
-### Task 5.1 — Operator re-attempt API (extends notify.mjs only)
+### Task 5.1 — Operator re-attempt API (PR5-A; extends notify.mjs only)
 
 - [ ] Explicit `{ force: true }` / CLI; not used by automatic completion.  
 - [ ] States documented: `completed`+`failed` re-fire; stuck `pending` policy.  
@@ -663,26 +664,42 @@ verify sentinel → remove exact sentinel → HEAD check → changed files
 - [ ] Tests prove **zero** new spawn/marker helpers outside `notify.mjs`.  
 - [ ] **Commit** `notify: operator re-attempt (may duplicate)`
 
-### Task 5.2 — Companion / skill surface (thin)
+### Task 5.2 — Companion / skill surface for retry (PR5-A thin)
 
 - [ ] Operator invocation only; never from auto completion path.  
 - [ ] Thin wrapper → `notify.mjs` force API.  
 - [ ] **Commit** `companion: notify-retry operator path`
 
-### Task 5.3 — Internal code review (Gate D)
+### Task 5.3 — Direct-mode completion signal (PR5-B)
 
-- [ ] Spec + DRY + no auto path regression.  
-- [ ] Artifact `docs/superpowers/reviews/YYYY-MM-DD-pr5-notify-retry.md`.  
+- [ ] When `runMode === "direct"` and prefs would notify, use a **job-scoped** marker home (e.g. under jobs state for that job id), not wrapper `runs/`.  
+- [ ] At-most-once same as hardened (`wx` / pending → completed).  
+- [ ] Payload still mode/lifecycle/job-or-run id/duration; document direct vs hardened marker paths.  
+- [ ] Tests: direct + auto/native/webhook; second attempt blocked; never creates wrapper runs dir.  
+- [ ] **Commit** `notify: direct-mode job-scoped completion signal`
+
+### Task 5.4 — Headless / native honesty (PR5-C)
+
+- [ ] Setup report + hints: `native`/`auto` need a desktop session; recommend `webhook` for SSH/CI/headless.  
+- [ ] On native send failure with no-display-shaped detail, stderr one-line hint toward webhook (best-effort).  
+- [ ] **Windows:** keep native as **unsupported** (`windows-native-unsupported`); do **not** ship a Windows toast adapter without a smoke-test host. Setup/docs must say: use **`webhook`** on Windows (and any headless host).  
+- [ ] Docs: `manual-smoke.md`, `COMPATIBILITY.md`, `plugin/references/README.md`, SECURITY note if needed — cover macOS/Linux desktop vs Windows/SSH/CI.  
+- [ ] **Commit** `docs+setup: headless native honesty for notify`
+
+### Task 5.5 — Internal code review (Gate D)
+
+- [ ] Spec + DRY + no auto path regression; direct marker isolation; headless copy accurate.  
+- [ ] Artifact `docs/superpowers/reviews/YYYY-MM-DD-pr5-notify-followups.md`.  
 - [ ] Zero open remediable findings.  
 - [ ] **Commit** `review: PR5 internal review artifact`
 
-### Task 5.4 — Docs + 1.7.0 (Gate E)
+### Task 5.6 — Docs + 1.7.0 (Gate E)
 
-- [ ] PR3 = one automatic attempt; PR5 = optional re-fire; neither exactly-once.  
+- [ ] PR3 = one automatic attempt on hardened durable runs; PR5 = A re-fire + B direct + C headless honesty; none exactly-once.  
 - [ ] Packaging **1.7.0**; suites; tag after merge.  
-- [ ] **Commit** `release: 1.7.0 operator notify retry`
+- [ ] **Commit** `release: 1.7.0 notify dogfood follow-ups`
 
-**Not in PR5:** auto-retry loops, delivery guarantees, Windows native notify.
+**Not in PR5:** auto-retry loops, delivery guarantees, **Windows native toast implementation** (document + webhook only until a Windows smoke host exists), private-IP webhook denylist (optional later if needed).
 
 ---
 
@@ -700,7 +717,9 @@ verify sentinel → remove exact sentinel → HEAD check → changed files
 | Opt-in review isolation + ownership + `--ita-invisible-in-index` | PR2 (`--isolated` only) |
 | Failure-mode matrix + DRY + internal review gates | PR3–PR5 (Gate A/B/D) |
 | Execution context + notify attempt; skill-run no-op | PR3 |
-| Operator notify re-attempt reuses notify.mjs; no auto-retry | PR5 |
+| Operator notify re-attempt reuses notify.mjs; no auto-retry | PR5-A |
+| Direct-mode job-scoped completion signal | PR5-B |
+| Headless/native honesty (setup + docs) | PR5-C |
 | Exactly-once notify / guaranteed delivery | **Out of program** |
 | Contract + scopes + order (single finalization fn) | PR4 / 4.1–4.3 |
 | Operator-trusted validation (no OS FS sandbox claim) | PR4 / 4.5 |
@@ -725,10 +744,10 @@ verify sentinel → remove exact sentinel → HEAD check → changed files
 | CAS | `recordRevision` + `run.lock` |
 | write_run_record public API | Deleted after PR1 migration; CAS only |
 | Elapsed | Monotonic in owner process; UTC for status |
-| Dirty isolation (when `--isolated`) | `git diff --binary --full-index --ita-invisible-in-index HEAD --` |
+| Dirty isolation (when `--isolated`) | `git diff --no-ext-diff --no-textconv --binary --full-index --ita-invisible-in-index <pinned-base-sha> --` |
 | Isolation trigger | **`--isolated` only**; `--base` alone = live |
 | Notify (PR3) | At-most-once **attempt**; no auto-retry pending; **not** exactly-once |
-| Notify retry (PR5) | **Operator-only** re-attempt via **same** notify.mjs; may duplicate |
+| Notify follow-ups (PR5) | Operator re-attempt + direct-mode signal + headless honesty; no auto-retry |
 | DRY (PR3–PR5) | **No duplicated logic**; shared validators/writers; review fails on copy-paste |
 | Internal review (PR3–PR5) | **Required task** + artifact before packaging |
 | Background | `GROK_COMPANION_EXECUTION_CONTEXT` via shared skill pattern; skill-run **no-op** |
@@ -758,7 +777,8 @@ No parallel tracks for PR1–PR4. PR5 may wait on real notify demand after 1.5.0
 
 Revision **9:** PR2 isolation opt-in only.  
 Revision **10:** PR5 = operator notify re-attempt only.  
-Revision **11:** PR3–PR5 **quality gates** (failure-mode matrix, **DRY**, **internal code review as PR tasks**); suites alone are not done.
+Revision **11:** PR3–PR5 **quality gates** (failure-mode matrix, **DRY**, **internal code review as PR tasks**); suites alone are not done.  
+Revision **12:** PR5 expanded after PR3 dogfood prioritization: **A** operator re-attempt, **B** direct-mode completion signal, **C** headless/native honesty (1.7.0).
 
 Paths:
 

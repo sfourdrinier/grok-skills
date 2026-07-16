@@ -145,7 +145,9 @@ def run(args: argparse.Namespace) -> dict:
                     },
                 ) from exc
             isolation = review_isolation.prepare_review_isolation(
-                repo_root=repo_root, run_id=pre_paths.run_id
+                repo_root=repo_root,
+                run_id=pre_paths.run_id,
+                base_revision=planned.base_revision,
             )
             # Map target into the isolation worktree (same relative path).
             if target_repo_relative:

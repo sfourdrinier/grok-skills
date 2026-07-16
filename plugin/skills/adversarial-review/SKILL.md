@@ -14,6 +14,8 @@ allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 
 ```bash
 SKILL_BASE='<Base directory for this skill - absolute path from Skill tool>'
+# Required for completion notifications (plugin/references/execution-context.md):
+export GROK_COMPANION_EXECUTION_CONTEXT=foreground   # or background
 node "$SKILL_BASE/run.mjs" <mode> [args...]
 ```
 
@@ -32,6 +34,7 @@ use `--task-file -` with a single-quoted heredoc.
 Never `--task "..."`. Example:
 
 ```bash
+export GROK_COMPANION_EXECUTION_CONTEXT=foreground
 node "$SKILL_BASE/run.mjs" adversarial-review [flags from $ARGUMENTS, values single-quoted] --task-file - <<'GROK_TASK'
 <operator focus>
 GROK_TASK

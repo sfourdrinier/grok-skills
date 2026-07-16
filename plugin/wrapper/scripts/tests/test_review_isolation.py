@@ -273,6 +273,218 @@ class ReviewIsolationHelperTests(unittest.TestCase):
         else:
             self.fail("expected a git diff invocation for isolation patch")
 
+    def test_dirty_patch_uses_pinned_base_not_live_head(self) -> None:
+        """Diff must target the worktree base_sha, not symbolic HEAD (concurrent moves)."""
+        (self.repo / "a.txt").write_text("alpha\nbeta\nedit\n", encoding="utf-8")
+        head_before = _git(self.repo, "rev-parse", "HEAD").strip()
+        captured_diff_bases = []
+        real = review_isolation._run_git_bytes
+
+        def _wrap(repo, args, **kwargs):
+            if args and args[0] == "diff" and "--binary" in args:
+                # argv: diff ... <base> -- .
+                try:
+                    dash = args.index("--")
+                    captured_diff_bases.append(args[dash - 1])
+                except ValueError:
+                    pass
+            return real(repo, args, **kwargs)
+
+        with mock.patch.object(review_isolation, "_run_git_bytes", side_effect=_wrap):
+            session = self._session()
+            try:
+                self.assertEqual(session.base_revision, head_before)
+                self.assertIn(head_before, captured_diff_bases)
+                self.assertNotIn("HEAD", captured_diff_bases)
+            finally:
+                review_isolation.cleanup_review_isolation(session)
+
+    def test_prepare_honors_plan_base_revision_pin(self) -> None:
+        """plan_review_isolation pin must drive prepare worktree base (not live HEAD)."""
+        planned = review_isolation.plan_review_isolation(
+            repo_root=self.repo, run_id=runstate.new_run_id()
+        )
+        pin = planned.base_revision
+        self.assertTrue(isinstance(pin, str) and len(pin) >= 7)
+        # Advance HEAD after plan so live HEAD != planned pin.
+        (self.repo / "a.txt").write_text("alpha\nbeta\npost-plan\n", encoding="utf-8")
+        _git(self.repo, "add", "a.txt")
+        _git(self.repo, "commit", "-m", "post-plan move")
+        head_after = _git(self.repo, "rev-parse", "HEAD").strip()
+        self.assertNotEqual(head_after, pin)
+
+        rid = runstate.new_run_id()
+        session = review_isolation.prepare_review_isolation(
+            repo_root=self.repo,
+            run_id=rid,
+            base_revision=pin,
+        )
+        try:
+            self.assertEqual(session.base_revision, pin)
+            self.assertNotEqual(session.base_revision, head_after)
+        finally:
+            review_isolation.cleanup_review_isolation(session)
+
+    def test_owner_marker_written_before_worktree_add(self) -> None:
+        """Crash window: marker must exist before git worktree add returns."""
+        order = []
+        real_write = runstate.write_owner_marker_file
+        real_git = worktree_mod._git
+
+        def _write(path, run_id):
+            order.append("marker")
+            return real_write(path, run_id)
+
+        def _git(repo, *args, **kwargs):
+            if args and args[0] == "worktree" and args[1] == "add":
+                order.append("worktree-add")
+                # Marker must already exist for the planned path.
+                # Find path arg: worktree add -b branch path base
+                wt_path = pathlib.Path(args[4])
+                marker = worktree_mod.marker_path_for(wt_path)
+                self.assertTrue(marker.is_file(), "owner marker must precede worktree add")
+            return real_git(repo, *args, **kwargs)
+
+        with mock.patch.object(runstate, "write_owner_marker_file", _write):
+            with mock.patch.object(worktree_mod, "_git", _git):
+                session = self._session()
+                review_isolation.cleanup_review_isolation(session)
+        self.assertEqual(order[:2], ["marker", "worktree-add"])
+
+    def test_cleanup_retains_marker_if_worktree_still_present(self) -> None:
+        session = self._session()
+        # Force path to look non-removable: leave a marker while path still exists
+        # by mocking rmtree/remove to no-op.
+        with mock.patch.object(
+            worktree_mod,
+            "_run_git",
+            return_value=subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="locked"),
+        ):
+            with mock.patch("shutil.rmtree", lambda *a, **k: None):
+                # path still exists after failed remove
+                review_isolation.cleanup_review_isolation(session)
+        self.assertTrue(session.worktree_path.exists())
+        self.assertTrue(
+            session.marker_path.is_file(),
+            "marker must remain while worktree exists for cleanup --confirm",
+        )
+        # Force real cleanup for teardown
+        import shutil
+
+        shutil.rmtree(session.worktree_path, ignore_errors=True)
+        if session.marker_path.exists():
+            session.marker_path.unlink()
+        if session.diff_path.exists():
+            session.diff_path.unlink()
+        subprocess.run(
+            ["git", "-C", str(self.repo), "branch", "-D", session.branch],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+
+    def test_is_all_zero_oid_accepts_sha256_length(self) -> None:
+        self.assertTrue(review_isolation._is_all_zero_oid("0" * 40))
+        self.assertTrue(review_isolation._is_all_zero_oid("0" * 64))
+        self.assertFalse(review_isolation._is_all_zero_oid("0" * 39))
+        self.assertFalse(review_isolation._is_all_zero_oid("a" * 40))
+
+    def test_intent_to_add_detects_sha256_zero_oids(self) -> None:
+        """ITA parser must treat 64-zero OIDs as intent-to-add (SHA-256 repos)."""
+        zero64 = "0" * 64
+        line = "1 .A N... 000000 000000 100644 {z} {z} weird-ita.bin".format(z=zero64)
+        payload = (line + "\0").encode("utf-8")
+        fake = subprocess.CompletedProcess(
+            args=["git", "status"],
+            returncode=0,
+            stdout=payload,
+            stderr=b"",
+        )
+        with mock.patch.object(review_isolation, "_run_git_bytes", return_value=fake):
+            paths = review_isolation._intent_to_add_paths(self.repo)
+        self.assertEqual(paths, ["weird-ita.bin"])
+
+    def test_intent_to_add_status_uses_bytes_not_utf8_decode(self) -> None:
+        """Regression: status must not go through utf-8-decoding _run_git."""
+        # Non-UTF-8 bytes in a porcelain line must not raise UnicodeDecodeError.
+        bad_name = b"1 .A N... 000000 000000 100644 " + (b"0" * 40) + b" " + (b"0" * 40) + b" "
+        bad_name += b"file-\xff-ita.txt\0"
+        fake = subprocess.CompletedProcess(
+            args=["git", "status"],
+            returncode=0,
+            stdout=bad_name,
+            stderr=b"",
+        )
+        with mock.patch.object(review_isolation, "_run_git_bytes", return_value=fake):
+            paths = review_isolation._intent_to_add_paths(self.repo)
+        self.assertEqual(len(paths), 1)
+        self.assertTrue(paths[0].startswith("file-"))
+
+    def test_worktree_add_failure_removes_prewritten_marker(self) -> None:
+        """If worktree add fails with no path left, drop the prewritten marker."""
+        run_id = runstate.new_run_id()
+        wt = runstate.state_root() / "worktrees" / "review" / run_id
+        expected_marker = worktree_mod.marker_path_for(wt)
+
+        with mock.patch.object(
+            worktree_mod,
+            "_git",
+            side_effect=GrokWrapperError("worktree-failure", "simulated worktree add failure"),
+        ):
+            with self.assertRaises(GrokWrapperError) as ctx:
+                review_isolation.prepare_review_isolation(repo_root=self.repo, run_id=run_id)
+        self.assertEqual(ctx.exception.error_class, "isolation-unavailable")
+        self.assertFalse(expected_marker.exists(), "orphan marker must be cleaned when path is gone")
+        self.assertFalse(wt.exists())
+
+    def test_worktree_add_failure_retains_marker_if_path_remains(self) -> None:
+        """Partial worktree left after add failure must keep owner marker for cleanup."""
+        run_id = runstate.new_run_id()
+        wt = runstate.state_root() / "worktrees" / "review" / run_id
+        expected_marker = worktree_mod.marker_path_for(wt)
+
+        real_git = worktree_mod._git
+        real_run_git = worktree_mod._run_git
+
+        def _git(repo, *args, **kwargs):
+            if args and args[0] == "worktree" and args[1] == "add":
+                wt.parent.mkdir(parents=True, exist_ok=True)
+                wt.mkdir(parents=True, exist_ok=True)
+                (wt / "README").write_text("partial\n", encoding="utf-8")
+                raise GrokWrapperError("worktree-failure", "simulated partial worktree add failure")
+            return real_git(repo, *args, **kwargs)
+
+        def _run_git(repo, args, env=None):
+            # Fail only cleanup reaps so the partial path remains.
+            if args and args[0] == "worktree" and args[1] in ("remove", "prune"):
+                return subprocess.CompletedProcess(
+                    args=[], returncode=1, stdout="", stderr="locked"
+                )
+            if args and args[0] == "branch":
+                return subprocess.CompletedProcess(
+                    args=[], returncode=1, stdout="", stderr="locked"
+                )
+            return real_run_git(repo, args, env=env)
+
+        with mock.patch.object(worktree_mod, "_git", side_effect=_git):
+            with mock.patch.object(worktree_mod, "_run_git", side_effect=_run_git):
+                with mock.patch("shutil.rmtree", lambda *a, **k: None):
+                    with self.assertRaises(GrokWrapperError) as ctx:
+                        review_isolation.prepare_review_isolation(
+                            repo_root=self.repo, run_id=run_id
+                        )
+        self.assertEqual(ctx.exception.error_class, "isolation-unavailable")
+        self.assertTrue(wt.exists(), "simulated partial worktree still present")
+        self.assertTrue(
+            expected_marker.is_file(),
+            "owner marker must remain so cleanup --confirm can reap",
+        )
+        import shutil
+
+        shutil.rmtree(wt, ignore_errors=True)
+        if expected_marker.exists():
+            expected_marker.unlink()
+
 
 class ReviewIsolationModeTests(ModeHarness):
     """End-to-end mode wiring: live path default, isolated path, failure class."""
