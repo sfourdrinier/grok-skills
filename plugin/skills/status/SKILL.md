@@ -30,11 +30,17 @@ use `--task-file -` with a single-quoted heredoc.
 <!-- plugin/skills/status.md -->
 
 Read a Grok run by id through the hardened wrapper and relay its result
-envelope. Finished runs return `"status": "success"` with
-`response.storedEnvelope`. In-progress runs return `"status": "running"` with
-progress events and `response.target` (elapsed, process, lastEvent) — not a
-missing-envelope warning. `status` is strictly read-only: one JSON envelope on
-stdout, nothing written to the run it inspects.
+envelope. Projection (read-only; never writes the target run dir):
+
+- In-flight (`created` / `running` / `finalizing`) → top-level `"running"`, exit 0
+- Completed → `"success"`, exit 0, with `response.storedEnvelope` when present
+- Failed / canceled / derived interrupted → `"failure"`, exit **1**, still a
+  well-formed status envelope (exit 1 means the *target* failed or was
+  interrupted, not that the status command malfunctioned)
+
+`response.target` includes `lifecycle`, `lifecycleSource` (`record` |
+`envelope` | `derived`), `elapsedMs`, process liveness, and progress summaries.
+Always relay the JSON envelope to the user regardless of exit status.
 
 Raw slash-command arguments:
 `$ARGUMENTS`
@@ -56,8 +62,9 @@ rejects any run id that is not the strict `YYYYMMDDThhmmssZ-xxxxxx` run-id shape
 node "$SKILL_BASE/run.mjs" status --run-id '<run-id from $ARGUMENTS>'
 ```
 - Return the command stdout envelope to the user VERBATIM. Do not paraphrase,
-  summarize, reformat, or add commentary before or after it, and preserve the
-  exit status.
+  summarize, reformat, or add commentary before or after it. Preserve the exit
+  status: exit 1 with a parseable status envelope is a successful inspection of
+  a failed/interrupted target — still show the envelope.
 
 If the companion prints an actionable "could not locate the Grok wrapper"
 message instead of an envelope, tell the user to run `/grok:setup`.

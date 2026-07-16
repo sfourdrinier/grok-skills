@@ -158,18 +158,17 @@ class ReviewModeTests(ModeHarness):
         self.assertEqual(record["runId"], run_id, "the envelope must carry the REAL run id")
 
     def test_write_run_record_failure_preserves_success_outcome(self) -> None:
-        # Round4 F3-write-run-record-unguarded: if the FINAL terminal run.json write
-        # fails, the already-determined success envelope must still be returned
-        # (with a warning), never reclassified into a generic cli-failure.
+        # If terminal finalize/persist fails, the already-determined success
+        # envelope must still be returned (with a warning), never reclassified.
         repo = self._repo()
-        real_write = runstate.write_run_record
 
-        def _write_but_fail_terminal(run_paths, record):
-            if record.get("status") == "running":
-                return real_write(run_paths, record)
-            raise OSError("simulated terminal run.json write failure (disk full)")
+        def _fail_finalize(*_a, **_k):
+            raise OSError("simulated terminal finalize failure (disk full)")
 
-        with mock.patch.object(runstate, "write_run_record", _write_but_fail_terminal):
+        with mock.patch(
+            "groklib.modes.finalize_worker.run_finalize_parent",
+            side_effect=_fail_finalize,
+        ), mock.patch.object(_shared, "run_finalize_parent", side_effect=_fail_finalize):
             exit_code, out = self.drive(
                 ["review", "--target", "pkg", "--task", "Review"], repo_root=repo
             )
@@ -177,7 +176,10 @@ class ReviewModeTests(ModeHarness):
         self.assertEqual(exit_code, 0, out)
         self.assertEqual(env["status"], "success")
         self.assertTrue(
-            any("terminal run record could not be persisted" in warning for warning in env["warnings"]),
+            any(
+                "terminal finalize failed" in warning or "could not be persisted" in warning
+                for warning in env["warnings"]
+            ),
             env["warnings"],
         )
 

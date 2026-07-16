@@ -57,6 +57,7 @@ from groklib.modes._envelope import (
     resolve_terminal_cleanup,
     terminalize_unexpected_failure,
 )
+from groklib.modes.finalize_worker import run_finalize_parent
 
 # Task 0 (probe-report.md Step 2): the sole authentication file under ~/.grok.
 AUTH_FILE_NAMES: Tuple[str, ...] = ("auth.json",)
@@ -146,15 +147,7 @@ def repo_root_for_path(anchor: pathlib.Path) -> pathlib.Path:
 def best_effort_write_run_record(
     run_paths: runstate.RunPaths, record: dict, warnings: List[str], log: Callable[[str, str], None]
 ) -> None:
-    """Write the terminal run.json, degrading to a warning (never raising) on a write failure.
-
-    F3-write-run-record-unguarded: the ALREADY-DETERMINED outcome envelope
-    (success, or a specific classified failure, or preflight's checks array) must
-    survive a run.json write failure. A StateOwnershipError or OSError here is
-    logged with context and recorded as a value-free warning, but the caller
-    still returns its determined outcome envelope instead of being reclassified
-    into a generic cli-failure by the outer terminalizer.
-    """
+    """Merge run.json under lock, degrading to a warning (never raising) on failure."""
     try:
         runstate.write_run_record(run_paths, record)
     except Exception as exc:
@@ -163,6 +156,52 @@ def best_effort_write_run_record(
             "could not persist terminal run.json for {}: {}".format(run_paths.run_id, exc),
         )
         warnings.append("the terminal run record could not be persisted (see stderr for detail)")
+
+
+def _publish_terminal_envelope(
+    run_paths: runstate.RunPaths,
+    mode: str,
+    envelope: dict,
+    *,
+    lifecycle: str,
+    progress: ProgressWriter,
+    warnings: List[str],
+) -> dict:
+    """Move to finalizing and persist terminal envelope via finalize worker."""
+    try:
+        record = runstate.load_run_record(run_paths.run_id)
+        rev = int(record.get("recordRevision", 0))
+        life = record.get("lifecycle")
+        if life == "created":
+            record = runstate.set_lifecycle(run_paths, rev, "running")
+            rev = int(record["recordRevision"])
+            life = "running"
+        if life == "running":
+            record = runstate.set_lifecycle(run_paths, rev, "finalizing")
+            rev = int(record["recordRevision"])
+        published, ephemeral = run_finalize_parent(
+            run_paths,
+            mode=mode,
+            envelope=envelope,
+            lifecycle=lifecycle,
+            expected_revision=rev,
+            progress=progress,
+        )
+        if ephemeral:
+            warnings.append("finalization worker unkillable; durable terminal state not written")
+            if isinstance(published, dict):
+                published = dict(published)
+                published["warnings"] = list(published.get("warnings") or []) + [
+                    "finalization worker unkillable; durable terminal state not written"
+                ]
+        return published
+    except Exception as exc:
+        _log("_publish_terminal_envelope", "finalize failed: {}".format(exc))
+        note = "terminal finalize failed (see stderr); returning in-memory envelope"
+        warnings.append(note)
+        repaired = dict(envelope)
+        repaired["warnings"] = list(envelope.get("warnings") or []) + [note]
+        return repaired
 
 
 def resolve_binary(args: argparse.Namespace) -> pathlib.Path:
@@ -584,7 +623,26 @@ def _run_grok_mode_body(
     result_holder: List[Optional[grokcli.GrokRunResult]],
 ) -> dict:
     """The classified-failure lifecycle body of run_grok_mode (see its docstring)."""
-    runstate.write_run_record(run_paths, _run_record(run, run_paths, "running"))
+    # Seed already has lifecycle=created; advance to running and merge mode fields.
+    try:
+        record = runstate.load_run_record(run_paths.run_id)
+        rev = int(record.get("recordRevision", 0))
+        if record.get("lifecycle") == "created":
+            record = runstate.set_lifecycle(run_paths, rev, "running")
+            rev = int(record["recordRevision"])
+        runstate.cas_update_run_record(
+            run_paths,
+            rev,
+            {
+                "requestedModel": run.requested_model,
+                "repository": run.repository,
+                "targetWorkspace": run.target_workspace,
+                "status": "running",
+            },
+        )
+    except Exception as exc:
+        _log("_run_grok_mode_body", "could not advance lifecycle to running: {}".format(exc))
+        runstate.write_run_record(run_paths, _run_record(run, run_paths, "running"))
     progress.safe_emit("start", "{} run created".format(run.mode), data={"mode": run.mode})
 
     # Reap a crashed prior run's stranded credential-bearing private home on live
@@ -696,16 +754,20 @@ def _run_grok_mode_body(
     result = result_holder[0]
     if outcome_error is None and result is not None and sandbox_obj is not None and effective_model is not None:
         progress.safe_emit("done", "{} run completed".format(run.mode))
-        best_effort_write_run_record(run_paths, _run_record(run, run_paths, "success"), warnings, _log)
-        return _success_envelope(
+        envelope = _success_envelope(
             run, run_paths, result, sandbox_obj, effective_model, cleanup_field, warnings
+        )
+        return _publish_terminal_envelope(
+            run_paths, run.mode, envelope, lifecycle="completed", progress=progress, warnings=warnings
         )
 
     error = outcome_error if outcome_error is not None else GrokWrapperError(
         "cli-failure", "{} run did not complete".format(run.mode), {"reason": "incomplete-run"}
     )
     progress.safe_emit("done", "{} failed: {}".format(run.mode, error.error_class), level="error")
-    best_effort_write_run_record(run_paths, _run_record(run, run_paths, "failure"), warnings, _log)
-    return _failure_envelope(
+    envelope = _failure_envelope(
         run, run_paths, error, sandbox_obj, effective_model, cleanup_field, warnings, result=result
+    )
+    return _publish_terminal_envelope(
+        run_paths, run.mode, envelope, lifecycle="failed", progress=progress, warnings=warnings
     )

@@ -682,3 +682,103 @@ class RunstateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CreateRunSeedTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp_root = tempfile.mkdtemp(prefix="grok-cli-seed-test-")
+        self.addCleanup(shutil.rmtree, self.tmp_root, True)
+        self.state_home = os.path.join(self.tmp_root, "state-home")
+        os.makedirs(self.state_home, exist_ok=True)
+        self._env_patcher = mock.patch.dict(os.environ, {"XDG_STATE_HOME": self.state_home})
+        self._env_patcher.start()
+        self.addCleanup(self._env_patcher.stop)
+
+    def test_seed_lifecycle_created_status_running_revision_zero(self) -> None:
+        paths = runstate.create_run("review")
+        record = json.loads((paths.run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(record["lifecycle"], "created")
+        self.assertEqual(record["status"], "running")
+        self.assertEqual(record["recordRevision"], 0)
+        self.assertEqual(record["runId"], paths.run_id)
+        self.assertEqual(record["mode"], "review")
+
+    def test_seed_exists_before_run_id_marker(self) -> None:
+        order = []
+        real_write = runstate.write_json_atomic
+        real_emit = runstate.emit_run_id_marker
+
+        def tracking_write(path, payload):
+            if path.name == "run.json":
+                order.append("seed")
+            return real_write(path, payload)
+
+        def tracking_emit(run_id):
+            order.append("marker")
+            return real_emit(run_id)
+
+        with mock.patch.object(runstate, "write_json_atomic", side_effect=tracking_write):
+            with mock.patch.object(runstate, "emit_run_id_marker", side_effect=tracking_emit):
+                runstate.create_run("code")
+        self.assertIn("seed", order)
+        self.assertIn("marker", order)
+        self.assertLess(order.index("seed"), order.index("marker"))
+
+    def test_write_json_atomic_no_tmp_left(self) -> None:
+        path = pathlib.Path(self.tmp_root) / "x.json"
+        runstate.write_json_atomic(path, {"a": 1})
+        runstate.write_json_atomic(path, {"a": 2})
+        self.assertEqual(json.loads(path.read_text())["a"], 2)
+        self.assertEqual(list(path.parent.glob("x.json.tmp.*")), [])
+
+    def test_cas_update_and_conflict(self) -> None:
+        paths = runstate.create_run("review")
+        updated = runstate.cas_update_run_record(paths, 0, {"repository": "/repo"})
+        self.assertEqual(updated["recordRevision"], 1)
+        self.assertEqual(updated["repository"], "/repo")
+        self.assertEqual(updated["lifecycle"], "created")
+        with self.assertRaises(runstate.CasConflictError):
+            runstate.cas_update_run_record(paths, 0, {"repository": "/other"})
+
+    def test_set_lifecycle_graph_and_terminal_refuse(self) -> None:
+        paths = runstate.create_run("review")
+        r = runstate.set_lifecycle(paths, 0, "running")
+        self.assertEqual(r["lifecycle"], "running")
+        r = runstate.set_lifecycle(paths, 1, "finalizing")
+        self.assertEqual(r["lifecycle"], "finalizing")
+        r = runstate.set_lifecycle(paths, 2, "completed")
+        self.assertEqual(r["lifecycle"], "completed")
+        with self.assertRaises(runstate.LifecycleError):
+            runstate.set_lifecycle(paths, 3, "running")
+
+    def test_persist_terminal_envelope_first_and_idempotent(self) -> None:
+        from groklib.envelope import build_envelope
+
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.set_lifecycle(paths, 1, "finalizing")
+        env = build_envelope(run_id=paths.run_id, mode="review", status="success", response={"ok": True})
+        runstate.persist_terminal_envelope(paths, 2, env, lifecycle="completed")
+        record = runstate.load_run_record(paths.run_id)
+        self.assertEqual(record["lifecycle"], "completed")
+        self.assertTrue(paths.envelope_path.is_file())
+        body = paths.envelope_path.read_bytes()
+        # Second call with different envelope must not replace
+        env2 = build_envelope(run_id=paths.run_id, mode="review", status="success", response={"ok": False})
+        runstate.persist_terminal_envelope(paths, None, env2, lifecycle="completed")
+        self.assertEqual(paths.envelope_path.read_bytes(), body)
+
+    def test_persist_crash_recovery_finishes_lifecycle(self) -> None:
+        from groklib.envelope import build_envelope
+
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.set_lifecycle(paths, 1, "finalizing")
+        env = build_envelope(run_id=paths.run_id, mode="review", status="success", response={"ok": True})
+        # Simulate crash after envelope write before lifecycle
+        runstate.write_json_atomic(paths.envelope_path, env)
+        record = runstate.load_run_record(paths.run_id)
+        self.assertEqual(record["lifecycle"], "finalizing")
+        runstate.persist_terminal_envelope(paths, None, None)
+        record = runstate.load_run_record(paths.run_id)
+        self.assertEqual(record["lifecycle"], "completed")

@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import pathlib
 import shutil
 import tempfile
 import unittest
@@ -147,8 +148,11 @@ class StatusModeTests(unittest.TestCase):
 
         exit_code, out = _run_status(paths.run_id)
         envelope = json.loads(out)
-        self.assertEqual(exit_code, 0, out)
-        self.assertEqual(envelope["status"], "success")
+        # Dead owner + no envelope → derived interrupted, top-level failure (read-only)
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(envelope["status"], "failure")
+        self.assertEqual(envelope["response"]["target"]["lifecycle"], "interrupted")
+        self.assertEqual(envelope["response"]["target"]["lifecycleSource"], "derived")
         self.assertTrue(
             any("no stored envelope" in str(w) for w in envelope.get("warnings") or []),
             envelope.get("warnings"),
@@ -333,6 +337,38 @@ class StatusModeTests(unittest.TestCase):
         after_mtime = os.stat(paths.run_dir).st_mtime_ns
         self.assertEqual(before_listing, after_listing)
         self.assertEqual(before_mtime, after_mtime)
+
+    def test_status_run_dir_byte_identical(self) -> None:
+        """status is read-only: recursive file contents unchanged after query."""
+        paths = self._seed_run()
+        before = {}
+        for root, _dirs, files in os.walk(paths.run_dir):
+            for name in files:
+                fp = pathlib.Path(root) / name
+                before[str(fp.relative_to(paths.run_dir))] = fp.read_bytes()
+        exit_code, _out = _run_status(paths.run_id)
+        self.assertEqual(exit_code, 0)
+        after = {}
+        for root, _dirs, files in os.walk(paths.run_dir):
+            for name in files:
+                fp = pathlib.Path(root) / name
+                after[str(fp.relative_to(paths.run_dir))] = fp.read_bytes()
+        self.assertEqual(before, after)
+
+    def test_status_envelope_overrides_nonterminal_record(self) -> None:
+        """Valid envelope + non-terminal lifecycle → effective lifecycle from envelope."""
+        paths = runstate.create_run("review")
+        env = build_envelope(
+            run_id=paths.run_id, mode="review", status="success", response={"answer": "done"}
+        )
+        paths.envelope_path.write_text(json.dumps(env), encoding="utf-8")
+        runstate.write_home_liveness_marker(paths.run_dir, 999999999)
+        exit_code, out = _run_status(paths.run_id)
+        envelope = json.loads(out)
+        self.assertEqual(exit_code, 0, out)
+        self.assertEqual(envelope["status"], "success")
+        self.assertEqual(envelope["response"]["target"]["lifecycle"], "completed")
+        self.assertEqual(envelope["response"]["target"]["lifecycleSource"], "envelope")
 
 
 if __name__ == "__main__":

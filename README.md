@@ -172,7 +172,7 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 | `/grok:code` | Implements in an **external git worktree** off a committed `--base`. Does not commit or push. |
 | `/grok:verify` | Pass/fail/inconclusive check on an existing worktree. No `--web`. |
 | `/grok:debate` | Two opposing Grok reason passes + synthesis on a topic. |
-| `/grok:status` | Jobs table, or wrapper status with `--run-id`. |
+| `/grok:status` | Jobs table, or read-only wrapper status with `--run-id` (lifecycle projection; exit 1 can mean a failed target). |
 | `/grok:jobs` | List recent companion-tracked jobs. |
 | `/grok:result` | Stored job output (`--pretty` for Markdown). |
 | `/grok:cancel` | Cancel a running job by id. |

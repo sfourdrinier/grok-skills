@@ -9,6 +9,7 @@
 # GrokWrapperError and the shared log_stderr helper from the top-level
 # groklib package.
 
+import contextlib
 import dataclasses
 import datetime
 import json
@@ -20,10 +21,20 @@ import shutil
 import stat
 import tempfile
 import time
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Set
 
 from groklib import GrokWrapperError, log_stderr
 from groklib import platformsupport
+
+try:
+    import fcntl  # type: ignore
+except ImportError:  # pragma: no cover - Windows
+    fcntl = None  # type: ignore
+
+try:
+    import msvcrt  # type: ignore
+except ImportError:  # pragma: no cover - non-Windows
+    msvcrt = None  # type: ignore
 
 _OWNER_STRING = "grok-skills-wrapper"
 _STATE_DIR_NAME = "grok-skills"
@@ -75,6 +86,29 @@ class LeaderSocketPathTooLong(GrokWrapperError):
         super().__init__("leader-socket-failure", message, detail)
 
 
+class CasConflictError(GrokWrapperError):
+    """Raised when a CAS update observes an unexpected recordRevision."""
+
+    def __init__(self, message: str, detail: Optional[Dict[str, object]] = None) -> None:
+        super().__init__("state-ownership-violation", message, detail)
+
+
+class LifecycleError(GrokWrapperError):
+    """Raised when a lifecycle transition is illegal or would overwrite a terminal state."""
+
+    def __init__(self, message: str, detail: Optional[Dict[str, object]] = None) -> None:
+        super().__init__("state-ownership-violation", message, detail)
+
+
+_TERMINAL_LIFECYCLES: Set[str] = frozenset({"completed", "failed", "canceled"})
+_ALLOWED_LIFECYCLE_TRANSITIONS: Dict[str, Set[str]] = {
+    "created": frozenset({"running", "failed", "canceled"}),
+    "running": frozenset({"finalizing", "failed", "canceled"}),
+    "finalizing": frozenset({"completed", "failed", "canceled"}),
+}
+_PRESERVE_ON_MERGE: Set[str] = frozenset({"runId", "createdAtUtc", "lifecycle", "recordRevision"})
+
+
 @dataclasses.dataclass(frozen=True)
 class RunPaths:
     run_id: str
@@ -122,15 +156,313 @@ def _mkdir_0700(path: pathlib.Path) -> None:
 
 def _write_json_0600(path: pathlib.Path, payload: object) -> None:
     """Write ``payload`` as JSON to ``path``, forcing the file to exactly 0600 regardless of umask."""
+    write_json_atomic(path, payload)
+
+
+def write_json_atomic(path: pathlib.Path, payload: object) -> None:
+    """Atomically write JSON: temp sibling ``path.name + '.tmp.' + pid`` then ``os.replace``, mode 0600."""
     serialized = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    parent = path.parent
+    tmp_name = "{}.tmp.{}".format(path.name, os.getpid())
+    tmp_path = parent / tmp_name
     try:
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _FILE_MODE)
+        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _FILE_MODE)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        platformsupport.restrict_file_permissions(tmp_path)
+        os.replace(str(tmp_path), str(path))
         platformsupport.restrict_file_permissions(path)
     except OSError as exc:
-        _log_stderr("_write_json_0600", "failed writing {}: {}".format(path, exc))
+        _log_stderr("write_json_atomic", "failed writing {}: {}".format(path, exc))
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
         raise
+
+
+@contextlib.contextmanager
+def run_lock(paths: RunPaths):
+    """Exclusive lock on ``run_dir/run.lock`` (fcntl on Unix, msvcrt on Windows)."""
+    lock_path = paths.run_dir / "run.lock"
+    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, _FILE_MODE)
+    try:
+        platformsupport.restrict_file_permissions(lock_path)
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        elif msvcrt is not None:  # pragma: no cover - Windows
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        yield
+    finally:
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            elif msvcrt is not None:  # pragma: no cover
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+        finally:
+            os.close(fd)
+
+
+def _load_run_json_unlocked(paths: RunPaths) -> dict:
+    record_path = paths.run_dir / "run.json"
+    try:
+        with open(record_path, "r", encoding="utf-8") as handle:
+            record = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise UnknownRunError(
+            "no run record for run id {}".format(paths.run_id),
+            {"runId": paths.run_id},
+        ) from exc
+    if not isinstance(record, dict):
+        raise UnknownRunError(
+            "run record for run id {} is not a JSON object".format(paths.run_id),
+            {"runId": paths.run_id},
+        )
+    return record
+
+
+def _verify_paths_owner(paths: RunPaths) -> None:
+    marker_path = paths.run_dir / "owner.json"
+    owner_run_id = verify_owner_marker(marker_path)
+    if owner_run_id != paths.run_id:
+        raise StateOwnershipError(
+            "owner marker run id mismatch for {}".format(paths.run_dir),
+            {"expectedRunId": paths.run_id, "markerRunId": owner_run_id},
+        )
+
+
+def seed_run_record(paths: RunPaths, mode: str) -> dict:
+    """Return the exact seed ``run.json`` body (schemaVersion 1, lifecycle created, revision 0)."""
+    return {
+        "schemaVersion": 1,
+        "runId": paths.run_id,
+        "mode": mode,
+        "createdAtUtc": _utc_now_iso(),
+        "lifecycle": "created",
+        "status": "running",
+        "recordRevision": 0,
+        "requestedModel": None,
+        "repository": None,
+        "targetWorkspace": None,
+        "worktreePath": None,
+        "worktreeBranch": None,
+        "baseRevision": None,
+        "progressStreamPath": str(paths.progress_path),
+        "envelopePath": str(paths.envelope_path),
+    }
+
+
+def cas_update_run_record(
+    paths: RunPaths,
+    expected_revision: int,
+    patch: Dict[str, object],
+) -> dict:
+    """CAS merge ``patch`` into run.json under lock; bumps recordRevision by 1."""
+    _verify_paths_owner(paths)
+    with run_lock(paths):
+        record = _load_run_json_unlocked(paths)
+        current = record.get("recordRevision", 0)
+        if current != expected_revision:
+            raise CasConflictError(
+                "recordRevision conflict for run {}: expected {}, found {}".format(
+                    paths.run_id, expected_revision, current
+                ),
+                {
+                    "runId": paths.run_id,
+                    "expectedRevision": expected_revision,
+                    "foundRevision": current,
+                },
+            )
+        if "lifecycle" in patch and patch["lifecycle"] != record.get("lifecycle"):
+            raise LifecycleError(
+                "use set_lifecycle or persist_terminal_envelope to change lifecycle",
+                {"runId": paths.run_id},
+            )
+        merged = dict(record)
+        for key, value in patch.items():
+            if key in ("runId", "createdAtUtc", "recordRevision"):
+                continue
+            merged[key] = value
+        merged["runId"] = paths.run_id
+        merged["createdAtUtc"] = record.get("createdAtUtc") or merged.get("createdAtUtc")
+        merged["recordRevision"] = expected_revision + 1
+        write_json_atomic(paths.run_dir / "run.json", merged)
+        return merged
+
+
+def set_lifecycle(paths: RunPaths, expected_revision: int, lifecycle: str) -> dict:
+    """CAS lifecycle transition under lock (design §6 graph)."""
+    _verify_paths_owner(paths)
+    with run_lock(paths):
+        record = _load_run_json_unlocked(paths)
+        current_rev = record.get("recordRevision", 0)
+        if current_rev != expected_revision:
+            raise CasConflictError(
+                "recordRevision conflict for run {}: expected {}, found {}".format(
+                    paths.run_id, expected_revision, current_rev
+                ),
+                {
+                    "runId": paths.run_id,
+                    "expectedRevision": expected_revision,
+                    "foundRevision": current_rev,
+                },
+            )
+        current_life = record.get("lifecycle")
+        if current_life in _TERMINAL_LIFECYCLES:
+            raise LifecycleError(
+                "refusing to overwrite terminal lifecycle {!r}".format(current_life),
+                {"runId": paths.run_id, "lifecycle": current_life},
+            )
+        allowed = _ALLOWED_LIFECYCLE_TRANSITIONS.get(str(current_life), frozenset())
+        if lifecycle not in allowed:
+            raise LifecycleError(
+                "illegal lifecycle transition {!r} -> {!r}".format(current_life, lifecycle),
+                {"from": current_life, "to": lifecycle, "runId": paths.run_id},
+            )
+        record = dict(record)
+        record["lifecycle"] = lifecycle
+        if lifecycle in ("running", "finalizing"):
+            record["status"] = "running"
+        record["recordRevision"] = expected_revision + 1
+        write_json_atomic(paths.run_dir / "run.json", record)
+        return record
+
+
+def _lifecycle_from_envelope(envelope: dict) -> str:
+    status = envelope.get("status")
+    if status == "success":
+        return "completed"
+    if status == "failure":
+        return "failed"
+    raise LifecycleError(
+        "cannot derive terminal lifecycle from envelope status {!r}".format(status),
+        {"status": status},
+    )
+
+
+def persist_terminal_envelope(
+    paths: RunPaths,
+    expected_revision: Optional[int],
+    envelope: Optional[dict],
+    *,
+    lifecycle: Optional[str] = None,
+) -> dict:
+    """Envelope-first terminal persistence under lock (design §7.1).
+
+    If a valid terminal envelope already exists, finish lifecycle only (never
+    replace the body). Otherwise write ``envelope.json`` first, then CAS lifecycle.
+    """
+    from groklib import envelope as envelope_mod
+
+    _verify_paths_owner(paths)
+    with run_lock(paths):
+        record = _load_run_json_unlocked(paths)
+        current_rev = int(record.get("recordRevision", 0))
+        envelope_path = paths.envelope_path
+        existing_env: Optional[dict] = None
+        if envelope_path.is_file():
+            try:
+                with open(envelope_path, "r", encoding="utf-8") as handle:
+                    candidate = json.load(handle)
+                if isinstance(candidate, dict) and not envelope_mod.validate_envelope(candidate):
+                    existing_env = candidate
+            except (OSError, json.JSONDecodeError):
+                existing_env = None
+
+        if existing_env is not None:
+            implied = _lifecycle_from_envelope(existing_env)
+            current_life = record.get("lifecycle")
+            if current_life in _TERMINAL_LIFECYCLES:
+                if current_life != implied and current_life != "canceled":
+                    # canceled may pair with failure-shaped envelopes in edge cases; allow match-or-cancel
+                    if not (current_life == "canceled" and implied == "failed"):
+                        raise LifecycleError(
+                            "terminal lifecycle {!r} conflicts with existing envelope".format(current_life),
+                            {"lifecycle": current_life, "implied": implied},
+                        )
+                return record
+            # Finish lifecycle only
+            record = dict(record)
+            record["lifecycle"] = implied
+            record["status"] = "success" if implied == "completed" else "failure"
+            record["recordRevision"] = current_rev + 1
+            write_json_atomic(paths.run_dir / "run.json", record)
+            return record
+
+        if envelope is None:
+            raise LifecycleError(
+                "no terminal envelope on disk and none provided to persist",
+                {"runId": paths.run_id},
+            )
+        if expected_revision is not None and current_rev != expected_revision:
+            raise CasConflictError(
+                "recordRevision conflict for run {}: expected {}, found {}".format(
+                    paths.run_id, expected_revision, current_rev
+                ),
+                {
+                    "runId": paths.run_id,
+                    "expectedRevision": expected_revision,
+                    "foundRevision": current_rev,
+                },
+            )
+        if lifecycle is None:
+            lifecycle = _lifecycle_from_envelope(envelope)
+        if lifecycle not in _TERMINAL_LIFECYCLES:
+            raise LifecycleError(
+                "lifecycle must be completed|failed|canceled, got {!r}".format(lifecycle),
+                {"lifecycle": lifecycle},
+            )
+        violations = envelope_mod.validate_envelope(envelope)
+        if violations:
+            raise envelope_mod.InvalidEnvelopeError(
+                "terminal envelope failed validation",
+                {"violations": violations},
+            )
+        # Envelope FIRST, then lifecycle
+        write_json_atomic(envelope_path, envelope)
+        record = dict(record)
+        record["lifecycle"] = lifecycle
+        record["status"] = "success" if lifecycle == "completed" else "failure"
+        record["recordRevision"] = current_rev + 1
+        write_json_atomic(paths.run_dir / "run.json", record)
+        return record
+
+
+def effective_lifecycle(
+    record: dict,
+    *,
+    has_valid_envelope: bool,
+    envelope_status: Optional[str],
+    process_liveness: str,
+) -> tuple:
+    """Return ``(lifecycle, lifecycleSource)`` without writing (design §6)."""
+    life = record.get("lifecycle")
+    if life in _TERMINAL_LIFECYCLES:
+        return str(life), "record"
+    if has_valid_envelope:
+        if envelope_status == "success":
+            return "completed", "envelope"
+        return "failed", "envelope"
+    # Legacy records without lifecycle field: treat status success/failure as terminal
+    status = record.get("status")
+    if status == "success" and not has_valid_envelope:
+        # unfinished claims
+        pass
+    if status == "success":
+        return "completed", "record"
+    if process_liveness == "dead":
+        return "interrupted", "derived"
+    if life in ("created", "running", "finalizing"):
+        return str(life), "record"
+    if status == "running":
+        return "running", "record"
+    return "running", "record"
 
 
 def emit_run_id_marker(run_id: str) -> None:
@@ -187,22 +519,11 @@ def _run_paths_for(run_id: str) -> RunPaths:
 
 
 def create_run(mode: str) -> RunPaths:
-    """Mint a fresh run id and build the C2 run-dir layout: run_dir/, trace/, owner.json.
+    """Mint a fresh run id, seed ``run.json``, then emit the run-id marker.
 
-    ``mode`` identifies the calling subcommand for forward compatibility with
-    callers; the C2 owner.json schema has no mode field, and run.json (which
-    does) is written separately via ``write_run_record`` by the mode handler
-    at run start, not by this function.
-
-    Parent directories (state root, ``runs/``) are created the same way as
-    every other directory in this module: missing ancestors are created and
-    chmod'd to 0700 with ``exist_ok=True``. The LEAF ``run_dir`` is different
-    on purpose: a colliding run id must never silently adopt an existing run
-    directory (which could belong to a concurrent or prior run), so it is
-    created with a bare ``os.mkdir`` and a ``FileExistsError`` is turned into
-    a fail-closed ``StateOwnershipError``.
+    Seed is written **before** ``emit_run_id_marker`` so a published run id always
+    has durable state (lifecycle ``created``, status ``running``, recordRevision 0).
     """
-    del mode  # accepted per the C5 signature; not persisted by this function, see docstring.
     run_id = new_run_id()
     paths = _run_paths_for(run_id)
     _mkdir_0700(paths.run_dir.parent)
@@ -219,26 +540,13 @@ def create_run(mode: str) -> RunPaths:
             ),
             {"runId": run_id, "operation": "create_run"},
         ) from exc
-    # From here the leaf run directory is OURS. Any failure finishing the layout
-    # must let the caller terminalize under THIS real run id instead of orphaning
-    # a dangling run dir under a synthesized id (F1-create-run-outside-try): the
-    # exception carries ``paths`` so run_grok_mode / run_worktree_mode /
-    # preflight.run can write a terminal run.json under the real id. The owner
-    # marker is written FIRST (before the trace dir and the relay marker) so
-    # write_run_record's owner-marker verification can succeed even when a later
-    # step fails.
     try:
         platformsupport.restrict_dir_permissions(paths.run_dir)
         write_owner_marker(paths.run_dir, run_id)
-        # F4-partial-create: write the owner-pid liveness lease into the run dir the
-        # instant the marker exists, so is_orphaned_partial_run_dir can tell a
-        # genuinely orphaned post-create crash (owner dead, no run.json) from a live
-        # in-flight create (owner alive). Written right after the marker so an
-        # in-flight run carries the lease before the caller writes run.json.
         write_home_liveness_marker(paths.run_dir, os.getpid())
         _mkdir_0700(paths.trace_dir)
-        # F-RELAY-RUNID: announce the freshly-minted run id on stderr so the
-        # plugin's foreground relay follows THIS run deterministically.
+        seed = seed_run_record(paths, mode)
+        write_json_atomic(paths.run_dir / "run.json", seed)
         emit_run_id_marker(run_id)
     except BaseException as exc:
         _attach_run_paths(exc, paths)
@@ -373,19 +681,51 @@ def allocate_leader_socket(private_home: pathlib.Path, run_id: str) -> pathlib.P
 
 
 def write_run_record(paths: RunPaths, record: dict) -> None:
-    """Write ``run_dir/run.json`` after verifying the run dir's owner marker matches ``paths.run_id``."""
-    marker_path = paths.run_dir / "owner.json"
-    owner_run_id = verify_owner_marker(marker_path)
-    if owner_run_id != paths.run_id:
-        _log_stderr(
-            "write_run_record",
-            "owner marker run id {!r} does not match paths.run_id {!r}".format(owner_run_id, paths.run_id),
-        )
-        raise StateOwnershipError(
-            "owner marker run id mismatch for {}".format(paths.run_dir),
-            {"expectedRunId": paths.run_id, "markerRunId": owner_run_id},
-        )
-    _write_json_0600(paths.run_dir / "run.json", record)
+    """Merge ``record`` into run.json under lock without clobbering seed lifecycle fields.
+
+    Public full-replace is removed: this merges under ``run.lock``, preserves
+    ``runId``/``createdAtUtc``/``lifecycle``/``recordRevision`` from the seed when
+    the caller omits them, maps terminal status values onto lifecycle when safe,
+    and bumps ``recordRevision``. Prefer ``cas_update_run_record`` /
+    ``set_lifecycle`` / ``persist_terminal_envelope`` for new code.
+    """
+    _verify_paths_owner(paths)
+    with run_lock(paths):
+        existing: dict = {}
+        record_path = paths.run_dir / "run.json"
+        if record_path.is_file():
+            try:
+                existing = _load_run_json_unlocked(paths)
+            except UnknownRunError:
+                existing = {}
+        merged = dict(existing)
+        for key, value in record.items():
+            if key in _PRESERVE_ON_MERGE and key in existing:
+                continue
+            merged[key] = value
+        merged["runId"] = paths.run_id
+        if "createdAtUtc" not in merged or not merged["createdAtUtc"]:
+            merged["createdAtUtc"] = existing.get("createdAtUtc") or _utc_now_iso()
+        # Lifecycle: preserve existing unless still non-terminal and status maps clearly
+        life = existing.get("lifecycle") or merged.get("lifecycle") or "created"
+        status_value = record.get("status")
+        if life not in _TERMINAL_LIFECYCLES:
+            if status_value == "success":
+                life = "completed"
+            elif status_value == "failure":
+                life = "failed"
+            elif status_value == "running" and life == "created":
+                life = "running"
+        merged["lifecycle"] = life
+        if life in _TERMINAL_LIFECYCLES and status_value not in ("success", "failure"):
+            merged["status"] = "success" if life == "completed" else "failure"
+        elif "status" not in merged:
+            merged["status"] = "running"
+        if existing:
+            merged["recordRevision"] = int(existing.get("recordRevision", 0)) + 1
+        else:
+            merged["recordRevision"] = int(record.get("recordRevision", 0) or 0)
+        write_json_atomic(record_path, merged)
 
 
 def load_run_record(run_id: str) -> dict:

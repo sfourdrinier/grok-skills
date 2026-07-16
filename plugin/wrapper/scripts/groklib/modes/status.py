@@ -136,26 +136,42 @@ def _build_target_info(
     events: List[dict],
     process_liveness: str,
     has_stored_envelope: bool,
+    effective_life: str,
+    lifecycle_source: str,
 ) -> dict:
     created = record.get("createdAtUtc")
     created_dt = _parse_utc(created if isinstance(created, str) else None)
     now = datetime.datetime.now(datetime.timezone.utc)
-    elapsed = None
+    elapsed_seconds = None
+    elapsed_ms = 0
     if created_dt is not None:
         if created_dt.tzinfo is None:
             created_dt = created_dt.replace(tzinfo=datetime.timezone.utc)
-        elapsed = max(0, int((now - created_dt).total_seconds()))
+        delta = now - created_dt
+        elapsed_seconds = max(0, int(delta.total_seconds()))
+        elapsed_ms = max(0, int(delta.total_seconds() * 1000))
+    # Prefer last event's stored elapsedMs when present
+    if events:
+        last_em = events[-1].get("elapsedMs")
+        if isinstance(last_em, int) and last_em >= 0:
+            elapsed_ms = last_em
 
     last_event = _event_summary(events[-1]) if events else None
+    if last_event is not None and events:
+        last_event["elapsedMs"] = events[-1].get("elapsedMs", elapsed_ms)
     recent = [_event_summary(ev) for ev in events[-8:]] if events else []
 
     return {
         "mode": record.get("mode"),
+        "lifecycle": effective_life,
+        "lifecycleSource": lifecycle_source,
         "recordStatus": record.get("status"),
         "process": process_liveness,  # alive | dead | unknown
         "hasStoredEnvelope": has_stored_envelope,
+        "resultAvailable": has_stored_envelope,
         "createdAtUtc": created,
-        "elapsedSeconds": elapsed,
+        "elapsedSeconds": elapsed_seconds,
+        "elapsedMs": elapsed_ms,
         "requestedModel": record.get("requestedModel"),
         "repository": record.get("repository"),
         "eventCount": len(events),
@@ -217,6 +233,13 @@ def run(args: argparse.Namespace) -> dict:
     safe_events = _stream_redact_event_text(events)
     process_liveness = runstate._home_owner_liveness(run_dir)
     record_status = record.get("status") if isinstance(record.get("status"), str) else None
+    envelope_status = stored.get("status") if isinstance(stored, dict) else None
+    effective_life, lifecycle_source = runstate.effective_lifecycle(
+        record,
+        has_valid_envelope=stored is not None,
+        envelope_status=envelope_status if isinstance(envelope_status, str) else None,
+        process_liveness=process_liveness,
+    )
 
     target = _build_target_info(
         record=record,
@@ -224,33 +247,27 @@ def run(args: argparse.Namespace) -> dict:
         events=safe_events,
         process_liveness=process_liveness,
         has_stored_envelope=stored is not None,
+        effective_life=effective_life,
+        lifecycle_source=lifecycle_source,
     )
 
-    # Still in progress: no final envelope yet, and the owner process is still
-    # alive (or lease unknown while the record claims running). A dead process
-    # with no envelope is incomplete/interrupted — not "running".
-    in_progress = stored is None and (
-        process_liveness == runstate._LIVENESS_ALIVE
-        or (
-            process_liveness == runstate._LIVENESS_UNKNOWN
-            and record_status == "running"
-        )
-    )
-
-    if in_progress:
+    # Projection (design §6): in-flight → running/0; completed → success/0;
+    # failed/canceled/interrupted → failure/1. Status never writes the run dir.
+    if effective_life in ("created", "running", "finalizing"):
         response = {
-            "storedEnvelope": None,
+            "storedEnvelope": stored,
             "events": safe_events,
             "eventWarnings": event_warnings,
             "target": target,
             "summary": (
-                "Run is still in progress (no final envelope yet). "
-                "recordStatus={!r}, process={!r}, events={}, elapsedSeconds={!r}."
+                "Run is still in progress. "
+                "lifecycle={!r} ({}), process={!r}, events={}, elapsedMs={!r}."
             ).format(
-                record_status,
+                effective_life,
+                lifecycle_source,
                 process_liveness,
                 len(safe_events),
-                target.get("elapsedSeconds"),
+                target.get("elapsedMs"),
             ),
         }
         safe_response = envelope_mod.redact_secret_material(response)
@@ -263,26 +280,43 @@ def run(args: argparse.Namespace) -> dict:
             response=safe_response,
         )
 
-    if stored is None:
-        # Finished or abandoned without writing envelope.json
+    if effective_life == "completed":
+        response = {
+            "storedEnvelope": stored,
+            "events": safe_events,
+            "eventWarnings": event_warnings,
+            "target": target,
+        }
+        safe_response = envelope_mod.redact_secret_material(response)
+        return envelope_mod.build_envelope(
+            run_id=run_id,
+            mode="status",
+            status="success",
+            progressStreamPath=str(progress_path),
+            warnings=warnings,
+            response=safe_response,
+        )
+
+    # failed / canceled / interrupted
+    if stored is None and effective_life == "interrupted":
         warnings.append(
             "run {} has no stored envelope (recordStatus={!r}, process={!r}); "
-            "run may have been interrupted before completion".format(
+            "run appears interrupted (derived; not persisted)".format(
                 run_id, record_status, process_liveness
             )
         )
-
     response = {
         "storedEnvelope": stored,
         "events": safe_events,
         "eventWarnings": event_warnings,
         "target": target,
+        "summary": "Target lifecycle={!r} (source={}).".format(effective_life, lifecycle_source),
     }
     safe_response = envelope_mod.redact_secret_material(response)
     return envelope_mod.build_envelope(
         run_id=run_id,
         mode="status",
-        status="success",
+        status="failure",
         progressStreamPath=str(progress_path),
         warnings=warnings,
         response=safe_response,

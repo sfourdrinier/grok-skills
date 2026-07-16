@@ -11,6 +11,7 @@ import datetime
 import json
 import os
 import pathlib
+import time
 from typing import Dict, List, Optional, Tuple
 
 from groklib import log_stderr
@@ -30,6 +31,7 @@ PHASES = (
     "worktree",
     "grok",
     "validate",
+    "finalizing",
     "cleanup",
     "done",
 )
@@ -71,6 +73,8 @@ class ProgressWriter:
         self.run_id: str = run_id
         self.path: pathlib.Path = path
         self._seq: int = 0
+        # Process-local monotonic clock for elapsedMs (design §8); not shared across spawn.
+        self._started_monotonic: float = time.monotonic()
         # F-STREAM-OSERR: flipped True the first time a progress.jsonl append
         # fails with OSError. Once degraded, every ``safe_emit`` is a no-op so a
         # persistent write failure (disk full, revoked permission) can neither
@@ -172,6 +176,7 @@ class ProgressWriter:
             redacted = redact_secret_material(data)
             redacted = injectedsecrets.redact_injected_secrets(redacted)
             safe_data = redacted if isinstance(redacted, dict) else {"_redacted": True}
+        elapsed_ms = int(max(0.0, (time.monotonic() - self._started_monotonic) * 1000.0))
         event: Dict[str, object] = {
             "schemaVersion": _SCHEMA_VERSION,
             "runId": self.run_id,
@@ -180,6 +185,7 @@ class ProgressWriter:
             "phase": phase,
             "level": level,
             "message": safe_message,
+            "elapsedMs": elapsed_ms,
         }
         if safe_data is not None:
             event["data"] = safe_data

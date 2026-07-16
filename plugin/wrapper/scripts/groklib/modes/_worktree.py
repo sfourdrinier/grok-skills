@@ -48,6 +48,7 @@ from groklib.modes._shared import (
     ModeRun,
     _execute_and_verify,
     _policy_field,
+    _publish_terminal_envelope,
     _run_record_fields,
     _write_prompt_file,
     best_effort_write_run_record,
@@ -326,18 +327,36 @@ def _run_worktree_mode_body(
     holder: "WorktreeHolder",
 ) -> dict:
     """The classified-failure lifecycle body of run_worktree_mode (see its docstring)."""
-    runstate.write_run_record(
-        run_paths,
-        _run_record_fields(
-            mode=mode,
-            run_paths=run_paths,
-            status_value="running",
-            requested_model=requested_model,
-            repository=repository,
-            target_workspace=target_workspace,
-            worktree=None,
-        ),
-    )
+    try:
+        record = runstate.load_run_record(run_paths.run_id)
+        rev = int(record.get("recordRevision", 0))
+        if record.get("lifecycle") == "created":
+            record = runstate.set_lifecycle(run_paths, rev, "running")
+            rev = int(record["recordRevision"])
+        runstate.cas_update_run_record(
+            run_paths,
+            rev,
+            {
+                "requestedModel": requested_model,
+                "repository": repository,
+                "targetWorkspace": target_workspace,
+                "status": "running",
+            },
+        )
+    except Exception as exc:
+        _log("_run_worktree_mode_body", "lifecycle advance failed: {}".format(exc))
+        runstate.write_run_record(
+            run_paths,
+            _run_record_fields(
+                mode=mode,
+                run_paths=run_paths,
+                status_value="running",
+                requested_model=requested_model,
+                repository=repository,
+                target_workspace=target_workspace,
+                worktree=None,
+            ),
+        )
     progress.safe_emit("start", "{} run created".format(mode), data={"mode": mode})
 
     # Reap a crashed prior run's stranded credential-bearing private home on live
@@ -498,26 +517,6 @@ def _run_worktree_mode_body(
     ):
         grok_field, usage_field, response_field, stderr_warnings = grok_usage_response_fields(result)
         progress.safe_emit("done", "{} run completed".format(mode))
-        # Write the terminal record BEFORE assembling the envelope fields so a
-        # guarded write-failure warning (F3) is reflected in the emitted envelope.
-        best_effort_write_run_record(
-            run_paths,
-            _run_record_fields(
-                mode=mode,
-                run_paths=run_paths,
-                status_value="success",
-                requested_model=requested_model,
-                repository=repository,
-                target_workspace=target_workspace,
-                # PR968 codex verify-adopted-worktree: record the worktree into
-                # the cleanup record ONLY for the run that OWNS it (code). verify
-                # adopts a borrowed worktree it must not enroll for its own
-                # cleanup -- see the terminalize handler above for the full note.
-                worktree=holder.worktree if worktree_retained else None,
-            ),
-            warnings,
-            _log,
-        )
         fields = _common_fields(
             requested_model=requested_model,
             effective_model=effective_model,
@@ -536,31 +535,30 @@ def _run_worktree_mode_body(
         fields["grok"] = grok_field
         fields["usage"] = usage_field
         fields["response"] = response_field
-        return build_envelope(run_id=run_paths.run_id, mode=mode, status="success", **fields)
+        envelope = build_envelope(run_id=run_paths.run_id, mode=mode, status="success", **fields)
+        # Record worktree metadata before terminal persist
+        best_effort_write_run_record(
+            run_paths,
+            _run_record_fields(
+                mode=mode,
+                run_paths=run_paths,
+                status_value="success",
+                requested_model=requested_model,
+                repository=repository,
+                target_workspace=target_workspace,
+                worktree=holder.worktree if worktree_retained else None,
+            ),
+            warnings,
+            _log,
+        )
+        return _publish_terminal_envelope(
+            run_paths, mode, envelope, lifecycle="completed", progress=progress, warnings=warnings
+        )
 
     error = outcome_error if outcome_error is not None else GrokWrapperError(
         "cli-failure", "{} run did not complete".format(mode), {"reason": "incomplete-run"}
     )
     progress.safe_emit("done", "{} failed: {}".format(mode, error.error_class), level="error")
-    # Guarded write BEFORE field assembly so the determined classified failure
-    # survives a run.json write failure and any write-failure warning is included.
-    best_effort_write_run_record(
-        run_paths,
-        _run_record_fields(
-            mode=mode,
-            run_paths=run_paths,
-            status_value="failure",
-            requested_model=requested_model,
-            repository=repository,
-            target_workspace=target_workspace,
-            # PR968 codex verify-adopted-worktree: only the owning run (code)
-            # enrolls its worktree for cleanup; a verify run's adopted worktree
-            # is reaped by the owning code run, never by the verify run.
-            worktree=holder.worktree if worktree_retained else None,
-        ),
-        warnings,
-        _log,
-    )
     fields = _common_fields(
         requested_model=requested_model,
         effective_model=effective_model,
@@ -587,11 +585,28 @@ def _run_worktree_mode_body(
         fields["usage"] = usage_field
         fields["response"] = response_field
         fields["warnings"] = stderr_warnings + warnings
-    return failure_envelope(
+    envelope = failure_envelope(
         run_id=run_paths.run_id,
         mode=mode,
         error_class=error.error_class,
         message=str(error),
         detail=error.detail or None,
         **fields,
+    )
+    best_effort_write_run_record(
+        run_paths,
+        _run_record_fields(
+            mode=mode,
+            run_paths=run_paths,
+            status_value="failure",
+            requested_model=requested_model,
+            repository=repository,
+            target_workspace=target_workspace,
+            worktree=holder.worktree if worktree_retained else None,
+        ),
+        warnings,
+        _log,
+    )
+    return _publish_terminal_envelope(
+        run_paths, mode, envelope, lifecycle="failed", progress=progress, warnings=warnings
     )

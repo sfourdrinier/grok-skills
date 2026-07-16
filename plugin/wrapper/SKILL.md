@@ -148,7 +148,10 @@ stays hermetic by design.
 ### `status` - read-only inspection of a prior run
 
 Reads back a run's stored envelope and progress stream by run id. It never
-writes to the run it inspects.
+writes to the run it inspects. Top-level status is a **projection** of the
+target lifecycle (`running` / `success` / `failure`); exit 1 with a valid
+status envelope means the target failed or was interrupted, not that status
+itself failed to inspect.
 
 ```bash
 python3 plugin/wrapper/scripts/grok_agent.py status --run-id <run-id>

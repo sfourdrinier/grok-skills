@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
+## [1.3.0] - 2026-07-16
+
+### Added
+
+- **Durable run lifecycle:** seed `run.json` (lifecycle `created`, status
+  `running`, `recordRevision` 0) before run-id publication; exclusive
+  `run.lock` + compare-and-swap record updates; envelope-first
+  `persist_terminal_envelope` (idempotent lifecycle finish; never replace a
+  valid terminal envelope).
+- **Spawn finalization worker** with parent recovery only when the worker is
+  confirmed not alive (`finalization-timeout` /
+  `finalization-worker-missing-result` / ephemeral `finalization-worker-unkillable`).
+- Progress events carry process-local monotonic `elapsedMs` and UTC `ts`.
+
+### Changed
+
+- **`/grok:status` projection:** strictly read-only; effective lifecycle from
+  record → valid envelope → derived `interrupted` (dead owner, no envelope).
+  Failed/canceled/interrupted targets return top-level `failure` and exit 1
+  while still emitting a well-formed status envelope. `response.target`
+  includes `lifecycle`, `lifecycleSource`, and `elapsedMs`.
+
 ## [1.2.10] - 2026-07-15
 
 ### Fixed

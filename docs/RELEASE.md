@@ -55,6 +55,11 @@ claude plugin validate ./plugin --strict
 Optional: install smoke from a clean cache or
 `CLAUDE_PLUGIN_ROOT=$PWD/plugin node …/grok-companion.mjs preflight`.
 
+Smoke (1.3.0+): after a live run, `/grok:status --run-id <id>` while in-flight
+should report `running` (exit 0); after completion, `success` or `failure`
+(exit 1 for failed targets still yields a well-formed status envelope). Status
+must not modify the run directory.
+
 ### 4. Commit
 
 ```bash
