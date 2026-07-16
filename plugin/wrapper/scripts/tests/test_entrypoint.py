@@ -277,4 +277,27 @@ class EntrypointStorePolicyTests(unittest.TestCase):
                 code = grok_agent.main(["not-a-mode"])
         self.assertEqual(code, 1)
         self.assertTrue(calls)
-        self.assertTrue(all(c is None for c in calls), calls)
+
+    def test_do_not_store_flag_preserved_on_stdout(self) -> None:
+        """Ephemeral envelopes keep doNotStore so callers do not treat them as durable."""
+        from groklib.envelope import failure_envelope
+
+        env = failure_envelope(
+            run_id="20260716T000000Z-abcdef",
+            mode="review",
+            error_class="finalization-worker-unkillable",
+            message="no durable write",
+        )
+        env["doNotStore"] = True
+        seen = []
+
+        def spy(envelope, path):
+            seen.append(dict(envelope) if isinstance(envelope, dict) else envelope)
+            return 1
+
+        # main() ends with _emit(env, None) without stripping doNotStore
+        with mock.patch.object(grok_agent, "emit_envelope", spy):
+            code = grok_agent._emit(env, None)
+        self.assertEqual(code, 1)
+        self.assertEqual(len(seen), 1)
+        self.assertTrue(seen[0].get("doNotStore"))

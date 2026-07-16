@@ -156,18 +156,23 @@ def write_json_atomic(path: pathlib.Path, payload: object) -> None:
         os.replace(str(tmp_path), str(path))
         platformsupport.restrict_file_permissions(path)
         # Durable directory entry for the replace (POSIX power-loss safety).
-        try:
-            dir_fd = os.open(str(parent), os.O_RDONLY)
-        except OSError as dir_open_exc:
-            _log_stderr(
-                "write_json_atomic",
-                "could not open parent dir for fsync after writing {}: {}".format(path, dir_open_exc),
-            )
-            raise
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
+        # Skip on non-POSIX: Windows cannot O_RDONLY-open directories (PermissionError)
+        # and would fail every write after replace — platform probe-required is separate.
+        if os.name == "posix":
+            try:
+                dir_fd = os.open(str(parent), os.O_RDONLY)
+            except OSError as dir_open_exc:
+                _log_stderr(
+                    "write_json_atomic",
+                    "could not open parent dir for fsync after writing {}: {}".format(
+                        path, dir_open_exc
+                    ),
+                )
+                raise
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
     except OSError as exc:
         _log_stderr("write_json_atomic", "failed writing {}: {}".format(path, exc))
         try:

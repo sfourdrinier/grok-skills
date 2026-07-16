@@ -344,10 +344,9 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # PR1 single terminal writer: modes own durable envelope.json via
     # persist_terminal_envelope. Entrypoint never O_TRUNC-stores a second copy.
-    clean = dict(env) if isinstance(env, dict) else env
-    if isinstance(clean, dict):
-        clean.pop("doNotStore", None)
-    return _emit(clean, None)
+    # Keep doNotStore on stdout when present so callers can distinguish ephemeral
+    # (stdout-only) failures from durable terminal envelopes (design §9.4).
+    return _emit(env, None)
 
 
 if __name__ == "__main__":

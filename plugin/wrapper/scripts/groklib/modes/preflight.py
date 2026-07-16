@@ -252,7 +252,7 @@ def _persist_preflight_terminal(
     lifecycle: str,
 ) -> dict:
     """Envelope-first terminal persist for preflight (design §7.1). Fail closed."""
-    from groklib.envelope import failure_envelope
+    from groklib.envelope import failure_envelope, validate_envelope
 
     try:
         record = runstate.load_run_record(run_paths.run_id)
@@ -272,6 +272,24 @@ def _persist_preflight_terminal(
             "_persist_preflight_terminal",
             "could not persist terminal preflight envelope for {}: {}".format(run_paths.run_id, exc),
         )
+        # Envelope may already be durable (written before run.json CAS/fsync failed).
+        # Prefer the stored body over a synthetic missing-result stdout lie.
+        if run_paths.envelope_path.is_file():
+            try:
+                import json as _json
+
+                stored = _json.loads(run_paths.envelope_path.read_text(encoding="utf-8"))
+                if isinstance(stored, dict) and not validate_envelope(stored):
+                    try:
+                        runstate.persist_terminal_envelope(run_paths, None, None)
+                    except Exception as finish_exc:
+                        _log(
+                            "_persist_preflight_terminal",
+                            "finish existing envelope failed: {}".format(finish_exc),
+                        )
+                    return stored
+            except (OSError, ValueError, TypeError):
+                pass
         fail = failure_envelope(
             run_id=run_paths.run_id,
             mode="preflight",
@@ -338,6 +356,24 @@ def _run_preflight_body(
         _advance_preflight_running(run_paths)
     except Exception as exc:
         _log("_run_preflight_body", "could not advance to running: {}".format(exc))
+        try:
+            _advance_preflight_running(run_paths)
+        except Exception as retry_exc:
+            _log("_run_preflight_body", "retry advance to running failed: {}".format(retry_exc))
+            # Fail closed (parity with live modes): do not probe auth/Grok without a
+            # trustworthy durable run record.
+            raise GrokWrapperError(
+                "state-ownership-violation",
+                "could not advance preflight run record to running after retry: {}".format(
+                    retry_exc
+                ),
+                {
+                    "reason": "run-record-cas-failed",
+                    "runId": run_paths.run_id,
+                    "firstError": str(exc),
+                    "retryError": str(retry_exc),
+                },
+            ) from retry_exc
     progress.safe_emit("start", "preflight run created", data={"mode": "preflight"})
 
     checks: List[dict] = []

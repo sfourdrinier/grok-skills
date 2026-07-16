@@ -542,14 +542,14 @@ class FinalizeWatchdogTests(unittest.TestCase):
         self.assertTrue(paths.envelope_path.is_file())
         self.assertFalse(finalize_worker.finalize_worker_is_alive(paths.run_dir))
 
-    def test_finalize_process_is_daemon(self) -> None:
-        """Unkillable path must use a daemon Process so shutdown does not hang."""
+    def test_finalize_process_is_non_daemon(self) -> None:
+        """Worker stays non-daemon so parent cancel does not kill mid-persist."""
         paths, env, rev = self._prepare_finalizing()
         seen = {}
 
         class FakeProc:
             def __init__(self):
-                self.daemon = False
+                self.daemon = True  # start wrong; parent must force False
                 self.exitcode = 0
                 self.pid = 12345
 
@@ -576,7 +576,6 @@ class FinalizeWatchdogTests(unittest.TestCase):
         with mock.patch.object(
             finalize_worker.multiprocessing, "get_context", return_value=FakeCtx()
         ):
-            # Missing envelope after exit 0 → missing-result path (spawn succeeded)
             finalize_worker.run_finalize_parent(
                 paths,
                 mode="review",
@@ -585,7 +584,69 @@ class FinalizeWatchdogTests(unittest.TestCase):
                 expected_revision=rev,
                 budget_seconds=5,
             )
-        self.assertTrue(seen.get("daemon"), "finalize Process must be daemon=True before start")
+        self.assertFalse(seen.get("daemon"), "finalize Process must be daemon=False")
+
+    def test_unkillable_abandons_process_from_shutdown_join(self) -> None:
+        """Unkillable path must not leave a non-daemon child that hangs exit."""
+        paths, env, rev = self._prepare_finalizing()
+        abandoned = []
+
+        class FakeProc:
+            def __init__(self):
+                self.daemon = False
+                self.exitcode = None
+                self.pid = 99999
+                self._alive = True
+
+            def start(self):
+                return None
+
+            def join(self, timeout=None):
+                return None
+
+            def is_alive(self):
+                return self._alive
+
+            def terminate(self):
+                return None
+
+            def kill(self):
+                return None
+
+        class FakeCtx:
+            def Process(self, **kwargs):
+                return FakeProc()
+
+        with mock.patch.object(
+            finalize_worker.multiprocessing, "get_context", return_value=FakeCtx()
+        ):
+            with mock.patch.object(
+                finalize_worker,
+                "_abandon_process_for_shutdown",
+                side_effect=lambda p: abandoned.append(p),
+            ):
+                out, ephemeral, durable = finalize_worker.run_finalize_parent(
+                    paths,
+                    mode="review",
+                    envelope=env,
+                    lifecycle="completed",
+                    expected_revision=rev,
+                    budget_seconds=1,
+                )
+        self.assertEqual(ephemeral, "finalization-worker-unkillable")
+        self.assertFalse(durable)
+        self.assertEqual(len(abandoned), 1)
+
+    def test_worker_pid_write_is_atomic_no_empty_window(self) -> None:
+        """PID marker never becomes empty O_TRUNC mid-write (SIGTERM race)."""
+        paths, env, rev = self._prepare_finalizing()
+        path = paths.run_dir / "finalize-worker.pid"
+        finalize_worker.mark_worker_starting(paths.run_dir)
+        self.assertEqual(path.read_text(encoding="utf-8"), "starting")
+        finalize_worker.write_worker_pid(paths.run_dir, 4242)
+        self.assertEqual(path.read_text(encoding="utf-8").strip(), "4242")
+        # No leftover tmp siblings
+        self.assertEqual(list(paths.run_dir.glob("finalize-worker.pid.tmp.*")), [])
 
     def test_terminalize_refuses_durable_write_while_worker_alive(self) -> None:
         """SIGTERM recovery must not durable-cancel while finalize worker lives."""

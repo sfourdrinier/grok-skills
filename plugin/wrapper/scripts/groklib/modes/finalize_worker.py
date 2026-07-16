@@ -38,10 +38,37 @@ def _log(function: str, message: str) -> None:
 
 
 def _write_private_text(path: pathlib.Path, text: str) -> None:
-    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _FILE_MODE)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(text)
-    platformsupport.restrict_file_permissions(path)
+    """Atomic private text write (temp sibling + replace) so readers never see empty O_TRUNC."""
+    parent = path.parent
+    tmp_path = parent / "{}.tmp.{}".format(path.name, os.getpid())
+    fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _FILE_MODE)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        platformsupport.restrict_file_permissions(tmp_path)
+        os.replace(str(tmp_path), str(path))
+        platformsupport.restrict_file_permissions(path)
+    except Exception:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _abandon_process_for_shutdown(proc: Any) -> None:
+    """Stop interpreter exit from joining a still-alive non-daemon child (unkillable path)."""
+    try:
+        import multiprocessing.process as mp_process
+
+        children = getattr(mp_process, "_children", None)
+        if children is not None:
+            children.discard(proc)
+    except Exception as exc:
+        _log("_abandon_process_for_shutdown", "could not abandon process: {}".format(exc))
 
 
 def finalize_budget_seconds(mode: str) -> int:
@@ -254,8 +281,10 @@ def run_finalize_parent(
         args=(str(payload_path),),
         name="grok-finalize",
     )
-    # Daemon: unkillable path must not hang interpreter shutdown joining the child.
-    proc.daemon = True
+    # Non-daemon: if parent is cancelled (SIGTERM) while waiting, the worker must
+    # keep running to finish durable envelope persist. Unkillable path abandons
+    # the child from the process join set so interpreter exit does not hang.
+    proc.daemon = False
     try:
         proc.start()
     except Exception as spawn_exc:
@@ -307,11 +336,10 @@ def run_finalize_parent(
             )
             # doNotStore: entrypoint must not write envelope.json
             ephemeral["doNotStore"] = True
-            # Daemon child will not block shutdown; drop liveness gate so later
-            # status/cleanup is not permanently blocked by a stuck "alive" pid file
-            # once the parent process exits (file may outlive the process).
-            # Keep pid file while THIS process is still handling the return so a
-            # concurrent terminalize still sees the worker.
+            # Keep pid file while returning so concurrent terminalize still sees
+            # the worker as live. Abandon join-on-exit so a stuck child cannot
+            # hang CLI shutdown (worker stays non-daemon for cancel/success path).
+            _abandon_process_for_shutdown(proc)
             return ephemeral, "finalization-worker-unkillable", False
     finally:
         # Keep pid while still alive (unkillable); clear once confirmed dead.
