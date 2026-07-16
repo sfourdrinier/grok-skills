@@ -50,7 +50,7 @@ Observed `integration.ready` is true only when **all** hold:
 Missing envelope → `terminal-envelope-incomplete`. Tampered patch →
 `artifact-integrity-failure`. No artifacts → `handoff-unavailable`.
 
-## Parent integrate protocol (document only — never auto-apply)
+## Parent integrate protocol (document only - never auto-apply)
 
 This plugin **never** auto-applies, commits, merges, cherry-picks, or pushes.
 

@@ -12,11 +12,10 @@ from unittest import mock
 
 from groklib import GrokWrapperError
 from groklib.command_evidence import build_command_evidence
+from groklib.handoff_patch import capture_phase1_patch, list_changed_paths
 from groklib.implementation_handoff import (
-    capture_phase1_patch,
     compute_integration_ready,
     dual_condition_ready,
-    list_changed_paths,
     primary_error_from_blockers,
     validate_implementation_handoff,
     write_manifest,
@@ -162,7 +161,7 @@ class Phase1PatchTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"GROK_HANDOFF_PATCH_MAX_BYTES": str(100)}):
             # clamp min is 1 MiB in code — set below by mocking _patch_max_bytes
             with mock.patch(
-                "groklib.implementation_handoff._patch_max_bytes", return_value=50
+                "groklib.handoff_patch._patch_max_bytes", return_value=50
             ):
                 meta, path, tree, blockers, steps = capture_phase1_patch(
                     worktree_path=self.repo,

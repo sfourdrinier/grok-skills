@@ -69,6 +69,9 @@ def path_in_scopes(path: str, scopes: Sequence[dict]) -> bool:
             if norm == scope_norm:
                 return True
         elif kind == "subtree":
+            # Repository-root subtree: path "." covers every repo-relative path.
+            if scope_norm == ".":
+                return True
             scope_parts = scope_norm.split("/")
             if path_parts[: len(scope_parts)] == scope_parts:
                 return True

@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple  # Tuple used by load helpers + patch resolve
 
 from groklib import GrokWrapperError, log_stderr, runstate
 from groklib import envelope as envelope_mod
@@ -31,6 +31,30 @@ def _load_json(path: pathlib.Path) -> Tuple[Optional[dict], Optional[str]]:
     if not isinstance(data, dict):
         return None, "not-object"
     return data, None
+
+
+def _resolve_patch_under_run(run_dir: pathlib.Path, relative_path: str) -> Tuple[Optional[pathlib.Path], Optional[str]]:
+    """Resolve patch.relativePath strictly under run_dir; reject absolute/escape paths."""
+    if not isinstance(relative_path, str) or not relative_path.strip():
+        return None, "empty-relative-path"
+    raw = relative_path.strip().replace("\\", "/")
+    if raw.startswith("/") or (len(raw) > 1 and raw[1] == ":"):
+        return None, "absolute-path-rejected"
+    parts = []
+    for p in pathlib.PurePosixPath(raw).parts:
+        if p in ("", "."):
+            continue
+        if p == "..":
+            return None, "parent-segment-rejected"
+        parts.append(p)
+    if not parts:
+        return None, "empty-relative-path"
+    candidate = (run_dir.joinpath(*parts)).resolve()
+    try:
+        candidate.relative_to(run_dir.resolve())
+    except ValueError:
+        return None, "escapes-run-dir"
+    return candidate, None
 
 
 def _load_stored_envelope(run_id: str, path: pathlib.Path) -> Optional[dict]:
@@ -121,14 +145,22 @@ def run(args: argparse.Namespace) -> dict:
         )
 
     patch_rel = (manifest.get("patch") or {}).get("relativePath") or "artifacts/implementation.patch"
-    # relativePath is repo-relative to run dir (artifacts/implementation.patch)
-    patch_path = run_dir / patch_rel
+    patch_path, path_err = _resolve_patch_under_run(run_dir, patch_rel)
+    if path_err is not None:
+        return envelope_mod.failure_envelope(
+            run_id=str(run_id),
+            mode="handoff",
+            error_class="artifact-integrity-failure",
+            message="handoff patch path is invalid or escapes the run directory",
+            detail={"reason": path_err, "relativePath": patch_rel},
+            progressStreamPath=None,
+        )
     stored_envelope = _load_stored_envelope(run_id, run_dir / "envelope.json")
 
     ready, dual_blockers = dual_condition_ready(
         manifest=manifest,
         envelope=stored_envelope,
-        patch_abs=patch_path if patch_path.is_file() else None,
+        patch_abs=patch_path if patch_path is not None and patch_path.is_file() else None,
     )
 
     if not ready:

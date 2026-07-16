@@ -45,6 +45,15 @@ over. It is **not** a complete sandbox against an adversarial model.
   still tracked; PR5 job-scoped marker). Isolation dirty patches may briefly
   exist as `*.diff` under the state root and are cleaned on success/cleanup
   paths; treat state root as sensitive.
+- **Implementation handoff (1.6.0+):** optional `--contract-file` is
+  **operator-trusted** content (not untrusted model output).
+  `requiredValidation` argv runs with `shell=False` and cwd confined to the
+  worktree; there is **no** OS filesystem sandbox claim for those commands
+  (they can write outside the worktree if the operator points them at a capable
+  binary). Direct mode rejects `--contract-file` (fail closed). Handoff mode
+  re-hashes the patch under the owned run directory only (absolute/`..` paths
+  rejected). Notify is not integration-ready - always call `handoff --run-id`
+  before apply. The plugin never auto-applies.
 
 Full design notes: [docs/OPEN-SECURITY-DECISIONS.md](docs/OPEN-SECURITY-DECISIONS.md).
 

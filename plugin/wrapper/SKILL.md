@@ -130,9 +130,26 @@ python3 plugin/wrapper/scripts/grok_agent.py code \
 ```
 
 Optional flags: `--web`, `--model`, `--timeout` (default 3600), optional
-`--max-turns` (default: unlimited). If the task depends on uncommitted changes
-in the current checkout, `code` fails closed rather than approximating them -
-commit what the task needs first.
+`--max-turns` (default: unlimited), optional **`--contract-file <path>`**
+(operator-trusted JSON: writeScopes + requiredValidation argv arrays; trust
+model `operator-contract-trusted-no-os-sandbox` - no OS FS sandbox claim).
+If the task depends on uncommitted changes in the current checkout, `code`
+fails closed rather than approximating them - commit what the task needs first.
+
+After Grok, the wrapper always attempts phase-1 patch + phase-2
+`implementation-handoff.json` under the run dir (even on classified failure
+when forensics are possible). Parents integrate only via `handoff --run-id`.
+
+### `handoff` - read-only verified implementation handoff (1.6.0+)
+
+Use after a `code` run to decide whether the retained worktree's immutable
+patch is **integration-ready**. Never spawns Grok, never creates jobs, never
+applies patches. Observed ready requires: valid ready manifest + success
+terminal envelope for the same `runId` + patch rehash.
+
+```bash
+python3 plugin/wrapper/scripts/grok_agent.py handoff --run-id <run-id>
+```
 
 ### `verify` - independent verification, no source edits
 
@@ -171,7 +188,9 @@ python3 plugin/wrapper/scripts/grok_agent.py status --run-id <run-id>
 Without `--confirm` this is a dry run: it reports the owned session state
 and (for `code`/`verify`) the worktree and branch it WOULD remove. With
 `--confirm` it actually removes them, refusing a dirty worktree rather than
-forcing it.
+forcing it. When the run has `integration.ready === true` handoff artifacts,
+cleanup warns factually that removal is permanent and the plugin cannot know
+whether the implementation was integrated (no "unacknowledged" wording).
 
 ```bash
 python3 plugin/wrapper/scripts/grok_agent.py cleanup --run-id <run-id>

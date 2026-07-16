@@ -48,6 +48,12 @@ class PathInScopesTests(unittest.TestCase):
         self.assertFalse(path_in_scopes("pkg/src2/x.ts", scopes))
         self.assertFalse(path_in_scopes("pkg/other/x.ts", scopes))
 
+    def test_subtree_dot_is_repo_root_wildcard(self) -> None:
+        scopes = [{"kind": "subtree", "path": "."}]
+        self.assertTrue(path_in_scopes("pkg/a.ts", scopes))
+        self.assertTrue(path_in_scopes("a.ts", scopes))
+        self.assertTrue(path_in_scopes("deep/nested/x", scopes))
+
 
 class ValidateContractTests(unittest.TestCase):
     def _ok(self, **overrides):

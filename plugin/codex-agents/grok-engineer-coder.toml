@@ -5,9 +5,10 @@
 name = "grok-engineer-coder"
 description = """
 Prefer for implementation: write or change code with Grok through the hardened
-grok-skills wrapper (isolated worktree). Use when the user asked for Grok / a
-second implementer - not for pure Q&A, design-only debate, or review-only.
-For diagnosis without coding, prefer grok-rescue.
+grok-skills wrapper (isolated worktree + optional --contract-file + handoff).
+Use when the user asked for Grok / a second implementer - not for pure Q&A,
+design-only debate, or review-only. For diagnosis without coding, prefer
+grok-rescue. After code: handoff --run-id before integrate; notify is not ready.
 """
 sandbox_mode = "read-only"
 developer_instructions = """

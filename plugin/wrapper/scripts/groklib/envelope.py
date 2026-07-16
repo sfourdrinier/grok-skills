@@ -297,12 +297,25 @@ def _is_number(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _validate_object(value: object, shape: Dict[str, tuple], path: str, violations: List[str]) -> None:
-    """Validate ``value`` is a dict matching ``shape`` exactly: every shape key present, no unknown keys."""
+def _validate_object(
+    value: object,
+    shape: Dict[str, tuple],
+    path: str,
+    violations: List[str],
+    *,
+    optional_shape: Optional[Dict[str, tuple]] = None,
+) -> None:
+    """Validate ``value`` is a dict matching ``shape``: every required key present.
+
+    When ``optional_shape`` is set, those keys may be omitted (backward-compatible
+    command evidence). If present, they must match their type_spec. Unknown keys
+    outside required+optional still fail.
+    """
     if not isinstance(value, dict):
         violations.append("{}: expected object, got {}".format(path, type(value).__name__))
         return
 
+    optional_shape = optional_shape or {}
     for field_name, type_spec in shape.items():
         field_path = "{}.{}".format(path, field_name)
         if field_name not in value:
@@ -310,7 +323,14 @@ def _validate_object(value: object, shape: Dict[str, tuple], path: str, violatio
             continue
         _validate_value(value[field_name], type_spec, field_path, violations)
 
-    unknown_fields = set(value.keys()) - set(shape.keys())
+    for field_name, type_spec in optional_shape.items():
+        if field_name not in value:
+            continue
+        field_path = "{}.{}".format(path, field_name)
+        _validate_value(value[field_name], type_spec, field_path, violations)
+
+    allowed = set(shape.keys()) | set(optional_shape.keys())
+    unknown_fields = set(value.keys()) - allowed
     for field_name in sorted(unknown_fields):
         violations.append("{}.{}: unknown field".format(path, field_name))
 
@@ -382,11 +402,18 @@ def _validate_value(value: object, type_spec: tuple, path: str, violations: List
                     violations.append("{}[{}]: expected string, got {}".format(path, index, type(item).__name__))
     elif kind == "array_of_object":
         item_shape = type_spec[1]
+        optional_item = type_spec[2] if len(type_spec) > 2 else None
         if not isinstance(value, list):
             violations.append("{}: expected array, got {}".format(path, type(value).__name__))
         else:
             for index, item in enumerate(value):
-                _validate_object(item, item_shape, "{}[{}]".format(path, index), violations)
+                _validate_object(
+                    item,
+                    item_shape,
+                    "{}[{}]".format(path, index),
+                    violations,
+                    optional_shape=optional_item,
+                )
     elif kind == "object":
         shape = type_spec[1]
         _validate_object(value, shape, path, violations)
@@ -437,18 +464,23 @@ _COMMAND_TAIL_SHAPE: Dict[str, tuple] = {
     "bytes": ("int",),
 }
 
+# Required fields for every commands[] entry (pre-1.6.0 and 1.6.0+).
 _COMMAND_ITEM_SHAPE: Dict[str, tuple] = {
     "argv": ("array_of_str",),
     "exitStatus": ("int",),
     "durationSeconds": ("number",),
     "purpose": ("str",),
     "cwd": ("str",),  # command's working dir: makes the build gate's location pinning auditable
-    # PR4 §14.13 bounded redacted evidence (sha256 + 4k tails; never full logs)
+}
+
+# Optional PR4 §14.13 evidence fields (present on new writers; absent on old envelopes).
+_COMMAND_EVIDENCE_OPTIONAL_SHAPE: Dict[str, tuple] = {
     "stdoutSha256": ("str",),
     "stderrSha256": ("str",),
     "stdoutTail": ("object", _COMMAND_TAIL_SHAPE),
     "stderrTail": ("object", _COMMAND_TAIL_SHAPE),
 }
+_COMMAND_EVIDENCE_KEYS = frozenset(_COMMAND_EVIDENCE_OPTIONAL_SHAPE.keys())
 
 _VERIFIER_SHAPE: Dict[str, tuple] = {
     "identity": ("str",),
@@ -518,7 +550,10 @@ FIELD_SPECS: Dict[str, dict] = {
     "response": {"type_spec": ("object_or_str_or_null",), "default_factory": lambda: None},
     "changedFiles": {"type_spec": ("array_of_str",), "default_factory": lambda: []},
     "diffSummary": {"type_spec": ("str_or_null",), "default_factory": lambda: None},
-    "commands": {"type_spec": ("array_of_object", _COMMAND_ITEM_SHAPE), "default_factory": lambda: []},
+    "commands": {
+        "type_spec": ("array_of_object", _COMMAND_ITEM_SHAPE, _COMMAND_EVIDENCE_OPTIONAL_SHAPE),
+        "default_factory": lambda: [],
+    },
     "verifier": {"type_spec": ("object", _VERIFIER_SHAPE), "default_factory": None, "omit_when_absent": True},
     "progressStreamPath": {"type_spec": ("str_or_null",), "default_factory": lambda: None},
     "warnings": {"type_spec": ("array_of_str",), "default_factory": lambda: []},

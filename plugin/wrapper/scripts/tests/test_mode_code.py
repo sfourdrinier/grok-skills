@@ -607,6 +607,67 @@ class CodeModeTests(WorktreeModeHarness):
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         self.assertFalse(manifest["integration"]["ready"])
 
+    def test_code_rename_source_outside_scope_fails(self) -> None:
+        """Rename oldPath must be in writeScopes, not only the destination."""
+        import subprocess
+
+        repo = self.make_code_repo()
+        (repo / "pkg" / "outside.ts").write_text("x\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "pkg/outside.ts"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-q", "-m", "outside"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        contract = {
+            "schemaVersion": 1,
+            "taskId": "rename-scope",
+            "target": "pkg",
+            "writeScopes": [{"kind": "subtree", "path": "pkg/allowed"}],
+            "requiredValidation": [],
+        }
+        cpath = pathlib.Path(self.tmp_root) / "contract-rename.json"
+        cpath.write_text(json.dumps(contract), encoding="utf-8")
+        (repo / "pkg" / "allowed").mkdir(exist_ok=True)
+        (repo / "pkg" / "allowed" / ".keep").write_text("", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "pkg/allowed/.keep"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-q", "-m", "allowed dir"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        def plant(wt: pathlib.Path, run_id: str) -> None:
+            _plant_sentinel_in_worktree(wt, run_id)
+            (wt / "pkg" / "allowed").mkdir(exist_ok=True)
+            subprocess.run(
+                ["git", "-C", str(wt), "mv", "pkg/outside.ts", "pkg/allowed/outside.ts"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        exit_code, out = self._run(
+            repo,
+            extra_argv=["--contract-file", str(cpath)],
+            plant=plant,
+        )
+        env = json.loads(out)
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(env["error"]["class"], "write-scope-violation")
+
     def test_code_unexpected_commit_no_reset_forensics(self) -> None:
         """HEAD moved after Grok → unexpected-commit; worktree preserved; handoff written."""
         import subprocess

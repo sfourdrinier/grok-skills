@@ -126,6 +126,19 @@ class HandoffModeTests(ModeHarness):
         self.assertEqual(code, 1, out)
         self.assertEqual(env["error"]["class"], "handoff-unavailable")
 
+    def test_handoff_rejects_escaping_patch_relative_path(self) -> None:
+        run_id = self._seed_code_run(ready_manifest=True, write_envelope=True)
+        paths_dir = runstate.state_root() / "runs" / run_id
+        manifest = json.loads((paths_dir / "implementation-handoff.json").read_text(encoding="utf-8"))
+        manifest["patch"]["relativePath"] = "../escape.patch"
+        (paths_dir / "implementation-handoff.json").write_text(
+            json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+        )
+        code, out = self.drive(["handoff", "--run-id", run_id])
+        env = json.loads(out)
+        self.assertEqual(code, 1, out)
+        self.assertEqual(env["error"]["class"], "artifact-integrity-failure")
+
 
 if __name__ == "__main__":
     unittest.main()

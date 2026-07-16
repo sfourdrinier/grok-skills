@@ -806,17 +806,36 @@ function main() {
     return code;
   };
 
+  // Read-only durable-run modes always use the hardened wrapper (state under
+  // XDG runs/), even when workspace prefs are setup --run-mode direct.
+  const WRAPPER_ONLY_MODES = new Set(["status", "cleanup", "handoff"]);
+  const contractFileIdx = wrapperArgs.indexOf("--contract-file");
+  const hasContractFile =
+    contractFileIdx >= 0 &&
+    typeof wrapperArgs[contractFileIdx + 1] === "string" &&
+    !String(wrapperArgs[contractFileIdx + 1]).startsWith("-");
+
   if (runMode === "direct") {
-    return Promise.resolve(
-      captureAndTrack(null, wrapperArgs, {
-        cwd,
-        mode: wrapperMode,
-        kind: track.kind,
-        runMode: "direct",
-        notifyMode: track.notifyMode,
-        skipNotify: track.skipNotify,
-      })
-    ).then(finishCleanups);
+    if (wrapperMode === "code" && hasContractFile) {
+      process.stderr.write(
+        "[grok-companion] --contract-file requires hardened mode (fail closed). " +
+          "Run setup --run-mode hardened, or omit --contract-file for direct code.\n"
+      );
+      return finishCleanups(1);
+    }
+    if (!WRAPPER_ONLY_MODES.has(wrapperMode)) {
+      return Promise.resolve(
+        captureAndTrack(null, wrapperArgs, {
+          cwd,
+          mode: wrapperMode,
+          kind: track.kind,
+          runMode: "direct",
+          notifyMode: track.notifyMode,
+          skipNotify: track.skipNotify,
+        })
+      ).then(finishCleanups);
+    }
+    // handoff/status/cleanup: fall through to wrapper path below
   }
 
   const wrapper = resolveWrapperPath(process.env);

@@ -31,7 +31,7 @@ from groklib import rules
 from groklib import worktree as worktree_mod
 from groklib import worktree_escape
 from groklib.implementation_contract import assert_target_matches, load_contract_file
-from groklib.implementation_handoff import code_handoff_finalize
+from groklib.code_handoff_finalize import code_handoff_finalize
 from groklib.projectconfig import ProjectConfig, build_gate_command, install_command, load_project_config
 from groklib.modes import _shared
 from groklib.modes._worktree import (

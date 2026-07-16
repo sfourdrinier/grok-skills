@@ -85,7 +85,7 @@ Return envelopes **verbatim**. Do not commit, push, or chain other modes.
 2. Optionally `/grok:status --run-id <runId>` for progress.
 3. **Required before integrate:** `node "$AGENT_RUN" handoff --run-id '<runId>'`.
 4. Integrate only when handoff status is success and `response.integration.ready`.
-5. Completion **notify** is not ready — always call handoff.
+5. Completion **notify** is not ready - always call handoff.
 6. Parent apply is **manual** (`git apply --check --binary` then explicit apply). Never auto-apply.
 7. Optional: pass `--contract-file '<path>'` on code for writeScopes + requiredValidation.
 
