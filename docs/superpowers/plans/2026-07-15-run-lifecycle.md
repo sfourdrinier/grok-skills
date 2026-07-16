@@ -264,6 +264,8 @@ def persist_terminal_envelope(
 
 ### Task 1.5 — Finalize worker protocol
 
+**/goal:** see table row **1.5** above.
+
 **Files:** `modes/finalize_worker.py`, `_shared.py`, `_worktree.py`, `envelope.py`, `tests/test_finalize_watchdog.py`
 
 Implement design §9 and §9.4 exactly:
@@ -291,6 +293,8 @@ Tests:
 
 ### Task 1.6 — Status projection (read-only)
 
+**/goal:** see table row **1.6** above.
+
 **Files:** `status.py`, `test_mode_status.py`, `plugin/skills/status/SKILL.md`
 
 - [ ] Projection table + effective lifecycle resolution design §6 (record / envelope / derived).  
@@ -302,6 +306,8 @@ Tests:
 - [ ] **Commit** `status: read-only projection with envelope-aware effective lifecycle`
 
 ### Task 1.7 — Docs + tag 1.3.0
+
+**/goal:** see table row **1.7** above.
 
 - [ ] All PR1 docs from file map.  
 - [ ] Packaging triple **1.3.0**.  
