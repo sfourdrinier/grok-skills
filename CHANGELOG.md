@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
-## [Unreleased]
+## [1.2.4] - 2026-07-16
 
 ### Fixed
 
@@ -15,6 +15,7 @@ for marketplace / package tags.
   Model contract is only `node "$SKILL_BASE/run.mjs" <mode> …` where `SKILL_BASE`
   is the Skill tool base directory (no env, no invented cache versions).
   Shared: `scripts/lib/skill-run.mjs`. Docs: `plugin/references/plugin-root.md`.
+  Also: `resolve-plugin-root` helpers/CLI for tests and advanced use.
 
 ## [1.2.3] - 2026-07-15
 
