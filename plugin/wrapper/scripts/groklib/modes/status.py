@@ -236,6 +236,16 @@ def run(args: argparse.Namespace) -> dict:
     events, event_warnings = read_events(progress_path)
     safe_events = _stream_redact_event_text(events)
     process_liveness = runstate._home_owner_liveness(run_dir)
+    # Parent owner.pid can die while the finalize worker still lives and may
+    # still persist the real terminal envelope. Treat that as process-alive so
+    # finalizing runs project as in-progress, not derived interrupted.
+    try:
+        from groklib.modes.finalize_worker import finalize_worker_is_alive
+
+        if finalize_worker_is_alive(run_dir):
+            process_liveness = "alive"
+    except Exception as liveness_exc:
+        _log("run", "finalize worker liveness check failed: {}".format(liveness_exc))
     record_status = record.get("status") if isinstance(record.get("status"), str) else None
     envelope_status = stored.get("status") if isinstance(stored, dict) else None
     effective_life, lifecycle_source = runstate.effective_lifecycle(

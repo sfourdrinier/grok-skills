@@ -179,10 +179,19 @@ def set_lifecycle(paths: "runstate.RunPaths", expected_revision: int, lifecycle:
 
 
 def _lifecycle_from_envelope(envelope: dict) -> str:
+    """Map a valid terminal envelope to lifecycle (design §6 / §7.1 recovery).
+
+    Failure envelopes with ``error.class == "cancelled"`` recover as ``canceled``
+    so a crash after envelope write / before run.json update does not rewrite
+    operator cancel as generic ``failed``.
+    """
     status = envelope.get("status")
     if status == "success":
         return "completed"
     if status == "failure":
+        error = envelope.get("error")
+        if isinstance(error, dict) and error.get("class") == "cancelled":
+            return "canceled"
         return "failed"
     raise LifecycleError(
         "cannot derive terminal lifecycle from envelope status {!r}".format(status),
@@ -253,8 +262,8 @@ def persist_terminal_envelope(
                         {"lifecycle": current_life, "envelopeStatus": env_status},
                     )
                 return record
-            # Finish lifecycle only (recovery): success→completed, failure→failed
-            # (canceled not recoverable from envelope alone → failed)
+            # Finish lifecycle only (recovery): success→completed;
+            # cancelled failure→canceled; other failure→failed.
             finish = implied
             record = dict(record)
             record["lifecycle"] = finish

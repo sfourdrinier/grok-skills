@@ -314,37 +314,55 @@ def run_finalize_parent(
     if worker_pid is not None:
         write_worker_pid(paths.run_dir, int(worker_pid))
     try:
-        proc.join(timeout=float(budget))
-        if proc.is_alive():
-            timed_out = True
-            proc.terminate()
-            proc.join(_TERMINATE_GRACE)
-        if proc.is_alive():
-            proc.kill()
-            proc.join(_KILL_GRACE)
+        try:
+            proc.join(timeout=float(budget))
+            if proc.is_alive():
+                timed_out = True
+                proc.terminate()
+                proc.join(_TERMINATE_GRACE)
+            if proc.is_alive():
+                proc.kill()
+                proc.join(_KILL_GRACE)
 
-        if proc.is_alive():
-            if progress is not None:
-                progress.safe_emit("finalizing", "finalization worker unkillable", level="error")
-            ephemeral = envelope_mod.failure_envelope(
-                run_id=paths.run_id,
-                mode=mode,
-                error_class="finalization-worker-unkillable",
-                message="finalization worker could not be terminated; no durable terminal write",
-                detail={"runId": paths.run_id},
-                progressStreamPath=str(paths.progress_path),
-            )
-            # doNotStore: entrypoint must not write envelope.json
-            ephemeral["doNotStore"] = True
-            # Keep pid file while returning so concurrent terminalize still sees
-            # the worker as live. Abandon join-on-exit so a stuck child cannot
-            # hang CLI shutdown (worker stays non-daemon for cancel/success path).
-            _abandon_process_for_shutdown(proc)
-            return ephemeral, "finalization-worker-unkillable", False
+            if proc.is_alive():
+                if progress is not None:
+                    progress.safe_emit(
+                        "finalizing", "finalization worker unkillable", level="error"
+                    )
+                ephemeral = envelope_mod.failure_envelope(
+                    run_id=paths.run_id,
+                    mode=mode,
+                    error_class="finalization-worker-unkillable",
+                    message="finalization worker could not be terminated; no durable terminal write",
+                    detail={"runId": paths.run_id},
+                    progressStreamPath=str(paths.progress_path),
+                )
+                # doNotStore: entrypoint must not write envelope.json
+                ephemeral["doNotStore"] = True
+                # Keep pid file while returning so concurrent terminalize still sees
+                # the worker as live. Abandon join-on-exit so a stuck child cannot
+                # hang CLI shutdown (worker stays non-daemon for cancel/success path).
+                _abandon_process_for_shutdown(proc)
+                return ephemeral, "finalization-worker-unkillable", False
+        except BaseException:
+            # SIGTERM/KeyboardInterrupt during join: abandon non-daemon child so
+            # interpreter shutdown does not hang after ephemeral doNotStore cancel.
+            try:
+                if proc.is_alive():
+                    _abandon_process_for_shutdown(proc)
+            except Exception as abandon_exc:
+                _log(
+                    "run_finalize_parent",
+                    "abandon after join interrupt failed: {}".format(abandon_exc),
+                )
+            raise
     finally:
-        # Keep pid while still alive (unkillable); clear once confirmed dead.
-        if not proc.is_alive():
-            clear_worker_pid(paths.run_dir)
+        # Keep pid while still alive (unkillable / interrupted); clear once dead.
+        try:
+            if not proc.is_alive():
+                clear_worker_pid(paths.run_dir)
+        except Exception:
+            pass
 
     # Recovery under lock semantics via persist API
     existing = _load_valid_envelope(paths)

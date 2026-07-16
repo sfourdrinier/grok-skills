@@ -727,3 +727,54 @@ class FinalizeWatchdogTests(unittest.TestCase):
             "premature done event: {}".format(events),
         )
 
+
+    def test_join_interrupt_abandons_process(self) -> None:
+        """BaseException during join abandons non-daemon child (no exit hang)."""
+        paths, env, rev = self._prepare_finalizing()
+        abandoned = []
+
+        class FakeProc:
+            def __init__(self):
+                self.daemon = False
+                self.exitcode = None
+                self.pid = 424242
+                self._alive = True
+
+            def start(self):
+                return None
+
+            def join(self, timeout=None):
+                raise KeyboardInterrupt()
+
+            def is_alive(self):
+                return self._alive
+
+            def terminate(self):
+                return None
+
+            def kill(self):
+                return None
+
+        class FakeCtx:
+            def Process(self, **kwargs):
+                return FakeProc()
+
+        with mock.patch.object(
+            finalize_worker.multiprocessing, "get_context", return_value=FakeCtx()
+        ):
+            with mock.patch.object(
+                finalize_worker,
+                "_abandon_process_for_shutdown",
+                side_effect=lambda p: abandoned.append(p),
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    finalize_worker.run_finalize_parent(
+                        paths,
+                        mode="review",
+                        envelope=env,
+                        lifecycle="completed",
+                        expected_revision=rev,
+                        budget_seconds=5,
+                    )
+        self.assertEqual(len(abandoned), 1)
+

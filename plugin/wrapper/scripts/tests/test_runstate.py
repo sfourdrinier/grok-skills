@@ -731,6 +731,27 @@ class CreateRunSeedTests(unittest.TestCase):
         self.assertEqual(json.loads(path.read_text())["a"], 2)
         self.assertEqual(list(path.parent.glob("x.json.tmp.*")), [])
 
+
+    def test_persist_recovery_cancelled_envelope_is_canceled(self) -> None:
+        """Envelope-first cancel crash recovery finishes lifecycle as canceled."""
+        from groklib.envelope import failure_envelope
+
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.set_lifecycle(paths, 1, "finalizing")
+        env = failure_envelope(
+            run_id=paths.run_id,
+            mode="review",
+            error_class="cancelled",
+            message="operator cancel",
+        )
+        runstate.write_json_atomic(paths.envelope_path, env)
+        self.assertEqual(runstate.load_run_record(paths.run_id)["lifecycle"], "finalizing")
+        finished = runstate.persist_terminal_envelope(paths, None, None)
+        self.assertEqual(finished["lifecycle"], "canceled")
+        self.assertEqual(finished["status"], "failure")
+
+
     def test_write_json_atomic_fsyncs_parent_directory(self) -> None:
         """After os.replace, parent dir is fsync'd for power-loss durability."""
         path = pathlib.Path(self.tmp_root) / "durable.json"

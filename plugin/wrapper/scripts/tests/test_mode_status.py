@@ -513,5 +513,26 @@ class StatusModeTests(unittest.TestCase):
         self.assertIsInstance(last["elapsedMs"], int)
         self.assertGreaterEqual(last["elapsedMs"], 0)
 
+
+    def test_status_finalizing_with_live_finalize_worker_not_interrupted(self) -> None:
+        """Dead parent owner.pid + live finalize worker => still in progress."""
+        from groklib.modes import finalize_worker
+
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.set_lifecycle(paths, 1, "finalizing")
+        # Parent owner is dead; without finalize liveness this becomes interrupted.
+        runstate.write_home_liveness_marker(paths.run_dir, 999999999)
+        finalize_worker.mark_worker_starting(paths.run_dir)
+        try:
+            exit_code, out = _run_status(paths.run_id)
+            envelope = json.loads(out)
+            self.assertEqual(exit_code, 0, out)
+            self.assertEqual(envelope["status"], "running")
+            self.assertEqual(envelope["response"]["target"]["lifecycle"], "finalizing")
+            self.assertEqual(envelope["response"]["target"]["process"], "alive")
+        finally:
+            finalize_worker.clear_worker_pid(paths.run_dir)
+
 if __name__ == "__main__":
     unittest.main()
