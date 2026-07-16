@@ -95,6 +95,7 @@ Execution mode (foreground vs background):
 Foreground flow (one Bash call, then relay verbatim). When the arguments carry a
 `--task <text>`, route that text through STDIN so it is never shell-evaluated:
 ```bash
+export GROK_COMPANION_EXECUTION_CONTEXT=foreground
 node "$SKILL_BASE/run.mjs" review --target '<target from $ARGUMENTS>' [other non-task flags from $ARGUMENTS, each substituted value single-quoted] --task-file - <<'GROK_TASK'
 <the --task text from $ARGUMENTS, verbatim>
 GROK_TASK
@@ -102,6 +103,7 @@ GROK_TASK
 When the arguments already use `--task-file <path>`, drop the heredoc and pass
 every flag as single-quoted argv tokens:
 ```bash
+export GROK_COMPANION_EXECUTION_CONTEXT=foreground
 node "$SKILL_BASE/run.mjs" review --target '<target from $ARGUMENTS>' --task-file '<path from $ARGUMENTS>' [other non-task flags from $ARGUMENTS, each substituted value single-quoted]
 ```
 - Return the command stdout envelope VERBATIM. Do not paraphrase, summarize, or

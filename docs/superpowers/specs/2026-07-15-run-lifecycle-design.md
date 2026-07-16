@@ -573,7 +573,8 @@ File: `{runDir}/notified.json`.
 | Windows | no-op, reason `windows-native-unsupported` | n/a |
 | Other | no-op | n/a |
 
-Always `shell: false`. Title `Grok Skills`. Body `"{mode} {lifecycle} · {runId} · {durationSeconds}s"`.
+Always `shell: false`. Title `Grok Skills`. Body
+`"{mode} {lifecycle} / {runId} / {durationSeconds}s"` (ASCII separators).
 
 ### Webhook (exact)
 

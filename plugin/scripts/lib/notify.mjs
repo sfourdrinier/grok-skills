@@ -18,6 +18,7 @@ const NATIVE_TIMEOUT_MS = 5000;
 const WEBHOOK_TIMEOUT_MS = 3000;
 const TITLE = "Grok Skills";
 
+// Keep in sync with jobs.mjs NOTIFICATION_MODES.
 const NOTIFY_MODES = new Set(["off", "auto", "native", "webhook"]);
 
 /**

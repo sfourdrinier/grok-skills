@@ -299,6 +299,32 @@ class ReviewIsolationHelperTests(unittest.TestCase):
             finally:
                 review_isolation.cleanup_review_isolation(session)
 
+    def test_prepare_honors_plan_base_revision_pin(self) -> None:
+        """plan_review_isolation pin must drive prepare worktree base (not live HEAD)."""
+        planned = review_isolation.plan_review_isolation(
+            repo_root=self.repo, run_id=runstate.new_run_id()
+        )
+        pin = planned.base_revision
+        self.assertTrue(isinstance(pin, str) and len(pin) >= 7)
+        # Advance HEAD after plan so live HEAD != planned pin.
+        (self.repo / "a.txt").write_text("alpha\nbeta\npost-plan\n", encoding="utf-8")
+        _git(self.repo, "add", "a.txt")
+        _git(self.repo, "commit", "-m", "post-plan move")
+        head_after = _git(self.repo, "rev-parse", "HEAD").strip()
+        self.assertNotEqual(head_after, pin)
+
+        rid = runstate.new_run_id()
+        session = review_isolation.prepare_review_isolation(
+            repo_root=self.repo,
+            run_id=rid,
+            base_revision=pin,
+        )
+        try:
+            self.assertEqual(session.base_revision, pin)
+            self.assertNotEqual(session.base_revision, head_after)
+        finally:
+            review_isolation.cleanup_review_isolation(session)
+
     def test_owner_marker_written_before_worktree_add(self) -> None:
         """Crash window: marker must exist before git worktree add returns."""
         order = []

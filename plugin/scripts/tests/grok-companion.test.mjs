@@ -5,6 +5,8 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -14,6 +16,8 @@ import {
   resolveWrapperPath,
   wrapperNotFoundMessage
 } from "../lib/wrapper.mjs";
+import { wrapperChildEnv, NOTIFY_ELIGIBLE_MODES, shouldNotify } from "../lib/notify.mjs";
+import { RUN_ID_RE } from "../progress-relay.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const COMPANION = path.resolve(SCRIPT_DIR, "..", "grok-companion.mjs");
@@ -80,6 +84,40 @@ test("resolveWrapperPath honors GROK_AGENT_WRAPPER when allow flag is set", () =
   assert.equal(resolved, path.resolve(real));
 });
 
+test("wrapperChildEnv strips execution context for wrapper spawns", () => {
+  const scrubbed = wrapperChildEnv({
+    GROK_COMPANION_EXECUTION_CONTEXT: "background",
+    PATH: "/bin"
+  });
+  assert.equal(scrubbed.GROK_COMPANION_EXECUTION_CONTEXT, undefined);
+  assert.equal(scrubbed.PATH, "/bin");
+});
+
+test("notify eligibility excludes status/setup/cleanup/jobs", () => {
+  for (const mode of ["status", "setup", "cleanup", "preflight", "jobs", "result", "cancel"]) {
+    assert.equal(NOTIFY_ELIGIBLE_MODES.has(mode), false, mode);
+  }
+  for (const mode of ["review", "reason", "code", "verify", "adversarial-review"]) {
+    assert.equal(NOTIFY_ELIGIBLE_MODES.has(mode), true, mode);
+  }
+});
+
+test("auto notify is background-only (companion policy)", () => {
+  assert.equal(
+    shouldNotify({ notificationMode: "auto", executionContext: "foreground" }).notify,
+    false
+  );
+  assert.equal(
+    shouldNotify({ notificationMode: "auto", executionContext: "background" }).notify,
+    true
+  );
+});
+
+test("run id shape used for notify is the same as progress-relay", () => {
+  assert.equal(RUN_ID_RE.test("20260716T120000Z-deadbe"), true);
+  assert.equal(RUN_ID_RE.test("../../../etc"), false);
+});
+
 test("wrapperNotFoundMessage is actionable and points at /grok:setup", () => {
   const message = wrapperNotFoundMessage({
     GROK_AGENT_WRAPPER: "/nope/grok_agent.py",
@@ -99,4 +137,76 @@ test("companion forwards argv to the wrapper and passes stdout + exit through", 
   const parsed = JSON.parse(result.stdout.trim());
   assert.equal(parsed.status, "failure");
   assert.equal(parsed.error.class, "usage-error");
+});
+
+function runSetup(args, envExtras = {}) {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-setup-"));
+  const pdata = path.join(cwd, "pdata");
+  const result = spawnSync(process.execPath, [COMPANION, "setup", ...args], {
+    encoding: "utf8",
+    cwd,
+    env: {
+      ...process.env,
+      CLAUDE_PLUGIN_DATA: pdata,
+      ...envExtras,
+    },
+  });
+  return { result, cwd, pdata };
+}
+
+test("setup rejects invalid --notification-mode without changing prefs", async () => {
+  const { getNotificationConfig } = await import("../lib/jobs.mjs");
+  const first = runSetup(["--notification-mode", "auto"]);
+  assert.equal(first.result.status, 0);
+  assert.match(first.result.stdout, /auto/);
+  assert.equal(
+    getNotificationConfig(first.cwd, { CLAUDE_PLUGIN_DATA: first.pdata }).notificationMode,
+    "auto"
+  );
+
+  const bad = spawnSync(
+    process.execPath,
+    [COMPANION, "setup", "--notification-mode", "telepathy"],
+    {
+      encoding: "utf8",
+      cwd: first.cwd,
+      env: { ...process.env, CLAUDE_PLUGIN_DATA: first.pdata },
+    }
+  );
+  assert.equal(bad.status, 0);
+  assert.match(bad.stdout + bad.stderr, /invalid mode/i);
+  assert.match(bad.stdout + bad.stderr, /telepathy/);
+  assert.equal(
+    getNotificationConfig(first.cwd, { CLAUDE_PLUGIN_DATA: first.pdata }).notificationMode,
+    "auto",
+    "invalid mode must not clobber prior auto"
+  );
+});
+
+test("setup redacts webhook URL query/userinfo from report", () => {
+  const secretUrl =
+    "https://user:token@hooks.example.com/notify?secret=super-secret-token";
+  const { result } = runSetup([
+    "--notification-mode",
+    "webhook",
+    "--notification-webhook-url",
+    secretUrl,
+  ]);
+  assert.equal(result.status, 0);
+  const out = result.stdout + result.stderr;
+  assert.doesNotMatch(out, /super-secret-token/);
+  assert.doesNotMatch(out, /user:token@/);
+  assert.match(out, /hooks\.example\.com/);
+});
+
+test("companion never maps terminal lifecycle to running (source contract)", async () => {
+  const src = fs.readFileSync(COMPANION, "utf8");
+  // Guard against re-introducing envelope status "running" as notify lifecycle.
+  assert.equal(
+    /lifecycle\s*=\s*["']running["']/.test(src),
+    false,
+    "maybeNotifyAfterTerminal must not set lifecycle to running"
+  );
+  assert.match(src, /safeRunIdForRunsDir|sanitizeRunId/);
+  assert.match(src, /notifyMode/);
 });

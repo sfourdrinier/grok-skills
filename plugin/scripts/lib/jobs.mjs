@@ -26,11 +26,13 @@ export const DEFAULT_JOBS_CONFIG = Object.freeze({
   lastRescueJobId: null,
 });
 
-const NOTIFICATION_MODES = new Set(["off", "auto", "native", "webhook"]);
+// Keep in sync with notify.mjs NOTIFY_MODES (single product set of strings).
+export const NOTIFICATION_MODES = Object.freeze(["off", "auto", "native", "webhook"]);
+const NOTIFICATION_MODE_SET = new Set(NOTIFICATION_MODES);
 
 function normalizeNotificationMode(value) {
   const mode = typeof value === "string" ? value.trim().toLowerCase() : "";
-  return NOTIFICATION_MODES.has(mode) ? mode : DEFAULT_JOBS_CONFIG.notificationMode;
+  return NOTIFICATION_MODE_SET.has(mode) ? mode : DEFAULT_JOBS_CONFIG.notificationMode;
 }
 
 function normalizeWebhookUrl(value) {

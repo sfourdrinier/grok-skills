@@ -205,7 +205,12 @@ def _intent_to_add_paths(repo_root: pathlib.Path) -> List[str]:
     return paths
 
 
-def prepare_review_isolation(*, repo_root: pathlib.Path, run_id: str) -> ReviewIsolation:
+def prepare_review_isolation(
+    *,
+    repo_root: pathlib.Path,
+    run_id: str,
+    base_revision: Optional[str] = None,
+) -> ReviewIsolation:
     """Create owned review worktree at HEAD, apply tracked dirty, return session.
 
     Raises GrokWrapperError(isolation-unavailable) on any setup failure after
@@ -213,6 +218,9 @@ def prepare_review_isolation(*, repo_root: pathlib.Path, run_id: str) -> ReviewI
 
     Order for crash-safe cleanup authority:
     parent dir -> owner marker -> worktree add -> permissions -> dirty patch.
+
+    When ``base_revision`` is supplied (from plan_review_isolation), that pin is
+    used for worktree create and dirty patch so run.json and worktree agree.
     """
     if not runstate.is_valid_run_id(run_id):
         raise _iso_error("run id is not valid for review isolation: {!r}".format(run_id), {"runId": run_id})
@@ -243,7 +251,10 @@ def prepare_review_isolation(*, repo_root: pathlib.Path, run_id: str) -> ReviewI
     base_sha: Optional[str] = None
     try:
         _reject_dirty_submodules(resolved_repo)
-        base_sha = worktree_mod._resolve_base_sha(resolved_repo, "HEAD")
+        if base_revision and isinstance(base_revision, str) and base_revision.strip():
+            base_sha = worktree_mod._resolve_base_sha(resolved_repo, base_revision.strip())
+        else:
+            base_sha = worktree_mod._resolve_base_sha(resolved_repo, "HEAD")
         worktree_mod._make_secure_dir(worktree_path.parent)
         # Marker BEFORE worktree so cleanup can prove ownership if we crash after add.
         runstate.write_owner_marker_file(marker_path, run_id)

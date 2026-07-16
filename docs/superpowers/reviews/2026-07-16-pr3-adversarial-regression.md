@@ -1,18 +1,24 @@
-# PR3 adversarial + regression gate (pre-open)
+# PR3 adversarial + regression gate
 
 **Date:** 2026-07-16  
 **Branch:** `feat/pr3-notifications-1.5.0`  
-**Purpose:** Close gaps that would re-trigger Codex on open PR.
+**Purpose:** Close gaps that would re-trigger Codex; keep post-open hardening covered by regressions.
 
-## Hardening applied before open
+## Hardening (pre-open + post-adversarial)
 
 | Risk | Fix |
 |------|-----|
 | Half-implemented `force` (PR5) invite findings | Removed force path from `attemptNotify` |
 | Creating `runs/<id>` for notify | Refuse if run dir missing (`run-dir-missing`) |
-| Wrapper env leak on preflight | `wrapperChildEnv` on preflight spawn |
+| Wrapper env leak on preflight | `wrapperChildEnv` on spawn/spawnSync/preflight |
 | Non-ASCII body / docs dashes | ASCII bodies; review docs ASCII-hyphenated |
-| Missing regression coverage | Expanded notify + isolation tests (see below) |
+| Path-unsafe run ids for notify/job joins | `safeRunIdForRunsDir` + companion `sanitizeRunId` |
+| Terminal lifecycle `"running"` after exit | Exit-code / success/failure only |
+| adversarial-review remapped to review for wrapper | `notifyMode` keeps skill name for payload |
+| Invalid `--notification-mode` | Setup warn/no-op; prefs unchanged |
+| Webhook URL leak on setup report | Host+path only (no userinfo/query) |
+| plan vs prepare base drift | `prepare(..., base_revision=planned.base_revision)` |
+| Missing regression coverage | Expanded notify + companion + isolation tests |
 
 ## Regression matrix -> tests
 
@@ -30,6 +36,23 @@
 | ineligible mode | status never writes marker |
 | missing run dir | no create |
 | wrapperChildEnv pure | does not mutate input |
+| NOTIFICATION_MODES stable | `notification mode set is complete and stable` |
+| invalid mode normalizes to off | `setNotificationConfig rejects invalid mode` |
+| adversarial-review skill mode in body | `adversarial-review is notify-eligible and webhook body uses skill mode` |
+| no middle-dot in payload | `notify body is ASCII separators only` |
+| skill env contract | `skills declare execution context prefix` |
+
+### Companion + relay (`grok-companion.test.mjs`, `progress-relay.test.mjs`)
+
+| Behavior | Test |
+|----------|------|
+| eligibility set | `notify eligibility excludes status/setup/...` |
+| auto FG/BG policy | `auto notify is background-only` |
+| run id shape shared | `run id shape used for notify is the same as progress-relay` |
+| safe run id under runsDir | `safeRunIdForRunsDir accepts valid ids...` |
+| setup invalid mode no-op | `setup rejects invalid --notification-mode without changing prefs` |
+| setup webhook redaction | `setup redacts webhook URL query/userinfo from report` |
+| no lifecycle running | `companion never maps terminal lifecycle to running` |
 
 ### Isolation (`tests/test_review_isolation.py`)
 
@@ -38,6 +61,7 @@
 | marker before worktree add | `test_owner_marker_written_before_worktree_add` |
 | add failure cleans marker | `test_worktree_add_failure_removes_prewritten_marker` |
 | pinned base_sha not HEAD | `test_dirty_patch_uses_pinned_base_not_live_head` |
+| plan pin drives prepare | `test_prepare_honors_plan_base_revision_pin` |
 | retain marker if wt remains | `test_cleanup_retains_marker_if_worktree_still_present` |
 | SHA-256 zero OIDs ITA | `test_intent_to_add_detects_sha256_zero_oids` |
 | status bytes non-UTF-8 | `test_intent_to_add_status_uses_bytes_not_utf8_decode` |
@@ -53,12 +77,12 @@
 2. Headless native often fails; marker still `completed`+`failed` (correct).  
 3. Webhook may target private IPs if operator sets URL (operator-trusted config).  
 
-## Open PR criteria
+## Gate criteria
 
 - [x] Gate A matrix  
 - [x] Gate B DRY  
 - [x] Regression tests above green  
-- [x] Full Node suite green  
+- [x] Full Node suite green (157)  
 - [x] Full Python suite green  
 - [x] Docs refreshed (COMPATIBILITY/RELEASE/SECURITY/manual-smoke/references)  
 - [x] No open remediable findings from internal adversarial pass  

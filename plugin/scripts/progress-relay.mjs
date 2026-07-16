@@ -323,6 +323,29 @@ export function runsDirFor(env = process.env) {
 }
 
 /**
+ * Fail-closed run id for notify/job path joins: shape must match RUN_ID_RE and
+ * the resolved path must stay under runsDir (no traversal after resolve).
+ *
+ * @param {string|null|undefined} candidate
+ * @param {string} runsDir
+ * @returns {string|null}
+ */
+export function safeRunIdForRunsDir(candidate, runsDir) {
+  if (typeof candidate !== "string" || !RUN_ID_RE.test(candidate)) {
+    return null;
+  }
+  if (typeof runsDir !== "string" || !runsDir) {
+    return null;
+  }
+  const root = path.resolve(runsDir);
+  const runDir = path.resolve(root, candidate);
+  if (runDir !== root && !runDir.startsWith(root + path.sep)) {
+    return null;
+  }
+  return candidate;
+}
+
+/**
  * Return the progress.jsonl path for a run id under a runs dir. The caller is
  * responsible for having validated the run id shape when it came from outside.
  *

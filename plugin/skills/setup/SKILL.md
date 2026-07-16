@@ -66,6 +66,7 @@ Examples:
 ```bash
 node "$SKILL_BASE/run.mjs" setup
 node "$SKILL_BASE/run.mjs" setup --run-mode hardened
+node "$SKILL_BASE/run.mjs" setup --notification-mode auto
 node "$SKILL_BASE/run.mjs" setup --force-codex-agents
 node "$SKILL_BASE/run.mjs" setup --remove-codex-agents
 node "$SKILL_BASE/run.mjs" setup --enable-review-gate

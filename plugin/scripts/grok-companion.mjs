@@ -21,6 +21,7 @@ import {
   parseRunIdMarker,
   renderRunProgress,
   runsDirFor,
+  safeRunIdForRunsDir,
   snapshotRunIds,
 } from "./progress-relay.mjs";
 import {
@@ -90,22 +91,37 @@ function stderrLine(line) {
 }
 
 /**
+ * Fail-closed run id for notify/job updates (shape + under runsDir).
+ * @param {string|null|undefined} candidate
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string|null}
+ */
+function sanitizeRunId(candidate, env = process.env) {
+  return safeRunIdForRunsDir(candidate, runsDirFor(env));
+}
+
+/**
  * Thin companion hook: after a terminal live run, at-most-once notify attempt.
  * Never throws; never fails the job. Uses notify.mjs only (DRY).
  */
 function maybeNotifyAfterTerminal({ cwd, mode, runId, code, startedAtMs, stdoutText }) {
-  if (!NOTIFY_ELIGIBLE_MODES.has(mode)) {
+  // Prefer skill/kind mode for notify payload when wrapper mode was remapped
+  // (e.g. adversarial-review -> review).
+  const notifyMode = NOTIFY_ELIGIBLE_MODES.has(mode) ? mode : null;
+  if (!notifyMode) {
     return Promise.resolve();
   }
-  if (!runId) {
+  const safeRunId = sanitizeRunId(runId, process.env);
+  if (!safeRunId) {
     return Promise.resolve();
   }
-  const runDir = path.join(runsDirFor(process.env), runId);
+  const runDir = path.resolve(runsDirFor(process.env), safeRunId);
   if (!fs.existsSync(runDir)) {
     // Direct mode synthetic ids have no durable run dir - skip (no marker home).
     return Promise.resolve();
   }
   const prefs = getNotificationConfig(cwd, process.env);
+  // Terminal path only: never advertise lifecycle "running" after process exit.
   let lifecycle = code === 0 ? "completed" : "failed";
   if (stdoutText) {
     const env = tryParseEnvelope(stdoutText);
@@ -113,9 +129,8 @@ function maybeNotifyAfterTerminal({ cwd, mode, runId, code, startedAtMs, stdoutT
       lifecycle = "completed";
     } else if (env?.status === "failure") {
       lifecycle = "failed";
-    } else if (env?.status === "running") {
-      lifecycle = "running";
     }
+    // ignore status "running" on a finished process - fall back to exit code
   }
   const durationSeconds = Math.max(
     0,
@@ -123,8 +138,8 @@ function maybeNotifyAfterTerminal({ cwd, mode, runId, code, startedAtMs, stdoutT
   );
   return attemptNotify({
     runDir,
-    runId,
-    mode,
+    runId: safeRunId,
+    mode: notifyMode,
     lifecycle,
     durationSeconds,
     notificationMode: prefs.notificationMode,
@@ -147,17 +162,17 @@ function maybeNotifyAfterTerminal({ cwd, mode, runId, code, startedAtMs, stdoutT
 
 function resolveRunIdFromJobAndStdout(cwd, job, stdoutText) {
   if (job?.runId) {
-    return job.runId;
+    const safe = sanitizeRunId(job.runId);
+    if (safe) return safe;
   }
   if (stdoutText) {
     const env = tryParseEnvelope(stdoutText);
-    if (env?.runId) {
-      return env.runId;
-    }
+    const safe = sanitizeRunId(env?.runId);
+    if (safe) return safe;
   }
   if (job?.id) {
     const latest = getJob(cwd, job.id);
-    return latest?.runId ?? null;
+    return sanitizeRunId(latest?.runId);
   }
   return null;
 }
@@ -289,11 +304,12 @@ function maybeSchema(args) {
   return args;
 }
 
-function captureAndTrack(wrapper, args, { cwd, mode, kind, runMode }) {
+function captureAndTrack(wrapper, args, { cwd, mode, kind, runMode, notifyMode }) {
   const startedAtMs = Date.now();
   const job = createJob(cwd, { kind, mode, runMode });
   appendJobLog(cwd, job.id, `dispatch ${args.join(" ")}`);
   stderrLine(`[grok-job] ${job.id} started (${mode}, ${runMode})`);
+  const skillMode = notifyMode || mode;
 
   if (runMode === "direct") {
     const direct = runDirectGrok({ mode, args, cwd, env: process.env });
@@ -324,7 +340,7 @@ function captureAndTrack(wrapper, args, { cwd, mode, kind, runMode }) {
     process.stderr.write(result.stderr);
     for (const line of result.stderr.split("\n")) {
       const runId = parseRunIdMarker(line);
-      if (runId) {
+      if (runId && sanitizeRunId(runId)) {
         updateJob(cwd, job.id, { runId });
       }
     }
@@ -335,8 +351,9 @@ function captureAndTrack(wrapper, args, { cwd, mode, kind, runMode }) {
     process.stdout.write(stdout.endsWith("\n") ? stdout : `${stdout}\n`);
     storeJobStdout(cwd, job.id, stdout);
     const env = tryParseEnvelope(stdout);
-    if (env?.runId) {
-      updateJob(cwd, job.id, { runId: env.runId });
+    const safe = sanitizeRunId(env?.runId);
+    if (safe) {
+      updateJob(cwd, job.id, { runId: safe });
     }
   }
 
@@ -351,7 +368,7 @@ function captureAndTrack(wrapper, args, { cwd, mode, kind, runMode }) {
   // but never throw.
   return maybeNotifyAfterTerminal({
     cwd,
-    mode,
+    mode: skillMode,
     runId,
     code,
     startedAtMs,
@@ -424,7 +441,7 @@ function runWithLiveRelay(wrapper, args, track) {
       const runId = resolveRunIdFromJobAndStdout(cwd, jobAfter, stdoutBuf);
       maybeNotifyAfterTerminal({
         cwd,
-        mode: track?.mode || "review",
+        mode: track?.notifyMode || track?.mode || "review",
         runId,
         code,
         startedAtMs,
@@ -468,7 +485,7 @@ function runWithLiveRelay(wrapper, args, track) {
           const line = stderrBuffer.slice(0, newlineIndex);
           stderrBuffer = stderrBuffer.slice(newlineIndex + 1);
           const runId = parseRunIdMarker(line);
-          if (runId) {
+          if (runId && sanitizeRunId(runId)) {
             try {
               relay.adoptRunId(runId);
             } catch (err) {
@@ -649,9 +666,15 @@ function cmdSetup(cwd, args) {
       setRunMode(cwd, mode);
     }
   }
+  let invalidNotificationMode = null;
   const notifyModeIdx = args.indexOf("--notification-mode");
   if (notifyModeIdx >= 0 && args[notifyModeIdx + 1]) {
-    setNotificationConfig(cwd, { notificationMode: args[notifyModeIdx + 1] });
+    const rawMode = String(args[notifyModeIdx + 1]).trim().toLowerCase();
+    if (!["off", "auto", "native", "webhook"].includes(rawMode)) {
+      invalidNotificationMode = rawMode;
+    } else {
+      setNotificationConfig(cwd, { notificationMode: rawMode });
+    }
   }
   const webhookIdx = args.indexOf("--notification-webhook-url");
   if (webhookIdx >= 0 && args[webhookIdx + 1]) {
@@ -665,6 +688,15 @@ function cmdSetup(cwd, args) {
   const notifyPrefs = getNotificationConfig(cwd);
   const binary = grokBinaryAvailable();
   const wrapper = resolveWrapperPath(process.env);
+  let webhookDetail = "none";
+  if (notifyPrefs.notificationWebhookUrl) {
+    try {
+      const u = new URL(notifyPrefs.notificationWebhookUrl);
+      webhookDetail = `${u.protocol}//${u.host}${u.pathname}`;
+    } catch {
+      webhookDetail = "(set)";
+    }
+  }
   const rows = [
     {
       name: "grok CLI",
@@ -683,10 +715,12 @@ function cmdSetup(cwd, args) {
     },
     {
       name: "notifications",
-      ok: true,
-      detail: `${notifyPrefs.notificationMode}${
-        notifyPrefs.notificationWebhookUrl ? ` webhook=${notifyPrefs.notificationWebhookUrl}` : ""
-      }`,
+      ok: !invalidNotificationMode,
+      detail: invalidNotificationMode
+        ? `invalid mode ${JSON.stringify(invalidNotificationMode)} (unchanged: ${notifyPrefs.notificationMode})`
+        : `${notifyPrefs.notificationMode}${
+            notifyPrefs.notificationWebhookUrl ? `; webhook=${webhookDetail}` : ""
+          }`,
     },
     {
       name: "stop-review gate",
@@ -707,7 +741,11 @@ function cmdSetup(cwd, args) {
   } else {
     hints.push("Hardened mode is default. For installed-CLI posture: companion setup --run-mode direct");
   }
-  if (notifyPrefs.notificationMode === "off") {
+  if (invalidNotificationMode) {
+    hints.push(
+      "Valid --notification-mode values: off | auto | native | webhook. Prefs were not changed."
+    );
+  } else if (notifyPrefs.notificationMode === "off") {
     hints.push(
       "Notifications are off. For background completion signals: setup --notification-mode auto (recommended)."
     );
@@ -990,7 +1028,9 @@ function main() {
 
   const track = {
     kind: mode === "adversarial-review" ? "adversarial-review" : mode === "code" ? "code" : "run",
+    // Keep skill name for notify payload (adversarial-review), wrapperMode for argv.
     mode: wrapperMode,
+    notifyMode: mode === "adversarial-review" ? "adversarial-review" : wrapperMode,
     runMode,
   };
 
@@ -1007,6 +1047,7 @@ function main() {
         mode: wrapperMode,
         kind: track.kind,
         runMode: "direct",
+        notifyMode: track.notifyMode,
       })
     ).then(finishCleanups);
   }
@@ -1042,6 +1083,7 @@ function main() {
         mode: wrapperMode,
         kind: track.kind,
         runMode: "hardened",
+        notifyMode: track.notifyMode,
       })
     ).then(finishCleanups);
   }
