@@ -1,16 +1,16 @@
-# Run lifecycle program — Implementation Plan (revision 8)
+# Run lifecycle program — Implementation Plan (revision 9)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Checkboxes track progress.
 
-**Goal:** Full run lifecycle with CAS, crash-consistent terminal persistence, read-only status, process finalize worker, isolated review, at-most-once notify attempts, and verified `code` implementation handoff — **four PRs**, zero open decisions.
+**Goal:** Full run lifecycle with CAS, crash-consistent terminal persistence, read-only status, process finalize worker, **opt-in** isolated review, at-most-once notify attempts, and verified `code` implementation handoff — **four PRs**.
 
-**Design:** [docs/superpowers/specs/2026-07-15-run-lifecycle-design.md](../specs/2026-07-15-run-lifecycle-design.md) **revision 8**.
+**Design:** [docs/superpowers/specs/2026-07-15-run-lifecycle-design.md](../specs/2026-07-15-run-lifecycle-design.md) **revision 9**.
 
-**Baseline:** v1.2.10. **Versions:** 1.3.0 → 1.4.0 → 1.5.0 → **1.6.0**.
+**Baseline:** v1.2.10; **PR1 shipped** on main as **1.3.x**. **Versions:** 1.3.x (done) → 1.4.0 → 1.5.0 → **1.6.0**.
 
-**Rule:** Do not invent alternatives. Design §4–§14 are authority. Every step below is mandatory as written.
+**Rule:** Design §4–§14 are authority. Rev 9 product change: PR2 isolation is **opt-in** (`--isolated` only); `--base` alone does **not** force isolation.
 
-**Do not execute until the user approves revision 8.**
+**PR2 may proceed under revision 9 after user approval of this opt-in policy.**
 
 ---
 
@@ -64,27 +64,27 @@
 
 **Not in PR1:** `docs/PROVENANCE.md` (no edit).
 
-### PR2 → 1.4.0
+### PR2 → 1.4.0 (opt-in isolation)
 
 | Path | Role |
 |------|------|
-| `plugin/wrapper/scripts/grok_agent.py` | `--isolated` |
+| `plugin/wrapper/scripts/grok_agent.py` | `--isolated` store_true (default off) |
 | `plugin/wrapper/scripts/groklib/review_isolation.py` | **New** — prepare + ownership + dirty apply + cleanup |
-| `plugin/wrapper/scripts/groklib/modes/review.py` | Call isolation |
+| `plugin/wrapper/scripts/groklib/modes/review.py` | Call isolation **only when `--isolated`** |
 | `plugin/wrapper/scripts/groklib/envelope.py` | `isolation-unavailable` |
 | `plugin/wrapper/scripts/tests/test_review_isolation.py` | **New** |
-| `plugin/wrapper/scripts/tests/test_mode_review.py` | Wire + concurrent + partial cleanup |
-| `plugin/skills/review/SKILL.md` | document `--base` / `--isolated` isolation behavior |
-| `plugin/skills/adversarial-review/SKILL.md` | **Yes — update:** same isolation flags as review (maps to review wrapper mode; document `--base` / `--isolated` identically) |
-| `README.md` | isolation |
-| `plugin/references/README.md` | isolation |
-| `plugin/wrapper/references/authority-policies.md` | isolation |
+| `plugin/wrapper/scripts/tests/test_mode_review.py` | Wire + concurrent + partial cleanup; **live path without `--isolated`** |
+| `plugin/skills/review/SKILL.md` | document opt-in `--isolated`; `--base` alone stays live |
+| `plugin/skills/adversarial-review/SKILL.md` | same opt-in policy as review |
+| `README.md` | isolation opt-in |
+| `plugin/references/README.md` | isolation opt-in |
+| `plugin/wrapper/references/authority-policies.md` | isolation opt-in |
 | `docs/COMPATIBILITY.md` | |
 | `docs/roadmap.md` | 1.4.0 |
 | `CHANGELOG.md` | 1.4.0 |
 | Packaging triple | **1.4.0** |
 
-**Not in PR2:** `docs/PROVENANCE.md`.
+**Not in PR2:** `docs/PROVENANCE.md`. **Not isolation triggers:** `--base` alone, adversarial-review default.
 
 ### PR3 → 1.5.0
 
@@ -316,16 +316,19 @@ Tests:
 
 ---
 
-## PR2 — Isolated review
+## PR2 — Opt-in isolated review
+
+**Policy (rev 9):** Isolation runs **only** when the operator/agent passes `--isolated`.  
+`--base` alone remains **live checkout** (comparison framing only). When `--isolated` is set, setup failures are **fail closed** (`isolation-unavailable`) — no silent fallback to live tree.
 
 ### Task 2.1 — Flag
 
-- [ ] `grok_agent.py`: `--isolated` store_true.  
-- [ ] **Commit** `cli: add --isolated`
+- [ ] `grok_agent.py`: `--isolated` store_true, **default false**.  
+- [ ] **Commit** `cli: add opt-in --isolated`
 
 ### Task 2.2 — `review_isolation.py`
 
-Implement design §10 exactly:
+Implement design §10 exactly (only used when isolation is requested):
 
 - Owner marker sibling `{worktree_path}.owner.json`.  
 - Never reuse existing path.  
@@ -336,24 +339,27 @@ Implement design §10 exactly:
 
 ### Task 2.3 — Wire review
 
-- [ ] Isolation required for `--base` and/or `--isolated`.  
-- [ ] Failure → failure envelope via terminal writer.  
-- [ ] finally cleanup always.  
-- [ ] **Commit** `review: enforce isolation for --base and --isolated`
+- [ ] Call isolation helper **iff** `args.isolated` (or equivalent) is true.  
+- [ ] `--base` without `--isolated` → **no** isolation path.  
+- [ ] Isolation failure → failure envelope via terminal writer (`isolation-unavailable`).  
+- [ ] finally cleanup always when isolation was started.  
+- [ ] **Commit** `review: opt-in isolation via --isolated only`
 
 ### Task 2.4 — Tests
 
-- [ ] worktree add fail → isolation-unavailable.  
+- [ ] Without `--isolated`: live review path unchanged (including with `--base`).  
+- [ ] With `--isolated`: worktree add fail → isolation-unavailable.  
 - [ ] Tracked dirty (staged+unstaged) appears; untracked does not.  
 - [ ] `git add -N` intent-to-add does **not** appear in isolated tree.  
 - [ ] Submodule dirty rejected.  
-- [ ] Apply failure → isolation-unavailable.  
-- [ ] Concurrent runs; partial cleanup.  
-- [ ] Original checkout noise does not force unexpected-edits on isolated review.
+- [ ] Apply failure → isolation-unavailable (no live fallback).  
+- [ ] Concurrent isolated runs; partial cleanup.  
+- [ ] Isolated run: original checkout noise does not force unexpected-edits.
 
 ### Task 2.5 — Docs + 1.4.0
 
-- [ ] All PR2 docs; packaging triple **1.4.0**; suites; tag `v1.4.0`.
+- [ ] All PR2 docs; packaging triple **1.4.0**; suites; tag `v1.4.0`.  
+- [ ] Explicit docs: opt-in only; when to use `--isolated` vs live `--base`.
 
 ---
 
@@ -508,7 +514,7 @@ Exact meaning design §14.17 — no “unacknowledged.”
 | Status read-only; envelope-aware effective lifecycle | PR1 / 1.6 |
 | Status exit 1 skill handling | PR1 / 1.6 |
 | Monotonic elapsed | PR1 / 1.4 |
-| Review ownership + `--ita-invisible-in-index` | PR2 |
+| Opt-in review isolation + ownership + `--ita-invisible-in-index` | PR2 (`--isolated` only) |
 | Execution context + notify attempt; skill-run no-op | PR3 |
 | Contract + scopes + order | PR4 / 4.1–4.3 |
 | Operator-trusted validation (no OS FS sandbox claim) | PR4 / 4.5 |
@@ -532,7 +538,8 @@ Exact meaning design §14.17 — no “unacknowledged.”
 | CAS | `recordRevision` + `run.lock` |
 | write_run_record public API | Deleted after PR1 migration; CAS only |
 | Elapsed | Monotonic in owner process; UTC for status |
-| Dirty isolation | `git diff --binary --full-index --ita-invisible-in-index HEAD --` |
+| Dirty isolation (when `--isolated`) | `git diff --binary --full-index --ita-invisible-in-index HEAD --` |
+| Isolation trigger | **`--isolated` only**; `--base` alone = live |
 | Notify | At-most-once **attempt**; no auto-retry pending |
 | Background | `GROK_COMPANION_EXECUTION_CONTEXT` via skill/agent SKILL/md; skill-run **no-op** |
 | Handoff streaming | **No** |
@@ -558,9 +565,9 @@ No parallel tracks. No alternate designs during implementation.
 
 ## Handoff
 
-Revision **8** closes rev-7 consistency findings: confirmed worker death before parent recovery, skill-run no-op aligned in design+plan, definitive rescue env prefix and adversarial-review isolation, seven PR4 error classes. Paths:
+Revision **9** product change after PR1 ship: **PR2 isolation is opt-in** (`--isolated` only). `--base` no longer requires isolation. Paths:
 
 - `docs/superpowers/specs/2026-07-15-run-lifecycle-design.md`  
 - `docs/superpowers/plans/2026-07-15-run-lifecycle.md`  
 
-**Approve revision 8 before any implementation.**
+**PR1 is done on main (1.3.x). Approve revision 9 before implementing PR2.**

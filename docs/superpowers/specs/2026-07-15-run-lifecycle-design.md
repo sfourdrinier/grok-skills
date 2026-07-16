@@ -1,9 +1,9 @@
 # Run lifecycle, isolated review, completion signals, and implementation handoff
 
-**Status:** design revision 8 (PR1–PR4 locked; rev-7 consistency fixes closed — no open decisions)  
-**Date:** 2026-07-15  
+**Status:** design revision 9 (PR1 shipped; PR2 isolation is **opt-in** only — not required for `--base`)  
+**Date:** 2026-07-16  
 **Product:** grok-skills (Claude Code + Codex)  
-**Baseline:** v1.2.10  
+**Baseline:** v1.2.10 (PR1 lifecycle on main as 1.3.x)  
 
 ## 1. Problem
 
@@ -13,7 +13,8 @@ Background and long-running Grok modes (especially `review`) are hard to trust:
 2. Run id is advertised before a durable seed `run.json` exists.
 3. Post-Grok finalization is quiet; operators think the process is stuck.
 4. Finalization can hang with no terminal envelope.
-5. Review evidence can be poisoned by concurrent writers on the live checkout.
+5. Review on the live checkout can be noisy under concurrent edits (optional
+   isolation can help; not required for correctness of review itself).
 6. No clean completion signal for background jobs.
 7. `code` retains a dirty worktree but does not produce a verified, immutable
    implementation artifact a parent harness (Codex/Claude) can safely inspect,
@@ -28,7 +29,8 @@ Background and long-running Grok modes (especially `review`) are hard to trust:
 - Status projection per §6; **`status` remains strictly read-only** (no writes).
 - Phase progress with process-local monotonic `elapsedMs` and UTC timestamps.
 - Process-based finalization watchdog with fully specified worker protocol.
-- Isolated review for `--base` and `--isolated`; ownership-marked worktrees; fail closed.
+- **Opt-in** isolated review via `--isolated` only; ownership-marked worktrees when
+  used; fail closed for isolation setup (never silently fall back if isolation was requested).
 - Optional notifications after terminal envelope; **at-most-once attempt** (no duplicate auto-retry); never fail the run.
 - Dual-host: same core; harnesses only present.
 - Docs follow code on every shippable PR (AGENTS.md rule #1).
@@ -64,7 +66,7 @@ Background and long-running Grok modes (especially `review`) are hard to trust:
 | Terminal immutability | A valid terminal envelope is **never** replaced by another terminal envelope. Terminal lifecycle never overwritten once set (except CAS completing non-terminal → terminal matching existing envelope). |
 | Progress elapsed | Owning process uses **monotonic** clock for `elapsedMs` on events it writes. Cross-process/status uses UTC timestamps; clamp negative elapsed to 0. |
 | Finalization | Child via `multiprocessing.get_context("spawn")`; fully specified payload and ownership (§9). |
-| Review isolation | §10; ownership markers; no silent live-checkout fallback. |
+| Review isolation | §10; **opt-in** (`--isolated` only). `--base` alone uses live checkout. No silent live-checkout fallback **when isolation was requested**. |
 | Notifications storage | **Only** jobs index `config` in `plugin/scripts/lib/jobs.mjs`. Never gate-state. |
 | Notifications default | `off`. Setup recommends `auto`. |
 | Notify contract | **At-most-once attempt:** prioritize no duplicate attempts over guaranteed delivery. **Not** exactly-once. No automatic retry of `pending`. |
@@ -96,7 +98,7 @@ Companion → Wrapper → state_root/runs/<id>/
 Worktrees:
 
 - Code/verify: existing external worktree paths + ownership (unchanged).
-- Review isolation: `{state_root}/worktrees/review/{run_id}/` + owner marker bound to run id (§10).
+- Review isolation (only if `--isolated`): `{state_root}/worktrees/review/{run_id}/` + owner marker bound to run id (§10).
 
 ## 6. Lifecycle and status projection
 
@@ -448,16 +450,25 @@ envelope after Grok; the spawned worker runs `persist_terminal_envelope` under
 a hang budget. Parent durable recovery remains §9.4 (`is_alive` gate). Full
 §9 ownership of sandbox verify / envelope build in the worker is deferred.
 
-## 10. Isolated review
+## 10. Isolated review (opt-in)
+
+### Product decision (rev 9)
+
+Isolation is **optional hygiene**, not a correctness requirement for review or for
+`--base`. Making isolation mandatory for `--base` over-weights worktree create /
+dirty-apply / cleanup cost and new failure modes relative to typical dogfood use.
+Operators who want a clean HEAD+tracked-dirty tree opt in with `--isolated`.
 
 ### When
 
 | Flags | Action |
 |-------|--------|
-| `--base` set | Isolation required |
-| `--isolated` set | Isolation required |
-| both | Worktree at HEAD; apply tracked dirty; keep `--base` for comparison |
-| neither | Live checkout; drift warnings only |
+| neither `--isolated` nor isolation implied | **Live checkout** (default). `--base` frames comparison only; no worktree. Drift warnings as today. |
+| `--isolated` set | Isolation **required for this run**: create owned worktree, apply tracked dirty, run review there. Fail closed with `isolation-unavailable` if setup fails — **no silent fallback to live checkout**. |
+| `--isolated` and `--base` | Same isolation worktree at HEAD + tracked dirty apply; preserve `--base` for comparison framing. Isolation HEAD is **not** the comparison base. |
+| `--base` without `--isolated` | Live checkout; `--base` comparison only. |
+
+**Not isolation triggers:** `--base` alone, adversarial-review skill default, or any other flag.
 
 ### Worktree path and ownership
 
@@ -602,7 +613,7 @@ Add new classes to `envelope.ERROR_CLASSES` in the owning PR.
 | PR | Version | Scope |
 |----|---------|--------|
 | PR1 | 1.3.0 | Lifecycle, CAS seed, single terminal writer, status read-only projection, progress, process finalize |
-| PR2 | 1.4.0 | Isolated review + ownership |
+| PR2 | 1.4.0 | **Opt-in** isolated review (`--isolated`) + ownership; `--base` alone stays live |
 | PR3 | 1.5.0 | Notifications + execution context |
 | PR4 | 1.6.0 | Verified implementation handoff |
 
