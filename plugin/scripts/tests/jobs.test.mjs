@@ -55,7 +55,7 @@ test("notification prefs default off and persist", () => {
   assert.equal(getNotificationConfig(cwd, env).notificationMode, "auto");
 });
 
-test("NOTIFICATION_MODES is the single product set", () => {
+test("NOTIFICATION_MODES re-exports the shared product set", () => {
   assert.deepEqual([...NOTIFICATION_MODES], ["off", "auto", "native", "webhook"]);
   assert.equal(isNotificationMode("auto"), true);
   assert.equal(isNotificationMode("telepathy"), false);

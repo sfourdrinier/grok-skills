@@ -83,13 +83,20 @@
 |---------|-----|
 | invalid setNotificationConfig clobber | leave prior prefs unchanged |
 | setup exit ignores invalid mode | exit 1 when mode invalid |
-| triple mode list | `NOTIFICATION_MODES` + `isNotificationMode` from jobs.mjs only |
+| triple mode list | `notification-modes.mjs` shared module |
 | dual-lens missing context | skill + contract test |
 | code/reason/verify FG fences | export execution context |
 | debate double notify | `skipNotify` on debate-a |
 | prepare docstring HEAD | pinned base wording |
 | job mode vs skill mode | createJob uses skill mode |
 | PR body suite counts | updated on PR |
+| setup partial notify prefs (R2-1) | atomic apply or apply none; accurate hint |
+| skipNotify behavioral (R2-2) | `shouldAttemptTerminalNotify` + tests |
+| notify imports jobs (R2-3) | tiny `notification-modes.mjs` |
+| webhook scheme (R2-4) | parseWebhookUrl http(s) only |
+| envelope parse (R2-5) | last JSON object line |
+| dual-lens double notify (R2-6) | `--no-notify` on first pass |
+| setup preflight exit (R2-7) | failed preflight rows fail setup exit |
 
 ## Gate criteria
 

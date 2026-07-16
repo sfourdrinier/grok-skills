@@ -10,6 +10,14 @@ import os from "node:os";
 import path from "node:path";
 
 import { resolveWorkspaceRoot } from "./gate-state.mjs";
+import {
+  isNotificationMode,
+  NOTIFICATION_MODES,
+  parseNotificationMode,
+  parseWebhookUrl,
+} from "./notification-modes.mjs";
+
+export { isNotificationMode, NOTIFICATION_MODES, parseNotificationMode, parseWebhookUrl };
 
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
 const FALLBACK = path.join(os.tmpdir(), "grok-companion");
@@ -26,33 +34,15 @@ export const DEFAULT_JOBS_CONFIG = Object.freeze({
   lastRescueJobId: null,
 });
 
-/** Single product set of notification mode strings (notify + setup import this). */
-export const NOTIFICATION_MODES = Object.freeze(["off", "auto", "native", "webhook"]);
-const NOTIFICATION_MODE_SET = new Set(NOTIFICATION_MODES);
-
-/**
- * @param {unknown} value
- * @returns {value is string}
- */
-export function isNotificationMode(value) {
-  return typeof value === "string" && NOTIFICATION_MODE_SET.has(value.trim().toLowerCase());
-}
-
 /** Normalize stored/corrupt config values to a known mode (default off). */
 function normalizeNotificationMode(value) {
-  const mode = typeof value === "string" ? value.trim().toLowerCase() : "";
-  return NOTIFICATION_MODE_SET.has(mode) ? mode : DEFAULT_JOBS_CONFIG.notificationMode;
+  return parseNotificationMode(value) ?? DEFAULT_JOBS_CONFIG.notificationMode;
 }
 
+/** Stored corrupt webhook URLs fall back to null. */
 function normalizeWebhookUrl(value) {
-  if (value == null || value === "") {
-    return null;
-  }
-  if (typeof value !== "string") {
-    return null;
-  }
-  const trimmed = value.trim();
-  return trimmed || null;
+  const parsed = parseWebhookUrl(value);
+  return parsed.ok ? parsed.url : null;
 }
 
 function normalizeConfig(raw) {
@@ -200,12 +190,17 @@ export function setNotificationConfig(cwd, patch, env = process.env) {
   const index = loadIndex(cwd, env);
   if (patch.notificationMode !== undefined) {
     // Invalid modes leave prior prefs unchanged (never clobber auto -> off).
-    if (isNotificationMode(patch.notificationMode)) {
-      index.config.notificationMode = String(patch.notificationMode).trim().toLowerCase();
+    const mode = parseNotificationMode(patch.notificationMode);
+    if (mode) {
+      index.config.notificationMode = mode;
     }
   }
   if (patch.notificationWebhookUrl !== undefined) {
-    index.config.notificationWebhookUrl = normalizeWebhookUrl(patch.notificationWebhookUrl);
+    // Invalid non-empty URLs leave prior webhook unchanged; empty clears.
+    const parsed = parseWebhookUrl(patch.notificationWebhookUrl);
+    if (parsed.ok) {
+      index.config.notificationWebhookUrl = parsed.url;
+    }
   }
   saveIndex(cwd, index, env);
   return getNotificationConfig(cwd, env);

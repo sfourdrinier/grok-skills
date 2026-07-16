@@ -179,11 +179,42 @@ test("setup rejects invalid --notification-mode without changing prefs", () => {
   const badOut = bad.stdout + bad.stderr;
   assert.match(badOut, /invalid mode/i);
   assert.match(badOut, /telepathy/);
+  assert.match(badOut, /notification prefs unchanged|No notification prefs were written/i);
   assert.equal(
     getNotificationConfig(first.cwd, { CLAUDE_PLUGIN_DATA: first.pdata }).notificationMode,
     "auto",
     "invalid mode must not clobber prior auto"
   );
+});
+
+test("setup invalid mode does not apply webhook in same invocation (atomic prefs)", () => {
+  const first = runSetup(["--notification-mode", "auto", "--skip-codex-agents"]);
+  assert.equal(
+    getNotificationConfig(first.cwd, { CLAUDE_PLUGIN_DATA: first.pdata }).notificationMode,
+    "auto"
+  );
+  const bad = spawnSync(
+    process.execPath,
+    [
+      COMPANION,
+      "setup",
+      "--notification-mode",
+      "telepathy",
+      "--notification-webhook-url",
+      "https://hooks.example.com/should-not-write",
+      "--skip-codex-agents",
+    ],
+    {
+      encoding: "utf8",
+      cwd: first.cwd,
+      env: { ...process.env, CLAUDE_PLUGIN_DATA: first.pdata },
+    }
+  );
+  assert.equal(bad.status, 1);
+  const cfg = getNotificationConfig(first.cwd, { CLAUDE_PLUGIN_DATA: first.pdata });
+  assert.equal(cfg.notificationMode, "auto");
+  assert.equal(cfg.notificationWebhookUrl, null, "webhook must not apply when mode invalid");
+  assert.match(bad.stdout + bad.stderr, /No notification prefs were written|prefs unchanged/i);
 });
 
 test("setup redacts webhook URL query/userinfo from report", () => {
@@ -196,7 +227,7 @@ test("setup redacts webhook URL query/userinfo from report", () => {
     secretUrl,
     "--skip-codex-agents",
   ]);
-  // Exit may be 1 without grok CLI on CI; redaction must still hold in report.
+  // Exit may be 1 without grok CLI / preflight on CI; redaction must still hold.
   assert.ok(result.status === 0 || result.status === 1);
   const out = result.stdout + result.stderr;
   assert.doesNotMatch(out, /super-secret-token/);
@@ -209,6 +240,30 @@ test("setup redacts webhook URL query/userinfo from report", () => {
   );
 });
 
+test("setup rejects non-http(s) webhook without writing prefs", () => {
+  const first = runSetup(["--notification-mode", "auto", "--skip-codex-agents"]);
+  const bad = spawnSync(
+    process.execPath,
+    [
+      COMPANION,
+      "setup",
+      "--notification-webhook-url",
+      "file:///tmp/x",
+      "--skip-codex-agents",
+    ],
+    {
+      encoding: "utf8",
+      cwd: first.cwd,
+      env: { ...process.env, CLAUDE_PLUGIN_DATA: first.pdata },
+    }
+  );
+  assert.equal(bad.status, 1);
+  const cfg = getNotificationConfig(first.cwd, { CLAUDE_PLUGIN_DATA: first.pdata });
+  assert.equal(cfg.notificationMode, "auto");
+  assert.equal(cfg.notificationWebhookUrl, null);
+  assert.match(bad.stdout + bad.stderr, /invalid webhook|http\(s\)/i);
+});
+
 test("companion never maps terminal lifecycle to running (source contract)", () => {
   const src = fs.readFileSync(COMPANION, "utf8");
   // Guard against re-introducing envelope status "running" as notify lifecycle.
@@ -219,9 +274,12 @@ test("companion never maps terminal lifecycle to running (source contract)", () 
   );
   assert.match(src, /safeRunIdForRunsDir|sanitizeRunId/);
   assert.match(src, /notifyMode/);
-  // Debate intermediate round must skip notify; final round may notify.
+  // Debate intermediate round and --no-notify must skip notify.
   assert.match(src, /skipNotify:\s*true/);
-  assert.match(src, /isNotificationMode/);
+  assert.match(src, /shouldAttemptTerminalNotify/);
+  assert.match(src, /--no-notify/);
+  assert.match(src, /parseNotificationMode/);
+  assert.match(src, /preflightOk/);
 });
 
 test("code/reason/verify dual-lens fenced runs export execution context", () => {
@@ -239,4 +297,6 @@ test("code/reason/verify dual-lens fenced runs export execution context", () => 
       `${rel} fenced runs must set execution context`
     );
   }
+  const dual = fs.readFileSync(path.join(root, "skills/dual-lens/SKILL.md"), "utf8");
+  assert.match(dual, /--no-notify/, "dual-lens first pass suppresses intermediate notify");
 });

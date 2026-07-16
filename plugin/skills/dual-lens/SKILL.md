@@ -31,19 +31,19 @@ use `--task-file -` with a single-quoted heredoc.
 
 ## Procedure
 
-Set the same execution context for both passes (two terminal runs may each
-attempt a completion notify when notifications are enabled).
+Use one completion signal for the recipe: pass `--no-notify` on the first
+(adversarial) run so only the final review may notify when notifications are on.
 
-1. Adversarial pass (web on by default):
+1. Adversarial pass (web on by default; suppress intermediate notify):
 
 ```bash
 export GROK_COMPANION_EXECUTION_CONTEXT=foreground
-node "$SKILL_BASE/run.mjs" adversarial-review [flags from "$ARGUMENTS"] --task-file - <<'GROK_TASK'
+node "$SKILL_BASE/run.mjs" adversarial-review --no-notify [flags from "$ARGUMENTS"] --task-file - <<'GROK_TASK'
 <operator focus or paste the task>
 GROK_TASK
 ```
 
-2. Normal review on the **same target**:
+2. Normal review on the **same target** (may notify):
 
 ```bash
 export GROK_COMPANION_EXECUTION_CONTEXT=foreground

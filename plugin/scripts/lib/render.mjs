@@ -1,19 +1,53 @@
 // plugin/scripts/lib/render.mjs
 // Human-readable views of Grok envelopes (stdout stays machine JSON by default).
 
+/**
+ * Parse a Grok result envelope from companion/wrapper stdout.
+ * Prefers whole-string JSON; otherwise takes the last line that is a JSON object
+ * with envelope-shaped fields (status / runId / mode).
+ *
+ * @param {string|null|undefined} text
+ * @returns {object|null}
+ */
 export function tryParseEnvelope(text) {
   if (!text || typeof text !== "string") {
     return null;
   }
   const trimmed = text.trim();
-  if (!trimmed.startsWith("{")) {
+  if (!trimmed) {
     return null;
   }
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    return null;
+  if (trimmed.startsWith("{")) {
+    try {
+      const whole = JSON.parse(trimmed);
+      if (whole && typeof whole === "object" && !Array.isArray(whole)) {
+        return whole;
+      }
+    } catch {
+      /* fall through to line scan */
+    }
   }
+  const lines = trimmed.split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const line = lines[i].trim();
+    if (!line.startsWith("{") || !line.endsWith("}")) {
+      continue;
+    }
+    try {
+      const obj = JSON.parse(line);
+      if (
+        obj &&
+        typeof obj === "object" &&
+        !Array.isArray(obj) &&
+        (obj.status != null || obj.runId != null || obj.mode != null)
+      ) {
+        return obj;
+      }
+    } catch {
+      /* continue */
+    }
+  }
+  return null;
 }
 
 export function renderEnvelopePretty(envelope) {

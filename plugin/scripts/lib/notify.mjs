@@ -13,7 +13,9 @@ import https from "node:https";
 import path from "node:path";
 import { URL } from "node:url";
 
-import { isNotificationMode } from "./jobs.mjs";
+import { parseNotificationMode } from "./notification-modes.mjs";
+
+export { shouldAttemptTerminalNotify } from "./notification-modes.mjs";
 
 const FILE_MODE = 0o600;
 const NATIVE_TIMEOUT_MS = 5000;
@@ -37,10 +39,7 @@ export function getExecutionContext(env = process.env) {
  * @returns {{ notify: boolean, reason: string }}
  */
 export function shouldNotify({ notificationMode, executionContext, webhookUrl = null }) {
-  const mode =
-    typeof notificationMode === "string" && isNotificationMode(notificationMode)
-      ? notificationMode.trim().toLowerCase()
-      : "off";
+  const mode = parseNotificationMode(notificationMode) ?? "off";
   if (mode === "off") {
     return { notify: false, reason: "mode-off" };
   }
@@ -314,10 +313,7 @@ export async function attemptNotify(opts) {
 
     // ASCII body (AGENTS.md); design middle-dot rendered as " / "
     const bodyText = `${mode} ${lifecycle} / ${runId} / ${durationSeconds}s`;
-    const effectiveMode =
-      typeof notificationMode === "string" && isNotificationMode(notificationMode)
-        ? notificationMode.trim().toLowerCase()
-        : "off";
+    const effectiveMode = parseNotificationMode(notificationMode) ?? "off";
     let sendResult;
 
     if (effectiveMode === "webhook") {

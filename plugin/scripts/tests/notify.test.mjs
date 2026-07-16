@@ -9,6 +9,7 @@ import { test } from "node:test";
 import {
   attemptNotify,
   getExecutionContext,
+  shouldAttemptTerminalNotify,
   shouldNotify,
   wrapperChildEnv,
   NOTIFY_ELIGIBLE_MODES,
@@ -21,6 +22,7 @@ import {
   getRunMode,
   NOTIFICATION_MODES,
 } from "../lib/jobs.mjs";
+import { tryParseEnvelope } from "../lib/render.mjs";
 import { RUN_ID_RE } from "../progress-relay.mjs";
 
 function tempCwd() {
@@ -330,6 +332,37 @@ test("setNotificationConfig rejects invalid mode without clobbering prior prefs"
   setNotificationConfig(cwd, { notificationMode: "BOGUS" }, env);
   // Invalid must not clobber prior auto to off
   assert.equal(getNotificationConfig(cwd, env).notificationMode, "auto");
+});
+
+test("setNotificationConfig rejects non-http(s) webhook without clearing prior URL", () => {
+  const cwd = tempCwd();
+  const env = { CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata") };
+  setNotificationConfig(cwd, { notificationWebhookUrl: "https://hooks.example.com/a" }, env);
+  setNotificationConfig(cwd, { notificationWebhookUrl: "file:///tmp/x" }, env);
+  assert.equal(
+    getNotificationConfig(cwd, env).notificationWebhookUrl,
+    "https://hooks.example.com/a"
+  );
+  setNotificationConfig(cwd, { notificationWebhookUrl: "" }, env);
+  assert.equal(getNotificationConfig(cwd, env).notificationWebhookUrl, null);
+});
+
+test("shouldAttemptTerminalNotify gates skipNotify (behavioral)", () => {
+  assert.equal(shouldAttemptTerminalNotify({ skipNotify: true }), false);
+  assert.equal(shouldAttemptTerminalNotify({ skipNotify: false }), true);
+});
+
+test("tryParseEnvelope accepts last JSON object line among noise", () => {
+  const text = [
+    "progress chatter",
+    '{"status":"running","runId":"20260716T000000Z-aaaaaa"}',
+    'not json',
+    '{"status":"success","runId":"20260716T000000Z-abcdef","mode":"review"}',
+    "",
+  ].join("\n");
+  const env = tryParseEnvelope(text);
+  assert.equal(env?.status, "success");
+  assert.equal(env?.runId, "20260716T000000Z-abcdef");
 });
 
 test("adversarial-review is notify-eligible and webhook body uses skill mode", async () => {

@@ -32,9 +32,10 @@ import {
   getLastRescueJobId,
   getNotificationConfig,
   getRunMode,
-  isNotificationMode,
   listJobs,
   NOTIFICATION_MODES,
+  parseNotificationMode,
+  parseWebhookUrl,
   readJobStdout,
   setNotificationConfig,
   setRunMode,
@@ -44,6 +45,7 @@ import {
 import {
   attemptNotify,
   NOTIFY_ELIGIBLE_MODES,
+  shouldAttemptTerminalNotify,
   wrapperChildEnv,
 } from "./lib/notify.mjs";
 import {
@@ -215,6 +217,7 @@ function stripFlags(args) {
   let base = null;
   let resume = false;
   let fresh = false;
+  let noNotify = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--pretty") {
@@ -233,6 +236,11 @@ function stripFlags(args) {
       fresh = true;
       continue;
     }
+    // Companion-only: suppress terminal completion notify for this invocation.
+    if (a === "--no-notify") {
+      noNotify = true;
+      continue;
+    }
     if (a === "--run-mode" && args[i + 1]) {
       runMode = args[++i];
       continue;
@@ -244,7 +252,7 @@ function stripFlags(args) {
     }
     out.push(a);
   }
-  return { args: out, pretty, runMode, jsonOut, base, resume, fresh };
+  return { args: out, pretty, runMode, jsonOut, base, resume, fresh, noNotify };
 }
 
 function extractTask(args) {
@@ -366,7 +374,7 @@ function captureAndTrack(wrapper, args, { cwd, mode, kind, runMode, notifyMode, 
     summary: code === 0 ? "completed" : `exit ${code}`,
     pid: null,
   });
-  if (skipNotify) {
+  if (!shouldAttemptTerminalNotify({ skipNotify })) {
     return Promise.resolve(code);
   }
   const runId = resolveRunIdFromJobAndStdout(cwd, updated, stdout);
@@ -444,6 +452,10 @@ function runWithLiveRelay(wrapper, args, track) {
           status: code === 0 ? "success" : "failure",
           summary: code === 0 ? "completed" : `exit ${code}`,
         });
+      }
+      if (!shouldAttemptTerminalNotify({ skipNotify: track?.skipNotify })) {
+        resolve(code);
+        return;
       }
       const runId = resolveRunIdFromJobAndStdout(cwd, jobAfter, stdoutBuf);
       maybeNotifyAfterTerminal({
@@ -673,19 +685,33 @@ function cmdSetup(cwd, args) {
       setRunMode(cwd, mode);
     }
   }
+  // Notification prefs: parse all flags first; apply atomically or apply none.
   let invalidNotificationMode = null;
+  let invalidWebhookUrl = null;
+  /** @type {{ notificationMode?: string, notificationWebhookUrl?: string|null }} */
+  const notifyPatch = {};
   const notifyModeIdx = args.indexOf("--notification-mode");
   if (notifyModeIdx >= 0 && args[notifyModeIdx + 1]) {
-    const rawMode = String(args[notifyModeIdx + 1]).trim().toLowerCase();
-    if (!isNotificationMode(rawMode)) {
-      invalidNotificationMode = rawMode;
+    const rawMode = String(args[notifyModeIdx + 1]);
+    const parsedMode = parseNotificationMode(rawMode);
+    if (!parsedMode) {
+      invalidNotificationMode = String(rawMode).trim().toLowerCase() || rawMode;
     } else {
-      setNotificationConfig(cwd, { notificationMode: rawMode });
+      notifyPatch.notificationMode = parsedMode;
     }
   }
   const webhookIdx = args.indexOf("--notification-webhook-url");
-  if (webhookIdx >= 0 && args[webhookIdx + 1]) {
-    setNotificationConfig(cwd, { notificationWebhookUrl: args[webhookIdx + 1] });
+  if (webhookIdx >= 0 && args[webhookIdx + 1] !== undefined) {
+    const parsedWebhook = parseWebhookUrl(args[webhookIdx + 1]);
+    if (!parsedWebhook.ok) {
+      invalidWebhookUrl = parsedWebhook.reason || "webhook-url-invalid";
+    } else {
+      notifyPatch.notificationWebhookUrl = parsedWebhook.url;
+    }
+  }
+  const notifyPrefsInvalid = Boolean(invalidNotificationMode || invalidWebhookUrl);
+  if (!notifyPrefsInvalid && Object.keys(notifyPatch).length > 0) {
+    setNotificationConfig(cwd, notifyPatch);
   }
   if (enable) writeGateConfig(cwd, true);
   if (disable) writeGateConfig(cwd, false);
@@ -703,6 +729,16 @@ function cmdSetup(cwd, args) {
     } catch {
       webhookDetail = "(set)";
     }
+  }
+  let notificationsDetail;
+  if (invalidNotificationMode) {
+    notificationsDetail = `invalid mode ${JSON.stringify(invalidNotificationMode)} (notification prefs unchanged)`;
+  } else if (invalidWebhookUrl) {
+    notificationsDetail = `invalid webhook URL (${invalidWebhookUrl}; notification prefs unchanged)`;
+  } else {
+    notificationsDetail = `${notifyPrefs.notificationMode}${
+      notifyPrefs.notificationWebhookUrl ? `; webhook=${webhookDetail}` : ""
+    }`;
   }
   const rows = [
     {
@@ -722,12 +758,8 @@ function cmdSetup(cwd, args) {
     },
     {
       name: "notifications",
-      ok: !invalidNotificationMode,
-      detail: invalidNotificationMode
-        ? `invalid mode ${JSON.stringify(invalidNotificationMode)} (unchanged: ${notifyPrefs.notificationMode})`
-        : `${notifyPrefs.notificationMode}${
-            notifyPrefs.notificationWebhookUrl ? `; webhook=${webhookDetail}` : ""
-          }`,
+      ok: !notifyPrefsInvalid,
+      detail: notificationsDetail,
     },
     {
       name: "stop-review gate",
@@ -750,7 +782,11 @@ function cmdSetup(cwd, args) {
   }
   if (invalidNotificationMode) {
     hints.push(
-      `Valid --notification-mode values: ${NOTIFICATION_MODES.join(" | ")}. Prefs were not changed.`
+      `Valid --notification-mode values: ${NOTIFICATION_MODES.join(" | ")}. No notification prefs were written.`
+    );
+  } else if (invalidWebhookUrl) {
+    hints.push(
+      "Webhook URL must be an absolute http(s) URL. No notification prefs were written."
     );
   } else if (notifyPrefs.notificationMode === "off") {
     hints.push(
@@ -816,25 +852,41 @@ function cmdSetup(cwd, args) {
   }
 
   // Also run hardened preflight when wrapper exists and mode is hardened
+  let preflightOk = true;
   if (wrapper && runMode === "hardened") {
     const pre = spawnSync(PYTHON, [wrapper, "preflight"], {
       encoding: "utf8",
       env: wrapperChildEnv(process.env),
     });
+    if (pre.status !== 0 && pre.status != null) {
+      preflightOk = false;
+    }
     if (pre.stdout) {
       const env = tryParseEnvelope(pre.stdout);
       if (env?.response?.checks) {
         for (const c of env.response.checks) {
-          rows.push({ name: `preflight:${c.name}`, ok: Boolean(c.ok), detail: c.detail || "" });
+          const ok = Boolean(c.ok);
+          if (!ok) {
+            preflightOk = false;
+          }
+          rows.push({ name: `preflight:${c.name}`, ok, detail: c.detail || "" });
         }
       } else {
         process.stderr.write(pre.stderr || "");
+        // Unparseable preflight output with non-zero exit already marked; if
+        // exit was 0 but no checks, treat as soft (report-only).
       }
+    } else if (pre.status !== 0 && pre.status != null) {
+      rows.push({
+        name: "preflight",
+        ok: false,
+        detail: (pre.stderr || `exit ${pre.status}`).trim() || "preflight failed",
+      });
     }
   }
 
   process.stdout.write(renderSetupReport({ rows, runMode, hints }));
-  return binary.ok && wrapper && agentsOk && !invalidNotificationMode ? 0 : 1;
+  return binary.ok && wrapper && agentsOk && !notifyPrefsInvalid && preflightOk ? 0 : 1;
 }
 
 async function cmdDebate(cwd, wrapper, args, runMode) {
@@ -931,6 +983,7 @@ function main() {
     base: baseRef,
     resume,
     fresh,
+    noNotify,
   } = stripFlags(rawArgs);
 
   let staged;
@@ -1041,6 +1094,7 @@ function main() {
     mode: wrapperMode,
     notifyMode: mode === "adversarial-review" ? "adversarial-review" : wrapperMode,
     runMode,
+    skipNotify: Boolean(noNotify),
   };
 
   const finishCleanups = (code) => {
@@ -1057,6 +1111,7 @@ function main() {
         kind: track.kind,
         runMode: "direct",
         notifyMode: track.notifyMode,
+        skipNotify: track.skipNotify,
       })
     ).then(finishCleanups);
   }
@@ -1093,6 +1148,7 @@ function main() {
         kind: track.kind,
         runMode: "hardened",
         notifyMode: track.notifyMode,
+        skipNotify: track.skipNotify,
       })
     ).then(finishCleanups);
   }
