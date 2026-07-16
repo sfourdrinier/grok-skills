@@ -1,6 +1,6 @@
 # Run lifecycle, isolated review, completion signals, and implementation handoff
 
-**Status:** design revision 11 (PR1 shipped; PR2 opt-in isolation; PR5 = operator notify re-attempt only; **PR3–PR5 quality:** failure-mode matrix, DRY, internal review before “done”)  
+**Status:** design revision 11 (PR1 + PR2 shipped on main; PR3 notifications in flight as 1.5.0; PR5 = operator notify re-attempt only; **PR3–PR5 quality:** failure-mode matrix, DRY, internal review before done)  
 **Date:** 2026-07-16  
 **Product:** grok-skills (Claude Code + Codex)  
 **Baseline:** v1.2.10 (PR1 lifecycle on main as 1.3.x)  
@@ -482,7 +482,7 @@ Operators who want a clean HEAD+tracked-dirty tree opt in with `--isolated`.
 1. From **repository root** (git toplevel of original checkout):  
 
 ```text
-git diff --binary --full-index --ita-invisible-in-index HEAD --
+git diff --no-ext-diff --no-textconv --binary --full-index --ita-invisible-in-index <pinned-base-sha> --
 ```
 
 2. This combines **staged and unstaged tracked** modifications relative to HEAD.  

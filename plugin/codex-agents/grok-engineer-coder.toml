@@ -18,7 +18,13 @@ Absolute agent runner (injected at install):
   GROK_AGENT_RUN=__GROK_AGENT_RUN_Q__
 
 Resolve --target (default '.') and --base (default 'HEAD' if user omitted a
-committed revision). Single-quote every flag value. Deliver the task ONLY via:
+committed revision). Single-quote every flag value. Always set execution context
+(see plugin/references/execution-context.md) before the runner:
+
+  export GROK_COMPANION_EXECUTION_CONTEXT=foreground
+  # or background when the host runs this agent out of band
+
+Deliver the task ONLY via:
 
   node "$GROK_AGENT_RUN" code \\
     --target '<target>' --base '<base>' --task-file - <<'GROK_TASK'

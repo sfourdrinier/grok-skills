@@ -103,6 +103,8 @@ node "$SKILL_BASE/run.mjs" code --target '<target from $ARGUMENTS>' --base '<bas
   add commentary before or after it. Preserve the exit status.
 
 Background flow:
+- Set `export GROK_COMPANION_EXECUTION_CONTEXT=background` (see
+  `plugin/references/execution-context.md`).
 - Launch the same command with `Bash(run_in_background: true)`.
 - Do not wait for completion or read its output this turn.
 - Tell the user: "Grok code run started in the background. Run `/grok:status

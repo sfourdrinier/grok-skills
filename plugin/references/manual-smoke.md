@@ -61,11 +61,16 @@ the Grok CLI is ready.
 
 - [ ] `/grok:preflight` → one readiness envelope
 - [ ] `/grok:setup` → optional readiness + gate status; enable/disable toggles work (not required for agents)
+- [ ] `/grok:setup --notification-mode auto` → setup report shows notifications: auto
 - [ ] `/grok:reason --task "Reply with exactly: PONG"` → success envelope
-- [ ] `/grok:review --target . --task "list top risks"` → one review envelope
+- [ ] `/grok:review --target . --task "list top risks"` → one review envelope (live checkout)
+- [ ] `/grok:review --target . --isolated --task "list risks"` → isolation worktree cleaned after run
 - [ ] `/grok:code --target . --base HEAD --task "trivial helper"` → worktree retained, no auto-commit
 - [ ] `/grok:verify --worktree <path> --task "confirm tests"` → verifier verdict; `--web` refused
 - [ ] `/grok:status --run-id <id>` → prior envelope
+- [ ] Background-style live run with `GROK_COMPANION_EXECUTION_CONTEXT=background` and
+      notifications `auto` → `runs/<runId>/notified.json` may appear as `completed`
+      (native may fail headless; marker still completes)
 - [ ] `/grok:cleanup --run-id <id>` dry-run, then `--confirm`
 - [ ] `grok-engineer-coder` routes implementation to companion `code` (one shell call; no unrestricted Bash)
 - [ ] `grok-rescue` routes diagnosis to `reason` (not pure implement); one Bash(node) call

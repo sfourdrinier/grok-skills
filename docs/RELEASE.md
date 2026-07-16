@@ -60,6 +60,16 @@ should report `running` (exit 0); after completion, `success` or `failure`
 (exit 1 for failed targets still yields a well-formed status envelope). Status
 must not modify the run directory.
 
+Smoke (1.4.0+): `review --isolated` on a dirty tracked file runs under
+`state…/worktrees/review/<runId>` and leaves no worktree after success; without
+`--isolated`, cwd stays the live checkout. Direct mode + `--isolated` fails closed.
+
+Smoke (1.5.0+): `setup --notification-mode auto`, then a background-style live
+run with `GROK_COMPANION_EXECUTION_CONTEXT=background` may write
+`runs/<runId>/notified.json` (`state: completed`) after the run; a second
+completion path does not re-fire (`already-attempted`). With mode `off`, no
+marker. Status/jobs alone never create `notified.json`.
+
 ### 4. Commit
 
 ```bash

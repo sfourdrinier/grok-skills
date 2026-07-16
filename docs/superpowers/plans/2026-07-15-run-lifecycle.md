@@ -382,7 +382,7 @@ Implement design §10 exactly (only used when isolation is requested):
 
 - Owner marker sibling `{worktree_path}.owner.json`.  
 - Never reuse existing path.  
-- Dirty: `git diff --binary --full-index --ita-invisible-in-index HEAD --` from repo root; apply in worktree; reject dirty submodules.  
+- Dirty: `git diff --no-ext-diff --no-textconv --binary --full-index --ita-invisible-in-index <pinned-base-sha> --` from repo root; apply in worktree; reject dirty submodules.  
 - Cleanup always: remove worktree, prune, marker, diff.  
 
 - [x] **Commit** `review: isolation helper with ownership`
@@ -436,57 +436,43 @@ Fill before any product code. Minimal rows (expand if needed):
 | skill-run.mjs | Unchanged | accidental edit | review + test | yes |
 | Native spawn | shell false only | — | — | yes |
 
-- [ ] Matrix committed in plan or `docs/superpowers/reviews/…-pr3-matrix.md`.  
-- [ ] List **one** module each for: marker I/O, native adapter, webhook adapter, “shouldNotify(mode, context)”.  
-- [ ] **Commit** `docs: PR3 failure-mode matrix and DRY boundaries`
+- [x] Matrix: `docs/superpowers/reviews/2026-07-16-pr3-notifications-matrix.md`.  
+- [x] Single modules: `notify.mjs`, `jobs.mjs` defaults, companion thin hook.  
+- [x] Committed on feature branch.
 
 ### Task 3.1 — Jobs config
 
-- [ ] Defaults `notificationMode: "off"`, `notificationWebhookUrl: null` in **one** place in `jobs.mjs` (no duplicate defaults elsewhere).  
-- [ ] **Commit** `jobs: notification prefs`
+- [x] Defaults off / null via `DEFAULT_JOBS_CONFIG`.  
+- [x] Committed.
 
 ### Task 3.2 — `notify.mjs` at-most-once attempt (only writer)
 
-Design §11:
+Design §11: exclusive pending; already-attempted; complete marker; shell false; not exactly-once.
 
-- Exclusive create `pending` before external call.  
-- Existing marker → `already-attempted` (no auto-retry).  
-- Always complete marker; never intentional auto-retry loop.  
-- Priority: no duplicate attempts over delivery. **Not** exactly-once.  
-- Adapters: Darwin osascript / Linux notify-send / webhook; always `shell: false`.  
-
-- [ ] Tests: off; already-attempted; crash-left pending not auto-retried; shell false; webhook failure still completed+failed.  
-- [ ] **Commit** `notify: at-most-once attempt semantics`
+- [x] Implemented + `notify.test.mjs`.  
+- [x] Committed.
 
 ### Task 3.3 — Companion hooks + execution context
 
-- [ ] Companion reads `GROK_COMPANION_EXECUTION_CONTEXT`; never forwards to wrapper.  
-- [ ] Calls **only** `notify.mjs` APIs (no inline marker/spawn).  
-- [ ] `auto` only background; `native` both; `off` never; webhook per config.  
-- [ ] Never on status/handoff/result/jobs/setup alone.  
-- [ ] **Do not** change `skill-run.mjs` behavior.  
-- [ ] Tests: FG + BG Claude skill path and Codex/agent path.  
-- [ ] **Commit** `companion: execution context and notify hooks`
+- [x] `wrapperChildEnv`; `maybeNotifyAfterTerminal`; eligible modes; skill-run unchanged.  
+- [x] Committed.
 
 ### Task 3.4 — Skill/agent env prefix (DRY)
 
-- [ ] **One** canonical pattern for prefixing `GROK_COMPANION_EXECUTION_CONTEXT` (document once; all PR3 file-map skills/agents use it).  
-- [ ] Grep/test gate: every live mode skill/agent in the file map has the prefix instruction; no divergent variants.  
-- [ ] **Commit** `skills: shared execution-context prefix for notify`
+- [x] `plugin/references/execution-context.md` + skills/agents/codex-agents.  
+- [x] Committed.
 
 ### Task 3.5 — Internal code review (Gate D)
 
-- [ ] Spec + quality pass (matrix, DRY, dual-host, no skill-run drift).  
-- [ ] Write review artifact `docs/superpowers/reviews/YYYY-MM-DD-pr3-notifications.md`.  
-- [ ] Zero open remediable findings.  
-- [ ] **Commit** `review: PR3 internal review artifact`
+- [x] `docs/superpowers/reviews/2026-07-16-pr3-full-review.md` (+ matrix/internal).  
+- [x] Includes PR2 late isolation carry-forward.  
+- [x] Zero open remediable findings.
 
 ### Task 3.6 — Docs + 1.5.0 (Gate E)
 
-- [ ] All PR3 docs; packaging **1.5.0**; suites green.  
-- [ ] Docs: at-most-once attempt only; operator retry = **PR5**.  
-- [ ] Tag `v1.5.0` after merge policy.  
-- [ ] **Commit** `release: 1.5.0 notifications`
+- [x] Packaging **1.5.0**; CHANGELOG; COMPATIBILITY; RELEASE; SECURITY; manual-smoke; references.  
+- [x] Docs: at-most-once only; operator retry = PR5.  
+- [ ] Tag `v1.5.0` after merge to main.
 
 ---
 
@@ -725,7 +711,7 @@ verify sentinel → remove exact sentinel → HEAD check → changed files
 | CAS | `recordRevision` + `run.lock` |
 | write_run_record public API | Deleted after PR1 migration; CAS only |
 | Elapsed | Monotonic in owner process; UTC for status |
-| Dirty isolation (when `--isolated`) | `git diff --binary --full-index --ita-invisible-in-index HEAD --` |
+| Dirty isolation (when `--isolated`) | `git diff --no-ext-diff --no-textconv --binary --full-index --ita-invisible-in-index <pinned-base-sha> --` |
 | Isolation trigger | **`--isolated` only**; `--base` alone = live |
 | Notify (PR3) | At-most-once **attempt**; no auto-retry pending; **not** exactly-once |
 | Notify retry (PR5) | **Operator-only** re-attempt via **same** notify.mjs; may duplicate |
