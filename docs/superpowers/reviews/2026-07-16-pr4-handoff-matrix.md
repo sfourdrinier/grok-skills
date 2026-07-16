@@ -49,6 +49,16 @@
 | Manifest ready, no success envelope | (handoff observation) | terminal-envelope-incomplete |
 | Build/validation fail | validation-failure (existing) | validation-failure |
 
+### Hard vs soft blockers (normative)
+
+| Kind | Terminal code envelope | Primary ERROR_CLASS | Ready |
+|------|------------------------|---------------------|-------|
+| `write-scope-violation`, `unexpected-commit`, `validation-failure`, `unexpected-edits`, artifact hard kinds, … | **failure** | first **hard** only (`HARD_BLOCKER_KINDS`) | false |
+| `no-changes`, `temp-index-retained` | success if no hard | **never** primary alone | false |
+
+Soft kinds earlier in the blocker list must not steal primary from a later hard kind
+(e.g. `temp-index-retained` then `unexpected-edits` with `phase=post-build-gate`).
+
 ## Modules to create
 
 - `plugin/wrapper/scripts/groklib/implementation_contract.py`

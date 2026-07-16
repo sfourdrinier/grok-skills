@@ -486,28 +486,53 @@ def write_manifest(path: pathlib.Path, doc: dict) -> None:
         pass
 
 
-def primary_error_from_blockers(blockers: Sequence[HandoffBlocker]) -> Tuple[Optional[str], Optional[str]]:
-    """Map first hard blocker to envelope ERROR_CLASS."""
-    mapping = {
-        "write-scope-violation": "write-scope-violation",
-        "unexpected-commit": "unexpected-commit",
-        "secret-material": "artifact-generation-failure",
-        "artifact-too-large": "artifact-generation-failure",
-        "artifact-generation-failure": "artifact-generation-failure",
-        "temp-index-retained": "artifact-generation-failure",
-        "validation-failure": "validation-failure",
-        "no-changes": "validation-failure",
-        "wrong-working-directory": "wrong-working-directory",
-        "unexpected-edits": "unexpected-edits",
-        "sandbox-failure": "sandbox-failure",
-        "worktree-failure": "worktree-failure",
+# Hard policy blockers fail the code envelope (raise after handoff write).
+# Ready-only soft kinds (no-changes, temp-index-retained) never become primary.
+HARD_BLOCKER_KINDS = frozenset(
+    {
+        "write-scope-violation",
+        "unexpected-commit",
+        "secret-material",
+        "artifact-too-large",
+        "artifact-generation-failure",
+        "validation-failure",
+        "wrong-working-directory",
+        "unexpected-edits",
+        "sandbox-failure",
+        "worktree-failure",
     }
+)
+
+# Soft blockers only force integration.ready false (never primary ERROR_CLASS alone).
+SOFT_BLOCKER_KINDS = frozenset({"no-changes", "temp-index-retained"})
+
+_HARD_PRIMARY_MAPPING = {
+    "write-scope-violation": "write-scope-violation",
+    "unexpected-commit": "unexpected-commit",
+    "secret-material": "artifact-generation-failure",
+    "artifact-too-large": "artifact-generation-failure",
+    "artifact-generation-failure": "artifact-generation-failure",
+    "validation-failure": "validation-failure",
+    "wrong-working-directory": "wrong-working-directory",
+    "unexpected-edits": "unexpected-edits",
+    "sandbox-failure": "sandbox-failure",
+    "worktree-failure": "worktree-failure",
+}
+
+
+def primary_error_from_blockers(blockers: Sequence[HandoffBlocker]) -> Tuple[Optional[str], Optional[str]]:
+    """Map the first *hard* policy blocker to envelope ERROR_CLASS.
+
+    Skips ready-only soft kinds (``no-changes``, ``temp-index-retained``) so a
+    soft blocker earlier in the list cannot steal primary class from a later
+    hard failure (e.g. unexpected-edits with phase=post-build-gate).
+    """
     for b in blockers:
-        cls = mapping.get(b.kind)
+        if b.kind not in HARD_BLOCKER_KINDS:
+            continue
+        cls = _HARD_PRIMARY_MAPPING.get(b.kind)
         if cls:
             return cls, b.message
-    if blockers:
-        return "validation-failure", blockers[0].message
     return None, None
 
 
@@ -881,22 +906,9 @@ def code_handoff_finalize(
 
     # 10. terminalOutcome
     steps.append("terminal-outcome")
-    # Ready-only blockers (do not fail the code envelope by themselves):
-    # no-changes, temp-index-retained — block integration.ready only (§14.7/§14.12).
+    # Ready-only soft blockers (SOFT_BLOCKER_KINDS) never fail the code envelope.
     # Hard policy failures raise after handoff write so the runner emits failure.
-    hard_kinds = {
-        "write-scope-violation",
-        "unexpected-commit",
-        "secret-material",
-        "artifact-too-large",
-        "artifact-generation-failure",
-        "validation-failure",
-        "wrong-working-directory",
-        "unexpected-edits",
-        "sandbox-failure",
-        "worktree-failure",
-    }
-    policy_fail = [b for b in blockers if b.kind in hard_kinds]
+    policy_fail = [b for b in blockers if b.kind in HARD_BLOCKER_KINDS]
     terminal_outcome = "failed" if policy_fail else "completed"
 
     # 11. compute ready
@@ -1028,19 +1040,9 @@ def code_handoff_finalize(
         # violations[]) so envelope.error.detail matches pre-PR4 callers.
         primary_detail: Dict[str, Any] = {}
         for b in blockers:
-            mapped = {
-                "write-scope-violation": "write-scope-violation",
-                "unexpected-commit": "unexpected-commit",
-                "secret-material": "artifact-generation-failure",
-                "artifact-too-large": "artifact-generation-failure",
-                "artifact-generation-failure": "artifact-generation-failure",
-                "validation-failure": "validation-failure",
-                "wrong-working-directory": "wrong-working-directory",
-                "unexpected-edits": "unexpected-edits",
-                "sandbox-failure": "sandbox-failure",
-                "worktree-failure": "worktree-failure",
-            }.get(b.kind)
-            if mapped == primary_class:
+            if b.kind not in HARD_BLOCKER_KINDS:
+                continue
+            if _HARD_PRIMARY_MAPPING.get(b.kind) == primary_class:
                 if b.detail:
                     primary_detail.update(b.detail)
                 break

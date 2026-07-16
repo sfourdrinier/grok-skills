@@ -607,6 +607,69 @@ class CodeModeTests(WorktreeModeHarness):
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         self.assertFalse(manifest["integration"]["ready"])
 
+    def test_code_unexpected_commit_no_reset_forensics(self) -> None:
+        """HEAD moved after Grok → unexpected-commit; worktree preserved; handoff written."""
+        import subprocess
+
+        repo = self.make_code_repo()
+        base_sha = subprocess.check_output(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+        ).strip()
+
+        def plant(wt: pathlib.Path, run_id: str) -> None:
+            _plant_sentinel_in_worktree(wt, run_id)
+            (wt / "pkg" / "moved.txt").write_text("payload\n", encoding="utf-8")
+            # Simulate an unexpected commit on the worktree branch (policy violation).
+            subprocess.run(
+                ["git", "-C", str(wt), "add", "pkg/moved.txt"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(wt),
+                    "-c",
+                    "user.email=test@example.com",
+                    "-c",
+                    "user.name=test",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "unexpected",
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            head_after = subprocess.check_output(
+                ["git", "-C", str(wt), "rev-parse", "HEAD"], text=True
+            ).strip()
+            self.assertNotEqual(head_after, base_sha)
+
+        exit_code, out = self._run(repo, plant=plant)
+        env = json.loads(out)
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(env["error"]["class"], "unexpected-commit")
+        run_id = env["runId"]
+        run_dir = runstate.state_root() / "runs" / run_id
+        manifest_path = run_dir / "implementation-handoff.json"
+        self.assertTrue(manifest_path.is_file(), "forensic handoff must still be written")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertFalse(manifest["integration"]["ready"])
+        kinds = [b.get("kind") for b in manifest["integration"].get("blockers") or []]
+        self.assertIn("unexpected-commit", kinds)
+        # Worktree retained; HEAD not reset to base
+        wt_path = pathlib.Path(env["worktreePath"] or "")
+        self.assertTrue(wt_path.is_dir(), env)
+        head_now = subprocess.check_output(
+            ["git", "-C", str(wt_path), "rev-parse", "HEAD"], text=True
+        ).strip()
+        self.assertNotEqual(head_now, base_sha, "must not reset worktree HEAD after unexpected-commit")
+        self.assertEqual(env["cleanup"]["status"], "retained")
+
 
 class CwdSentinelTests(unittest.TestCase):
     """Grok r3 #12: the cwd sentinel must be a real regular file, not a spoofable symlink/dir."""

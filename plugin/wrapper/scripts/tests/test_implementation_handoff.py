@@ -272,6 +272,27 @@ class ReadyAndDualConditionTests(unittest.TestCase):
         )
         self.assertEqual(cls2, "write-scope-violation")
 
+    def test_primary_skips_soft_blockers_before_hard(self) -> None:
+        """Soft ready-only kinds must not steal primary from a later hard failure."""
+        soft_then_hard = [
+            HandoffBlocker("temp-index-retained", "index left"),
+            HandoffBlocker("no-changes", "empty"),
+            HandoffBlocker(
+                "unexpected-edits",
+                "escape",
+                detail={"phase": "post-build-gate", "violations": ["/x"]},
+            ),
+        ]
+        cls, msg = primary_error_from_blockers(soft_then_hard)
+        self.assertEqual(cls, "unexpected-edits")
+        self.assertEqual(msg, "escape")
+        # Soft-only list → no primary (ready false, code envelope can still succeed)
+        soft_only = [
+            HandoffBlocker("temp-index-retained", "index left"),
+            HandoffBlocker("no-changes", "empty"),
+        ]
+        self.assertEqual(primary_error_from_blockers(soft_only), (None, None))
+
     def test_step_order_constant(self) -> None:
         self.assertEqual(
             list(_STEP_ORDER),
