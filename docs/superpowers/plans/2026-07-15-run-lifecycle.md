@@ -1,16 +1,16 @@
-# Run lifecycle program — Implementation Plan (revision 7)
+# Run lifecycle program — Implementation Plan (revision 8)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Checkboxes track progress.
 
 **Goal:** Full run lifecycle with CAS, crash-consistent terminal persistence, read-only status, process finalize worker, isolated review, at-most-once notify attempts, and verified `code` implementation handoff — **four PRs**, zero open decisions.
 
-**Design:** [docs/superpowers/specs/2026-07-15-run-lifecycle-design.md](../specs/2026-07-15-run-lifecycle-design.md) **revision 7**.
+**Design:** [docs/superpowers/specs/2026-07-15-run-lifecycle-design.md](../specs/2026-07-15-run-lifecycle-design.md) **revision 8**.
 
 **Baseline:** v1.2.10. **Versions:** 1.3.0 → 1.4.0 → 1.5.0 → **1.6.0**.
 
 **Rule:** Do not invent alternatives. Design §4–§14 are authority. Every step below is mandatory as written.
 
-**Do not execute until the user approves revision 7.**
+**Do not execute until the user approves revision 8.**
 
 ---
 
@@ -45,7 +45,7 @@
 | `plugin/wrapper/scripts/groklib/modes/preflight.py` | preserve seed lifecycle under CAS after `create_run` |
 | `plugin/wrapper/scripts/groklib/modes/finalize_worker.py` | **New** — `finalize_worker_main` |
 | `plugin/wrapper/scripts/groklib/modes/status.py` | Read-only projection + derived interrupted; **zero writes** |
-| `plugin/wrapper/scripts/groklib/envelope.py` | `finalization-timeout`, `finalization-worker-missing-result` in ERROR_CLASSES |
+| `plugin/wrapper/scripts/groklib/envelope.py` | `finalization-timeout`, `finalization-worker-missing-result`, `finalization-worker-unkillable` in ERROR_CLASSES |
 | `plugin/wrapper/scripts/tests/test_runstate.py` | **Existing** — extend for seed + CAS |
 | `plugin/wrapper/scripts/tests/test_mode_status.py` | Projection + byte-identical run dir |
 | `plugin/wrapper/scripts/tests/test_mode_cleanup.py` | Fixture migration for seed/CAS |
@@ -74,8 +74,8 @@
 | `plugin/wrapper/scripts/groklib/envelope.py` | `isolation-unavailable` |
 | `plugin/wrapper/scripts/tests/test_review_isolation.py` | **New** |
 | `plugin/wrapper/scripts/tests/test_mode_review.py` | Wire + concurrent + partial cleanup |
-| `plugin/skills/review/SKILL.md` | isolation flags |
-| `plugin/skills/adversarial-review/SKILL.md` | isolation if applicable |
+| `plugin/skills/review/SKILL.md` | document `--base` / `--isolated` isolation behavior |
+| `plugin/skills/adversarial-review/SKILL.md` | **Yes — update:** same isolation flags as review (maps to review wrapper mode; document `--base` / `--isolated` identically) |
 | `README.md` | isolation |
 | `plugin/references/README.md` | isolation |
 | `plugin/wrapper/references/authority-policies.md` | isolation |
@@ -99,10 +99,10 @@
 | `plugin/skills/reason/SKILL.md` | same |
 | `plugin/skills/adversarial-review/SKILL.md` | same |
 | `plugin/skills/verify/SKILL.md` | same |
-| `plugin/agents/grok-engineer-coder.md` | Prefix env when spawning `agents/run.mjs` for live modes that notify |
-| `plugin/agents/grok-rescue.md` | Prefix env if it runs live modes that can notify (else document N/A for reason-only) |
-| `plugin/codex-agents/grok-engineer-coder.toml` | Document/env prefix parity for Codex materialization path |
-| `plugin/codex-agents/grok-rescue.toml` | same |
+| `plugin/agents/grok-engineer-coder.md` | **Always** prefix `GROK_COMPANION_EXECUTION_CONTEXT` on every companion/`agents/run.mjs` invocation (foreground default unless background chosen) |
+| `plugin/agents/grok-rescue.md` | **Always** prefix env on every invocation: rescue runs `reason` and optionally `code` — both are live modes that can notify under `native`/`auto` |
+| `plugin/codex-agents/grok-engineer-coder.toml` | Same always-prefix env rule in materialization/docs for Codex |
+| `plugin/codex-agents/grok-rescue.toml` | Same always-prefix env rule |
 | `plugin/scripts/tests/notify.test.mjs` | **New** |
 | `plugin/scripts/tests/jobs.test.mjs` | prefs |
 | `plugin/scripts/tests/grok-companion.test.mjs` | context + notify paths (foreground + background) |
@@ -129,7 +129,7 @@
 | `plugin/wrapper/scripts/groklib/modes/_worktree.py` | wire code finalization order + command evidence |
 | `plugin/wrapper/scripts/groklib/modes/handoff.py` | **New** — read-only |
 | `plugin/wrapper/scripts/groklib/modes/cleanup.py` | factual ready-handoff warning (§14.17) |
-| `plugin/wrapper/scripts/groklib/envelope.py` | six error classes; MODES += `handoff` |
+| `plugin/wrapper/scripts/groklib/envelope.py` | **seven** PR4 error classes in ERROR_CLASSES + MODES += `handoff` (see list below) |
 | `plugin/scripts/grok-companion.mjs` | WRAPPER_MODES += `handoff`; **not** STREAMING; `runHandoff()` |
 | `plugin/skills/handoff/SKILL.md` | **New** |
 | `plugin/skills/handoff/run.mjs` | **New** |
@@ -137,13 +137,27 @@
 | `plugin/wrapper/scripts/tests/test_implementation_contract.py` | **New** |
 | `plugin/wrapper/scripts/tests/test_implementation_handoff.py` | **New** |
 | `plugin/wrapper/scripts/tests/test_mode_handoff.py` | **New** |
-| `plugin/wrapper/scripts/tests/test_mode_code.py` | order, blockers, ready, validation sandbox |
+| `plugin/wrapper/scripts/tests/test_mode_code.py` | order, blockers, ready, operator-trusted validation |
 | `plugin/scripts/tests/grok-companion.test.mjs` | handoff non-streaming / no job |
 | Docs: `README.md`, `CHANGELOG.md`, `docs/roadmap.md`, `docs/COMPATIBILITY.md`, `docs/RELEASE.md`, `plugin/references/README.md`, `plugin/references/manual-smoke.md`, `plugin/wrapper/references/authority-policies.md`, `plugin/wrapper/SKILL.md` | all mandatory |
 | Packaging triple | **1.6.0** |
 | Claude/Codex manifests | packaging triple only (modes discovered from skills dirs; no separate mode list file) |
 
 **Not in PR4:** `docs/PROVENANCE.md`.
+
+**PR4 envelope ERROR_CLASSES (exactly seven):**
+
+```text
+implementation-contract-invalid
+write-scope-violation
+unexpected-commit
+artifact-generation-failure
+artifact-integrity-failure
+handoff-unavailable
+terminal-envelope-incomplete
+```
+
+(`temp-index-retained` is a handoff **blocker** string, not a separate ERROR_CLASSES entry.)
 
 ---
 
@@ -226,22 +240,24 @@ Implement design §9 and §9.4 exactly:
 
 - Serializable `finalize-payload.json` only.  
 - Worker = normal terminal writer via `persist_terminal_envelope`.  
-- Parent = recovery writer only after worker dead/killed + join + re-read.  
-- Parent-authorized **new** failure classes only: `finalization-timeout`, `cli-failure`, `finalization-worker-missing-result`.  
+- Parent durable recovery **only when `proc.is_alive() is False`** (confirmed). Timed join is not proof of death.  
+- Parent-authorized durable failure classes only: `finalization-timeout`, `cli-failure`, `finalization-worker-missing-result`.  
+- If still alive after kill grace: **no durable write**; ephemeral stdout `finalization-worker-unkillable`; lifecycle stays `finalizing`.  
 - Parent never writes success envelopes.  
-- Idempotent lifecycle finish when envelope already valid.  
+- Idempotent lifecycle finish when envelope already valid (only if not alive).  
 
 Tests:
 
 - [ ] Worker completes before timeout → success preserved.  
 - [ ] Worker completes during kill window → envelope preserved.  
 - [ ] Worker completes after parent would have written timeout → no replacement.  
-- [ ] True hang → finalization-timeout once; lifecycle failed.  
+- [ ] True hang that dies after kill → finalization-timeout once; lifecycle failed.  
+- [ ] Unkillable worker (mock still alive) → no durable envelope; ephemeral unkillable; lifecycle finalizing.  
 - [ ] Nonzero worker exit without envelope → cli-failure.  
 - [ ] Exit 0 without envelope → finalization-worker-missing-result.  
-- [ ] Parent cannot write while worker alive.  
+- [ ] Parent durable-write guard requires `is_alive() is False`.  
 - [ ] Spawn payload has no non-serializable fields.  
-- [ ] **Commit** `modes: process finalize worker with parent recovery writer`
+- [ ] **Commit** `modes: process finalize worker with confirmed-dead parent recovery`
 
 ### Task 1.6 — Status projection (read-only)
 
@@ -452,7 +468,7 @@ Exact meaning design §14.17 — no “unacknowledged.”
 | Seed + recordRevision 0 | PR1 / 1.1 |
 | CAS + lock + no full-replace clobber | PR1 / 1.2–1.3 |
 | Envelope-first crash-consistent terminal persist | PR1 / 1.3 |
-| Worker normal writer; parent recovery §9.4 | PR1 / 1.5 |
+| Worker normal writer; parent recovery only if not alive | PR1 / 1.5 |
 | Status read-only; envelope-aware effective lifecycle | PR1 / 1.6 |
 | Status exit 1 skill handling | PR1 / 1.6 |
 | Monotonic elapsed | PR1 / 1.4 |
@@ -476,7 +492,7 @@ Exact meaning design §14.17 — no “unacknowledged.”
 | Status writes | **Never** |
 | Effective lifecycle | record / envelope / derived (§6) |
 | Terminal persist | Envelope-first; idempotent lifecycle finish (§7.1) |
-| Terminal writers | Worker normal; parent recovery only §9.4 classes |
+| Terminal writers | Worker normal; parent durable recovery only if `is_alive() is False` |
 | CAS | `recordRevision` + `run.lock` |
 | write_run_record public API | Deleted after PR1 migration; CAS only |
 | Elapsed | Monotonic in owner process; UTC for status |
@@ -506,9 +522,9 @@ No parallel tracks. No alternate designs during implementation.
 
 ## Handoff
 
-Revision **7** closes residual findings on rev 6 (crash-consistent terminal persist, non-circular ready, validation trust honesty, parent recovery authority, ITA exclusion, exact PR3 paths, mechanical temp-index cleanup). Paths:
+Revision **8** closes rev-7 consistency findings: confirmed worker death before parent recovery, skill-run no-op aligned in design+plan, definitive rescue env prefix and adversarial-review isolation, seven PR4 error classes. Paths:
 
 - `docs/superpowers/specs/2026-07-15-run-lifecycle-design.md`  
 - `docs/superpowers/plans/2026-07-15-run-lifecycle.md`  
 
-**Approve revision 7 before any implementation.**
+**Approve revision 8 before any implementation.**

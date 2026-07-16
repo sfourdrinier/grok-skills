@@ -1,6 +1,6 @@
 # Run lifecycle, isolated review, completion signals, and implementation handoff
 
-**Status:** design revision 7 (PR1–PR4 locked; rev-6 residual findings 1–7 closed — no open decisions)  
+**Status:** design revision 8 (PR1–PR4 locked; rev-7 consistency fixes closed — no open decisions)  
 **Date:** 2026-07-15  
 **Product:** grok-skills (Claude Code + Codex)  
 **Baseline:** v1.2.10  
@@ -58,7 +58,7 @@ Background and long-running Grok modes (especially `review`) are hard to trust:
 | Seed record | `lifecycle: "created"`, compatible `status: "running"`, `recordRevision: 0`. |
 | Status mode | **Strictly read-only.** Never writes under the target run directory. Byte-for-byte unchanged after every status query (test-enforced). |
 | Interrupted durable write | **Not from status.** Status only **derives** display lifecycle (§6.3). |
-| Terminal writer roles | **Worker** = normal terminal writer. **Parent** = recovery writer only after worker is proven exited or killed, successfully joined, and state re-read under lock (§9.4). All terminal writes go through `persist_terminal_envelope` CAS API only. |
+| Terminal writer roles | **Worker** = normal terminal writer. **Parent** = recovery writer only when `proc.is_alive() is False` (confirmed), then re-read under lock (§9.4). Timed `join()` alone is **not** proof of death. All terminal writes go through `persist_terminal_envelope` CAS API only. |
 | Envelope vs lifecycle crash | **Envelope-first** under lock; then lifecycle. Idempotent finish if matching valid envelope already exists. Status derives effective terminal lifecycle from valid envelope when record is still non-terminal (§7.1). |
 | CAS | `run.json.recordRevision` monotonic integer; every lifecycle/record mutation requires expected revision; lock file §7. |
 | Terminal immutability | A valid terminal envelope is **never** replaced by another terminal envelope. Terminal lifecycle never overwritten once set (except CAS completing non-terminal → terminal matching existing envelope). |
@@ -68,7 +68,7 @@ Background and long-running Grok modes (especially `review`) are hard to trust:
 | Notifications storage | **Only** jobs index `config` in `plugin/scripts/lib/jobs.mjs`. Never gate-state. |
 | Notifications default | `off`. Setup recommends `auto`. |
 | Notify contract | **At-most-once attempt:** prioritize no duplicate attempts over guaranteed delivery. **Not** exactly-once. No automatic retry of `pending`. |
-| Background signal | Companion-only `GROK_COMPANION_EXECUTION_CONTEXT=foreground\|background` set by skills; never forwarded to wrapper; never inferred from TTY. |
+| Background signal | Companion-only `GROK_COMPANION_EXECUTION_CONTEXT=foreground\|background` set by skill/agent shell prefixes; `skill-run.mjs` unchanged; never forwarded to wrapper; never inferred from TTY. |
 | Handoff mode | `WRAPPER_MODES` only; **not** `STREAMING_MODES`; `runHandoff()` like status passthrough. |
 | Contract validation | Explicit execution after scopes + HEAD; **operator-trusted argv, not OS-filesystem-sandboxed** (§14.3, §14.9). |
 | Handoff readiness | Computed from in-memory `terminalOutcome`, not persisted lifecycle. Manifest then envelope. `/grok:handoff` requires ready manifest **and** completed envelope (§14.6–14.12, §14.14). |
@@ -371,32 +371,37 @@ On success: envelope already persisted; `ok: true`.
 2. Write `finalize-payload.json` (0600).  
 3. `ctx = multiprocessing.get_context("spawn")`; `Process(target=finalize_worker_main, args=(payload_path,), name="grok-finalize")`.  
 4. `proc.start()`; `proc.join(timeout=budget_seconds)`.  
-5. If still alive:  
+5. If `proc.is_alive()`:  
    - `proc.terminate()`; `proc.join(5)` (terminate grace **5s**).  
    - If still alive: `proc.kill()`; `proc.join(5)` (kill grace **5s**).  
-   - If kill unavailable / still alive after kill join: log; still proceed to §9.4 re-read (filesystem is source of truth).  
-6. Enter **parent recovery** (§9.4) — never write terminal state before this point after spawn.
+6. **Liveness gate (mandatory):** re-check `proc.is_alive()`.  
+   - If **alive**: parent recovery writes are **forbidden**. Progress `"finalization worker unkillable"`. Do **not** call `persist_terminal_envelope`. Do **not** write `envelope.json` or change lifecycle. Return an **ephemeral** (stdout-only, not run-dir) failure envelope with class `finalization-worker-unkillable` so the operator sees failure this session; durable state remains `finalizing` until the worker exits and either writes a terminal envelope or the owner dies (status then derives `interrupted` if no envelope).  
+   - If **not alive**: enter **parent recovery** (§9.4).
+
+**Timed `join()` returning is never treated as proof of death.** Only `proc.is_alive() is False` authorizes parent recovery.
 
 ### 9.4 Parent recovery writer (exact authority)
 
 **Preconditions (all required):**
 
-1. Worker process is not alive **or** kill/terminate sequence completed and `join` returned (including timeout joins).  
+1. **`proc.is_alive() is False`** (confirmed after any terminate/kill sequence).  
 2. Exclusive `run.lock` acquired.  
 3. Fresh re-read of `envelope.json` + `run.json`.
 
-**Actions under lock (ordered):**
+If precondition 1 fails → §9 step 6 unkillable path; no durable parent write.
+
+**Actions under lock (ordered), only when preconditions hold:**
 
 1. If valid terminal envelope exists:  
    - Call `persist_terminal_envelope` idempotent path to finish lifecycle if needed.  
    - **Never** replace the envelope.  
    - Return that envelope to the parent caller.  
 2. Else if worker exit code was 0 but no envelope: parent may write **one** new failure envelope via `persist_terminal_envelope` with class `finalization-worker-missing-result`, lifecycle `failed`.  
-3. Else if worker was timed out / still not producing envelope: parent may write **one** new failure envelope with class `finalization-timeout`, lifecycle `failed`.  
+3. Else if the budget timed out (join hit timeout) and no envelope: parent may write **one** new failure envelope with class `finalization-timeout`, lifecycle `failed`.  
 4. Else if worker exited non-zero without envelope: parent may write **one** new failure envelope with class `cli-failure` (detail from `finalize-worker.stderr` / finalize-result if present), lifecycle `failed`.  
-5. No other parent-authored error classes. No parent success envelopes. No parent writes while worker still running.
+5. No other parent-authored error classes. No parent success envelopes. **No parent durable writes while worker is alive.**
 
-**Parent-authorized new failure classes (complete list):**
+**Parent-authorized new failure classes for durable envelopes (complete list):**
 
 ```text
 finalization-timeout
@@ -404,7 +409,13 @@ cli-failure
 finalization-worker-missing-result
 ```
 
-All through `persist_terminal_envelope` only.
+**Ephemeral-only (stdout, not persisted under run dir):**
+
+```text
+finalization-worker-unkillable
+```
+
+All durable terminal writes through `persist_terminal_envelope` only.
 
 ### Budgets
 
@@ -426,7 +437,8 @@ Env `GROK_FINALIZE_TIMEOUT_SECONDS`: integer, clamp **30..600**, overrides table
 - Spawn works on macOS; Windows spawn tested when CI/platform available (skip with explicit marker only if platform lacks spawn — prefer run).  
 - No non-serializable objects in payload.  
 - Parent cannot write success envelope.  
-- Parent cannot write while worker still alive (unit test of guard).
+- Parent cannot durable-write while `proc.is_alive()` (unit test of guard).  
+- After kill grace still alive → no durable timeout envelope; ephemeral `finalization-worker-unkillable`; lifecycle remains `finalizing`.
 
 ## 10. Isolated review
 
@@ -503,7 +515,7 @@ GROK_COMPANION_EXECUTION_CONTEXT=foreground|background
 
 | Rule | Locked |
 |------|--------|
-| Who sets it | The host skill invocation that chooses Wait vs background (Claude skill Bash command prefixes the env; Codex agent/skill spawn does the same). `plugin/scripts/lib/skill-run.mjs` may gain an optional third-arg env merge helper, but the **skill markdown / agent prompt** is the authority for the value based on the user’s execution choice. |
+| Who sets it | The host skill/agent invocation that chooses Wait vs background prefixes `GROK_COMPANION_EXECUTION_CONTEXT` in the shell environment **before** `node …/run.mjs` or `node …/agents/run.mjs`. **`plugin/scripts/lib/skill-run.mjs` has no functional change** in this program (no new helper, no env inference). |
 | Forward to wrapper | **Never** (companion strips/ignores for wrapper argv and wrapper child env) |
 | Infer from TTY | **Never** |
 | Missing / invalid | Treat as `foreground` |
@@ -564,6 +576,7 @@ Always `shell: false`. Title `Grok Skills`. Body `"{mode} {lifecycle} · {runId}
 | `isolation-unavailable` | `failed` | PR2 |
 | `finalization-timeout` | `failed` | PR1 |
 | `finalization-worker-missing-result` | `failed` | PR1 |
+| `finalization-worker-unkillable` | ephemeral stdout only; lifecycle stays `finalizing` | PR1 |
 | `implementation-contract-invalid` | `failed` | PR4 |
 | `write-scope-violation` | `failed` | PR4 |
 | `unexpected-commit` | `failed` | PR4 |
@@ -956,3 +969,12 @@ Every new Python/JS/Markdown/skill file must follow repository path-header and s
 | R5 | High | §10 `--ita-invisible-in-index` + `git add -N` test |
 | R6 | Medium | Plan PR3 exact file list (no optional paths) |
 | R7 | Medium | §14.7 mechanical temp-index post-check + `temp-index-retained` |
+
+### Consistency fixes on rev 7 (closed in rev 8)
+
+| # | Severity | Resolution |
+|---|----------|------------|
+| C1 | High | §9 / §9.4 require `proc.is_alive() is False`; unkillable → ephemeral only |
+| C2 | Medium | §11 skill-run.mjs no functional change (matches plan) |
+| C3 | Medium | Plan: rescue always prefixes env; adversarial-review isolation definitive |
+| C4 | Low | Plan: seven PR4 envelope error classes including `terminal-envelope-incomplete` |
