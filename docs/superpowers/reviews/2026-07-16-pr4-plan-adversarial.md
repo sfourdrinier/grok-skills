@@ -112,6 +112,18 @@ Matrix → DRY → suites → internal review → package. Missing-flag, path-se
 - Multi-root build gates in one run  
 - Windows native toast  
 - Replacing parent VCS policy  
+- **ACP (Agent Client Protocol)** client/server in this plugin (Grok CLI may speak ACP for IDE hosts; PR4 handoff is orchestrator peer artifacts, not ACP transport)  
+
+### F14 - Grok CLI ACP (informational; no plan change)
+
+Grok Build/CLI advertises full **ACP** support (IDE↔agent JSON-RPC; registry entries
+such as Zed “Grok Build”). That is complementary to grok-skills:
+
+- **ACP path:** editor drives Grok agent session live.  
+- **Plugin path:** Claude/Codex orchestrate a **sandboxed** headless Grok run and
+  (PR4) pull a **verified handoff** by `runId`.
+
+Do not fold ACP into PR4 scope or delay handoff for ACP parity.
 
 ## Verdict
 

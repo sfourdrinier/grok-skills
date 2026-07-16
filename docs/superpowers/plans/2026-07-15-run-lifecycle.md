@@ -686,7 +686,26 @@ verify sentinel → remove exact sentinel → HEAD check → changed files
 - OS-sandbox of requiredValidation  
 - Multi-root build gates in one run  
 - Exactly-once delivery of handoff or notify  
-- PR5 notify items (direct notify, operator re-fire, headless polish) except docs cross-links
+- PR5 notify items (direct notify, operator re-fire, headless polish) except docs cross-links  
+- **ACP (Agent Client Protocol) client/server** in this plugin - see note below  
+
+### Note: Grok CLI ACP support (does **not** change PR4 scope)
+
+xAI's Grok CLI / Grok Build supports **ACP** (Agent Client Protocol: open JSON-RPC
+IDE↔agent standard; e.g. Zed/JetBrains registry, `grok agent stdio`). That path
+lets an **editor** drive Grok as a coding agent directly.
+
+**This repo (grok-skills) is a different surface:** Claude Code / Codex plugin →
+companion → hardened wrapper → Grok CLI **headless** modes → one JSON envelope.
+PR4 handoff is the **orchestrator peer** integration API (`runId` → immutable
+patch + ready manifest for parent agents), not ACP session transport.
+
+| Question | Answer for PR4 |
+|----------|----------------|
+| Does ACP make handoff unnecessary? | **No.** ACP is editor↔agent session protocol; handoff is parent-agent integrate artifacts after an isolated `code` run. |
+| Should PR4 speak ACP? | **No.** Do not implement ACP in the plugin or map envelopes to ACP RPC in 1.6.0. |
+| Is ACP relevant later? | Optional future research (e.g. document coexistence). Not a PR4/PR5 gate. |
+| Practical user impact | Users may use Grok via ACP **or** via this plugin; same CLI binary, different integration. |
 
 ---
 
