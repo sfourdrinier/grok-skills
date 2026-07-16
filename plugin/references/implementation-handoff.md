@@ -1,0 +1,86 @@
+# Implementation handoff (1.6.0+)
+
+Authority: design §14. Schema is validated only by
+`validate_implementation_handoff` in the wrapper (no second public JSON Schema
+file).
+
+## Trust model
+
+Contract content is **operator-trusted**. Value of
+`validation.sources.contractRequiredValidation.trustModel`:
+
+```text
+operator-contract-trusted-no-os-sandbox
+```
+
+Contract `requiredValidation` runs with `shell=False` and cwd confined to the
+worktree. There is **no** OS filesystem sandbox claim for those argv.
+
+## Artifact layout
+
+Under the C2 state root for a code run:
+
+```text
+runs/<runId>/
+  envelope.json
+  implementation-handoff.json
+  artifacts/
+    implementation.patch
+```
+
+## Manifest fields (schemaVersion 1)
+
+| Field | Notes |
+|-------|--------|
+| `runId` | Matches code run |
+| `taskId` | From contract or `no-contract` |
+| `contractSha256` | Hash of normalized contract or null |
+| `baseRevision` | Full SHA worktree was created from |
+| `resultTreeOid` | Tree OID after staging changes |
+| `changedFiles[]` | `{path, status, oldPath}` |
+| `patch` | `format=git-binary-full-index-v1`, relativePath, sha256, bytes |
+| `validation` | See sources authority below |
+| `integration.ready` | Manifest write-time ready (not dual-condition) |
+| `integration.blockers[]` | `{kind, message, detail?}` |
+| `worktree` | retained path + branch |
+| `createdAtUtc` | ISO-Z |
+
+### validation.sources
+
+- `wrapperBuildGate.authoritative: true`
+- `contractRequiredValidation.authoritative: true` + trustModel string above
+- `modelClaimedCommands.authoritative: false` (ignored for readiness)
+
+## Dual-condition ready (what parents must use)
+
+`/grok:handoff` reports ready only when:
+
+1. Manifest loads and validates
+2. `integration.ready === true` on the manifest
+3. Patch re-hash matches
+4. Completed **success** terminal envelope for same `runId`
+
+## Parent apply checklist
+
+1. `handoff --run-id` success + ready  
+2. Confirm base still present / ancestry  
+3. Dirty overlap check on target paths  
+4. `git apply --check --binary path/to/implementation.patch`  
+5. Explicit apply only with operator intent  
+6. Re-run project validation on parent  
+7. Record runId + patch sha256  
+
+**Never** auto-apply, auto-commit, merge, cherry-pick, or push from this plugin.
+
+## transfer vs result vs handoff
+
+| Surface | Purpose |
+|---------|---------|
+| transfer | Conversation / session context |
+| result | Companion job stdout by job id |
+| handoff | Verified implementation by **runId** |
+
+## Notify vs handoff
+
+Notifications (1.5.0) are optional **signals** that a terminal attempt finished.
+They are not proof of integration readiness. Always call handoff before integrate.

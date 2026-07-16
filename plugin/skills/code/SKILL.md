@@ -1,7 +1,7 @@
 ---
 name: "code"
 description: "Have Grok implement code in an isolated external worktree (nothing is committed or pushed)"
-argument-hint: "--target <path> --base <revision> (--task <text> | --task-file <path>) [--web] [--model <id>] [--timeout <s>] [--max-turns <n>]"
+argument-hint: "--target <path> --base <revision> (--task <text> | --task-file <path>) [--contract-file <path>] [--web] [--model <id>] [--timeout <s>] [--max-turns <n>]"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
 
@@ -114,3 +114,21 @@ Background flow:
 
 If the companion prints an actionable "could not locate the Grok wrapper"
 message instead of an envelope, tell the user to run `/grok:setup`.
+
+## Implementation contract + handoff (1.6.0+)
+
+Optional `--contract-file <path>` points at operator-trusted JSON (writeScopes +
+`requiredValidation` argv arrays). Bad contracts fail closed **before** Grok
+with `implementation-contract-invalid`. Trust model:
+`operator-contract-trusted-no-os-sandbox` (no OS filesystem sandbox claim for
+validation commands).
+
+On success or classified failure after Grok, the wrapper writes:
+
+- `runs/<runId>/artifacts/implementation.patch` (immutable git binary full-index)
+- `runs/<runId>/implementation-handoff.json`
+
+**Notify is not integrate.** After a code run, parents (Claude Code / Codex)
+must call `/grok:handoff --run-id <runId from the code envelope>` and require
+dual-condition ready before any apply. See `skills/handoff/SKILL.md` and
+`references/implementation-handoff.md`. Never auto-apply.

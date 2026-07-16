@@ -42,6 +42,7 @@ trust marketing; direct is one flag away for people who already live in Grok.
 | List jobs (table) | `/grok:status` without run-id, `/grok:jobs` | **shipped** |
 | Durable lifecycle + CAS + finalize worker | wrapper `run.json` / spawn finalize / status projection | **shipped (1.3.0), hardened (1.3.1)** |
 | Completion notifications | companion push on terminal live runs (hardened durable runs) | **shipped (1.5.0)** |
+| Verified implementation handoff | contract + patch + `/grok:handoff` dual-condition ready | **shipped (1.6.0)** |
 | Notify dogfood follow-ups | operator re-attempt; direct-mode signal; headless honesty | **PR5 → 1.7.0** |
 | Opt-in isolated review | `review --isolated` owned worktree + tracked dirty; `--base` stays live | **shipped (1.4.0)** |
 | Fetch finished output | `/grok:result [job-id]` | **shipped** |

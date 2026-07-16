@@ -98,12 +98,19 @@ Canonical table: root [README.md](../../README.md) (skills + agents). Summary:
 | `/grok:adversarial-review` | `adversarial-review` | Hostile; web on by default |
 | `/grok:dual-lens` | companion | Adversarial then ordinary review |
 | `/grok:reason` | `reason` | Cold second opinion; web off by default |
-| `/grok:code` | `code` | Isolated worktree implementation |
+| `/grok:code` | `code` | Isolated worktree implementation (+ optional `--contract-file`) |
 | `/grok:verify` | `verify` | Hermetic verify; never `--web` |
+| `/grok:handoff` | `handoff` | Verified implementation by **runId** (1.6.0+; dual-condition ready) |
 | `/grok:debate` | companion | Two reason passes + synthesis |
 | `/grok:status` / `jobs` / `result` / `cancel` | companion | Job inspection |
 | `/grok:transfer` | companion | Claude session → task pack |
 | `/grok:cleanup` | `cleanup` | Dry-run by default; `--confirm` removes |
+
+## Implementation handoff (1.6.0+)
+
+See [implementation-handoff.md](implementation-handoff.md). After `/grok:code`,
+parents call `/grok:handoff --run-id` before any apply. Notify is not ready.
+No auto-apply.
 
 ## Execution context and notifications (1.5.0+)
 

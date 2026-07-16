@@ -40,6 +40,12 @@ the user wants a pass/fail check:
   <acceptance criteria>
   GROK_TASK
 
-Do not commit, push, or chain other modes. On failure return stderr and a short
-preflight/setup hint - never return nothing.
+After code: note runId; optionally status; then REQUIRED before integrate:
+
+  node "$GROK_AGENT_RUN" handoff --run-id '<runId>'
+
+Only if handoff success and response.integration.ready may the parent integrate
+manually (git apply --check --binary then explicit apply). Notify is not ready.
+Optional code flag: --contract-file '<path>'. Never auto-apply, commit, or push.
+On failure return stderr and a short preflight/setup hint - never return nothing.
 """

@@ -16,6 +16,16 @@ root, applies tracked dirty against a pinned base SHA, and cleans up after the
 run. `--base` alone is framing only (live checkout). Direct mode rejects
 `--isolated` (`isolation-unavailable`). Fail closed; no silent live fallback.
 
+## Implementation handoff (1.6.0+)
+
+`code` may take optional `--contract-file` (operator-trusted writeScopes +
+requiredValidation). After Grok, the wrapper writes
+`implementation-handoff.json` + `artifacts/implementation.patch` under the run
+dir. Parents must call **`handoff --run-id`** before integrate; dual-condition
+ready requires ready manifest **and** a success terminal envelope **and** patch
+rehash. Notifications are not ready. No auto-apply. See
+`plugin/references/implementation-handoff.md`.
+
 ## Completion notifications (1.5.0+)
 
 Companion-only push after a terminal **live** run (review/reason/code/verify/
