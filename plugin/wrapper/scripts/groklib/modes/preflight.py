@@ -353,7 +353,6 @@ def _run_preflight_body(
         _check_stale_audit(progress, checks)
     except GrokWrapperError as exc:
         _log("run", "preflight check failed: {} ({})".format(exc.error_class, exc))
-        progress.safe_emit("done", "preflight failed: {}".format(exc.error_class), level="error")
         # F2 preflight-cleanup-field-on-classified-failure: thread the REAL probe-
         # home teardown outcome onto the top-level cleanup field, consistently with
         # the runners (modes/_shared._failure_envelope). Without this the classified
@@ -373,9 +372,12 @@ def _run_preflight_body(
             response={"checks": checks},
             cleanup=probe_cleanup_holder[0],
         )
-        return _persist_preflight_terminal(run_paths, envelope, lifecycle="failed")
+        out = _persist_preflight_terminal(run_paths, envelope, lifecycle="failed")
+        # Emit "done" only after durable terminal persist (or classified fail-closed).
+        if not out.get("doNotStore"):
+            progress.safe_emit("done", "preflight failed: {}".format(exc.error_class), level="error")
+        return out
 
-    progress.safe_emit("done", "preflight complete", data={"checkCount": len(checks)})
     response = {
         "platform": platformsupport.current_platform(),
         "platformProbed": platformsupport.current_platform() in platformsupport.PROBED_PLATFORMS,
@@ -398,4 +400,7 @@ def _run_preflight_body(
         progressStreamPath=str(run_paths.progress_path),
         response=response,
     )
-    return _persist_preflight_terminal(run_paths, envelope, lifecycle="completed")
+    out = _persist_preflight_terminal(run_paths, envelope, lifecycle="completed")
+    if not out.get("doNotStore"):
+        progress.safe_emit("done", "preflight complete", data={"checkCount": len(checks)})
+    return out

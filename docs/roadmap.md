@@ -40,7 +40,7 @@ trust marketing; direct is one flag away for people who already live in Grok.
 |------|-----------------|--------|
 | Track runs as jobs | automatic on live modes | **shipped** |
 | List jobs (table) | `/grok:status` without run-id, `/grok:jobs` | **shipped** |
-| Durable lifecycle + CAS + finalize worker | wrapper `run.json` / spawn finalize / status projection | **shipped (1.3.0)** |
+| Durable lifecycle + CAS + finalize worker | wrapper `run.json` / spawn finalize / status projection | **shipped (1.3.0), hardened (1.3.1)** |
 | Fetch finished output | `/grok:result [job-id]` | **shipped** |
 | Cancel running job | `/grok:cancel [job-id]` | **shipped** |
 | Human render | `/grok:result --pretty` / companion render | **shipped** |

@@ -463,5 +463,55 @@ class StatusModeTests(unittest.TestCase):
         self.assertEqual(envelope["status"], "failure")
         self.assertEqual(envelope["response"]["target"]["lifecycle"], "canceled")
 
+    def _rewrite_created_at(self, paths, iso_utc: str) -> None:
+        """Test helper: rewrite createdAtUtc (CAS preserves seed timestamp)."""
+        run_json = paths.run_dir / "run.json"
+        rec = json.loads(run_json.read_text(encoding="utf-8"))
+        rec["createdAtUtc"] = iso_utc
+        run_json.write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
+
+    def test_status_elapsed_ms_past_created_at(self) -> None:
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.write_home_liveness_marker(paths.run_dir, os.getpid())
+        self._rewrite_created_at(paths, "2020-01-01T00:00:00+00:00")
+        exit_code, out = _run_status(paths.run_id)
+        envelope = json.loads(out)
+        self.assertEqual(exit_code, 0, out)
+        target = envelope["response"]["target"]
+        self.assertIsInstance(target["elapsedMs"], int)
+        self.assertGreater(target["elapsedMs"], 0)
+        self.assertGreaterEqual(target["elapsedMs"], 0)
+        if target.get("elapsedSeconds") is not None:
+            self.assertGreaterEqual(target["elapsedSeconds"], 0)
+
+    def test_status_elapsed_ms_future_created_at_clamps_to_zero(self) -> None:
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.write_home_liveness_marker(paths.run_dir, os.getpid())
+        self._rewrite_created_at(paths, "2099-01-01T00:00:00+00:00")
+        exit_code, out = _run_status(paths.run_id)
+        envelope = json.loads(out)
+        self.assertEqual(exit_code, 0, out)
+        target = envelope["response"]["target"]
+        self.assertEqual(target["elapsedMs"], 0)
+        self.assertEqual(target["elapsedSeconds"], 0)
+
+    def test_status_last_event_copies_progress_elapsed_ms(self) -> None:
+        paths = runstate.create_run("review")
+        runstate.set_lifecycle(paths, 0, "running")
+        runstate.write_home_liveness_marker(paths.run_dir, os.getpid())
+        writer = ProgressWriter(paths.run_id, paths.progress_path)
+        writer.emit("start", "run created", data={"mode": "review"})
+        writer.emit("grok", "still working")
+        exit_code, out = _run_status(paths.run_id)
+        envelope = json.loads(out)
+        self.assertEqual(exit_code, 0, out)
+        last = envelope["response"]["target"]["lastEvent"]
+        self.assertIsNotNone(last)
+        self.assertIn("elapsedMs", last)
+        self.assertIsInstance(last["elapsedMs"], int)
+        self.assertGreaterEqual(last["elapsedMs"], 0)
+
 if __name__ == "__main__":
     unittest.main()

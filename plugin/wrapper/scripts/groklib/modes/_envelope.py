@@ -343,14 +343,6 @@ def terminalize_unexpected_failure(
         ),
     )
 
-    try:
-        progress.safe_emit("done", "{} failed: {}".format(mode, error_class), level="error")
-    except Exception as emit_exc:  # progress is best-effort; never block the envelope
-        log(
-            "terminalize_unexpected_failure",
-            "progress emit failed during terminalization of {}: {}".format(run_paths.run_id, emit_exc),
-        )
-
     # Round5 cleanup-outcome-lost-on-terminalize: carry the REAL private-home teardown
     # outcome onto the terminal envelope so a FAILED auth-material teardown on this
     # raw-exception / SIGTERM path is surfaced FAIL-CLOSED (not the default
@@ -410,7 +402,8 @@ def terminalize_unexpected_failure(
             **cleanup_fields,
         )
 
-    # Envelope-first durable terminalization (never lifecycle-before-envelope)
+    # Envelope-first durable terminalization (never lifecycle-before-envelope).
+    # Emit progress "done" only after durable persist succeeds.
     try:
         # Optional non-terminal bookkeeping from caller (must not terminalize alone)
         try:
@@ -433,6 +426,15 @@ def terminalize_unexpected_failure(
         runstate.persist_terminal_envelope(
             run_paths, rev, envelope, lifecycle=terminal_lifecycle
         )
+        try:
+            progress.safe_emit("done", "{} failed: {}".format(mode, error_class), level="error")
+        except Exception as emit_exc:  # progress is best-effort; never block the envelope
+            log(
+                "terminalize_unexpected_failure",
+                "progress emit failed during terminalization of {}: {}".format(
+                    run_paths.run_id, emit_exc
+                ),
+            )
     except Exception as persist_exc:
         log(
             "terminalize_unexpected_failure",

@@ -521,7 +521,7 @@ def _run_worktree_mode_body(
         and effective_model is not None
     ):
         grok_field, usage_field, response_field, stderr_warnings = grok_usage_response_fields(result)
-        progress.safe_emit("done", "{} run completed".format(mode))
+        # No progress "done" until _publish_terminal_envelope confirms durable_ok.
         fields = _common_fields(
             requested_model=requested_model,
             effective_model=effective_model,
@@ -568,7 +568,6 @@ def _run_worktree_mode_body(
     error = outcome_error if outcome_error is not None else GrokWrapperError(
         "cli-failure", "{} run did not complete".format(mode), {"reason": "incomplete-run"}
     )
-    progress.safe_emit("done", "{} failed: {}".format(mode, error.error_class), level="error")
     fields = _common_fields(
         requested_model=requested_model,
         effective_model=effective_model,

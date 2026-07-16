@@ -187,6 +187,7 @@ def _publish_terminal_envelope(
                     "finalization worker unkillable; durable terminal state not written"
                 ]
                 published["doNotStore"] = True
+            # No "done" progress event: durable terminalization did not complete.
             return published
         if not durable_ok:
             # Prefer already-returned failure; mark no store
@@ -204,7 +205,17 @@ def _publish_terminal_envelope(
                     )
                     fail["doNotStore"] = True
                     return fail
+            # No "done": operator-visible completion requires durable terminal write.
             return published
+        # Design §8: finalizing → notify → done only after durable_ok.
+        if isinstance(published, dict) and published.get("status") == "success":
+            progress.safe_emit("done", "{} run completed".format(mode))
+        elif isinstance(published, dict):
+            err = ((published.get("error") or {}) if isinstance(published.get("error"), dict) else {})
+            err_class = err.get("class") or "failure"
+            progress.safe_emit(
+                "done", "{} failed: {}".format(mode, err_class), level="error"
+            )
         return published
     except Exception as exc:
         _log("_publish_terminal_envelope", "finalize failed: {}".format(exc))
@@ -789,7 +800,8 @@ def _run_grok_mode_body(
 
     result = result_holder[0]
     if outcome_error is None and result is not None and sandbox_obj is not None and effective_model is not None:
-        progress.safe_emit("done", "{} run completed".format(run.mode))
+        # Do not emit progress "done" here — that implies completion before durable
+        # terminalization. _publish_terminal_envelope emits done only after durable_ok.
         envelope = _success_envelope(
             run, run_paths, result, sandbox_obj, effective_model, cleanup_field, warnings
         )
@@ -800,7 +812,6 @@ def _run_grok_mode_body(
     error = outcome_error if outcome_error is not None else GrokWrapperError(
         "cli-failure", "{} run did not complete".format(run.mode), {"reason": "incomplete-run"}
     )
-    progress.safe_emit("done", "{} failed: {}".format(run.mode, error.error_class), level="error")
     envelope = _failure_envelope(
         run, run_paths, error, sandbox_obj, effective_model, cleanup_field, warnings, result=result
     )
