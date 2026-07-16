@@ -682,7 +682,8 @@ verify sentinel → remove exact sentinel → HEAD check → changed files
 
 - [ ] Setup report + hints: `native`/`auto` need a desktop session; recommend `webhook` for SSH/CI/headless.  
 - [ ] On native send failure with no-display-shaped detail, stderr one-line hint toward webhook (best-effort).  
-- [ ] Docs: `manual-smoke.md`, `COMPATIBILITY.md`, `plugin/references/README.md`, SECURITY note if needed.  
+- [ ] **Windows:** keep native as **unsupported** (`windows-native-unsupported`); do **not** ship a Windows toast adapter without a smoke-test host. Setup/docs must say: use **`webhook`** on Windows (and any headless host).  
+- [ ] Docs: `manual-smoke.md`, `COMPATIBILITY.md`, `plugin/references/README.md`, SECURITY note if needed — cover macOS/Linux desktop vs Windows/SSH/CI.  
 - [ ] **Commit** `docs+setup: headless native honesty for notify`
 
 ### Task 5.5 — Internal code review (Gate D)
@@ -698,7 +699,7 @@ verify sentinel → remove exact sentinel → HEAD check → changed files
 - [ ] Packaging **1.7.0**; suites; tag after merge.  
 - [ ] **Commit** `release: 1.7.0 notify dogfood follow-ups`
 
-**Not in PR5:** auto-retry loops, delivery guarantees, Windows native notify, private-IP webhook denylist (optional later if needed).
+**Not in PR5:** auto-retry loops, delivery guarantees, **Windows native toast implementation** (document + webhook only until a Windows smoke host exists), private-IP webhook denylist (optional later if needed).
 
 ---
 

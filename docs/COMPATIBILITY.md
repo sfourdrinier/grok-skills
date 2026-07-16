@@ -39,7 +39,7 @@ Python wrapper.
 |------|------|
 | Operator re-attempt | Explicit re-fire after failed/stuck notify (may duplicate) |
 | Direct-mode push notify | Job-scoped marker home (direct has no wrapper `runs/<id>`) |
-| Headless / native honesty | Setup + docs: native needs a desktop session; prefer webhook |
+| Headless / native honesty | Setup + docs: native needs a desktop session (macOS/Linux); **Windows** stays unsupported for native toast — use **webhook** |
 
 Verified against local installs on 2026-07-15:
 

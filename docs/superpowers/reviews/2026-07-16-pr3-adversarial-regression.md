@@ -77,6 +77,7 @@
 |----------|-------------|
 | Direct mode: no durable `runs/<id>` → no push notify | **PR5-B** (job-scoped marker) |
 | Headless native often fails; marker still completed+failed | **PR5-C** (setup/docs honesty + optional hint); behavior correct |
+| Windows native toast not implemented | **PR5-C** documents webhook; **no** Windows toast without a smoke host |
 | Operator re-attempt / stuck `pending` force | **PR5-A** (already scheduled) |
 | Webhook private/metadata IPs | Permanent residual unless later denylist; operator-trusted |
 | Automatic retry / exactly-once | Permanent non-goal |

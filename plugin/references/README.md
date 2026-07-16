@@ -114,8 +114,10 @@ attempt after terminal live runs (hardened durable `runs/<id>`). Prefer
 `setup --notification-mode auto` for background jobs. Never status/jobs alone.
 
 **Not in 1.5.0 (PR5 → 1.7.0):** operator re-attempt; direct-mode push notify;
-headless/native honesty polish (setup/docs). Native toasts need a desktop session
-today; use `webhook` for SSH/CI until PR5.
+headless/native honesty polish (setup/docs). Native toasts need a **macOS/Linux
+desktop session** today; they are **not** implemented on Windows. Use
+`webhook` for SSH/CI/**Windows** (and any headless host) until PR5 docs/setup
+polish; Windows toast stays out until a smoke-test host exists.
 
 ## Optional stop-review gate
 

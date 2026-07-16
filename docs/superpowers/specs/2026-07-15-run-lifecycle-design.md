@@ -960,7 +960,7 @@ As §12, §14.6–14.14 tests, dual-host smoke §14.19, packaging 1.6.0 on the t
 
 - Host chat completion APIs  
 - Untracked under review `--isolated`  
-- Windows native notify  
+- Windows native toast implementation (1.5.0 residual; PR5-C documents webhook instead; implement only with a Windows smoke host)  
 - Ignore-list review safety  
 - Auto-apply handoff  
 - `--allow-commits`  
@@ -975,7 +975,7 @@ As §12, §14.6–14.14 tests, dual-host smoke §14.19, packaging 1.6.0 on the t
 |-------|------|
 | **PR5-A** | Operator-initiated notify re-attempt after a finished run (explicit duplicate risk; force into same `notify.mjs`) |
 | **PR5-B** | Direct-mode completion push via **job-scoped** marker home (hardened keeps `runs/<runId>/notified.json`) |
-| **PR5-C** | Headless/native honesty: setup report + docs recommend webhook off-desktop; optional native-fail hint |
+| **PR5-C** | Headless/native honesty: setup report + docs recommend webhook for SSH/CI/**Windows** (native toast remains macOS/Linux desktop only; no Windows toast without a smoke host); optional native-fail hint |
 
 ## 17. New source file conventions
 
