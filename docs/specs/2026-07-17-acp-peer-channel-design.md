@@ -59,3 +59,40 @@ protocol, ever.
 - No host-side ACP server; no session/load reattach (capability noted for
   v2); no multi-session mux per child; no auto-apply; one-envelope-per-
   invocation preserved for every companion command.
+
+## Amendments (adversarial review 2026-07-17, REQUIRED before build)
+
+The initial draft above is superseded by these on every conflict. Grok's
+self-review of this channel found the control plane, crash model, redaction
+boundary, and confinement-parity claims wrong. Build to THIS list.
+
+1. CONTROL PLANE: replace the run-dir inbox/outbox FIFO with a wrapper-owned
+   unix domain socket (0600, companion uid only). The run dir keeps only
+   durable peer.json and REDACTED progress. If a FIFO is ever used, the peer
+   dir is 0700, outbox is exclusive-create, foreign entries rejected.
+2. CRASH/REAPER: peer.json records BOTH wrapper pid+starttime and child
+   pid+starttime (or a process-group id). Wrapper death -> companion/reaper
+   kills the group. Never reap the home while the child starttime matches.
+   MAX_PEER_LEASE is separate from MAX_RUN_TIMEOUT; each prompt renews the
+   lease; pid-reuse guarded by starttime.
+3. START PARITY (fail closed if unmet, BEFORE the first prompt): same sandbox
+   profile, same tool allowlist (or hard-refuse if ACP cannot pin tools),
+   mcpServers [], same web policy, cwd sentinel planted, original_baseline +
+   pristine gate scripts captured, no .env copy - the full code-mode invariant
+   set.
+4. REDACTION: outbox/result envelopes pass the secret scan (or store only a
+   redacted summary + sha of the raw under 0700); multi-frame chunks are
+   reassembled before scanning or the residual risk is documented; child
+   stderr is dropped or redacted. Delete the "envelopes unchanged" sentence.
+5. HANDOFF HONESTY: peer-stop finalize must either require contract scopes for
+   a "confined" dual-ready result, OR label the manifest
+   confinement: "worktree-final-diff-only". Capture baseline at start,
+   quiesce the child before finalize, and do NOT claim code-equivalent
+   confinement without the sentinel + escape asserts.
+6. pre_tool_use deny is registered but documented as NON-ENFORCEMENT (the OS
+   sandbox is the enforcement layer); terminal-command policy stated explicitly.
+7. Prompts serialized: one in-flight prompt per session; stop vs in-flight
+   cancel semantics defined.
+
+Optional (v1.1+): probe session/load to drop wrapper residency; per-prompt
+escape scan.
