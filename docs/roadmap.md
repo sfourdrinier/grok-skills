@@ -91,11 +91,28 @@ trust marketing; direct is one flag away for people who already live in Grok.
 
 ---
 
+## 2.0.0 peer-agent integration (in progress on `feat/2.0-peer-agent`)
+
+Plan: `docs/superpowers/plans/2026-07-16-peer-agent-integration.md`. Live
+evidence: `docs/checklists/2.0-live-smoke-ledger.md`. One release (2.0.0),
+phases as sequential PRs; most implementation delegated to Grok through this
+plugin's own contract -> code -> handoff pipeline.
+
+| Phase | Content | Status |
+|-------|---------|--------|
+| 0 (PR6) | Hygiene: verify/checks gate + CI, task-file DRY, argv-safety reference, divergence warning, test splits, review fixes | **done 2026-07-17** |
+| 1 (PR7) | Acceptance criteria wired, `implement` combo, unified IDs, direct-mode parity | next |
+| 2 (PR8) | Iteration loop: session archive + `code --continue-run` | planned |
+| 3 (PR9) | Claude Code native surface (bin/, plugin data dir, SubagentStop, userConfig, agent frontmatter) | planned |
+| 4 (PR10) | Codex parity polish | planned |
+| 5+6 (PR11) | ACP probe/spec/experimental peer channel; manifest polish; release | planned |
+
 ## Recommended next order (after Wave 1 polish)
 
 1. ~~**Live validation**~~ done 2026-07-15 (`docs/checklists/wave1-live-results-2026-07-15.md`)
-2. **Linux sandbox profile** when a probe report exists  
-3. Optional apply-worktree UX; Wave 3 multi-agent; official directory listings
+2. **2.0.0 peer-agent phases** (table above)
+3. **Linux sandbox profile** when a probe report exists  
+4. Optional apply-worktree UX; official directory listings
 
 ---
 

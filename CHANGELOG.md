@@ -18,9 +18,10 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 - `tools/verify.sh` + `tools/checks.sh`: one-command verification gate (both unit
   suites, 900-line cap with ratcheting `tools/cap-allowlist.txt`, ASCII-hyphen
   check, `claude plugin validate --strict`). CI gains a `mechanical` job.
-- Canonical fake-wrapper test harness for companion tests
-  (`plugin/scripts/tests/helpers/fake-wrapper.mjs`): tests never spawn the real
-  wrapper or the Grok CLI.
+- Fake-wrapper test harness for companion tests
+  (`plugin/scripts/tests/helpers/fake-wrapper.mjs`): the canonical harness for
+  NEW companion tests (none spawn the real wrapper or the Grok CLI); older
+  suites still carry their own fixtures pending consolidation.
 - `plugin/references/argv-safety.md`: single canonical injection-safety
   reference (task text via stdin heredoc, single-quoted flag values, contract
   `requiredValidation` argv is shell-free); six skills now carry a short inline

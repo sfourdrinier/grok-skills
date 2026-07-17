@@ -29,6 +29,18 @@ No `pip install` or `npm install` is required for unit tests.
 
 ## Tests
 
+### One-command gate (preferred)
+
+```bash
+tools/verify.sh
+```
+
+Runs both unit suites, the mechanical checks (`tools/checks.sh`: 900-line cap
+with ratcheting `tools/cap-allowlist.txt`, ASCII-hyphen rule), and
+`claude plugin validate ./plugin --strict` when the `claude` CLI is present.
+CI runs the same suites and checks; live modes and plugin validate remain
+local gates. The individual commands below remain valid.
+
 ### Wrapper (Python)
 
 ```bash
