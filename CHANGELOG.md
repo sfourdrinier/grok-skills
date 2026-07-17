@@ -198,6 +198,32 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
   claims `/grok:handoff` observes peer-stop ready - handoff stays code-mode only
   and refuses peer runIds (`handoff-unavailable`).
 
+### Fixed (Phase 7 - PR #5 Codex code-review remediation)
+
+Verified each inline review comment against current code (many were already
+resolved or stale after the re-architecture); fixed the genuinely-valid ones in
+three batches. Two release-blockers were real.
+
+- **Direct-mode rollback on abnormal exit:** protected-path rollback now runs on
+  any abnormal Grok exit / gate-or-validation failure / realpath-escape (not just
+  finalize's happy path); deny-scan covers `.env/**`; continue-run on a direct
+  run gives an honest hint.
+- **Peer/ACP (blockers + lifecycle):** the ACP child now runs under the same
+  global `--sandbox <profile>` confinement and minimal env (HOME/PATH/TMPDIR) as
+  code mode (was: unsandboxed + full operator-env passthrough while the envelope
+  claimed confinement); private tmp unified to `<home>/tmp` (two-phase, no leak);
+  peer-stop fails closed on auth-teardown failure; fallback kills the orphaned
+  child (fail-safe, positive-identity + never-own-group); stdout-suppress armed
+  before serving; strict UTF-8 ACP frame decode; companion peer-start exits
+  nonzero unless status=running; start-parity test no longer breaks a clean CI.
+- **Companion correctness/security:** continue-run exempt from direct consent;
+  `parseTargetFlag` last-wins (matches wrapper); setup bare-mode scan skips flag
+  values; session archive skips symlinks; contiguous secret-shaped test literals
+  split (AGENTS.md #8); handoff-consumed marker now written; auto-apply blocks
+  dirty-overlap; legacy prefs pinned as setup only when non-default.
+- Deferred (tracked): implement/auto job+notify finalize after handoff; peer
+  start-abort home/worktree cleanup guard; model-created cwd sentinel.
+
 ### Changed (Phase 0)
 
 - `plugin/scripts/lib/task-file.mjs`: task-text temp staging deduplicated
@@ -210,7 +236,7 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 
 ### Suite counts (ratchet)
 
-- Wrapper: 653 -> 787. Plugin: 172 -> 271 (through Phase 7 review remediation).
+- Wrapper: 653 -> 799. Plugin: 172 -> 280 (through PR #5 code-review remediation).
 
 ## [1.6.0] - 2026-07-16
 
