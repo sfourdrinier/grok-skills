@@ -240,17 +240,34 @@ Two postures, same skills:
 | **hardened** (default) | omit, or `/grok:setup` with `--run-mode hardened` | Private Grok home, sandbox verification, worktree isolation, secret redaction. | **Yes** - verified patch + handoff manifest under the run dir. |
 | **direct** | `GROK_SKILLS_MODE=direct` or companion `setup --run-mode direct` | Uses your **installed Grok CLI** and normal `~/.grok` auth - same idea as OpenAI's plugin using your installed Codex. Faster, less isolation. Direct mode does **not** push completion notify in 1.5.0 (job still tracked). Job surface (`result`/`cancel`) accepts `direct-<timestamp>` ids; `handoff`/`status --run-id`/`implement` refuse with an honest message. | **No** - by design: handoff artifacts' value is the isolation evidence (worktree, sentinel, sandbox verification) that direct mode cannot attest. |
 
-On Claude Code, plugin `userConfig` (Settings) can also set the default run mode
-and notification prefs. The host exports them as `CLAUDE_PLUGIN_OPTION_*` env
-vars. Precedence: `/grok:setup` workspace prefs > `userConfig` env > built-in
-defaults (invalid env values are ignored). Job state prefers absolute
-`CLAUDE_PLUGIN_DATA` when the host provides it. Details:
+### Integration modes (how edits land)
+
+Orthogonal to run mode (security). Default for code/implement is **direct**
+(edit this working tree), but the first direct run in a workspace without
+recorded consent fails closed with a trust summary. Accept once:
+
+```bash
+node "$SKILL_BASE/run.mjs" setup --integration direct
+```
+
+Or opt into isolation for a single run: `--integration worktree` or
+`--integration review`. Settings `userConfig.integrationMode` / env
+`CLAUDE_PLUGIN_OPTION_INTEGRATIONMODE` are a default hint only - they do **not**
+satisfy consent; only setup does. Full mode matrix (Task 7.5 reference) lands
+with the peer-native integration docs.
+
+On Claude Code, plugin `userConfig` (Settings) can also set the default run mode,
+integration mode, and notification prefs. The host exports them as
+`CLAUDE_PLUGIN_OPTION_*` env vars. Precedence: `/grok:setup` workspace prefs >
+`userConfig` env > built-in defaults (invalid env values are ignored). Job state
+prefers absolute `CLAUDE_PLUGIN_DATA` when the host provides it. Details:
 [plugin/references/README.md](plugin/references/README.md).
 
 ```bash
 # Prefer skill runner after Skill tool load:
 node "$SKILL_BASE/run.mjs" setup --run-mode direct
 node "$SKILL_BASE/run.mjs" setup --run-mode hardened
+node "$SKILL_BASE/run.mjs" setup --integration direct
 # Or from a known install:
 node "${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}/scripts/grok-companion.mjs" setup --run-mode hardened
 ```

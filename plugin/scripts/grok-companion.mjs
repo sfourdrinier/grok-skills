@@ -27,6 +27,7 @@ import {
   createJob,
   findJobByRunId,
   formatJobsTable,
+  gateIntegrationForCodeish,
   getJob,
   getLastRescueJobId,
   getRunMode,
@@ -109,6 +110,7 @@ function stripFlags(args) {
   const out = [];
   let pretty = false;
   let runMode = null;
+  let integration = null;
   let jsonOut = false;
   let base = null;
   let resume = false;
@@ -141,6 +143,15 @@ function stripFlags(args) {
       runMode = args[++i];
       continue;
     }
+    // Integration (how edits land) - resolved + consent-gated for code/implement.
+    if (a === "--integration" && args[i + 1]) {
+      integration = args[++i];
+      continue;
+    }
+    if (typeof a === "string" && a.startsWith("--integration=")) {
+      integration = a.slice("--integration=".length);
+      continue;
+    }
     if (a === "--base" && args[i + 1]) {
       // Captured for review framing; re-attached for code mode later.
       base = args[++i];
@@ -148,7 +159,7 @@ function stripFlags(args) {
     }
     out.push(a);
   }
-  return { args: out, pretty, runMode, jsonOut, base, resume, fresh, noNotify };
+  return { args: out, pretty, runMode, integration, jsonOut, base, resume, fresh, noNotify };
 }
 
 function ensureTarget(args, cwd) {
@@ -527,7 +538,7 @@ function hasFlag(args, name) {
 
 // Post-staging dispatch. Staged stdin cleanup is owned by main()'s finally.
 async function dispatch({
-  cwd, stripped, pretty, runModeFlag, baseRef, resume, fresh, noNotify, staged,
+  cwd, stripped, pretty, runModeFlag, integrationFlag, baseRef, resume, fresh, noNotify, staged,
 }) {
   const forwardedArgs = staged ? staged.args : stripped;
   let mode = forwardedArgs[0];
@@ -561,7 +572,14 @@ async function dispatch({
   if (mode === "result") return cmdResult(cwd, rest, pretty || rest.includes("--pretty"));
   if (mode === "cancel") return cmdCancel(cwd, rest);
   if (mode === "transfer") return cmdTransfer(cwd, rest);
-  if (mode === "setup") return cmdSetup(cwd, rest);
+  // stripFlags peels --integration for the code/implement gate; re-attach for setup.
+  if (mode === "setup") {
+    const setupArgs =
+      integrationFlag != null && String(integrationFlag).trim() !== ""
+        ? ["--integration", String(integrationFlag), ...rest]
+        : rest;
+    return cmdSetup(cwd, setupArgs);
+  }
   if (mode === "render") return cmdResult(cwd, rest, true);
 
   // One-shot --run-mode does NOT persist; only setup may write workspace mode.
@@ -578,6 +596,19 @@ async function dispatch({
       stderrLine(`[grok-companion] --resume: last rescue job was ${getLastRescueJobId(cwd)}`);
     }
     if (fresh) stderrLine("[grok-companion] --fresh: starting a new rescue thread");
+  }
+
+  // Integration consent gate (code/implement only). Refuses before wrapper spawn.
+  // Re-bind rest so implement/code see the explicit --integration <effective>.
+  {
+    const gated = gateIntegrationForCodeish(mode, rest, integrationFlag, cwd);
+    if (!gated.ok) {
+      process.stderr.write(gated.message);
+      return gated.code;
+    }
+    if (gated.effective != null) {
+      rest = gated.rest;
+    }
   }
 
   if (mode === "debate") {
@@ -607,8 +638,9 @@ async function dispatch({
     }, { runWithLiveRelay, stderrLine });
   }
 
+  // Rebuild forwarded args after integration injection into rest (code path).
   let wrapperArgs =
-    mode.startsWith("peer-") ? [mode, ...rest] : forwardedArgs;
+    mode.startsWith("peer-") ? [mode, ...rest] : [mode, ...rest];
   let extraCleanup = null;
   let wrapperMode = mode;
 
@@ -792,6 +824,7 @@ async function main() {
     args: stripped,
     pretty,
     runMode: runModeFlag,
+    integration: integrationFlag,
     base: baseRef,
     resume,
     fresh,
@@ -815,6 +848,7 @@ async function main() {
       stripped,
       pretty,
       runModeFlag,
+      integrationFlag,
       baseRef,
       resume,
       fresh,

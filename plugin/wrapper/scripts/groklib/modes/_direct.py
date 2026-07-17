@@ -15,7 +15,9 @@
 #     is not enough. Reads of secrets are NOT blocked (D-SECRETREAD gap).
 #   - Do NOT claim the sandbox keeps the tree "safe". verify_enforcement proves
 #     grant coverage of the writable roots; snapshot/restore + deny scan +
-#     write-scope + dirty overlap are the remaining policy layers.
+#     write-scope + dirty overlap are the remaining policy layers. Deny scans
+#     the full changed-set (incl. gitignored .env); scope + dirty-overlap use
+#     source changes only (gitignored byproducts excluded via check-ignore).
 #   - Backlog: probe seatbelt write-deny subpaths for true prevention.
 #
 # Intentionally does NOT reuse run_grok_mode (no finalize hook; read-only single

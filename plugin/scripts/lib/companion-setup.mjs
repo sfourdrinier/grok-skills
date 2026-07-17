@@ -16,11 +16,16 @@ import {
 import { grokBinaryAvailable } from "./direct-grok.mjs";
 import { readGateConfig, writeGateConfig } from "./gate-state.mjs";
 import {
+  getIntegrationConsent,
+  getIntegrationMode,
   getNotificationConfig,
   getRunMode,
+  INTEGRATION_MODES,
   NOTIFICATION_MODES,
+  parseIntegrationMode,
   parseNotificationMode,
   parseWebhookUrl,
+  setIntegrationMode,
   setNotificationConfig,
   setRunMode,
 } from "./jobs.mjs";
@@ -57,11 +62,42 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
       }
     }
   }
-  if (args.includes("--run-mode") || args.includes("direct") || args.includes("hardened")) {
+  // runMode is security posture (hardened|direct). Do not treat --integration
+  // direct/worktree/... values as run-mode (orthogonal axis).
+  {
     const idx = args.indexOf("--run-mode");
-    const mode = idx >= 0 ? args[idx + 1] : args.find((a) => a === "direct" || a === "hardened");
+    let mode = null;
+    if (idx >= 0) {
+      mode = args[idx + 1];
+    } else {
+      // Bare convenience: setup direct | setup hardened (not a flag value).
+      for (let i = 0; i < args.length; i++) {
+        const a = args[i];
+        if (a !== "direct" && a !== "hardened") continue;
+        const prev = args[i - 1];
+        if (prev === "--integration" || prev === "--run-mode") continue;
+        mode = a;
+        break;
+      }
+    }
     if (mode === "direct" || mode === "hardened") {
       setRunMode(cwd, mode);
+    }
+  }
+  // Integration mode (how edits land) - orthogonal to runMode security posture.
+  let invalidIntegrationMode = null;
+  const integrationIdx = args.indexOf("--integration");
+  if (integrationIdx >= 0) {
+    const rawIntegration = args[integrationIdx + 1];
+    if (rawIntegration === undefined || String(rawIntegration).startsWith("--")) {
+      invalidIntegrationMode = "(missing value)";
+    } else {
+      const parsedIntegration = parseIntegrationMode(rawIntegration);
+      if (!parsedIntegration) {
+        invalidIntegrationMode = String(rawIntegration).trim() || rawIntegration;
+      } else {
+        setIntegrationMode(cwd, parsedIntegration);
+      }
     }
   }
   // Notification prefs: parse all flags first; apply atomically or apply none.
@@ -112,6 +148,8 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
 
   const gate = readGateConfig(cwd);
   const runMode = getRunMode(cwd);
+  const integrationMode = getIntegrationMode(cwd);
+  const integrationConsent = getIntegrationConsent(cwd);
   const notifyPrefs = getNotificationConfig(cwd);
   const codexAgentsScope = invalidCodexAgentsScope
     ? priorCodexAgentsScope
@@ -129,6 +167,18 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
       notifyPrefs.notificationWebhookUrl ? `; webhook=${webhookDetail}` : ""
     }`;
   }
+  let integrationDetail;
+  if (invalidIntegrationMode) {
+    integrationDetail = `invalid ${JSON.stringify(invalidIntegrationMode)} (integration prefs unchanged)`;
+  } else {
+    integrationDetail = `${integrationMode}${
+      integrationMode === "direct"
+        ? integrationConsent
+          ? "; consent=yes"
+          : "; consent=no (first direct run will refuse)"
+        : ""
+    }`;
+  }
   const rows = [
     {
       name: "grok CLI",
@@ -144,6 +194,11 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
       name: "run mode",
       ok: true,
       detail: runMode,
+    },
+    {
+      name: "integration mode",
+      ok: !invalidIntegrationMode,
+      detail: integrationDetail,
     },
     {
       name: "notifications",
@@ -178,6 +233,15 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
   } else {
     hints.push(
       "Hardened mode is default. For installed-CLI posture: companion setup --run-mode direct"
+    );
+  }
+  if (invalidIntegrationMode) {
+    hints.push(
+      `Valid --integration values: ${INTEGRATION_MODES.join(" | ")}. Integration prefs were not changed.`
+    );
+  } else if (integrationMode === "direct" && !integrationConsent) {
+    hints.push(
+      "Direct integration is the default but needs one-time consent: setup --integration direct (or use --integration worktree for isolation)."
     );
   }
   if (invalidNotificationMode) {
@@ -304,6 +368,7 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
     agentsOk &&
     !notifyPrefsInvalid &&
     !invalidCodexAgentsScope &&
+    !invalidIntegrationMode &&
     preflightOk
     ? 0
     : 1;

@@ -63,7 +63,17 @@ test("implement runs code then handoff and exits 0 only when ready", () => {
   });
   try {
     const res = runCompanion(
-      ["implement", "--target", ".", "--base", "HEAD", "--task", "fix it"],
+      [
+        "implement",
+        "--integration",
+        "worktree",
+        "--target",
+        ".",
+        "--base",
+        "HEAD",
+        "--task",
+        "fix it",
+      ],
       { cwd, env: companionEnv(env, cwd, callsPath) }
     );
     assert.equal(res.code, 0, `stderr: ${res.stderr}`);
@@ -92,7 +102,17 @@ test("implement exits 1 when handoff not ready", () => {
   });
   try {
     const res = runCompanion(
-      ["implement", "--target", ".", "--base", "HEAD", "--task", "fix it"],
+      [
+        "implement",
+        "--integration",
+        "worktree",
+        "--target",
+        ".",
+        "--base",
+        "HEAD",
+        "--task",
+        "fix it",
+      ],
       { cwd, env: companionEnv(env, cwd, callsPath) }
     );
     assert.equal(res.code, 1, `expected exit 1; stderr: ${res.stderr}`);
@@ -115,7 +135,17 @@ test("implement exits 1 when code envelope has no runId", () => {
   });
   try {
     const res = runCompanion(
-      ["implement", "--target", ".", "--base", "HEAD", "--task", "fix it"],
+      [
+        "implement",
+        "--integration",
+        "worktree",
+        "--target",
+        ".",
+        "--base",
+        "HEAD",
+        "--task",
+        "fix it",
+      ],
       { cwd, env: companionEnv(env, cwd, callsPath) }
     );
     assert.equal(res.code, 1, `stderr: ${res.stderr}`);
@@ -144,7 +174,17 @@ test("implement runs handoff after failed code with runId and exits 1", () => {
   });
   try {
     const res = runCompanion(
-      ["implement", "--target", ".", "--base", "HEAD", "--task", "fix it"],
+      [
+        "implement",
+        "--integration",
+        "worktree",
+        "--target",
+        ".",
+        "--base",
+        "HEAD",
+        "--task",
+        "fix it",
+      ],
       { cwd, env: companionEnv(env, cwd, callsPath) }
     );
     assert.equal(res.code, 1, `expected exit 1; stderr: ${res.stderr}`);
@@ -166,7 +206,17 @@ test("implement no-runId spawn-failure path returns 1", () => {
   const { env, cleanup } = makeFakeWrapper({});
   try {
     const res = runCompanion(
-      ["implement", "--target", ".", "--base", "HEAD", "--task", "fix it"],
+      [
+        "implement",
+        "--integration",
+        "worktree",
+        "--target",
+        ".",
+        "--base",
+        "HEAD",
+        "--task",
+        "fix it",
+      ],
       { cwd, env: companionEnv(env, cwd, callsPath) }
     );
     assert.equal(res.code, 1, `expected exit 1 (not raw spawn code); stderr: ${res.stderr}`);
@@ -191,7 +241,17 @@ test("implement refuses in direct run-mode", () => {
   const { env, cleanup } = makeFakeWrapper({});
   try {
     const res = runCompanion(
-      ["implement", "--target", ".", "--base", "HEAD", "--task", "fix it"],
+      [
+        "implement",
+        "--integration",
+        "worktree",
+        "--target",
+        ".",
+        "--base",
+        "HEAD",
+        "--task",
+        "fix it",
+      ],
       {
         cwd,
         env: {

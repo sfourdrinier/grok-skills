@@ -126,9 +126,12 @@ test("degrade (ii) unreadable progress mid-run: envelope still delivered exactly
 });
 
 test("degrade (iii) run fails: failure envelope delivered verbatim, exit 1", () => {
-  const { result, iso } = runCompanion(["code", "--target", ".", "--base", "HEAD", "--task", "x"], {
-    GROK_FAKE_EXIT: "1",
-  });
+  const { result, iso } = runCompanion(
+    ["code", "--integration", "worktree", "--target", ".", "--base", "HEAD", "--task", "x"],
+    {
+      GROK_FAKE_EXIT: "1",
+    }
+  );
   try {
     assert.equal(result.status, 1);
 

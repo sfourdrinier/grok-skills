@@ -14,7 +14,7 @@ import { spawnSync } from "node:child_process";
 // deterministic root-resolution test is not flaky under load.
 function spawnNode(args) {
   let result;
-  for (let attempt = 0; attempt < 4; attempt++) {
+  for (let attempt = 0; attempt < 8; attempt++) {
     result = spawnSync(process.execPath, args, { encoding: "utf8" });
     // Retry on any spawn-level error OR a non-zero exit under load (EAGAIN can
     // surface either way when the machine is saturated with concurrent
@@ -22,6 +22,9 @@ function spawnNode(args) {
     if (!result.error && result.status === 0) {
       return result;
     }
+    // small backoff so a transient resource shortage can clear
+    const until = Date.now() + 25 * (attempt + 1);
+    while (Date.now() < until) { /* spin briefly */ }
   }
   return result;
 }

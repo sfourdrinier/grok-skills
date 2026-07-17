@@ -5,12 +5,17 @@
 #
 #   1. changed-set fingerprint diff (baseline vs after)
 #   2. realpath-under-repo per changed path
-#   3. deny-glob scan -> protected-path-write (+ ROLLBACK via direct_protect)
-#   4. contract writeScopes scan -> write-scope-violation
+#   3. deny-glob scan over FULL changed-set -> protected-path-write (+ ROLLBACK)
+#   4. contract writeScopes scan on SOURCE changes only -> write-scope-violation
 #   5. D1(b) gate-script integrity + build gate (reuse code helpers)
 #   6. contract requiredValidation (reuse code._run_recorded_command)
 #   7. re-diff (build/validation may have written)
-#   8. dirty-overlap -> dirty-path-conflict unless --force
+#   8. dirty-overlap on SOURCE changes only -> dirty-path-conflict unless --force
+#
+# SOURCE vs FULL changed-set (7.1c): repo_change_fingerprint includes gitignored
+# paths so deny still catches .env. Scope + dirty-overlap use source_changed =
+# changed minus git_ignored_paths (batch check-ignore), so __pycache__/*.pyc and
+# other ignored byproducts from build/validation never fail those checks.
 #
 # SECURITY: direct mode does NOT prevent protected writes at the sandbox layer
 # (workspace is whole-root). The deny scan + direct_protect snapshot/restore
@@ -20,6 +25,7 @@
 
 import fnmatch
 import pathlib
+import subprocess
 import types
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
@@ -118,6 +124,69 @@ def _changed_paths(
     added_or_changed = {relative for relative, _fingerprint in (after_fp - baseline_fp)}
     removed_or_changed = {relative for relative, _fingerprint in (baseline_fp - after_fp)}
     return added_or_changed | removed_or_changed
+
+
+def git_ignored_paths(repo_root: pathlib.Path, paths: Set[str]) -> Set[str]:
+    """Return the subset of ``paths`` that git considers ignored under ``repo_root``.
+
+    Batch ``git check-ignore --stdin -z`` over the candidate set (NUL-separated
+    path stream). Empty ``paths`` or none-ignored (git exit 1) returns an empty
+    set. Non-probe failures fail closed as worktree-failure. Used to derive
+    source_changed for scope + dirty-overlap while the deny scan keeps the full
+    changed-set.
+    """
+    if not paths:
+        return set()
+    # NUL-separated stdin matches git check-ignore --stdin -z contract.
+    payload = "\0".join(sorted(paths)) + "\0"
+    argv = [
+        "git",
+        "-c",
+        "core.hooksPath={}".format(worktree_mod._EMPTY_GIT_HOOKS),
+        "-C",
+        str(repo_root),
+        "check-ignore",
+        "--stdin",
+        "-z",
+    ]
+    try:
+        completed = subprocess.run(
+            argv,
+            input=payload,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            encoding="utf-8",
+            env=worktree_mod._git_env(),
+            timeout=worktree_mod._GIT_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _log("git_ignored_paths", "check-ignore could not be executed: {}".format(exc))
+        raise GrokWrapperError(
+            "worktree-failure",
+            "git check-ignore could not be executed: {}".format(exc),
+            {"argv": argv},
+        ) from exc
+    # git check-ignore: 0 = one or more ignored, 1 = none ignored, 128 = fatal.
+    if completed.returncode == 1:
+        return set()
+    if completed.returncode != 0:
+        stderr = (completed.stderr or "").strip()
+        _log(
+            "git_ignored_paths",
+            "check-ignore failed exit={}: {}".format(completed.returncode, stderr),
+        )
+        raise GrokWrapperError(
+            "worktree-failure",
+            "git check-ignore failed while classifying changed paths",
+            {"exitStatus": completed.returncode, "stderr": stderr},
+        )
+    return {part for part in completed.stdout.split("\0") if part}
+
+
+def _source_changed_paths(repo_root: pathlib.Path, changed: Set[str]) -> Set[str]:
+    """Changed paths minus git-ignored byproducts (for scope + dirty-overlap only)."""
+    return changed - git_ignored_paths(repo_root, changed)
 
 
 def _assert_realpath_under_repo(repo_root: pathlib.Path, changed: Set[str]) -> None:
@@ -305,11 +374,13 @@ def finalize_direct(
     protect_snapshot = getattr(stage, "protect_snapshot", None)
 
     _assert_realpath_under_repo(repo_root, changed)
+    # Deny keeps the FULL changed-set (incl. gitignored .env); scope uses source only.
     _assert_deny_globs(changed, repo_root=repo_root, protect_snapshot=protect_snapshot)
     _assert_git_dir_untouched(
         stage.baseline_git_fp, repo_root, protect_snapshot=protect_snapshot
     )
-    _assert_write_scopes(changed, contract)
+    source_changed = _source_changed_paths(repo_root, changed)
+    _assert_write_scopes(source_changed, contract)
 
     # D1(b): pristine scripts from HEAD (already captured at prepare); refuse
     # Grok-modified gate scripts, then run the build gate in the real tree.
@@ -335,9 +406,11 @@ def finalize_direct(
     _assert_git_dir_untouched(
         stage.baseline_git_fp, repo_root, protect_snapshot=protect_snapshot
     )
-    _assert_write_scopes(changed, contract)
+    source_changed = _source_changed_paths(repo_root, changed)
+    _assert_write_scopes(source_changed, contract)
 
-    overlap = sorted(changed & dirty_paths)
+    # Dirty-overlap ignores gitignored byproducts (same source filter as scope).
+    overlap = sorted(source_changed & dirty_paths)
     if overlap and not stage.force:
         _log("finalize_direct", "dirty-path-conflict: {}".format(overlap))
         raise GrokWrapperError(

@@ -26,6 +26,12 @@
       "description": "Security posture for live Grok runs: hardened (private home, sandbox, worktrees) or direct (your installed CLI)",
       "default": "hardened"
     },
+    "integrationMode": {
+      "type": "string",
+      "title": "Integration mode",
+      "description": "How code edits land: direct (this tree; needs one-time setup consent), worktree (isolated), auto, or review. Orthogonal to run mode.",
+      "default": "direct"
+    },
     "notificationMode": {
       "type": "string",
       "title": "Completion notifications",

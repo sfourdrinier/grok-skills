@@ -224,6 +224,110 @@ class DirectModeSecurityTests(DirectModeHarness):
         self.assertEqual(exit_code, 1, out)
         self.assertEqual(env["error"]["class"], "write-scope-violation")
 
+    def test_ignored_byproduct_outside_scopes_not_scope_violation(self) -> None:
+        """Gitignored build byproducts outside writeScopes must not fail scope (7.1c)."""
+        repo = self.make_code_repo()
+        (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n", encoding="utf-8")
+        self._git(repo, "add", ".gitignore")
+        self._git(repo, "commit", "-q", "-m", "ignore pycache byproducts")
+        contract = {
+            "schemaVersion": 1,
+            "taskId": "direct-byproduct-scope",
+            "objective": "only touch pkg/mod.txt",
+            "acceptanceCriteria": ["mod only"],
+            "target": "pkg",
+            "writeScopes": [{"kind": "file", "path": "pkg/mod.txt"}],
+            "requiredValidation": [],
+        }
+        contract_path = pathlib.Path(self.tmp_root) / "contract-byproduct.json"
+        contract_path.write_text(json.dumps(contract), encoding="utf-8")
+
+        def _plant(repo_root: pathlib.Path, _run_id: str) -> None:
+            # In-scope legitimate edit plus an ignored byproduct OUTSIDE scopes
+            # (simulates validation/build writing __pycache__ outside the contract).
+            (repo_root / "pkg" / "mod.txt").write_text("module fixed\n", encoding="utf-8")
+            pycache = repo_root / "other" / "__pycache__"
+            pycache.mkdir(parents=True, exist_ok=True)
+            (pycache / "_direct.cpython-314.pyc").write_bytes(b"\0bytecode\0")
+
+        exit_code, out = self.drive_direct(
+            self._direct_argv("--contract-file", str(contract_path)),
+            repo_root=repo,
+            plant=_plant,
+        )
+        env = json.loads(out)
+        self.assertEqual(exit_code, 0, out)
+        self.assertEqual(env["status"], "success")
+        self.assertNotEqual(env.get("error", {}).get("class"), "write-scope-violation")
+
+    def test_source_outside_scopes_still_write_scope_violation(self) -> None:
+        """Genuine source outside writeScopes must still fail (scope enforcement intact)."""
+        repo = self.make_code_repo()
+        (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n", encoding="utf-8")
+        self._git(repo, "add", ".gitignore")
+        self._git(repo, "commit", "-q", "-m", "ignore pycache byproducts")
+        contract = {
+            "schemaVersion": 1,
+            "taskId": "direct-source-scope",
+            "objective": "only touch pkg/mod.txt",
+            "acceptanceCriteria": ["mod only"],
+            "target": "pkg",
+            "writeScopes": [{"kind": "file", "path": "pkg/mod.txt"}],
+            "requiredValidation": [],
+        }
+        contract_path = pathlib.Path(self.tmp_root) / "contract-source-scope.json"
+        contract_path.write_text(json.dumps(contract), encoding="utf-8")
+
+        def _plant(repo_root: pathlib.Path, _run_id: str) -> None:
+            (repo_root / "a.txt").write_text("genuine source outside scope\n", encoding="utf-8")
+
+        exit_code, out = self.drive_direct(
+            self._direct_argv("--contract-file", str(contract_path)),
+            repo_root=repo,
+            plant=_plant,
+        )
+        env = json.loads(out)
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(env["error"]["class"], "write-scope-violation")
+        self.assertIn("a.txt", json.dumps(env["error"]))
+
+    def test_ignored_byproduct_operator_dirty_not_dirty_path_conflict(self) -> None:
+        """Operator-dirty gitignored byproduct modified by Grok is not dirty-path-conflict."""
+        repo = self.make_code_repo()
+        (repo / ".gitignore").write_text("__pycache__/\n*.pyc\n", encoding="utf-8")
+        self._git(repo, "add", ".gitignore")
+        self._git(repo, "commit", "-q", "-m", "ignore pycache byproducts")
+        # Pre-existing operator dirt that is gitignored (build byproduct).
+        pycache = repo / "__pycache__"
+        pycache.mkdir(parents=True, exist_ok=True)
+        (pycache / "pre.cpython-314.pyc").write_bytes(b"operator-v1")
+
+        def _plant(repo_root: pathlib.Path, _run_id: str) -> None:
+            (repo_root / "__pycache__" / "pre.cpython-314.pyc").write_bytes(b"grok-v2")
+            (repo_root / "pkg" / "mod.txt").write_text("module fixed\n", encoding="utf-8")
+
+        exit_code, out = self.drive_direct(self._direct_argv(), repo_root=repo, plant=_plant)
+        env = json.loads(out)
+        self.assertEqual(exit_code, 0, out)
+        self.assertEqual(env["status"], "success")
+        self.assertNotEqual(env.get("error", {}).get("class"), "dirty-path-conflict")
+
+    def test_env_ignored_and_deny_still_protected_path_write(self) -> None:
+        """Deny scan still catches .env even when it is also gitignored (7.1c)."""
+        repo = self.make_code_repo()
+        (repo / ".gitignore").write_text(".env\n.env.*\n", encoding="utf-8")
+        self._git(repo, "add", ".gitignore")
+        self._git(repo, "commit", "-q", "-m", "ignore env files")
+
+        def _plant(repo_root: pathlib.Path, _run_id: str) -> None:
+            (repo_root / ".env").write_text("SECRET=shhh\n", encoding="utf-8")
+
+        exit_code, out = self.drive_direct(self._direct_argv(), repo_root=repo, plant=_plant)
+        env = json.loads(out)
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(env["error"]["class"], "protected-path-write")
+        self.assertIn(".env", json.dumps(env["error"]))
+
     def test_dirty_overlap_fails_without_force(self) -> None:
         repo = self.make_code_repo()
         # make_repo leaves dirty.txt untracked; also dirtied here for clarity.

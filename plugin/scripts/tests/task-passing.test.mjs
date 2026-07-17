@@ -102,7 +102,18 @@ test("a --target value with shell metacharacters reaches the wrapper as a litera
     const hostileTarget = `pkgs/$(touch ${marker})\`whoami\`;rm -rf x`;
     const result = spawnSync(
       process.execPath,
-      [COMPANION, "code", "--target", hostileTarget, "--base", "HEAD", "--task-file", "-"],
+      [
+        COMPANION,
+        "code",
+        "--integration",
+        "worktree",
+        "--target",
+        hostileTarget,
+        "--base",
+        "HEAD",
+        "--task-file",
+        "-",
+      ],
       {
         encoding: "utf8",
         input: "implement it\n",

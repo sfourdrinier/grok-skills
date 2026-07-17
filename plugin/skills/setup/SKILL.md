@@ -1,7 +1,7 @@
 ---
 name: "setup"
 description: "Check Grok readiness and optionally toggle stop gate / run mode / Codex agents scope (Codex agents auto-install on SessionStart)"
-argument-hint: "[--enable-review-gate | --disable-review-gate] [--run-mode hardened|direct] [--notification-mode off|auto|native|webhook] [--notification-webhook-url <url>] [--codex-agents-scope user|project] [--force-codex-agents] [--skip-codex-agents] [--remove-codex-agents]"
+argument-hint: "[--enable-review-gate | --disable-review-gate] [--run-mode hardened|direct] [--integration direct|worktree|auto|review] [--notification-mode off|auto|native|webhook] [--notification-webhook-url <url>] [--codex-agents-scope user|project] [--force-codex-agents] [--skip-codex-agents] [--remove-codex-agents]"
 allowed-tools: "Bash(node:*)"
 ---
 
@@ -60,6 +60,8 @@ Supported flags:
 |------|--------|
 | `--run-mode hardened` | Persist hardened mode (default) |
 | `--run-mode direct` | Persist direct (installed Grok CLI home) |
+| `--integration direct` | Persist integration mode **and** record one-time consent for live-tree edits (orthogonal to run mode) |
+| `--integration worktree\|auto\|review` | Persist integration mode (no consent required; isolated / review paths) |
 | `--notification-mode off\|auto\|native\|webhook` | Completion signal prefs (default `off`; **auto** recommended for background jobs) |
 | `--notification-webhook-url <url>` | Webhook URL when mode is `webhook` |
 | `--enable-review-gate` | Opt-in stop-time review gate |
@@ -74,6 +76,7 @@ Examples:
 ```bash
 node "$SKILL_BASE/run.mjs" setup
 node "$SKILL_BASE/run.mjs" setup --run-mode hardened
+node "$SKILL_BASE/run.mjs" setup --integration direct
 node "$SKILL_BASE/run.mjs" setup --notification-mode auto
 node "$SKILL_BASE/run.mjs" setup --codex-agents-scope project
 node "$SKILL_BASE/run.mjs" setup --force-codex-agents
@@ -85,7 +88,8 @@ node "$SKILL_BASE/run.mjs" setup --enable-review-gate
 
 - Grok CLI presence / version
 - Bundled wrapper path
-- Run mode (hardened vs direct)
+- Run mode (hardened vs direct security posture)
+- Integration mode (how code edits land) + direct consent status
 - Stop-review gate on/off
 - **Codex agents scope** (`user` or `project`)
 - **Codex agents** ensure result (dest from scope, absolute `agents/run.mjs`)

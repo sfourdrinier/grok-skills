@@ -32,7 +32,29 @@ export const DEFAULT_JOBS_CONFIG = Object.freeze({
   notificationMode: "off",
   notificationWebhookUrl: null,
   lastRescueJobId: null,
+  // Integration (how edits land) is orthogonal to runMode (security posture).
+  integrationMode: "direct",
+  integrationConsent: false,
 });
+
+/** Integration modes for code/implement (how edits land). Not runMode. */
+export const INTEGRATION_MODES = Object.freeze([
+  "direct",
+  "worktree",
+  "auto",
+  "review",
+]);
+
+/**
+ * @param {unknown} value
+ * @returns {"direct"|"worktree"|"auto"|"review"|null}
+ */
+export function parseIntegrationMode(value) {
+  const v = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  return INTEGRATION_MODES.includes(v) ? v : null;
+}
 
 /**
  * Claude Code exports userConfig values as CLAUDE_PLUGIN_OPTION_<KEY> with the
@@ -45,6 +67,7 @@ const PLUGIN_OPTION_WEBHOOK_KEYS = [
   "NOTIFICATIONWEBHOOKURL",
   "NOTIFICATION_WEBHOOK_URL",
 ];
+const PLUGIN_OPTION_INTEGRATIONMODE_KEYS = ["INTEGRATIONMODE", "INTEGRATION_MODE"];
 
 /** Normalize stored/corrupt config values to a known mode (default off). */
 function normalizeNotificationMode(value) {
@@ -79,6 +102,9 @@ function normalizeConfig(raw, opts = {}) {
     notificationMode: normalizeNotificationMode(raw?.notificationMode),
     notificationWebhookUrl: normalizeWebhookUrl(raw?.notificationWebhookUrl),
     lastRescueJobId: raw?.lastRescueJobId ?? null,
+    integrationMode:
+      parseIntegrationMode(raw?.integrationMode) ?? DEFAULT_JOBS_CONFIG.integrationMode,
+    integrationConsent: raw?.integrationConsent === true,
     prefsSources,
   };
 }
@@ -375,6 +401,8 @@ function saveIndex(cwd, index, env = process.env) {
       notificationMode: config.notificationMode,
       notificationWebhookUrl: config.notificationWebhookUrl,
       lastRescueJobId: config.lastRescueJobId,
+      integrationMode: config.integrationMode,
+      integrationConsent: config.integrationConsent === true,
       prefsSources: config.prefsSources ?? {},
     },
     jobs,
@@ -414,6 +442,134 @@ export function setRunMode(cwd, mode, env = process.env) {
   index.config.prefsSources = { ...(index.config.prefsSources ?? {}), runMode: "setup" };
   saveIndex(cwd, index, env);
   return index.config.runMode;
+}
+
+/**
+ * Effective integration mode (how edits land: direct|worktree|auto|review).
+ * Precedence: setup prefs > CLAUDE_PLUGIN_OPTION_INTEGRATIONMODE > default.
+ * Orthogonal to runMode. Env alone is a default hint, never consent.
+ * @returns {"direct"|"worktree"|"auto"|"review"}
+ */
+export function getIntegrationMode(cwd, env = process.env) {
+  const config = loadIndex(cwd, env).config;
+  if (isSetupAuthored(config, "integrationMode")) {
+    return (
+      parseIntegrationMode(config.integrationMode) ?? DEFAULT_JOBS_CONFIG.integrationMode
+    );
+  }
+  const opt = readPluginOption(env, PLUGIN_OPTION_INTEGRATIONMODE_KEYS);
+  if (opt) {
+    const mode = parseIntegrationMode(opt.value);
+    if (mode) {
+      return mode;
+    }
+    noteInvalidPluginOption(opt.name, opt.value);
+  }
+  return DEFAULT_JOBS_CONFIG.integrationMode;
+}
+
+/**
+ * True only when setup --integration direct recorded operator consent.
+ * Env / userConfig alone never satisfies this gate.
+ */
+export function getIntegrationConsent(cwd, env = process.env) {
+  const config = loadIndex(cwd, env).config;
+  return config.integrationConsent === true && isSetupAuthored(config, "integrationConsent");
+}
+
+/**
+ * Persist integrationMode via setup. For direct, also records integrationConsent.
+ * Does not touch runMode.
+ * @param {string} cwd
+ * @param {string} mode
+ * @returns {"direct"|"worktree"|"auto"|"review"|null} null when mode invalid
+ */
+export function setIntegrationMode(cwd, mode, env = process.env) {
+  const parsed = parseIntegrationMode(mode);
+  if (!parsed) {
+    return null;
+  }
+  const index = loadIndex(cwd, env);
+  if (!index.config.prefsSources || typeof index.config.prefsSources !== "object") {
+    index.config.prefsSources = {};
+  }
+  index.config.integrationMode = parsed;
+  index.config.prefsSources.integrationMode = "setup";
+  if (parsed === "direct") {
+    index.config.integrationConsent = true;
+    index.config.prefsSources.integrationConsent = "setup";
+  }
+  saveIndex(cwd, index, env);
+  return parsed;
+}
+
+/** One-screen refuse when effective integration is direct without setup consent. */
+export const DIRECT_INTEGRATION_CONSENT_MSG =
+  "Direct integration lets Grok edit files in THIS working tree directly (no " +
+  "worktree isolation, no pre-apply review). Protected paths (.git/.env/keys/" +
+  "hooks) are rolled back if touched, but source edits land live. To accept and " +
+  "make direct the default here: /grok:setup --integration direct (or: " +
+  "companion setup --integration direct). Or run this once with " +
+  "--integration worktree (isolated) or --integration review.";
+
+/**
+ * Drop any existing --integration flag(s) then append the resolved effective mode.
+ * Ensures the wrapper never silently defaults behind the companion gate.
+ * @param {string[]} args
+ * @param {string} mode
+ * @returns {string[]}
+ */
+export function withExplicitIntegration(args, mode) {
+  const out = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--integration" && args[i + 1] !== undefined) {
+      i += 1;
+      continue;
+    }
+    if (typeof a === "string" && a.startsWith("--integration=")) {
+      continue;
+    }
+    out.push(a);
+  }
+  out.push("--integration", mode);
+  return out;
+}
+
+/**
+ * Resolve effective integration for code/implement and enforce the one-time
+ * direct consent gate. worktree|auto|review need no consent; direct needs setup.
+ * @returns {{ ok: true, effective: string|null, rest: string[] } | { ok: false, code: number, message: string }}
+ */
+export function gateIntegrationForCodeish(mode, rest, integrationFlag, cwd, env = process.env) {
+  if (mode !== "code" && mode !== "implement") {
+    return { ok: true, rest, effective: null };
+  }
+  let effective;
+  if (integrationFlag != null && String(integrationFlag).trim() !== "") {
+    const parsed = parseIntegrationMode(integrationFlag);
+    if (!parsed) {
+      return {
+        ok: false,
+        code: 1,
+        message:
+          `[grok-companion] invalid --integration ${JSON.stringify(integrationFlag)} ` +
+          `(valid: direct|worktree|auto|review)\n`,
+      };
+    }
+    effective = parsed;
+  } else {
+    effective = getIntegrationMode(cwd, env);
+  }
+  // auto/review: treat like worktree for gating (no live unverified tree writes).
+  if (effective === "direct" && !getIntegrationConsent(cwd, env)) {
+    return { ok: false, code: 1, message: `${DIRECT_INTEGRATION_CONSENT_MSG}\n` };
+  }
+  return {
+    ok: true,
+    effective,
+    rest: withExplicitIntegration(rest, effective),
+  };
 }
 
 /**
