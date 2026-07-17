@@ -27,6 +27,11 @@ const COMPANION = path.resolve(HELPERS_DIR, "..", "..", "grok-companion.mjs");
 const FAKE_WRAPPER_BODY = `import json, os, sys
 mode = sys.argv[1] if len(sys.argv) > 1 else ""
 calls_path = os.environ.get("FAKE_WRAPPER_CALLS", "").strip()
+# Count prior calls of this mode BEFORE appending (sequence index).
+prior = 0
+if calls_path and os.path.exists(calls_path):
+    with open(calls_path, "r", encoding="utf-8") as cf:
+        prior = sum(1 for line in cf if line.strip() == mode)
 if calls_path:
     with open(calls_path, "a", encoding="utf-8") as cf:
         cf.write(mode + "\\n")
@@ -35,8 +40,20 @@ r = responses.get(mode)
 if r is None:
     sys.stderr.write("[fake-wrapper] unregistered mode: %r\\n" % mode)
     sys.exit(2)
+# Sequence support: handoff responses may be a list (apply-time revalidation).
+if isinstance(r, list):
+    if not r:
+        sys.stderr.write("[fake-wrapper] empty sequence for mode: %r\\n" % mode)
+        sys.exit(2)
+    idx = prior if prior < len(r) else len(r) - 1
+    r = r[idx]
 if r.get("stderr"):
     sys.stderr.write(r["stderr"])
+# Optional mutate: write a file before responding (apply-time tree race tests).
+mutate = r.get("mutate")
+if isinstance(mutate, dict) and mutate.get("path"):
+    with open(mutate["path"], "w", encoding="utf-8") as mf:
+        mf.write(mutate.get("content", ""))
 # echoTask: read --task-file and echo content + argv (task-passing tests).
 if r.get("echoTask"):
     argv = sys.argv[1:]

@@ -36,6 +36,7 @@ import {
   resolveJobByIdOrRunId,
   storeJobStdout,
   updateJob,
+  withExplicitIntegration,
 } from "./lib/jobs.mjs";
 import { shouldAttemptTerminalNotify, wrapperChildEnv } from "./lib/notify.mjs";
 import {
@@ -56,7 +57,7 @@ import {
   runDirectGrok,
   writeDirectNoHandoffRefuse,
 } from "./lib/direct-grok.mjs";
-import { runImplementCombo } from "./lib/implement.mjs";
+import { runAutoIntegrate, runImplementCombo } from "./lib/implement.mjs";
 import { renderEnvelopePretty, tryParseEnvelope } from "./lib/render.mjs";
 import { terminateReviewTree } from "./lib/gate-kill.mjs";
 import {
@@ -600,6 +601,8 @@ async function dispatch({
 
   // Integration consent gate (code/implement only). Refuses before wrapper spawn.
   // Re-bind rest so implement/code see the explicit --integration <effective>.
+  // Capture effective for auto (apply-on-verified-ready) post-step.
+  let integrationEffective = null;
   {
     const gated = gateIntegrationForCodeish(mode, rest, integrationFlag, cwd);
     if (!gated.ok) {
@@ -607,6 +610,7 @@ async function dispatch({
       return gated.code;
     }
     if (gated.effective != null) {
+      integrationEffective = gated.effective;
       rest = gated.rest;
     }
   }
@@ -620,22 +624,40 @@ async function dispatch({
     return cmdDebate(cwd, wrapper, forwardedArgs, runMode, captureAndTrack);
   }
 
-  if (mode === "implement") {
+  // implement = code+handoff (no apply). code --integration auto = same + apply.
+  const isAutoCode = mode === "code" && integrationEffective === "auto";
+  if (mode === "implement" || isAutoCode) {
     if (runMode === "direct") return writeDirectNoHandoffRefuse();
     const wrapper = resolveWrapperPath(process.env);
     if (!wrapper) {
       process.stderr.write(`${wrapperNotFoundMessage(process.env)}\n`);
       return WRAPPER_NOT_FOUND_EXIT;
     }
-    const implementRest =
+    const comboRest =
       baseRef && !rest.includes("--base") ? [...rest, "--base", baseRef] : rest;
-    return runImplementCombo(wrapper, implementRest, runMode, {
+    const track = {
       kind: "code",
       mode: "code",
-      notifyMode: "implement",
+      notifyMode: isAutoCode ? "code" : "implement",
       runMode,
       skipNotify: Boolean(noNotify),
-    }, { runWithLiveRelay, stderrLine });
+    };
+    if (isAutoCode) {
+      return runAutoIntegrate(wrapper, comboRest, runMode, track, {
+        runWithLiveRelay,
+        stderrLine,
+        targetCwd: cwd,
+      });
+    }
+    return runImplementCombo(wrapper, comboRest, runMode, track, {
+      runWithLiveRelay,
+      stderrLine,
+    });
+  }
+
+  // review -> wrapper worktree (companion-only modes the wrapper does not accept).
+  if (mode === "code" && integrationEffective === "review") {
+    rest = withExplicitIntegration(rest, "worktree");
   }
 
   // Rebuild forwarded args after integration injection into rest (code path).

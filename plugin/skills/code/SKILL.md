@@ -145,7 +145,13 @@ On success or classified failure after hardened Grok, the wrapper writes:
 **Notify is not integrate.** After a code run, parents (Claude Code / Codex)
 must call `/grok:handoff --run-id <runId from the code envelope>` and require
 dual-condition ready before any apply. See `skills/handoff/SKILL.md` and
-`references/implementation-handoff.md`. Never auto-apply.
+`references/implementation-handoff.md`.
+
+**Integration modes (brief; full matrix in Task 7.5):**
+- default / `--integration direct` - live tree edits (one-time consent)
+- `--integration worktree` | `review` - isolated worktree; parent apply stays manual
+- `--integration auto` - worktree + dual-condition handoff, then
+  **apply-on-verified-ready** with apply-time revalidation (never half-applies)
 
 ## Iterating on a run (2.0.0+)
 

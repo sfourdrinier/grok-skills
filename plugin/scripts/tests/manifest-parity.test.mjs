@@ -10,6 +10,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
@@ -150,18 +151,37 @@ test("gen-manifests --check passes on the committed tree (no drift)", () => {
 });
 
 test("gen-manifests --check exits 1 when a generated file drifts", () => {
-  const abs = path.join(REPO_ROOT, CLAUDE_PLUGIN);
-  const original = fs.readFileSync(abs, "utf8");
+  // Isolate: copy the source + generated files into a temp root and mutate the
+  // COPY, never the committed repo files. Concurrency-safe (two suites in the
+  // same checkout no longer race on the real manifests). GEN_MANIFESTS_ROOT
+  // points the generator at the temp tree.
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "gen-manifests-drift-"));
   try {
-    // Mutate one generated file, then require --check to fail closed.
-    fs.writeFileSync(abs, original.replace('"version": "2.0.0"', '"version": "0.0.0-drift"'), "utf8");
+    for (const rel of [
+      "plugin/manifest.source.json",
+      CLAUDE_PLUGIN,
+      CODEX_PLUGIN,
+      CLAUDE_MARKETPLACE,
+    ]) {
+      const dst = path.join(tmpRoot, rel);
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      fs.copyFileSync(path.join(REPO_ROOT, rel), dst);
+    }
+    // Mutate the COPY of a generated file so --check must fail closed.
+    const claudeCopy = path.join(tmpRoot, CLAUDE_PLUGIN);
+    const original = fs.readFileSync(claudeCopy, "utf8");
+    fs.writeFileSync(
+      claudeCopy,
+      original.replace('"version": "2.0.0"', '"version": "0.0.0-drift"'),
+      "utf8"
+    );
     const result = spawnSync(process.execPath, [GEN_MANIFESTS, "--check"], {
       encoding: "utf8",
-      cwd: REPO_ROOT,
+      env: { ...process.env, GEN_MANIFESTS_ROOT: tmpRoot },
     });
     assert.equal(result.status, 1, "drift must exit 1");
     assert.match(result.stderr, /drift/i);
   } finally {
-    fs.writeFileSync(abs, original, "utf8");
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
 });

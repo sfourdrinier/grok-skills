@@ -47,7 +47,9 @@ blockers surface on stdout. Without a runId, handoff is skipped and the
 combo exits 1.
 
 This still never applies, commits, or pushes - parent apply stays manual (see
-references/implementation-handoff.md).
+references/implementation-handoff.md). For **apply-on-verified-ready**, use
+`/grok:code --integration auto` (worktree + handoff + apply-time revalidation);
+`implement` stays verify-only.
 Requires hardened mode; direct mode is refused fail-closed.
 Foreground/background selection: same AskUserQuestion flow as /grok:code.
 
@@ -125,5 +127,6 @@ message instead of an envelope, tell the user to run `/grok:setup`.
 
 `implement` requires **hardened** run-mode. Direct mode is refused fail-closed
 (no handoff artifacts exist without isolation evidence). Parent apply stays
-manual after a ready handoff - never auto-apply, commit, or push. See
-`skills/handoff/SKILL.md` and `references/implementation-handoff.md`.
+manual after a ready handoff - never auto-apply, commit, or push from
+`implement`. For apply-on-verified-ready, use `/grok:code --integration auto`
+instead. See `skills/handoff/SKILL.md` and `references/implementation-handoff.md`.

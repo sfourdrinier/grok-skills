@@ -6,29 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
 
-// Spawn under heavy concurrent load (a full suite plus other processes) can hit
-// EAGAIN/ENOMEM at the OS level - a resource-pressure failure, not a resolution
-// bug. Retry the spawn (never the assertions) a few times before giving up so a
-// deterministic root-resolution test is not flaky under load.
-function spawnNode(args) {
-  let result;
-  for (let attempt = 0; attempt < 8; attempt++) {
-    result = spawnSync(process.execPath, args, { encoding: "utf8" });
-    // Retry on any spawn-level error OR a non-zero exit under load (EAGAIN can
-    // surface either way when the machine is saturated with concurrent
-    // processes); the resolution itself is deterministic, so a clean run wins.
-    if (!result.error && result.status === 0) {
-      return result;
-    }
-    // small backoff that YIELDS the CPU (a busy-spin would worsen the very
-    // resource pressure we are backing off from). Atomics.wait blocks without
-    // burning a core.
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * (attempt + 1));
-  }
-  return result;
-}
 
 import {
   companionPath,
@@ -37,11 +15,31 @@ import {
   resolvePluginRoot,
   BUNDLED_PLUGIN_ROOT,
 } from "../lib/resolve-plugin-root.mjs";
+import { main as resolveCli } from "../lib/resolve-plugin-root.mjs";
+
+// Run the CLI main() IN-PROCESS, capturing stdout. Avoids spawning a
+// subprocess, which was flaky under heavy concurrent machine load (EAGAIN on
+// spawn) - the resolution logic is deterministic and needs no child process.
+function runCli(argv, env = {}) {
+  const out = [];
+  const err = [];
+  const origOut = process.stdout.write.bind(process.stdout);
+  const origErr = process.stderr.write.bind(process.stderr);
+  process.stdout.write = (s) => { out.push(String(s)); return true; };
+  process.stderr.write = (s) => { err.push(String(s)); return true; };
+  let status;
+  try {
+    status = resolveCli(argv, env);
+  } finally {
+    process.stdout.write = origOut;
+    process.stderr.write = origErr;
+  }
+  return { status, stdout: out.join(""), stderr: err.join("") };
+}
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN_ROOT = path.resolve(HERE, "..", "..");
 const DUAL_LENS_SKILL = path.join(PLUGIN_ROOT, "skills", "dual-lens");
-const CLI = path.join(PLUGIN_ROOT, "scripts", "resolve-plugin-root.mjs");
 
 test("bundled plugin root is valid", () => {
   assert.equal(path.resolve(BUNDLED_PLUGIN_ROOT), PLUGIN_ROOT);
@@ -97,29 +95,18 @@ test("resolvePluginRoot fails closed when candidate has no companion", () => {
   assert.match(r.error, /invalid|missing/i);
 });
 
-test("CLI --skill-dir prints root and --companion prints companion", () => {
-  const rootRun = spawnNode([CLI, "--skill-dir", DUAL_LENS_SKILL]);
-  assert.equal(rootRun.status, 0, rootRun.stderr);
+test("CLI main prints root and --companion prints companion (in-process)", () => {
+  const rootRun = runCli(["--skill-dir", DUAL_LENS_SKILL]);
+  assert.equal(rootRun.status, 0);
   assert.equal(rootRun.stdout.trim(), PLUGIN_ROOT);
 
-  const compRun = spawnNode([CLI, "--skill-dir", DUAL_LENS_SKILL, "--companion"]);
-  assert.equal(compRun.status, 0, compRun.stderr);
+  const compRun = runCli(["--skill-dir", DUAL_LENS_SKILL, "--companion"]);
+  assert.equal(compRun.status, 0);
   assert.equal(compRun.stdout.trim(), companionPath(PLUGIN_ROOT));
 });
 
-test("CLI fails without skill-dir or env", () => {
-  const run = spawnSync(process.execPath, [CLI], {
-    encoding: "utf8",
-    env: { ...process.env, CLAUDE_PLUGIN_ROOT: "", PLUGIN_ROOT: "", SKILL_DIR: "" },
-  });
-  // Clear may not empty inherited - force empty plugin env only
-  const run2 = spawnSync(process.execPath, [CLI], {
-    encoding: "utf8",
-    env: {
-      PATH: process.env.PATH,
-      HOME: process.env.HOME,
-    },
-  });
-  assert.notEqual(run2.status, 0);
-  assert.match(run2.stderr, /plugin root not set/i);
+test("CLI fails without skill-dir or env (in-process)", () => {
+  const run = runCli([], {});
+  assert.notEqual(run.status, 0);
+  assert.match(run.stderr, /plugin root not set/i);
 });

@@ -16,7 +16,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
-const REPO_ROOT = path.resolve(HERE, "..");
+// GEN_MANIFESTS_ROOT lets tests run against an isolated temp copy of the repo
+// so a drift check never mutates the real committed manifests (concurrency-safe).
+const REPO_ROOT = process.env.GEN_MANIFESTS_ROOT
+  ? path.resolve(process.env.GEN_MANIFESTS_ROOT)
+  : path.resolve(HERE, "..");
 
 const SOURCE_REL = "plugin/manifest.source.json";
 const CLAUDE_PLUGIN_REL = "plugin/.claude-plugin/plugin.json";
