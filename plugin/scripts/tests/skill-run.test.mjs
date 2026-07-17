@@ -13,6 +13,7 @@ import {
   pluginRootFromSkillEntryUrl,
 } from "../lib/skill-run.mjs";
 import { BUNDLED_PLUGIN_ROOT } from "../lib/resolve-plugin-root.mjs";
+import { companionIsolation } from "./helpers/fake-wrapper.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PLUGIN = path.resolve(HERE, "..", "..");
@@ -20,12 +21,31 @@ const PREFLIGHT_RUN = path.join(PLUGIN, "skills", "preflight", "run.mjs");
 const DUAL_LENS_RUN = path.join(PLUGIN, "skills", "dual-lens", "run.mjs");
 const AGENTS_RUN = path.join(PLUGIN, "agents", "run.mjs");
 
-const bareEnv = {
-  PATH: process.env.PATH,
-  HOME: process.env.HOME,
-  TMPDIR: process.env.TMPDIR,
-  USER: process.env.USER,
-};
+/** Minimal host env + isolation defaults (never real XDG / workspace registry). */
+function isolatedBareEnv(extra = {}) {
+  const iso = companionIsolation({
+    env: {
+      // Drop ambient CLAUDE_PLUGIN_ROOT etc. by starting from isolation only.
+      PATH: process.env.PATH,
+      HOME: process.env.HOME,
+      USER: process.env.USER,
+      ...extra,
+    },
+  });
+  // companionIsolation merges process.env first; rebuild a strict allowlist.
+  const env = {
+    PATH: process.env.PATH,
+    HOME: process.env.HOME,
+    USER: process.env.USER,
+    XDG_STATE_HOME: iso.env.XDG_STATE_HOME,
+    CLAUDE_PLUGIN_DATA: iso.env.CLAUDE_PLUGIN_DATA,
+    TMPDIR: iso.env.TMPDIR,
+    TMP: iso.env.TMP,
+    TEMP: iso.env.TEMP,
+    ...extra,
+  };
+  return { env, cwd: iso.cwd, cleanup: iso.cleanup };
+}
 
 /**
  * Assert self-locating entry reached the real wrapper and produced an envelope.
@@ -72,11 +92,17 @@ test("pluginRootFromPluginEntryUrl maps agents/run.mjs to plugin root", () => {
 });
 
 test("agents/run.mjs works with no CLAUDE_PLUGIN_ROOT/PLUGIN_ROOT", () => {
-  const result = spawnSync(process.execPath, [AGENTS_RUN, "preflight"], {
-    encoding: "utf8",
-    env: bareEnv,
-  });
-  assertSelfLocatingPreflight(result);
+  const iso = isolatedBareEnv();
+  try {
+    const result = spawnSync(process.execPath, [AGENTS_RUN, "preflight"], {
+      encoding: "utf8",
+      cwd: iso.cwd,
+      env: iso.env,
+    });
+    assertSelfLocatingPreflight(result);
+  } finally {
+    iso.cleanup();
+  }
 });
 
 test("every skill has a self-locating run.mjs", () => {
@@ -96,25 +122,36 @@ test("every skill has a self-locating run.mjs", () => {
 });
 
 test("preflight run.mjs works with no CLAUDE_PLUGIN_ROOT/PLUGIN_ROOT", () => {
-  const result = spawnSync(process.execPath, [PREFLIGHT_RUN, "preflight"], {
-    encoding: "utf8",
-    env: bareEnv,
-  });
-  assertSelfLocatingPreflight(result);
+  const iso = isolatedBareEnv();
+  try {
+    const result = spawnSync(process.execPath, [PREFLIGHT_RUN, "preflight"], {
+      encoding: "utf8",
+      cwd: iso.cwd,
+      env: iso.env,
+    });
+    assertSelfLocatingPreflight(result);
+  } finally {
+    iso.cleanup();
+  }
 });
 
 test("run.mjs forces entry-derived root over stale CLAUDE_PLUGIN_ROOT", () => {
   // Stale env pointing at a non-install path must not break self-locating entry
   // or load a different wrapper tree.
-  const result = spawnSync(process.execPath, [PREFLIGHT_RUN, "preflight"], {
-    encoding: "utf8",
-    env: {
-      ...bareEnv,
-      CLAUDE_PLUGIN_ROOT: "/tmp/stale-grok-plugin-root-does-not-exist",
-      PLUGIN_ROOT: "/tmp/stale-grok-plugin-root-does-not-exist",
-    },
+  const iso = isolatedBareEnv({
+    CLAUDE_PLUGIN_ROOT: "/tmp/stale-grok-plugin-root-does-not-exist",
+    PLUGIN_ROOT: "/tmp/stale-grok-plugin-root-does-not-exist",
   });
-  assertSelfLocatingPreflight(result);
+  try {
+    const result = spawnSync(process.execPath, [PREFLIGHT_RUN, "preflight"], {
+      encoding: "utf8",
+      cwd: iso.cwd,
+      env: iso.env,
+    });
+    assertSelfLocatingPreflight(result);
+  } finally {
+    iso.cleanup();
+  }
 });
 
 test("run.mjs prefers entry tree over a second valid plugin root in env", () => {
@@ -130,29 +167,37 @@ test("run.mjs prefers entry tree over a second valid plugin root in env", () => 
   );
   fs.mkdirSync(path.join(tmp, "wrapper", "scripts"), { recursive: true });
   fs.writeFileSync(path.join(tmp, "wrapper", "scripts", "grok_agent.py"), "# stale\n", "utf8");
+  const iso = isolatedBareEnv({
+    CLAUDE_PLUGIN_ROOT: tmp,
+    PLUGIN_ROOT: tmp,
+  });
   try {
     const result = spawnSync(process.execPath, [PREFLIGHT_RUN, "preflight"], {
       encoding: "utf8",
-      env: {
-        ...bareEnv,
-        CLAUDE_PLUGIN_ROOT: tmp,
-        PLUGIN_ROOT: tmp,
-      },
+      cwd: iso.cwd,
+      env: iso.env,
     });
     // Stale companion would exit 42. Real entry tree yields 0 or classified 1.
     assertSelfLocatingPreflight(result, { forbidExit: [42] });
   } finally {
+    iso.cleanup();
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
 
 test("run.mjs invalid mode is not a plugin-root failure", () => {
-  const result = spawnSync(process.execPath, [DUAL_LENS_RUN, "not-a-real-mode"], {
-    encoding: "utf8",
-    env: bareEnv,
-  });
-  const text = `${result.stderr}\n${result.stdout}`;
-  assert.notEqual(result.status, 127);
-  assert.doesNotMatch(text, /plugin root not set/i);
-  assert.doesNotMatch(text, /invalid plugin root/i);
+  const iso = isolatedBareEnv();
+  try {
+    const result = spawnSync(process.execPath, [DUAL_LENS_RUN, "not-a-real-mode"], {
+      encoding: "utf8",
+      cwd: iso.cwd,
+      env: iso.env,
+    });
+    const text = `${result.stderr}\n${result.stdout}`;
+    assert.notEqual(result.status, 127);
+    assert.doesNotMatch(text, /plugin root not set/i);
+    assert.doesNotMatch(text, /invalid plugin root/i);
+  } finally {
+    iso.cleanup();
+  }
 });

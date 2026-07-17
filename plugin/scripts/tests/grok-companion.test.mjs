@@ -19,6 +19,7 @@ import {
 import { getNotificationConfig } from "../lib/jobs.mjs";
 import { wrapperChildEnv, NOTIFY_ELIGIBLE_MODES, shouldNotify } from "../lib/notify.mjs";
 import { RUN_ID_RE } from "../progress-relay.mjs";
+import { companionIsolation } from "./helpers/fake-wrapper.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const COMPANION = path.resolve(SCRIPT_DIR, "..", "grok-companion.mjs");
@@ -133,21 +134,42 @@ test("companion forwards argv to the wrapper and passes stdout + exit through", 
   // No subcommand -> the wrapper prints exactly one failure (usage-error)
   // envelope to stdout and exits non-zero. This exercises resolution +
   // python3 exec + stdout passthrough + exit passthrough without a live run.
-  const result = spawnSync(process.execPath, [COMPANION], { encoding: "utf8" });
-  assert.notEqual(result.status, 0, "usage error must forward a non-zero exit");
-  const parsed = JSON.parse(result.stdout.trim());
-  assert.equal(parsed.status, "failure");
-  assert.equal(parsed.error.class, "usage-error");
+  const iso = companionIsolation({});
+  try {
+    const result = spawnSync(process.execPath, [COMPANION], {
+      encoding: "utf8",
+      cwd: iso.cwd,
+      env: iso.env,
+    });
+    assert.notEqual(result.status, 0, "usage error must forward a non-zero exit");
+    const parsed = JSON.parse(result.stdout.trim());
+    assert.equal(parsed.status, "failure");
+    assert.equal(parsed.error.class, "usage-error");
+  } finally {
+    iso.cleanup();
+  }
 });
+
+function spawnCompanionIsolated(argv, { cwd, env = {} } = {}) {
+  const iso = companionIsolation({ cwd, env });
+  try {
+    return spawnSync(process.execPath, [COMPANION, ...argv], {
+      encoding: "utf8",
+      cwd: iso.cwd,
+      env: iso.env,
+    });
+  } finally {
+    // Drop auto XDG/TMP roots; caller-owned cwd is not in iso.cleanup roots.
+    iso.cleanup();
+  }
+}
 
 function runSetup(args, envExtras = {}) {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-setup-"));
   const pdata = path.join(cwd, "pdata");
-  const result = spawnSync(process.execPath, [COMPANION, "setup", ...args], {
-    encoding: "utf8",
+  const result = spawnCompanionIsolated(["setup", ...args], {
     cwd,
     env: {
-      ...process.env,
       CLAUDE_PLUGIN_DATA: pdata,
       ...envExtras,
     },
@@ -165,14 +187,9 @@ test("setup rejects invalid --notification-mode without changing prefs", () => {
     "auto"
   );
 
-  const bad = spawnSync(
-    process.execPath,
-    [COMPANION, "setup", "--notification-mode", "telepathy", "--skip-codex-agents"],
-    {
-      encoding: "utf8",
-      cwd: first.cwd,
-      env: { ...process.env, CLAUDE_PLUGIN_DATA: first.pdata },
-    }
+  const bad = spawnCompanionIsolated(
+    ["setup", "--notification-mode", "telepathy", "--skip-codex-agents"],
+    { cwd: first.cwd, env: { CLAUDE_PLUGIN_DATA: first.pdata } }
   );
   // Invalid mode always fails setup exit (independent of grok CLI).
   assert.equal(bad.status, 1);
@@ -193,10 +210,8 @@ test("setup invalid mode does not apply webhook in same invocation (atomic prefs
     getNotificationConfig(first.cwd, { CLAUDE_PLUGIN_DATA: first.pdata }).notificationMode,
     "auto"
   );
-  const bad = spawnSync(
-    process.execPath,
+  const bad = spawnCompanionIsolated(
     [
-      COMPANION,
       "setup",
       "--notification-mode",
       "telepathy",
@@ -204,11 +219,7 @@ test("setup invalid mode does not apply webhook in same invocation (atomic prefs
       "https://hooks.example.com/should-not-write",
       "--skip-codex-agents",
     ],
-    {
-      encoding: "utf8",
-      cwd: first.cwd,
-      env: { ...process.env, CLAUDE_PLUGIN_DATA: first.pdata },
-    }
+    { cwd: first.cwd, env: { CLAUDE_PLUGIN_DATA: first.pdata } }
   );
   assert.equal(bad.status, 1);
   const cfg = getNotificationConfig(first.cwd, { CLAUDE_PLUGIN_DATA: first.pdata });
@@ -243,14 +254,9 @@ test("setup redacts webhook path/query/userinfo from report", () => {
 
 test("setup rejects --notification-mode without a value", () => {
   const first = runSetup(["--notification-mode", "auto", "--skip-codex-agents"]);
-  const bad = spawnSync(
-    process.execPath,
-    [COMPANION, "setup", "--notification-mode", "--skip-codex-agents"],
-    {
-      encoding: "utf8",
-      cwd: first.cwd,
-      env: { ...process.env, CLAUDE_PLUGIN_DATA: first.pdata },
-    }
+  const bad = spawnCompanionIsolated(
+    ["setup", "--notification-mode", "--skip-codex-agents"],
+    { cwd: first.cwd, env: { CLAUDE_PLUGIN_DATA: first.pdata } }
   );
   assert.equal(bad.status, 1);
   assert.match(bad.stdout + bad.stderr, /invalid mode|missing value/i);
@@ -262,20 +268,9 @@ test("setup rejects --notification-mode without a value", () => {
 
 test("setup rejects non-http(s) webhook without writing prefs", () => {
   const first = runSetup(["--notification-mode", "auto", "--skip-codex-agents"]);
-  const bad = spawnSync(
-    process.execPath,
-    [
-      COMPANION,
-      "setup",
-      "--notification-webhook-url",
-      "file:///tmp/x",
-      "--skip-codex-agents",
-    ],
-    {
-      encoding: "utf8",
-      cwd: first.cwd,
-      env: { ...process.env, CLAUDE_PLUGIN_DATA: first.pdata },
-    }
+  const bad = spawnCompanionIsolated(
+    ["setup", "--notification-webhook-url", "file:///tmp/x", "--skip-codex-agents"],
+    { cwd: first.cwd, env: { CLAUDE_PLUGIN_DATA: first.pdata } }
   );
   assert.equal(bad.status, 1);
   const cfg = getNotificationConfig(first.cwd, { CLAUDE_PLUGIN_DATA: first.pdata });

@@ -9,31 +9,34 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { parseRunIdMarker } from "../progress-relay.mjs";
+import { companionIsolation } from "./helpers/fake-wrapper.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const COMPANION = path.resolve(SCRIPT_DIR, "..", "grok-companion.mjs");
 const FAKE_WRAPPER = path.resolve(SCRIPT_DIR, "fixtures", "fake_wrapper.py");
 
-function runCompanion(args, extraEnv) {
-  const xdg = fs.mkdtempSync(path.join(os.tmpdir(), "grok-relay-xdg-"));
-  const result = spawnSync(process.execPath, [COMPANION, ...args], {
-    encoding: "utf8",
+function runCompanion(args, extraEnv = {}) {
+  // Explicit XDG_STATE_HOME so callers can plant run dirs under the same root;
+  // companionIsolation still supplies temp cwd + CLAUDE_PLUGIN_DATA + TMPDIR.
+  const iso = companionIsolation({
     env: {
-      ...process.env,
       GROK_AGENT_WRAPPER: FAKE_WRAPPER,
       GROK_ALLOW_WRAPPER_OVERRIDE: "1",
       GROK_PYTHON: "python3",
-      XDG_STATE_HOME: xdg,
       ...extraEnv,
     },
   });
-  return { result, xdg };
+  const result = spawnSync(process.execPath, [COMPANION, ...args], {
+    encoding: "utf8",
+    cwd: iso.cwd,
+    env: iso.env,
+  });
+  return { result, xdg: iso.env.XDG_STATE_HOME, iso };
 }
 
 function stdoutJsonLines(stdout) {
@@ -45,109 +48,135 @@ function stdoutJsonLines(stdout) {
 
 test("streaming success: envelope is the sole stdout line, exit 0, progress on stderr", () => {
   // GROK_FAKE_SLEEP gives the live poll a chance; the final drain covers the rest.
-  const { result } = runCompanion(["reason", "--task", "ping"], { GROK_FAKE_SLEEP: "0.3" });
-  assert.equal(result.status, 0);
+  const { result, iso } = runCompanion(["reason", "--task", "ping"], { GROK_FAKE_SLEEP: "0.3" });
+  try {
+    assert.equal(result.status, 0);
 
-  const lines = stdoutJsonLines(result.stdout);
-  assert.equal(lines.length, 1, "stdout must carry exactly one envelope line (relay never writes stdout)");
-  const envelope = JSON.parse(lines[0]);
-  assert.equal(envelope.status, "success");
-  assert.equal(envelope.mode, "reason");
+    const lines = stdoutJsonLines(result.stdout);
+    assert.equal(lines.length, 1, "stdout must carry exactly one envelope line (relay never writes stdout)");
+    const envelope = JSON.parse(lines[0]);
+    assert.equal(envelope.status, "success");
+    assert.equal(envelope.mode, "reason");
 
-  // The streamed thought token surfaced as human-readable progress on stderr.
-  assert.match(result.stderr, /\[grok\] grok: grok streamed thought tokens/);
-  assert.match(result.stderr, /thinking about PONG/);
+    // The streamed thought token surfaced as human-readable progress on stderr.
+    assert.match(result.stderr, /\[grok\] grok: grok streamed thought tokens/);
+    assert.match(result.stderr, /thinking about PONG/);
+  } finally {
+    iso.cleanup();
+  }
 });
 
 test("run-id marker is forwarded to stderr and the relay follows the announced run past a decoy", () => {
   // F-RELAY-RUNID: the wrapper announces its run id on stderr; the companion
   // forwards that line verbatim AND uses it to bind the relay to the exact run,
   // even when a lexically-newer decoy run dir also appears.
-  const { result } = runCompanion(["reason", "--task", "ping"], {
+  const { result, iso } = runCompanion(["reason", "--task", "ping"], {
     GROK_FAKE_SLEEP: "0.3",
     GROK_FAKE_DECOY_RUN_ID: "20990101T000000Z-ffffff",
   });
-  assert.equal(result.status, 0);
+  try {
+    assert.equal(result.status, 0);
 
-  const lines = stdoutJsonLines(result.stdout);
-  assert.equal(lines.length, 1, "stdout stays exactly one envelope line");
-  const envelope = JSON.parse(lines[0]);
-  assert.equal(envelope.status, "success");
+    const lines = stdoutJsonLines(result.stdout);
+    assert.equal(lines.length, 1, "stdout stays exactly one envelope line");
+    const envelope = JSON.parse(lines[0]);
+    assert.equal(envelope.status, "success");
 
-  // The marker line was forwarded verbatim, and it named the wrapper's real run.
-  assert.match(result.stderr, /\[grok-run-id\] \d{8}T\d{6}Z-[0-9a-f]{6}/);
-  assert.equal(parseRunIdMarker(`[grok-run-id] ${envelope.runId}`), envelope.runId);
-  // The real run's live progress surfaced (the relay bound to the announced run).
-  assert.match(result.stderr, /thinking about PONG/);
+    // The marker line was forwarded verbatim, and it named the wrapper's real run.
+    assert.match(result.stderr, /\[grok-run-id\] \d{8}T\d{6}Z-[0-9a-f]{6}/);
+    assert.equal(parseRunIdMarker(`[grok-run-id] ${envelope.runId}`), envelope.runId);
+    // The real run's live progress surfaced (the relay bound to the announced run).
+    assert.match(result.stderr, /thinking about PONG/);
+  } finally {
+    iso.cleanup();
+  }
 });
 
 test("degrade (i) no stream at start: envelope still delivered exactly once, exit 0", () => {
-  const { result } = runCompanion(["reason", "--task", "ping"], { GROK_FAKE_BEHAVIOR: "norun" });
-  assert.equal(result.status, 0);
+  const { result, iso } = runCompanion(["reason", "--task", "ping"], { GROK_FAKE_BEHAVIOR: "norun" });
+  try {
+    assert.equal(result.status, 0);
 
-  const lines = stdoutJsonLines(result.stdout);
-  assert.equal(lines.length, 1);
-  assert.equal(JSON.parse(lines[0]).status, "success");
+    const lines = stdoutJsonLines(result.stdout);
+    assert.equal(lines.length, 1);
+    assert.equal(JSON.parse(lines[0]).status, "success");
+  } finally {
+    iso.cleanup();
+  }
 });
 
 test("degrade (ii) unreadable progress mid-run: envelope still delivered exactly once", () => {
-  const { result } = runCompanion(["reason", "--task", "ping"], {
+  const { result, iso } = runCompanion(["reason", "--task", "ping"], {
     GROK_FAKE_BEHAVIOR: "brokenprogress",
     GROK_FAKE_SLEEP: "0.2",
   });
-  assert.equal(result.status, 0);
+  try {
+    assert.equal(result.status, 0);
 
-  const lines = stdoutJsonLines(result.stdout);
-  assert.equal(lines.length, 1, "a failing relay must not add or corrupt stdout");
-  assert.equal(JSON.parse(lines[0]).status, "success");
+    const lines = stdoutJsonLines(result.stdout);
+    assert.equal(lines.length, 1, "a failing relay must not add or corrupt stdout");
+    assert.equal(JSON.parse(lines[0]).status, "success");
+  } finally {
+    iso.cleanup();
+  }
 });
 
 test("degrade (iii) run fails: failure envelope delivered verbatim, exit 1", () => {
-  const { result } = runCompanion(["code", "--target", ".", "--base", "HEAD", "--task", "x"], {
+  const { result, iso } = runCompanion(["code", "--target", ".", "--base", "HEAD", "--task", "x"], {
     GROK_FAKE_EXIT: "1",
   });
-  assert.equal(result.status, 1);
+  try {
+    assert.equal(result.status, 1);
 
-  const lines = stdoutJsonLines(result.stdout);
-  assert.equal(lines.length, 1);
-  const envelope = JSON.parse(lines[0]);
-  assert.equal(envelope.status, "failure");
-  assert.equal(envelope.error.class, "cli-failure");
+    const lines = stdoutJsonLines(result.stdout);
+    assert.equal(lines.length, 1);
+    const envelope = JSON.parse(lines[0]);
+    assert.equal(envelope.status, "failure");
+    assert.equal(envelope.error.class, "cli-failure");
+  } finally {
+    iso.cleanup();
+  }
 });
 
 test("status stdout is only the envelope (no post-hoc progress dump on stderr)", () => {
   // Hosts that merge streams must still see a single relayable JSON document.
   // Progress is inside response.events - not re-printed after the envelope.
   const runId = "20260715T050000Z-abcdef";
-  const xdg = fs.mkdtempSync(path.join(os.tmpdir(), "grok-relay-status-clean-"));
-  const runDir = path.join(xdg, "grok-skills", "runs", runId);
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(runDir, "progress.jsonl"),
-    `${JSON.stringify({ seq: 1, phase: "start", level: "info", message: "reason run created" })}\n` +
-      `${JSON.stringify({ seq: 2, phase: "grok", level: "info", message: "grok streamed thought tokens", data: { text: "recalling the answer" } })}\n`
-  );
-
-  const result = spawnSync(process.execPath, [COMPANION, "status", "--run-id", runId], {
-    encoding: "utf8",
+  const iso = companionIsolation({
     env: {
-      ...process.env,
       GROK_AGENT_WRAPPER: FAKE_WRAPPER,
       GROK_ALLOW_WRAPPER_OVERRIDE: "1",
       GROK_PYTHON: "python3",
-      XDG_STATE_HOME: xdg,
       GROK_FAKE_BEHAVIOR: "norun",
     },
   });
+  try {
+    const runDir = path.join(iso.env.XDG_STATE_HOME, "grok-skills", "runs", runId);
+    fs.mkdirSync(runDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(runDir, "progress.jsonl"),
+      `${JSON.stringify({ seq: 1, phase: "start", level: "info", message: "reason run created" })}\n` +
+        `${JSON.stringify({ seq: 2, phase: "grok", level: "info", message: "grok streamed thought tokens", data: { text: "recalling the answer" } })}\n`
+    );
 
-  assert.equal(result.status, 0);
-  const lines = stdoutJsonLines(result.stdout);
-  assert.equal(lines.length, 1, "status stdout stays the verbatim envelope");
-  assert.equal(JSON.parse(lines[0]).mode, "status");
-  // No second-pass [grok] progress dump after the envelope (Codex merges streams)
-  assert.doesNotMatch(result.stderr || "", /\[grok\] start: reason run created/);
-  assert.doesNotMatch(result.stderr || "", /recalling the answer/);
+    const result = spawnSync(process.execPath, [COMPANION, "status", "--run-id", runId], {
+      encoding: "utf8",
+      cwd: iso.cwd,
+      env: iso.env,
+    });
+
+    assert.equal(result.status, 0);
+    const lines = stdoutJsonLines(result.stdout);
+    assert.equal(lines.length, 1, "status stdout stays the verbatim envelope");
+    assert.equal(JSON.parse(lines[0]).mode, "status");
+    // No second-pass [grok] progress dump after the envelope (Codex merges streams)
+    assert.doesNotMatch(result.stderr || "", /\[grok\] start: reason run created/);
+    assert.doesNotMatch(result.stderr || "", /recalling the answer/);
+  } finally {
+    iso.cleanup();
+  }
 });
+
 test("status: an invalid/partial run renders NO progress, only the wrapper's failure envelope", () => {
   // PR968 codex status-render-order: a strict-shaped run dir holding ONLY a
   // progress file (no valid/owned run.json) is one the wrapper rejects as
@@ -155,33 +184,38 @@ test("status: an invalid/partial run renders NO progress, only the wrapper's fai
   // -- the render is gated on the wrapper's SUCCESS envelope, so validation is
   // never bypassed.
   const runId = "20260715T060000Z-abcdef";
-  const xdg = fs.mkdtempSync(path.join(os.tmpdir(), "grok-relay-status-bad-"));
-  const runDir = path.join(xdg, "grok-skills", "runs", runId);
-  fs.mkdirSync(runDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(runDir, "progress.jsonl"),
-    `${JSON.stringify({ seq: 1, phase: "grok", level: "info", message: "leaked partial run content" })}\n`
-  );
-
-  // norun: the fake wrapper leaves the pre-planted dir untouched. EXIT 1: it
-  // reports a failure envelope, standing in for the real wrapper's invalid-target.
-  const result = spawnSync(process.execPath, [COMPANION, "status", "--run-id", runId], {
-    encoding: "utf8",
+  const iso = companionIsolation({
     env: {
-      ...process.env,
       GROK_AGENT_WRAPPER: FAKE_WRAPPER,
       GROK_ALLOW_WRAPPER_OVERRIDE: "1",
       GROK_PYTHON: "python3",
-      XDG_STATE_HOME: xdg,
       GROK_FAKE_BEHAVIOR: "norun",
       GROK_FAKE_EXIT: "1",
     },
   });
+  try {
+    const runDir = path.join(iso.env.XDG_STATE_HOME, "grok-skills", "runs", runId);
+    fs.mkdirSync(runDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(runDir, "progress.jsonl"),
+      `${JSON.stringify({ seq: 1, phase: "grok", level: "info", message: "leaked partial run content" })}\n`
+    );
 
-  assert.equal(result.status, 1);
-  const lines = stdoutJsonLines(result.stdout);
-  assert.equal(lines.length, 1, "status stdout stays the verbatim failure envelope");
-  assert.equal(JSON.parse(lines[0]).status, "failure");
-  // The pre-planted progress content must never reach the terminal.
-  assert.doesNotMatch(result.stderr, /leaked partial run content/);
+    // norun: the fake wrapper leaves the pre-planted dir untouched. EXIT 1: it
+    // reports a failure envelope, standing in for the real wrapper's invalid-target.
+    const result = spawnSync(process.execPath, [COMPANION, "status", "--run-id", runId], {
+      encoding: "utf8",
+      cwd: iso.cwd,
+      env: iso.env,
+    });
+
+    assert.equal(result.status, 1);
+    const lines = stdoutJsonLines(result.stdout);
+    assert.equal(lines.length, 1, "status stdout stays the verbatim failure envelope");
+    assert.equal(JSON.parse(lines[0]).status, "failure");
+    // The pre-planted progress content must never reach the terminal.
+    assert.doesNotMatch(result.stderr, /leaked partial run content/);
+  } finally {
+    iso.cleanup();
+  }
 });

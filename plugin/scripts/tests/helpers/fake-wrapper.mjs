@@ -9,6 +9,11 @@
 // not have been spawned" probe.
 // When FAKE_WRAPPER_CALLS points at a file, each invocation appends the mode
 // plus newline before responding (real spawn-order assertions).
+//
+// Isolation: runCompanion / companionIsolation default to a fresh temp cwd,
+// XDG_STATE_HOME, TMPDIR, and CLAUDE_PLUGIN_DATA so concurrent suites never
+// race on the real XDG state root or a shared workspace job registry. Callers
+// that pass their own values keep them (hasOwnProperty on the env object).
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -85,16 +90,84 @@ export function makeFakeWrapper(responses) {
   };
 }
 
-export function runCompanion(argv, { env = {}, cwd = process.cwd(), stdin } = {}) {
-  const result = spawnSync(process.execPath, [COMPANION, ...argv], {
-    cwd,
-    encoding: "utf8",
-    input: stdin,
-    env: { ...process.env, ...env },
-  });
-  return {
-    code: typeof result.status === "number" ? result.status : 1,
-    stdout: result.stdout || "",
-    stderr: result.stderr || "",
+function hasOwn(obj, key) {
+  return Object.prototype.hasOwnProperty.call(obj, key);
+}
+
+/**
+ * Build an isolated cwd + env for any companion (or companion-adjacent) spawn.
+ * Defaults are applied only when the caller did not pass the corresponding
+ * option / env key, so explicit fixtures keep full control.
+ *
+ * @param {{ env?: Record<string, string | undefined>, cwd?: string }} [options]
+ * @returns {{ cwd: string, env: NodeJS.ProcessEnv, cleanup: () => void }}
+ */
+export function companionIsolation({ env: callerEnv = {}, cwd: callerCwd } = {}) {
+  const roots = [];
+  const mk = (prefix) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+    roots.push(dir);
+    return dir;
   };
+
+  const cwd = callerCwd ?? mk("grok-companion-cwd-");
+  const isolation = {};
+
+  if (!hasOwn(callerEnv, "XDG_STATE_HOME")) {
+    isolation.XDG_STATE_HOME = mk("grok-companion-xdg-");
+  }
+  if (!hasOwn(callerEnv, "CLAUDE_PLUGIN_DATA") && !hasOwn(callerEnv, "PLUGIN_DATA")) {
+    // Always absolute so jobs.mjs resolvePluginDataDir accepts it.
+    isolation.CLAUDE_PLUGIN_DATA = path.join(cwd, ".grok-plugin-data");
+  }
+  if (!hasOwn(callerEnv, "TMPDIR")) {
+    const tmp = mk("grok-companion-tmp-");
+    isolation.TMPDIR = tmp;
+    // Mirror common temp env vars so platform-specific os.tmpdir() still lands
+    // inside the private tree (Node honors TMPDIR; some tools also read TMP/TEMP).
+    if (!hasOwn(callerEnv, "TMP")) isolation.TMP = tmp;
+    if (!hasOwn(callerEnv, "TEMP")) isolation.TEMP = tmp;
+  }
+
+  const env = { ...process.env, ...isolation, ...callerEnv };
+  return {
+    cwd,
+    env,
+    cleanup: () => {
+      for (const dir of roots) {
+        try {
+          fs.rmSync(dir, { recursive: true, force: true });
+        } catch {
+          // best-effort temp cleanup
+        }
+      }
+    },
+  };
+}
+
+/**
+ * Spawn grok-companion.mjs under isolated cwd/XDG/TMPDIR/plugin-data by default.
+ * Pass cwd or the matching env keys to opt out of individual defaults.
+ *
+ * @param {string[]} argv
+ * @param {{ env?: Record<string, string | undefined>, cwd?: string, stdin?: string }} [options]
+ */
+export function runCompanion(argv, { env = {}, cwd, stdin } = {}) {
+  const iso = companionIsolation({ env, cwd });
+  try {
+    const result = spawnSync(process.execPath, [COMPANION, ...argv], {
+      cwd: iso.cwd,
+      encoding: "utf8",
+      input: stdin,
+      env: iso.env,
+    });
+    return {
+      code: typeof result.status === "number" ? result.status : 1,
+      stdout: result.stdout || "",
+      stderr: result.stderr || "",
+    };
+  } finally {
+    // Only remove dirs we created (caller-owned cwd/env roots are left alone).
+    iso.cleanup();
+  }
 }
