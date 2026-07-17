@@ -1,0 +1,6 @@
+# Grandfathered files over the 900-line cap (AGENTS.md rule 11).
+# verify.sh fails if a listed file drops to <= 900 lines (remove the entry) or
+# if an unlisted code file exceeds 900. Goal: empty this file by 2.0.0.
+plugin/wrapper/scripts/tests/test_envelope.py
+plugin/wrapper/scripts/tests/test_worktree.py
+plugin/wrapper/scripts/tests/test_implementation_handoff.py
