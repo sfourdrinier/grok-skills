@@ -1,18 +1,24 @@
 // plugin/scripts/lib/codex-agents.mjs
 //
 // Install Codex custom-agent TOML templates shipped under plugin/codex-agents/
-// into ~/.codex/agents/ (or CODEX_HOME/agents).
+// into ~/.codex/agents/ (or project .codex/agents when scope=project).
 //
 // Codex does not yet register plugin-bundled agents (openai/codex#18988), so we
-// materialize them into the global agents dir. Prefer ensureCodexAgents() from
+// materialize them into the agents dir. Prefer ensureCodexAgents() from
 // SessionStart so install is zero-step for the user. Templates use
 // __GROK_AGENT_RUN_Q__; install rewrites an absolute path to agents/run.mjs.
+//
+// Project-scope agent discovery (.codex/agents/) per Codex docs July 2026:
+// https://developers.openai.com/codex/subagents
+// (personal ~/.codex/agents, project .codex/agents).
 
 import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { getRunMode, jobsDir } from "./jobs.mjs";
 
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -21,6 +27,10 @@ const AGENT_RUN_PLACEHOLDER = "__GROK_AGENT_RUN_Q__";
 /** @deprecated legacy templates */
 const COMPANION_PLACEHOLDER = "__GROK_COMPANION_Q__";
 const MANAGED_NAME_PREFIX = "grok-";
+/** Keep at most this many managed-agent *.bak* files per target (newest first). */
+export const MAX_MANAGED_AGENT_BACKUPS = 3;
+const CODEX_AGENTS_SCOPE_KEY = "codexAgentsScope";
+const SCOPE_SIDECAR = "codex-agents-prefs.json";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const DEFAULT_TEMPLATES_DIR = path.resolve(SCRIPT_DIR, "..", "..", "codex-agents");
@@ -36,6 +46,154 @@ export function codexHome(env = process.env) {
 
 export function codexAgentsDir(env = process.env) {
   return path.join(codexHome(env), "agents");
+}
+
+/**
+ * @param {unknown} value
+ * @returns {"user"|"project"|null}
+ */
+export function parseCodexAgentsScope(value) {
+  const s = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  if (s === "user" || s === "project") {
+    return s;
+  }
+  return null;
+}
+
+function stateRootFromJobs(cwd, env) {
+  // jobsDir -> <stateRoot>/jobs; ensure() side effect via getRunMode load path.
+  getRunMode(cwd, env);
+  return path.dirname(jobsDir(cwd, env));
+}
+
+function jobsIndexPath(cwd, env) {
+  return path.join(stateRootFromJobs(cwd, env), "jobs-index.json");
+}
+
+function scopeSidecarPath(cwd, env) {
+  return path.join(stateRootFromJobs(cwd, env), SCOPE_SIDECAR);
+}
+
+function readScopeFromIndex(cwd, env) {
+  try {
+    const file = jobsIndexPath(cwd, env);
+    if (!fs.existsSync(file)) {
+      return null;
+    }
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    return parseCodexAgentsScope(parsed?.config?.[CODEX_AGENTS_SCOPE_KEY]);
+  } catch {
+    return null;
+  }
+}
+
+function readScopeFromSidecar(cwd, env) {
+  try {
+    const file = scopeSidecarPath(cwd, env);
+    if (!fs.existsSync(file)) {
+      return null;
+    }
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    return parseCodexAgentsScope(parsed?.codexAgentsScope);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Effective Codex agents install scope for this workspace.
+ * Default `user` = personal ~/.codex/agents (historical behavior).
+ * Persisted in workspace prefs (jobs-index.json) alongside run mode; a small
+ * sidecar re-hydrates the value if jobs-index rewrite drops unknown keys.
+ *
+ * @param {string} cwd
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {"user"|"project"}
+ */
+export function getCodexAgentsScope(cwd, env = process.env) {
+  return readScopeFromIndex(cwd, env) || readScopeFromSidecar(cwd, env) || "user";
+}
+
+/**
+ * Persist Codex agents install scope in workspace prefs (same jobs-index as
+ * run mode) plus a resilience sidecar under the same state root.
+ *
+ * @param {string} cwd
+ * @param {string} scope
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {"user"|"project"}
+ */
+export function setCodexAgentsScope(cwd, scope, env = process.env) {
+  const normalized = parseCodexAgentsScope(scope) || "user";
+  const root = stateRootFromJobs(cwd, env);
+  fs.mkdirSync(root, { recursive: true, mode: DIR_MODE });
+
+  const indexFile = path.join(root, "jobs-index.json");
+  let payload = { version: 1, jobs: [], config: {} };
+  if (fs.existsSync(indexFile)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(indexFile, "utf8"));
+      if (parsed && typeof parsed === "object") {
+        payload = parsed;
+      }
+    } catch {
+      /* start fresh structure but keep going */
+    }
+  }
+  if (!payload.config || typeof payload.config !== "object") {
+    payload.config = {};
+  }
+  payload.config[CODEX_AGENTS_SCOPE_KEY] = normalized;
+  if (!payload.config.prefsSources || typeof payload.config.prefsSources !== "object") {
+    payload.config.prefsSources = {};
+  }
+  payload.config.prefsSources[CODEX_AGENTS_SCOPE_KEY] = "setup";
+  if (!Array.isArray(payload.jobs)) {
+    payload.jobs = [];
+  }
+  if (payload.version == null) {
+    payload.version = 1;
+  }
+  fs.writeFileSync(indexFile, `${JSON.stringify(payload, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: FILE_MODE,
+  });
+
+  // Sidecar: jobs.mjs saveIndex only re-emits known config keys and would drop
+  // codexAgentsScope; keep a same-state-root copy so SessionStart still honors
+  // project scope after unrelated prefs/job writes.
+  fs.writeFileSync(
+    path.join(root, SCOPE_SIDECAR),
+    `${JSON.stringify({ codexAgentsScope: normalized }, null, 2)}\n`,
+    { encoding: "utf8", mode: FILE_MODE }
+  );
+  return normalized;
+}
+
+/**
+ * Resolve the Codex agents destination directory for install/ensure.
+ * Project scope -> <cwd>/.codex/agents; user scope -> ~/.codex/agents (or CODEX_HOME).
+ *
+ * Project-scope agent discovery (.codex/agents/) per Codex docs July 2026:
+ * https://developers.openai.com/codex/subagents
+ * (personal ~/.codex/agents, project .codex/agents).
+ *
+ * @param {{ cwd?: string, env?: NodeJS.ProcessEnv, scope?: string|null }} [opts]
+ * @returns {string}
+ */
+export function resolveCodexAgentsDestDir({
+  cwd = process.cwd(),
+  env = process.env,
+  scope = null,
+} = {}) {
+  const resolved =
+    parseCodexAgentsScope(scope) || getCodexAgentsScope(cwd, env) || "user";
+  if (resolved === "project") {
+    return path.join(path.resolve(cwd), ".codex", "agents");
+  }
+  return codexAgentsDir(env);
 }
 
 export function listTemplateAgents(templatesDir = DEFAULT_TEMPLATES_DIR) {
@@ -136,7 +294,86 @@ function writePrivate(filePath, content) {
 }
 
 /**
+ * True when name is a backup sibling of baseName: base.bak or base.bak.N
+ * @param {string} baseName
+ * @param {string} name
+ */
+function isBackupNameFor(baseName, name) {
+  if (name === `${baseName}.bak`) {
+    return true;
+  }
+  return (
+    name.startsWith(`${baseName}.bak.`) &&
+    /^\d+$/.test(name.slice(`${baseName}.bak.`.length))
+  );
+}
+
+/**
+ * Managed-agent backup siblings of filePath (content must carry managed-by).
+ * @param {string} filePath
+ * @returns {{ path: string, mtimeMs: number, name: string }[]}
+ */
+export function listManagedAgentBackups(filePath) {
+  const dir = path.dirname(filePath);
+  const baseName = path.basename(filePath);
+  if (!fs.existsSync(dir)) {
+    return [];
+  }
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const name of names) {
+    if (!isBackupNameFor(baseName, name)) {
+      continue;
+    }
+    const full = path.join(dir, name);
+    try {
+      const body = fs.readFileSync(full, "utf8");
+      if (!isManagedAgentBody(body)) {
+        continue;
+      }
+      const st = fs.statSync(full);
+      out.push({ path: full, mtimeMs: st.mtimeMs, name });
+    } catch {
+      /* skip unreadable */
+    }
+  }
+  return out;
+}
+
+/**
+ * Keep the newest `keep` managed backups for filePath; delete older managed ones.
+ * Never touches files whose content lacks the managed-by header.
+ * @param {string} filePath
+ * @param {number} [keep]
+ * @returns {{ kept: string[], deleted: string[] }}
+ */
+export function pruneManagedAgentBackups(filePath, keep = MAX_MANAGED_AGENT_BACKUPS) {
+  const backups = listManagedAgentBackups(filePath).sort(
+    (a, b) => b.mtimeMs - a.mtimeMs
+  );
+  const kept = backups.slice(0, keep);
+  const deleted = [];
+  for (const b of backups.slice(keep)) {
+    try {
+      fs.unlinkSync(b.path);
+      deleted.push(b.path);
+    } catch {
+      /* best-effort */
+    }
+  }
+  return { kept: kept.map((b) => b.path), deleted };
+}
+
+/**
  * Backup existing file to path.bak (and path.bak.N if needed). Returns backup path or null.
+ * After writing a new backup, cap managed-agent backups at MAX_MANAGED_AGENT_BACKUPS
+ * (newest 3 total including the new one). Only prunes backups whose content
+ * carries the managed-by header - never touches user files.
  */
 export function backupAgentFile(filePath) {
   if (!fs.existsSync(filePath)) {
@@ -154,6 +391,14 @@ export function backupAgentFile(filePath) {
   } catch {
     /* best-effort */
   }
+  // Cap only when the new backup itself is managed content.
+  try {
+    if (isManagedAgentBody(fs.readFileSync(backup, "utf8"))) {
+      pruneManagedAgentBackups(filePath, MAX_MANAGED_AGENT_BACKUPS);
+    }
+  } catch {
+    /* best-effort prune */
+  }
   return backup;
 }
 
@@ -170,6 +415,8 @@ export function installCodexAgents({
   updateManaged = true,
   pluginRoot = null,
   backup = true,
+  cwd = null,
+  scope = null,
 } = {}) {
   const root =
     (pluginRoot && String(pluginRoot).trim()) ||
@@ -177,7 +424,13 @@ export function installCodexAgents({
     DEFAULT_PLUGIN_ROOT;
   const companion = resolveCompanionPath(root);
   const agentRun = resolveAgentRunPath(root);
-  const dest = destDir || codexAgentsDir(env);
+  const workCwd = cwd || process.cwd();
+  // Project-scope agent discovery (.codex/agents/) per Codex docs July 2026:
+  // https://developers.openai.com/codex/subagents
+  // (personal ~/.codex/agents, project .codex/agents).
+  const dest =
+    destDir ||
+    resolveCodexAgentsDestDir({ cwd: workCwd, env, scope });
   const installed = [];
   const updated = [];
   const skipped = [];
@@ -317,8 +570,13 @@ export function uninstallCodexAgents({
   env = process.env,
   backup = true,
   onlyNames = null,
+  cwd = null,
+  scope = null,
 } = {}) {
-  const dest = destDir || codexAgentsDir(env);
+  const workCwd = cwd || process.cwd();
+  const dest =
+    destDir ||
+    resolveCodexAgentsDestDir({ cwd: workCwd, env, scope });
   const removed = [];
   const skippedUser = [];
   const backedUp = [];
@@ -390,6 +648,7 @@ export function uninstallCodexAgents({
 
 /**
  * Silent, best-effort ensure for SessionStart. Never throws.
+ * Honors workspace prefs scope (user|project) when destDir is omitted.
  */
 export function ensureCodexAgents(opts = {}) {
   try {
@@ -400,9 +659,13 @@ export function ensureCodexAgents(opts = {}) {
       ...opts,
     });
   } catch (err) {
+    const env = opts.env || process.env;
+    const workCwd = opts.cwd || process.cwd();
     return {
       ok: false,
-      destDir: opts.destDir || codexAgentsDir(opts.env || process.env),
+      destDir:
+        opts.destDir ||
+        resolveCodexAgentsDestDir({ cwd: workCwd, env, scope: opts.scope }),
       companion: "",
       installed: [],
       updated: [],

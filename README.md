@@ -67,11 +67,13 @@ skill names on Codex for later job output.
 |------|-------------|-------------------------------|
 | Install plugin | `/plugin marketplace add sfourdrinier/grok-skills` then `/plugin install grok@grok-skills` | `codex plugin marketplace add sfourdrinier/grok-skills` then `codex plugin add grok@grok-skills` |
 | Skills | Slash commands **or** Skill tool: `/grok:review`, `/grok:code`, ... (model invocation enabled) | Skill picker / Skill tool - same skill **names** (`review`, `code`, `setup`, `dual-lens`, ...) |
-| Subagents | Auto-loaded from plugin: `grok-engineer-coder`, `grok-rescue` | Auto-installed on SessionStart into `~/.codex/agents/` (absolute `agents/run.mjs`) |
-| Implement with Grok | Spawn **grok-engineer-coder**, or `/grok:code` | Spawn **grok-engineer-coder**, or run **code** skill |
-| Stop / SubagentStop hooks | Claude hooks (stop gate + handoff nudge) | Same hooks; may require **trust** via `/hooks` |
+| Subagents | Auto-loaded from plugin: `grok-engineer-coder`, `grok-rescue` | Auto-installed on SessionStart into `~/.codex/agents/` (or project `.codex/agents/` with `setup --codex-agents-scope project`; absolute `agents/run.mjs`) |
+| Implement with Grok | Spawn **grok-engineer-coder**, or `/grok:code` | Spawn **grok-engineer-coder** (nickname **Grok Coder**), or run **code** skill |
+| Stop / SubagentStop hooks | Claude hooks (stop gate + handoff nudge) | **Dormant by default** until trusted via `/hooks` (see Codex trust note below) |
 
 Same engine either way: Node companion → hardened Python wrapper → one JSON envelope.
+
+**Codex trust honesty:** on Codex, plugin hooks (the optional stop-review gate **and** the SubagentStop handoff nudge) stay **dormant until you trust them** via `/hooks`. That is the honest default posture - install alone does not enable those hooks. Skills and SessionStart agent materialization still work without hook trust.
 
 ---
 
@@ -149,7 +151,7 @@ Also accepted: `https://github.com/sfourdrinier/grok-skills.git`, SSH URLs, or a
 
 Skills ship with the plugin. Invoke them the way your Codex build exposes plugin skills (skill picker / `$skill` style, depending on version). Prefer each skill’s self-locating `run.mjs` (Skill base directory); custom agents get an absolute `agents/run.mjs` path on SessionStart - do not invent cache paths by hand.
 
-After install, start a new Codex session (or reload) so **SessionStart** can write `~/.codex/agents/grok-*.toml`. Then spawn **grok-engineer-coder** / **grok-rescue**, or run skills the same way you would in Claude. Prefer tasks via `--task-file` / stdin heredoc so nothing shell-expands.
+After install, start a new Codex session (or reload) so **SessionStart** can write managed `grok-*.toml` agents (default: `~/.codex/agents/`; or `<cwd>/.codex/agents/` after `setup --codex-agents-scope project`). Then spawn **grok-engineer-coder** / **grok-rescue**, or run skills the same way you would in Claude. Prefer tasks via `--task-file` / stdin heredoc so nothing shell-expands. On Codex, plugin hooks remain **dormant until trusted** via `/hooks` (stop gate and SubagentStop nudge); agent materialization does not require that trust step.
 
 ### ChatGPT desktop (Codex)
 
@@ -181,7 +183,7 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 | Skill | What it does |
 |-------|----------------|
 | `/grok:preflight` | Readiness only: Grok CLI runnable (`grok --version`), auth, sandbox policy, private-home lifecycle. No task. No exact CLI build pin. |
-| `/grok:setup` | Optional readiness + prefs (`--run-mode`, **`--notification-mode auto`** for background completion). Codex agents auto-install on SessionStart. |
+| `/grok:setup` | Optional readiness + prefs (`--run-mode`, **`--notification-mode auto`** for background completion, **`--codex-agents-scope user\|project`**). Codex agents auto-install on SessionStart. |
 | `/grok:review` | Read-only review. Target defaults to `.`; optional `--base` (framing only); opt-in `--isolated` for owned worktree snapshot. |
 | `/grok:adversarial-review` | Hostile review that challenges design; web on by default. |
 | `/grok:dual-lens` | Adversarial pass, then ordinary review on the same target. |
@@ -206,18 +208,27 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 | **`grok-rescue`** | Second opinion / diagnosis via Grok `reason` (or `code` if target+base are already known). |
 
 - **Claude Code:** agents ship in the plugin (`plugin/agents/`). Reload plugins after install.
-- **Codex:** agents auto-install on **SessionStart** into `~/.codex/agents/` with an
-  absolute `GROK_AGENT_RUN` → `agents/run.mjs` (Codex cannot register plugin agents
+- **Codex:** agents auto-install on **SessionStart** with an absolute
+  `GROK_AGENT_RUN` → `agents/run.mjs` (Codex cannot register plugin agents
   natively yet - [openai/codex#18988](https://github.com/openai/codex/issues/18988)).
-  Managed files refresh on plugin upgrade (with `*.bak`); user-owned TOML is left alone
-  unless `setup --force-codex-agents`. If agents are missing after install, open a
-  **new session** or run optional `setup --force-codex-agents` (hook failures are
-  non-blocking so they never stall host startup).
+  Default dest is personal `~/.codex/agents/`; `setup --codex-agents-scope project`
+  persists workspace prefs and installs into `<cwd>/.codex/agents/` instead
+  (SessionStart honors the same prefs; see
+  [Codex subagents](https://developers.openai.com/codex/subagents)).
+  Managed files refresh on plugin upgrade (at most 3 managed `*.bak*` kept;
+  user-owned TOML is never pruned or overwritten unless `setup --force-codex-agents`).
+  If agents are missing after install, open a **new session** or run optional
+  `setup --force-codex-agents` (hook failures are non-blocking so they never stall
+  host startup). Nicknames: **Grok Coder** / **Grok Rescue**.
+- **Codex hooks stay dormant until trusted:** the stop-review gate and the
+  SubagentStop handoff nudge are skipped on Codex until you approve them via
+  `/hooks`. Skills and agent materialization do not depend on that trust step.
 - **Transparent skills + agents:** skills use `$SKILL_BASE/run.mjs`; Claude/Codex
   agents use `agents/run.mjs` (self-locating). See
   [plugin-root.md](plugin/references/plugin-root.md).
 - **Remove managed Codex agents:** disable/uninstall the plugin first, then
-  `setup --remove-codex-agents` (or delete managed `~/.codex/agents/grok-*.toml`).
+  `setup --remove-codex-agents` (or delete managed `grok-*.toml` under the active
+  scope dir).
 
 
 ### Run modes (security posture)

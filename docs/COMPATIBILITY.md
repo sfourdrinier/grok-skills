@@ -88,9 +88,10 @@ What we match:
 - Plugin dual-manifest: `plugin/.codex-plugin/plugin.json` with `skills`,
   `hooks`, Figma-style `interface` (displayName, logos, defaultPrompt, category).
   Codex does not yet register plugin-bundled custom agents (openai/codex#18988);
-  we materialize `plugin/codex-agents/*.toml` into `~/.codex/agents/` on SessionStart
+  we materialize `plugin/codex-agents/*.toml` into `~/.codex/agents/` (or project
+  `.codex/agents/` when workspace prefs scope is `project`) on SessionStart
   with absolute `GROK_AGENT_RUN` → `agents/run.mjs` (v1.2.5+; SessionStart since
-  v1.2.1). Interface category: **Development & Workflow**.
+  v1.2.1). Interface category: **Development & Workflow**. See **Upstream gaps**.
 - Install sources (both hosts):
 
   | Source | Claude | Codex |
@@ -166,6 +167,16 @@ If the operator sets `--max-turns` and Grok stops at the budget (often as
 `status: success` with `response` populated and a **warning** that findings may
 be incomplete. Empty shells are not salvaged (`findings: []` / `null`,
 placeholder-only findings, blank text).
+
+## Upstream gaps
+
+Re-check these at each release (links may close or change behavior). Workarounds
+in this repo must stay honest about what the host still cannot do.
+
+| Upstream | Gap | Our workaround / posture |
+|----------|-----|---------------------------|
+| [openai/codex#18988](https://github.com/openai/codex/issues/18988) | Plugins cannot bundle custom agents the way Claude loads `plugin/agents/` | SessionStart + optional `setup` materialize `plugin/codex-agents/*.toml` into `~/.codex/agents/` (or project `.codex/agents/` when `setup --codex-agents-scope project`) with absolute `GROK_AGENT_RUN` |
+| [openai/codex#18308](https://github.com/openai/codex/issues/18308) | Plugin hooks are not auto-trusted on install | Stop-review gate and SubagentStop handoff nudge stay **dormant until trusted** via `/hooks` (honest default). Skills and agent materialization do not depend on hook trust. |
 
 ## Not required for core use
 

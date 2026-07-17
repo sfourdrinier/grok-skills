@@ -8,13 +8,17 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
+  backupAgentFile,
   ensureCodexAgents,
+  getCodexAgentsScope,
   installCodexAgents,
   isManagedAgentBody,
   listTemplateAgents,
   materializeAgentBody,
   resolveAgentRunPath,
+  resolveCodexAgentsDestDir,
   resolveCompanionPath,
+  setCodexAgentsScope,
   shellSingleQuote,
   uninstallCodexAgents,
 } from "../lib/codex-agents.mjs";
@@ -190,4 +194,145 @@ test("ensureCodexAgents never throws", () => {
   });
   assert.equal(result.ok, false);
   assert.ok(result.errors.length > 0);
+});
+
+// --- Task 4.1a: project-scoped Codex agents via workspace prefs ---
+
+test("codex agents scope prefs default user and persist project", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-scope-prefs-"));
+  const env = { CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata") };
+  assert.equal(getCodexAgentsScope(cwd, env), "user");
+  assert.equal(setCodexAgentsScope(cwd, "project", env), "project");
+  assert.equal(getCodexAgentsScope(cwd, env), "project");
+  assert.equal(setCodexAgentsScope(cwd, "user", env), "user");
+  assert.equal(getCodexAgentsScope(cwd, env), "user");
+});
+
+test("prefs project scope resolves dest under cwd/.codex/agents", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-scope-dest-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-scope-"));
+  const env = {
+    CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata"),
+    CODEX_HOME: home,
+  };
+  setCodexAgentsScope(cwd, "project", env);
+  const dest = resolveCodexAgentsDestDir({ cwd, env });
+  assert.equal(dest, path.join(cwd, ".codex", "agents"));
+  // user scope still targets personal agents dir
+  setCodexAgentsScope(cwd, "user", env);
+  assert.equal(resolveCodexAgentsDestDir({ cwd, env }), path.join(home, "agents"));
+});
+
+test("installCodexAgents honors project scope prefs for destDir", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "codex-scope-install-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-install-"));
+  const env = {
+    CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata"),
+    CODEX_HOME: home,
+  };
+  setCodexAgentsScope(cwd, "project", env);
+  const result = installCodexAgents({
+    templatesDir: TEMPLATES,
+    env,
+    cwd,
+    pluginRoot: PLUGIN_ROOT,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.destDir, path.join(cwd, ".codex", "agents"));
+  assert.ok(
+    fs.existsSync(path.join(cwd, ".codex", "agents", "grok-engineer-coder.toml"))
+  );
+  assert.ok(
+    !fs.existsSync(path.join(home, "agents", "grok-engineer-coder.toml")),
+    "project scope must not write personal ~/.codex/agents"
+  );
+});
+
+// --- Task 4.1b: managed backup cap (keep newest 3 total) ---
+
+test("backupAgentFile caps managed backups at 3 newest including the new one", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bak-cap-"));
+  const target = path.join(dir, "grok-engineer-coder.toml");
+  const managedBody =
+    "# managed-by: grok-skills\n# agent-run: /x\nname = \"grok-engineer-coder\"\n";
+  fs.writeFileSync(target, managedBody);
+
+  // Five existing managed backups with staggered mtimes (oldest -> newest).
+  const prior = [];
+  for (let i = 0; i < 5; i += 1) {
+    const bak =
+      i === 0 ? `${target}.bak` : `${target}.bak.${i}`;
+    fs.writeFileSync(bak, `${managedBody}# bak-gen ${i}\n`);
+    const mtime = new Date(Date.now() - (5 - i) * 60_000);
+    fs.utimesSync(bak, mtime, mtime);
+    prior.push({ path: bak, mtimeMs: mtime.getTime(), i });
+  }
+
+  // User-owned backup must never be pruned.
+  const userBak = path.join(dir, "user-custom.toml.bak");
+  fs.writeFileSync(userBak, "# not managed\nname = \"user-custom\"\n");
+  const userMtime = new Date(Date.now() - 10 * 60_000);
+  fs.utimesSync(userBak, userMtime, userMtime);
+
+  // Bump target mtime so the new backup is newest.
+  const now = new Date();
+  fs.utimesSync(target, now, now);
+  const created = backupAgentFile(target);
+  assert.ok(created);
+  assert.ok(fs.existsSync(created));
+
+  const managedBackups = fs
+    .readdirSync(dir)
+    .filter(
+      (n) =>
+        n === "grok-engineer-coder.toml.bak" ||
+        /^grok-engineer-coder\.toml\.bak\.\d+$/.test(n)
+    )
+    .map((n) => {
+      const p = path.join(dir, n);
+      return { name: n, path: p, mtimeMs: fs.statSync(p).mtimeMs };
+    })
+    .sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+  assert.equal(
+    managedBackups.length,
+    3,
+    `expected 3 managed backups total (including new), got ${managedBackups.map((b) => b.name).join(", ")}`
+  );
+  // Newest must be the just-created backup.
+  assert.equal(managedBackups[0].path, created);
+  // User backup untouched.
+  assert.ok(fs.existsSync(userBak));
+});
+
+test("backupAgentFile does not prune non-managed backups", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-bak-user-"));
+  const target = path.join(dir, "grok-engineer-coder.toml");
+  // Current file is managed (so install would backup it), but prior backups are user content.
+  const managedBody =
+    "# managed-by: grok-skills\nname = \"grok-engineer-coder\"\n";
+  fs.writeFileSync(target, managedBody);
+  const userBackups = [];
+  for (let i = 0; i < 4; i += 1) {
+    const bak = i === 0 ? `${target}.bak` : `${target}.bak.${i}`;
+    fs.writeFileSync(bak, `# user edit ${i}\nname = \"grok-engineer-coder\"\n`);
+    userBackups.push(bak);
+  }
+  backupAgentFile(target);
+  for (const bak of userBackups) {
+    assert.ok(fs.existsSync(bak), `user backup must remain: ${bak}`);
+  }
+});
+
+test("materializeAgentBody keeps nickname_candidates from templates", () => {
+  const eng = fs.readFileSync(
+    path.join(TEMPLATES, "grok-engineer-coder.toml"),
+    "utf8"
+  );
+  const res = fs.readFileSync(path.join(TEMPLATES, "grok-rescue.toml"), "utf8");
+  assert.match(eng, /nickname_candidates\s*=\s*\["Grok Coder"\]/);
+  assert.match(res, /nickname_candidates\s*=\s*\["Grok Rescue"\]/);
+  const body = materializeAgentBody(eng, "/cache/agents/run.mjs", "/cache/scripts/x.mjs");
+  assert.match(body, /nickname_candidates\s*=\s*\["Grok Coder"\]/);
+  assert.ok(!body.includes("__GROK_AGENT_RUN_Q__"));
 });

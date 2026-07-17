@@ -6,7 +6,13 @@
 import { spawnSync } from "node:child_process";
 import process from "node:process";
 
-import { installCodexAgents, uninstallCodexAgents } from "./codex-agents.mjs";
+import {
+  getCodexAgentsScope,
+  installCodexAgents,
+  parseCodexAgentsScope,
+  setCodexAgentsScope,
+  uninstallCodexAgents,
+} from "./codex-agents.mjs";
 import { grokBinaryAvailable } from "./direct-grok.mjs";
 import { readGateConfig, writeGateConfig } from "./gate-state.mjs";
 import {
@@ -35,6 +41,22 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
   const skipCodexAgents = args.includes("--skip-codex-agents");
   const forceCodexAgents = args.includes("--force-codex-agents");
   const removeCodexAgents = args.includes("--remove-codex-agents");
+  // Capture scope before other prefs writes (jobs-index may drop unknown keys).
+  const priorCodexAgentsScope = getCodexAgentsScope(cwd, process.env);
+  const scopeIdx = args.indexOf("--codex-agents-scope");
+  let scopeFlag = null;
+  let invalidCodexAgentsScope = null;
+  if (scopeIdx >= 0) {
+    const rawScope = args[scopeIdx + 1];
+    if (rawScope === undefined || String(rawScope).startsWith("--")) {
+      invalidCodexAgentsScope = "(missing value)";
+    } else {
+      scopeFlag = parseCodexAgentsScope(rawScope);
+      if (!scopeFlag) {
+        invalidCodexAgentsScope = String(rawScope).trim() || rawScope;
+      }
+    }
+  }
   if (args.includes("--run-mode") || args.includes("direct") || args.includes("hardened")) {
     const idx = args.indexOf("--run-mode");
     const mode = idx >= 0 ? args[idx + 1] : args.find((a) => a === "direct" || a === "hardened");
@@ -82,9 +104,18 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
   if (enable) writeGateConfig(cwd, true);
   if (disable) writeGateConfig(cwd, false);
 
+  // Re-persist scope after other prefs writes so jobs-index rewrites cannot drop it.
+  const effectiveCodexAgentsScope = scopeFlag || priorCodexAgentsScope;
+  if (!invalidCodexAgentsScope) {
+    setCodexAgentsScope(cwd, effectiveCodexAgentsScope, process.env);
+  }
+
   const gate = readGateConfig(cwd);
   const runMode = getRunMode(cwd);
   const notifyPrefs = getNotificationConfig(cwd);
+  const codexAgentsScope = invalidCodexAgentsScope
+    ? priorCodexAgentsScope
+    : getCodexAgentsScope(cwd, process.env);
   const binary = grokBinaryAvailable();
   const wrapper = resolveWrapperPath(process.env);
   const webhookDetail = formatWebhookDisplay(notifyPrefs.notificationWebhookUrl);
@@ -124,6 +155,13 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
       ok: true,
       detail: gate.stopReviewGate ? "ENABLED" : "disabled",
     },
+    {
+      name: "codex agents scope",
+      ok: !invalidCodexAgentsScope,
+      detail: invalidCodexAgentsScope
+        ? `invalid ${JSON.stringify(invalidCodexAgentsScope)} (scope prefs unchanged; valid: user|project)`
+        : codexAgentsScope,
+    },
   ];
   const hints = [];
   if (!binary.ok) {
@@ -155,13 +193,27 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
       "Notifications are off. For background completion signals: setup --notification-mode auto (recommended)."
     );
   }
+  if (invalidCodexAgentsScope) {
+    hints.push(
+      "Valid --codex-agents-scope values: user | project. Scope prefs were not changed."
+    );
+  } else if (codexAgentsScope === "project") {
+    hints.push(
+      "Codex agents scope=project: managed TOMLs install into <cwd>/.codex/agents (SessionStart honors this prefs)."
+    );
+  }
 
   let agentsResult = null;
   let agentsOk = true;
   if (removeCodexAgents) {
-    agentsResult = uninstallCodexAgents({ env: process.env, backup: true });
+    agentsResult = uninstallCodexAgents({
+      env: process.env,
+      backup: true,
+      cwd,
+      scope: codexAgentsScope,
+    });
     const detail = agentsResult.ok
-      ? `removed=[${agentsResult.removed.join(", ") || "none"}] user-owned-kept=[${agentsResult.skippedUser.join(", ") || "none"}] backups=[${agentsResult.backedUp.join(", ") || "none"}] → ${agentsResult.destDir}`
+      ? `scope=${codexAgentsScope} removed=[${agentsResult.removed.join(", ") || "none"}] user-owned-kept=[${agentsResult.skippedUser.join(", ") || "none"}] backups=[${agentsResult.backedUp.join(", ") || "none"}] → ${agentsResult.destDir}`
       : `errors: ${agentsResult.errors.join("; ")}`;
     rows.push({ name: "codex agents", ok: agentsResult.ok, detail });
     agentsOk = agentsResult.ok;
@@ -177,8 +229,11 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
       updateManaged: true,
       pluginRoot,
       backup: true,
+      cwd,
+      scope: codexAgentsScope,
     });
     const parts = [
+      `scope=${codexAgentsScope}`,
       `installed=[${agentsResult.installed.join(", ") || "none"}]`,
       `updated=[${agentsResult.updated.join(", ") || "none"}]`,
       `skipped=[${agentsResult.skipped.join(", ") || "none"}]`,
@@ -203,11 +258,11 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
       );
     } else if (agentsResult.skippedUser?.length) {
       hints.push(
-        "Some ~/.codex/agents/grok-*.toml look user-owned (no managed-by header). Use setup --force-codex-agents to overwrite (creates .bak)."
+        "Some grok-*.toml agents look user-owned (no managed-by header). Use setup --force-codex-agents to overwrite (creates .bak)."
       );
     } else if (agentsResult.skipped.length && !agentsResult.installed.length) {
       hints.push(
-        "Codex agents already up to date under ~/.codex/agents (SessionStart keeps managed agents in sync)."
+        `Codex agents already up to date under ${agentsResult.destDir} (SessionStart keeps managed agents in sync).`
       );
     }
   }
@@ -244,5 +299,12 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
   }
 
   process.stdout.write(renderSetupReport({ rows, runMode, hints }));
-  return binary.ok && wrapper && agentsOk && !notifyPrefsInvalid && preflightOk ? 0 : 1;
+  return binary.ok &&
+    wrapper &&
+    agentsOk &&
+    !notifyPrefsInvalid &&
+    !invalidCodexAgentsScope &&
+    preflightOk
+    ? 0
+    : 1;
 }

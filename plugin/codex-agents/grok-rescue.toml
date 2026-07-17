@@ -3,6 +3,7 @@
 # Placeholder __GROK_AGENT_RUN_Q__ is rewritten to an absolute single-quoted path
 # to agents/run.mjs (self-locating; same entry family as skills/*/run.mjs).
 name = "grok-rescue"
+nickname_candidates = ["Grok Rescue"]
 description = """
 Delegate diagnosis, root-cause investigation, or a second opinion to Grok through
 the hardened grok-skills wrapper. Prefer for investigation - not pure
