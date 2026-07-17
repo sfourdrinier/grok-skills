@@ -51,7 +51,7 @@ def build_command_evidence(
     (detail belongs on blockers / error.detail, not commands[]).
     """
     safe_argv = [redact_secret_value_text(str(a)) for a in argv]
-    return {
+    record = {
         "argv": safe_argv,
         "cwd": cwd,
         "purpose": purpose,
@@ -62,3 +62,15 @@ def build_command_evidence(
         "stdoutTail": _tail_text(stdout or b""),
         "stderrTail": _tail_text(stderr or b""),
     }
+    if int(exit_status) != 0 and stdout:
+        # TAP failure names from FULL stdout, pre-tail-cap (max 5, redacted).
+        failed = []
+        for line in stdout.decode("utf-8", errors="replace").split("\n"):
+            stripped = line.strip()
+            if stripped.startswith("not ok"):
+                failed.append(redact_secret_value_text(stripped[:300]))
+                if len(failed) >= 5:
+                    break
+        if failed:
+            record["failedTests"] = failed
+    return record

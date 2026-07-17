@@ -364,3 +364,28 @@ class TapFailureLinesTests(unittest.TestCase):
 
         self.assertEqual(tap_failure_lines(""), [])
         self.assertEqual(tap_failure_lines("ok 1 - all good\n# pass 1"), [])
+
+
+class EvidenceFailedTestsTests(unittest.TestCase):
+    """build_command_evidence captures TAP failures from FULL stdout, pre-tail-cap."""
+
+    def test_failed_tests_survive_tail_truncation(self) -> None:
+        from groklib.command_evidence import build_command_evidence
+
+        early_fail = b"not ok 3 - the buried failing test name\n"
+        stdout = early_fail + b"ok filler line\n" * 2000  # pushes the failure out of any 4k tail
+        rec = build_command_evidence(
+            argv=["node", "--test"], cwd="/tmp", purpose="full plugin suite",
+            exit_status=1, stdout=stdout, stderr=b"", duration_seconds=1.0,
+        )
+        self.assertIn("the buried failing test name", " ".join(rec.get("failedTests") or []))
+        self.assertNotIn("the buried failing test name", rec["stdoutTail"]["text"])
+
+    def test_zero_exit_records_no_failed_tests(self) -> None:
+        from groklib.command_evidence import build_command_evidence
+
+        rec = build_command_evidence(
+            argv=["true"], cwd="/tmp", purpose="x", exit_status=0,
+            stdout=b"ok 1 - fine\n", stderr=b"", duration_seconds=0.1,
+        )
+        self.assertNotIn("failedTests", rec)

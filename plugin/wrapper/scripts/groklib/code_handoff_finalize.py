@@ -402,11 +402,11 @@ def code_handoff_finalize(
             if int(rec.get("exitStatus", 1)) != 0:
                 validation_ok = False
                 detail = {"argv": safe_argv, "exitStatus": rec.get("exitStatus")}
-                failed = tap_failure_lines(
+                failed = rec.get("failedTests") or tap_failure_lines(
                     ((rec.get("stdoutTail") or {}).get("text") or "")
                 )
                 if failed:
-                    detail["failedTests"] = failed
+                    detail["failedTests"] = list(failed)
                 blockers.append(
                     HandoffBlocker(
                         "validation-failure",

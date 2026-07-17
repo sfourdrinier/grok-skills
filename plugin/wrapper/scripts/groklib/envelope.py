@@ -317,6 +317,9 @@ _COMMAND_EVIDENCE_OPTIONAL_SHAPE: Dict[str, tuple] = {
     "stderrSha256": ("str",),
     "stdoutTail": ("object", _COMMAND_TAIL_SHAPE),
     "stderrTail": ("object", _COMMAND_TAIL_SHAPE),
+    # 2.0.0: TAP "not ok" lines from the FULL stdout of a FAILED command,
+    # captured before tail truncation so validation failures name their tests.
+    "failedTests": ("array_of_str",),
 }
 _COMMAND_EVIDENCE_KEYS = frozenset(_COMMAND_EVIDENCE_OPTIONAL_SHAPE.keys())
 
