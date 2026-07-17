@@ -157,6 +157,22 @@ class ValidateHandoffTests(unittest.TestCase):
         doc["changedFiles"] = [{"path": "a:b.txt", "status": "added", "oldPath": None}]
         self.assertEqual(validate_implementation_handoff(doc), [])
 
+    def test_contract_summary_optional_and_typed(self) -> None:
+        doc = self._doc()
+        self.assertEqual(validate_implementation_handoff(doc), [])
+        doc["contractSummary"] = {
+            "taskId": "T-1",
+            "objective": "x",
+            "acceptanceCriteria": ["a"],
+        }
+        self.assertEqual(validate_implementation_handoff(doc), [])
+        doc["contractSummary"] = None
+        self.assertEqual(validate_implementation_handoff(doc), [])
+        doc["contractSummary"] = {"taskId": 5}
+        self.assertTrue(
+            any("contractSummary" in e for e in validate_implementation_handoff(doc))
+        )
+
     def test_dual_condition_requires_code_envelope_mode(self) -> None:
         import tempfile
 

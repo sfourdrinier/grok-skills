@@ -222,6 +222,7 @@ def run(args: argparse.Namespace) -> dict:
             "manifestPath": str(manifest_path),
             "patchPath": str(patch_path),
         },
+        "contractSummary": manifest.get("contractSummary"),
         "parentProtocol": {
             "autoApply": False,
             "note": (

@@ -606,6 +606,15 @@ def code_handoff_finalize(
         "runId": run_id,
         "taskId": task_id,
         "contractSha256": _contract_sha256(contract),
+        "contractSummary": (
+            {
+                "taskId": contract.get("taskId"),
+                "objective": contract.get("objective") or "",
+                "acceptanceCriteria": list(contract.get("acceptanceCriteria") or []),
+            }
+            if contract
+            else None
+        ),
         "baseRevision": base_revision,
         "resultTreeOid": result_tree or "",
         "changedFiles": changed,

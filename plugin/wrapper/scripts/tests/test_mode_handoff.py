@@ -118,6 +118,27 @@ class HandoffModeTests(ModeHarness):
         self.assertTrue(env["response"]["integration"]["ready"])
         self.assertIn("patch", env["response"]["handoff"])
 
+    def test_handoff_response_echoes_contract_summary(self) -> None:
+        run_id = self._seed_code_run(ready_manifest=True, write_envelope=True)
+        paths_dir = runstate.state_root() / "runs" / run_id
+        manifest = json.loads(
+            (paths_dir / "implementation-handoff.json").read_text(encoding="utf-8")
+        )
+        summary = {
+            "taskId": "T-1",
+            "objective": "ship handoff summary",
+            "acceptanceCriteria": ["echoed on response", "display only"],
+        }
+        manifest["contractSummary"] = summary
+        (paths_dir / "implementation-handoff.json").write_text(
+            json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+        )
+        code, out = self.drive(["handoff", "--run-id", run_id])
+        env = json.loads(out)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(env["status"], "success")
+        self.assertEqual(env["response"]["contractSummary"], summary)
+
     def test_handoff_not_ready_without_envelope(self) -> None:
         run_id = self._seed_code_run(ready_manifest=True, write_envelope=False)
         code, out = self.drive(["handoff", "--run-id", run_id])

@@ -35,6 +35,7 @@ runs/<runId>/
 | `runId` | Matches code run |
 | `taskId` | From contract or `no-contract` |
 | `contractSha256` | Hash of normalized contract or null |
+| `contractSummary` | Display metadata or null: `{taskId, objective, acceptanceCriteria[]}` - not part of readiness |
 | `baseRevision` | Full SHA worktree was created from |
 | `resultTreeOid` | Tree OID after staging changes |
 | `changedFiles[]` | `{path, status, oldPath}` |

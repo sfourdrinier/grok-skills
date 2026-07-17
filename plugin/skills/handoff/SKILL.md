@@ -72,14 +72,15 @@ This plugin **never** auto-applies, commits, merges, cherry-picks, or pushes.
 2. Wait for terminal status (`/grok:status --run-id` optional)
 3. Run `/grok:handoff --run-id <id>`
 4. Proceed only if envelope status is success and `response.integration.ready`
-5. Verify `patch.sha256` matches on-disk patch
-6. Inspect patch and changed files
-7. Confirm parent base still contains `baseRevision` ancestry as needed
-8. Check dirty overlap on paths you will touch
-9. `git apply --check --binary <patch>`
-10. Explicit `git apply --binary <patch>` (or equivalent) only with operator intent
-11. Re-run relevant validation on the parent checkout
-12. Record `runId` + patch hash in your notes
+5. When `response.contractSummary` is present, check its acceptance criteria against the patch before applying
+6. Verify `patch.sha256` matches on-disk patch
+7. Inspect patch and changed files
+8. Confirm parent base still contains `baseRevision` ancestry as needed
+9. Check dirty overlap on paths you will touch
+10. `git apply --check --binary <patch>`
+11. Explicit `git apply --binary <patch>` (or equivalent) only with operator intent
+12. Re-run relevant validation on the parent checkout
+13. Record `runId` + patch hash in your notes
 
 ## What this mode never does
 

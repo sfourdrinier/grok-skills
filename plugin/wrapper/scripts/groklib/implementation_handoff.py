@@ -214,6 +214,18 @@ def validate_implementation_handoff(doc: dict) -> List[str]:
     worktree = doc.get("worktree")
     if not isinstance(worktree, dict):
         errors.append("worktree must be object")
+    summary = doc.get("contractSummary")
+    if summary is not None:
+        if not isinstance(summary, dict):
+            errors.append("contractSummary must be object or null")
+        else:
+            if not isinstance(summary.get("taskId"), str):
+                errors.append("contractSummary.taskId must be string")
+            if not isinstance(summary.get("objective"), str):
+                errors.append("contractSummary.objective must be string")
+            ac = summary.get("acceptanceCriteria")
+            if not isinstance(ac, list) or not all(isinstance(c, str) for c in ac):
+                errors.append("contractSummary.acceptanceCriteria must be string array")
     return errors
 
 
