@@ -37,6 +37,23 @@ if r is None:
     sys.exit(2)
 if r.get("stderr"):
     sys.stderr.write(r["stderr"])
+# echoTask: read --task-file and echo content + argv (task-passing tests).
+if r.get("echoTask"):
+    argv = sys.argv[1:]
+    task_echo = None
+    if "--task-file" in argv:
+        index = argv.index("--task-file")
+        if index + 1 < len(argv):
+            with open(argv[index + 1], "r", encoding="utf-8") as handle:
+                task_echo = handle.read()
+    sys.stdout.write(json.dumps({
+        "schemaVersion": 1,
+        "mode": mode,
+        "status": "success",
+        "taskEcho": task_echo,
+        "argv": argv,
+    }))
+    sys.exit(int(r.get("exitCode", 0)))
 stdout = r.get("stdout", "{}")
 # Optional template so tests can assert which --run-id was forwarded.
 if "{{RUN_ID}}" in stdout:

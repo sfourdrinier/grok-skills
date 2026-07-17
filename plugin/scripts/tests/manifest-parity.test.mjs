@@ -2,9 +2,13 @@
 //
 // Task 6.1: dual-manifest drift guard - Claude/Codex parity, packaging
 // version surfaces from RELEASE.md, and tolerant CHANGELOG heading check.
+// Task 7.6: also asserts tools/gen-manifests.mjs --check on the committed tree
+// (independent of the generator's own write path; keeps the guard if someone
+// hand-edits a generated file).
 // Reads live files from the repo root (no fixtures).
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +22,7 @@ const CLAUDE_PLUGIN = "plugin/.claude-plugin/plugin.json";
 const CODEX_PLUGIN = "plugin/.codex-plugin/plugin.json";
 const CLAUDE_MARKETPLACE = ".claude-plugin/marketplace.json";
 const CHANGELOG = "CHANGELOG.md";
+const GEN_MANIFESTS = path.join(REPO_ROOT, "tools", "gen-manifests.mjs");
 
 const SHARED_FIELDS = ["name", "version", "license", "homepage", "repository"];
 const CODEX_ONLY_KEYWORD = "claude-code";
@@ -130,4 +135,33 @@ test("CHANGELOG has a section for the manifest version or the 2.0.0 unreleased h
     `CHANGELOG.md must contain "## [${version}]" (any suffix) or the literal ` +
       `"${UNRELEASED_HEADING}" (branch unreleased-tracked state)`
   );
+});
+
+test("gen-manifests --check passes on the committed tree (no drift)", () => {
+  const result = spawnSync(process.execPath, [GEN_MANIFESTS, "--check"], {
+    encoding: "utf8",
+    cwd: REPO_ROOT,
+  });
+  assert.equal(
+    result.status,
+    0,
+    `gen-manifests --check must pass on committed manifests; stdout=${result.stdout} stderr=${result.stderr}`
+  );
+});
+
+test("gen-manifests --check exits 1 when a generated file drifts", () => {
+  const abs = path.join(REPO_ROOT, CLAUDE_PLUGIN);
+  const original = fs.readFileSync(abs, "utf8");
+  try {
+    // Mutate one generated file, then require --check to fail closed.
+    fs.writeFileSync(abs, original.replace('"version": "2.0.0"', '"version": "0.0.0-drift"'), "utf8");
+    const result = spawnSync(process.execPath, [GEN_MANIFESTS, "--check"], {
+      encoding: "utf8",
+      cwd: REPO_ROOT,
+    });
+    assert.equal(result.status, 1, "drift must exit 1");
+    assert.match(result.stderr, /drift/i);
+  } finally {
+    fs.writeFileSync(abs, original, "utf8");
+  }
 });

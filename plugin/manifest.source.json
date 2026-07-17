@@ -1,0 +1,75 @@
+{
+  "name": "grok",
+  "version": "2.0.0",
+  "descriptionTemplate": "Grok as a peer implementer agent for {{host}}: delegate code to an isolated worktree, iterate with continue-run, integrate through verified handoff. Review, reason, and verify included. Not affiliated with xAI.",
+  "author": {
+    "name": "Stephane Fourdrinier"
+  },
+  "homepage": "https://github.com/sfourdrinier/grok-skills",
+  "repository": "https://github.com/sfourdrinier/grok-skills",
+  "license": "MIT",
+  "keywords": [
+    "grok",
+    "xai",
+    "code-review",
+    "agent",
+    "sandbox",
+    "peer-agent",
+    "implementation-handoff",
+    "worktree"
+  ],
+  "displayName": "Grok Skills",
+  "claude": {
+    "hostName": "Claude Code",
+    "userConfig": {
+      "runMode": {
+        "type": "string",
+        "title": "Run mode",
+        "description": "Security posture for live Grok runs: hardened (private home, sandbox, worktrees) or direct (your installed CLI)",
+        "default": "hardened"
+      },
+      "notificationMode": {
+        "type": "string",
+        "title": "Completion notifications",
+        "description": "off, auto (background runs only), native, or webhook",
+        "default": "off"
+      },
+      "notificationWebhookUrl": {
+        "type": "string",
+        "title": "Webhook URL",
+        "description": "HTTPS endpoint for webhook notifications",
+        "sensitive": true,
+        "default": ""
+      }
+    }
+  },
+  "codex": {
+    "hostName": "Codex / ChatGPT",
+    "extraKeyword": "claude-code",
+    "extraKeywordAfter": "sandbox",
+    "skills": "./skills/",
+    "hooks": "./hooks/hooks.json",
+    "interface": {
+      "displayName": "Grok Skills",
+      "shortDescription": "Peer implementer for Codex: implement, continue-run, verified handoff",
+      "longDescription": "Grok as a peer implementer for Codex CLI and the ChatGPT desktop app. Delegate code into isolated git worktrees, iterate with continue-run, and integrate through verified handoff. Review, reason, and verify modes included. Experimental peer channel available. Every mode runs in a private auth home under a verified OS sandbox and emits exactly one machine-readable JSON result envelope. The Python engine is bundled inside the plugin install tree so marketplace cache installs work without env hacks. Not affiliated with xAI.",
+      "developerName": "Stephane Fourdrinier",
+      "category": "Development & Workflow",
+      "capabilities": [
+        "Read",
+        "Write"
+      ],
+      "websiteURL": "https://github.com/sfourdrinier/grok-skills",
+      "defaultPrompt": [
+        "Run the grok preflight skill and summarize readiness.",
+        "Use the grok review skill on the current change set and report correctness bugs.",
+        "Use the grok reason skill to critique this architecture decision.",
+        "Use the grok implement skill to fix a bug and verify the handoff."
+      ],
+      "brandColor": "#7CFFB2",
+      "composerIcon": "./assets/icon.svg",
+      "logo": "./assets/logo.svg",
+      "screenshots": []
+    }
+  }
+}

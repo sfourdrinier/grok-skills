@@ -171,3 +171,25 @@ test("FAKE_WRAPPER_CALLS appends invoked mode; readCalls returns string[]", () =
     fs.rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+test("echoTask reads --task-file and returns taskEcho + argv", () => {
+  const cwd = tempCwd();
+  const taskFile = path.join(cwd, "task.txt");
+  fs.writeFileSync(taskFile, "literal $(nope)\n", "utf8");
+  const { env, cleanup } = makeFakeWrapper({
+    verify: { echoTask: true },
+  });
+  try {
+    const res = runCompanion(
+      ["verify", "--worktree", "/x", "--task-file", taskFile],
+      { env, cwd }
+    );
+    assert.equal(res.code, 0, res.stderr);
+    const envelope = JSON.parse(res.stdout.trim());
+    assert.equal(envelope.taskEcho, "literal $(nope)\n");
+    assert.ok(envelope.argv.includes(taskFile));
+  } finally {
+    cleanup();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});

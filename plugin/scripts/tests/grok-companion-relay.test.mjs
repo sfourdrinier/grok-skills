@@ -5,6 +5,9 @@
 // state machine's three timings each deliver the wrapper's envelope EXACTLY ONCE
 // and unchanged on stdout, that the relay never writes stdout, and that live
 // progress surfaces on stderr. Run with: node --test plugin/scripts/tests/
+//
+// Kept on fixtures/fake_wrapper.py (not helpers/fake-wrapper.mjs): needs live
+// progress.jsonl, sleep, decoy run dirs, broken-progress, and run-id markers.
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -18,6 +21,7 @@ import { companionIsolation } from "./helpers/fake-wrapper.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const COMPANION = path.resolve(SCRIPT_DIR, "..", "grok-companion.mjs");
+// Bespoke progressive simulator - see file header for why not makeFakeWrapper.
 const FAKE_WRAPPER = path.resolve(SCRIPT_DIR, "fixtures", "fake_wrapper.py");
 
 function runCompanion(args, extraEnv = {}) {

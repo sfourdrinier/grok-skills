@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# tools/checks.sh - mechanical repo checks (900-line cap + ASCII hyphens).
+# tools/checks.sh - mechanical repo checks (900-line cap + ASCII hyphens +
+# manifest single-source drift).
 # Single source: called by tools/verify.sh locally and by the CI `mechanical`
 # job. FAIL CLOSED: missing tools or tool errors fail the gate, never pass it.
 set -euo pipefail
@@ -55,5 +56,10 @@ elif [ "$rg_status" -ne 1 ]; then
   echo "rg failed with exit $rg_status (fail closed)"
   exit 1
 fi
+
+echo "== manifest single-source (gen-manifests --check) =="
+# Fail closed on dual-host plugin.json or marketplace version drift vs
+# plugin/manifest.source.json. Regenerator: node tools/gen-manifests.mjs
+node tools/gen-manifests.mjs --check
 
 echo "CHECKS OK"

@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 # plugin/scripts/tests/fixtures/fake_wrapper.py
 #
+# Kept (not folded into helpers/fake-wrapper.mjs): progressive run simulation
+# (progress.jsonl, sleep, decoy runs, large stderr, PID + SIGTERM-ignore) used
+# by grok-companion-relay and stop-review-gate-hook. Canned makeFakeWrapper
+# responses cannot cover those live timings without losing coverage.
+#
 # Test-only stand-in for the hardened Grok wrapper (grok_agent.py), used by the
 # grok-companion relay integration tests to exercise the degrade-to-Tier-1 state
 # machine WITHOUT invoking real Grok. It mints a run under $XDG_STATE_HOME (so
