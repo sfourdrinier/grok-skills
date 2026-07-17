@@ -4,8 +4,35 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { stageTaskFile, injectTaskFile, stageStdinTaskFile } from "../lib/task-file.mjs";
+import {
+  extractTask,
+  stageTaskFile,
+  injectTaskFile,
+  stageStdinTaskFile,
+} from "../lib/task-file.mjs";
 import { runCompanion } from "./helpers/fake-wrapper.mjs";
+
+test("extractTask reads --task inline text", () => {
+  assert.equal(extractTask(["code", "--task", "do the thing", "--target", "."]), "do the thing");
+});
+
+test("extractTask prefers --task-file path content over --task", () => {
+  const { taskPath, cleanup } = stageTaskFile("from-file");
+  try {
+    assert.equal(
+      extractTask(["code", "--task", "inline", "--task-file", taskPath]),
+      "from-file"
+    );
+  } finally {
+    cleanup();
+  }
+});
+
+test("extractTask returns empty for missing file or stdin sentinel", () => {
+  assert.equal(extractTask(["code", "--task-file", "-"]), "");
+  assert.equal(extractTask(["code", "--task-file", "/no/such/path-xyz"]), "");
+  assert.equal(extractTask(["code", "--target", "."]), "");
+});
 
 test("stageTaskFile writes 0600 file and cleanup removes it", () => {
   const { taskPath, cleanup } = stageTaskFile("hello task");

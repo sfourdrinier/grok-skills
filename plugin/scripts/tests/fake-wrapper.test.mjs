@@ -10,7 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { makeFakeWrapper, runCompanion } from "./helpers/fake-wrapper.mjs";
+import { makeFakeWrapper, readCalls, runCompanion } from "./helpers/fake-wrapper.mjs";
 
 const RID = "20260716T000000Z-abc123";
 
@@ -66,6 +66,32 @@ test("fake wrapper stderr is relayed", () => {
   try {
     const res = runCompanion(["status", "--run-id", RID], { env, cwd });
     assert.match(res.stderr, /\[fake\] diagnostic line/);
+  } finally {
+    cleanup();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("FAKE_WRAPPER_CALLS appends invoked mode; readCalls returns string[]", () => {
+  const cwd = tempCwd();
+  const callsPath = path.join(cwd, "calls.log");
+  const { env, cleanup } = makeFakeWrapper({
+    status: { stdout: "{}", exitCode: 0 },
+  });
+  try {
+    assert.deepEqual(readCalls(callsPath), []);
+    const res = runCompanion(["status", "--run-id", RID], {
+      env: { ...env, FAKE_WRAPPER_CALLS: callsPath },
+      cwd,
+    });
+    assert.equal(res.code, 0);
+    assert.deepEqual(readCalls(callsPath), ["status"]);
+    // Second call appends
+    runCompanion(["status", "--run-id", RID], {
+      env: { ...env, FAKE_WRAPPER_CALLS: callsPath },
+      cwd,
+    });
+    assert.deepEqual(readCalls(callsPath), ["status", "status"]);
   } finally {
     cleanup();
     fs.rmSync(cwd, { recursive: true, force: true });

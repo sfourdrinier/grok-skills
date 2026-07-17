@@ -15,6 +15,7 @@ import {
   isNotificationMode,
   listJobs,
   NOTIFICATION_MODES,
+  resolveJobByIdOrRunId,
   setNotificationConfig,
   setRunMode,
   storeJobStdout,
@@ -167,6 +168,121 @@ test("status bare runId positional rewrites to --run-id before wrapper", () => {
     const res = runCompanion(["status", runId], { env, cwd });
     assert.equal(res.code, 0, `stderr: ${res.stderr}`);
     assert.ok(res.stdout.includes(envelope), `stdout missing envelope: ${res.stdout}`);
+  } finally {
+    cleanup();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// Phase 1 finding 3: job id and runId share YYYYMMDDTHHMMSSZ-xxxxxx shape.
+// Exact job-id match must win over runId lookup on collision.
+test("resolveJobByIdOrRunId prefers exact job-id match over runId collision", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-jobs-collision-"));
+  const env = { CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata") };
+  // Job A id === job B runId (same shape). Prefer A when looking up that token.
+  const shared = "20260716T120000Z-aaaaaa";
+  const jobA = createJob(
+    cwd,
+    { id: shared, kind: "review", mode: "review", runMode: "hardened" },
+    env
+  );
+  updateJob(cwd, jobA.id, { status: "success", summary: "job-A" }, env);
+  storeJobStdout(
+    cwd,
+    jobA.id,
+    JSON.stringify({ status: "success", response: { text: "from-job-A" } }) + "\n",
+    env
+  );
+  const jobB = createJob(cwd, { kind: "code", mode: "code", runMode: "hardened" }, env);
+  updateJob(cwd, jobB.id, { runId: shared, status: "success", summary: "job-B" }, env);
+  storeJobStdout(
+    cwd,
+    jobB.id,
+    JSON.stringify({ status: "success", response: { text: "from-job-B" } }) + "\n",
+    env
+  );
+
+  const resolved = resolveJobByIdOrRunId(cwd, shared, env);
+  assert.ok(resolved, "expected a job");
+  assert.equal(resolved.id, jobA.id, "exact job-id match must win over runId");
+  assert.equal(resolved.summary, "job-A");
+
+  // result / cancel go through the same resolver
+  const { env: fakeEnv, cleanup } = makeFakeWrapper({});
+  try {
+    const res = runCompanion(["result", shared], {
+      cwd,
+      env: { ...fakeEnv, CLAUDE_PLUGIN_DATA: env.CLAUDE_PLUGIN_DATA },
+    });
+    assert.equal(res.code, 0, `stderr: ${res.stderr}`);
+    assert.match(res.stdout, /from-job-A/);
+    assert.ok(!res.stdout.includes("from-job-B"), "must not return colliding runId job");
+  } finally {
+    cleanup();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("status known job id rewrites to that job's runId", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-status-jobid-"));
+  const pluginData = path.join(cwd, "pdata");
+  const envBase = { CLAUDE_PLUGIN_DATA: pluginData };
+  const jobId = "20260716T130000Z-bbbbbb";
+  const runId = "20260716T140000Z-cccccc";
+  const job = createJob(
+    cwd,
+    { id: jobId, kind: "code", mode: "code", runMode: "hardened" },
+    envBase
+  );
+  updateJob(cwd, job.id, { runId, status: "success" }, envBase);
+
+  // {{RUN_ID}} is substituted with the --run-id the companion actually forwarded.
+  const { env, cleanup } = makeFakeWrapper({
+    status: {
+      stdout: JSON.stringify({ status: "success", runId: "{{RUN_ID}}", mode: "status" }),
+      exitCode: 0,
+    },
+  });
+  try {
+    const res = runCompanion(["status", jobId], {
+      cwd,
+      env: { ...env, CLAUDE_PLUGIN_DATA: pluginData },
+    });
+    assert.equal(res.code, 0, `stderr: ${res.stderr}`);
+    assert.match(res.stdout, new RegExp(runId));
+    assert.ok(!res.stdout.includes(jobId), "must forward recorded runId, not job id");
+    const parsed = JSON.parse(res.stdout.trim());
+    assert.equal(parsed.runId, runId, "wrapper must receive the job's recorded runId");
+  } finally {
+    cleanup();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("status known job id without runId prints jobs table and exits 1", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-status-no-runid-"));
+  const pluginData = path.join(cwd, "pdata");
+  const envBase = { CLAUDE_PLUGIN_DATA: pluginData };
+  const jobId = "20260716T150000Z-dddddd";
+  createJob(cwd, { id: jobId, kind: "code", mode: "code", runMode: "hardened" }, envBase);
+  // No runId recorded.
+
+  const { env, cleanup } = makeFakeWrapper({
+    // If status were wrongly forwarded with the job id as --run-id, this would run.
+    status: { stdout: "{}", exitCode: 0 },
+  });
+  try {
+    const res = runCompanion(["status", jobId], {
+      cwd,
+      env: { ...env, CLAUDE_PLUGIN_DATA: pluginData },
+    });
+    assert.equal(res.code, 1, `expected exit 1; stderr: ${res.stderr} stdout: ${res.stdout}`);
+    // Jobs table hint (formatJobsTable header or tip line)
+    assert.match(res.stdout, /ID\s+KIND|Tip:|No Grok jobs|code/);
+    assert.ok(
+      !res.stderr.includes("[fake-wrapper] unregistered mode"),
+      "must not forward job id without runId to wrapper"
+    );
   } finally {
     cleanup();
     fs.rmSync(cwd, { recursive: true, force: true });

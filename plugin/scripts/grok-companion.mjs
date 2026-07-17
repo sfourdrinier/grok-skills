@@ -12,7 +12,7 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { stageStdinTaskFile, injectTaskFile } from "./lib/task-file.mjs";
+import { extractTask, stageStdinTaskFile, injectTaskFile } from "./lib/task-file.mjs";
 import { resolveWrapperPath, wrapperNotFoundMessage } from "./lib/wrapper.mjs";
 import {
   LiveRelay,
@@ -53,9 +53,9 @@ import {
   isDirectHandoffRequest,
   isDirectRunId,
   runDirectGrok,
-  runImplementCombo,
   writeDirectNoHandoffRefuse,
 } from "./lib/direct-grok.mjs";
+import { runImplementCombo } from "./lib/implement.mjs";
 import { renderEnvelopePretty, tryParseEnvelope } from "./lib/render.mjs";
 import { terminateReviewTree } from "./lib/gate-kill.mjs";
 import {
@@ -144,22 +144,6 @@ function stripFlags(args) {
     out.push(a);
   }
   return { args: out, pretty, runMode, jsonOut, base, resume, fresh, noNotify };
-}
-
-function extractTask(args) {
-  const tf = args.indexOf("--task-file");
-  if (tf >= 0 && args[tf + 1] && args[tf + 1] !== "-") {
-    try {
-      return fs.readFileSync(args[tf + 1], "utf8");
-    } catch {
-      return "";
-    }
-  }
-  const t = args.indexOf("--task");
-  if (t >= 0 && args[t + 1]) {
-    return args[t + 1];
-  }
-  return "";
 }
 
 function ensureTarget(args, cwd) {
@@ -781,20 +765,45 @@ async function dispatch({
     return finishCleanups(writeDirectNoHandoffRefuse());
   }
 
-  // status <bare-runId>: rewrite to --run-id before wrapper / jobs-table dispatch
+  // status <bare-token>: job id and runId share RUN_ID_RE shape. Prefer the
+  // workspace job index: known job with recorded runId -> rewrite to THAT
+  // runId; known job with no runId -> jobs-table hint and exit 1 (never
+  // forward a job id to the wrapper as a run id); unknown token -> --run-id.
   if (wrapperMode === "status" && !parseRunIdArg(wrapperArgs)) {
     const bareIdx = wrapperArgs.findIndex(
       (a, i) => i > 0 && typeof a === "string" && !a.startsWith("-") && RUN_ID_RE.test(a)
     );
     if (bareIdx >= 0) {
       const id = wrapperArgs[bareIdx];
-      wrapperArgs = [
-        wrapperArgs[0],
-        "--run-id",
-        id,
-        ...wrapperArgs.slice(1, bareIdx),
-        ...wrapperArgs.slice(bareIdx + 1),
-      ];
+      const knownJob = getJob(cwd, id);
+      if (knownJob) {
+        const recorded = sanitizeRunId(knownJob.runId);
+        if (!recorded) {
+          process.stdout.write(formatJobsTable(listJobs(cwd)));
+          process.stdout.write(
+            "\nTip: /grok:status --run-id <id> for wrapper envelope; /grok:result [job-id] for stored output.\n"
+          );
+          process.stderr.write(
+            `[grok-companion] job ${id} has no recorded runId yet; cannot query wrapper status.\n`
+          );
+          return finishCleanups(1);
+        }
+        wrapperArgs = [
+          wrapperArgs[0],
+          "--run-id",
+          recorded,
+          ...wrapperArgs.slice(1, bareIdx),
+          ...wrapperArgs.slice(bareIdx + 1),
+        ];
+      } else {
+        wrapperArgs = [
+          wrapperArgs[0],
+          "--run-id",
+          id,
+          ...wrapperArgs.slice(1, bareIdx),
+          ...wrapperArgs.slice(bareIdx + 1),
+        ];
+      }
     }
   }
 

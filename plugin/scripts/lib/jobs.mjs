@@ -321,15 +321,17 @@ export function findJobByRunId(cwd, runId, env = process.env) {
 
 /**
  * Resolve a job from a positional that may be a job id or a runId.
- * Same id shape (JOB_ID_RE / RUN_ID_RE); prefer runId lookup, then job id.
+ * Same id shape (JOB_ID_RE / RUN_ID_RE); exact job-id match wins, then runId.
+ * Collision: job A id === job B runId returns A (getJob), not B.
  * @returns {object|null}
  */
 export function resolveJobByIdOrRunId(cwd, idOrRunId, env = process.env) {
-  let job = null;
-  if (idOrRunId && isValidJobId(idOrRunId)) {
+  // Prefer exact job-id match so a job id that collides with another job's
+  // runId never resolves to the wrong record (shared YYYYMMDDTHHMMSSZ shape).
+  let job = getJob(cwd, idOrRunId, env);
+  if (!job && idOrRunId) {
     job = findJobByRunId(cwd, idOrRunId, env);
   }
-  if (!job) job = getJob(cwd, idOrRunId, env);
   return job;
 }
 

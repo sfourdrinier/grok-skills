@@ -7,6 +7,8 @@
 // (GROK_AGENT_WRAPPER + GROK_ALLOW_WRAPPER_OVERRIDE=1, lib/wrapper.mjs).
 // An UNREGISTERED mode exits 2 - tests use that as the "this wrapper mode must
 // not have been spawned" probe.
+// When FAKE_WRAPPER_CALLS points at a file, each invocation appends the mode
+// plus newline before responding (real spawn-order assertions).
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -18,17 +20,48 @@ const HELPERS_DIR = path.dirname(fileURLToPath(import.meta.url));
 const COMPANION = path.resolve(HELPERS_DIR, "..", "..", "grok-companion.mjs");
 
 const FAKE_WRAPPER_BODY = `import json, os, sys
-responses = json.loads(os.environ.get("FAKE_WRAPPER_RESPONSES", "{}"))
 mode = sys.argv[1] if len(sys.argv) > 1 else ""
+calls_path = os.environ.get("FAKE_WRAPPER_CALLS", "").strip()
+if calls_path:
+    with open(calls_path, "a", encoding="utf-8") as cf:
+        cf.write(mode + "\\n")
+responses = json.loads(os.environ.get("FAKE_WRAPPER_RESPONSES", "{}"))
 r = responses.get(mode)
 if r is None:
     sys.stderr.write("[fake-wrapper] unregistered mode: %r\\n" % mode)
     sys.exit(2)
 if r.get("stderr"):
     sys.stderr.write(r["stderr"])
-sys.stdout.write(r.get("stdout", "{}"))
+stdout = r.get("stdout", "{}")
+# Optional template so tests can assert which --run-id was forwarded.
+if "{{RUN_ID}}" in stdout:
+    rid = ""
+    args = sys.argv[1:]
+    for i, a in enumerate(args):
+        if a == "--run-id" and i + 1 < len(args):
+            rid = args[i + 1]
+        elif isinstance(a, str) and a.startswith("--run-id="):
+            rid = a[len("--run-id="):]
+    stdout = stdout.replace("{{RUN_ID}}", rid)
+sys.stdout.write(stdout)
 sys.exit(int(r.get("exitCode", 0)))
 `;
+
+/**
+ * Read modes appended by the fake wrapper when FAKE_WRAPPER_CALLS is set.
+ * @param {string} callsPath
+ * @returns {string[]}
+ */
+export function readCalls(callsPath) {
+  if (!callsPath || !fs.existsSync(callsPath)) {
+    return [];
+  }
+  return fs
+    .readFileSync(callsPath, "utf8")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+}
 
 export function makeFakeWrapper(responses) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-fake-wrapper-"));

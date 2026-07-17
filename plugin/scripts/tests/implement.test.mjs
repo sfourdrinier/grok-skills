@@ -11,7 +11,7 @@ import { test } from "node:test";
 
 import { DIRECT_NO_HANDOFF_MSG } from "../lib/direct-grok.mjs";
 import { setRunMode } from "../lib/jobs.mjs";
-import { makeFakeWrapper, runCompanion } from "./helpers/fake-wrapper.mjs";
+import { makeFakeWrapper, readCalls, runCompanion } from "./helpers/fake-wrapper.mjs";
 
 const RUN_ID = "20260716T000000Z-abc123";
 
@@ -43,10 +43,20 @@ function handoffEnvelope(ready, overrides = {}) {
   });
 }
 
+function companionEnv(env, cwd, callsPath) {
+  return {
+    ...env,
+    CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata"),
+    GROK_COMPANION_EXECUTION_CONTEXT: "foreground",
+    ...(callsPath ? { FAKE_WRAPPER_CALLS: callsPath } : {}),
+  };
+}
+
 test("implement runs code then handoff and exits 0 only when ready", () => {
   const cwd = tempCwd();
   const codeOut = codeEnvelope();
   const handoffOut = handoffEnvelope(true);
+  const callsPath = path.join(cwd, "calls.log");
   const { env, cleanup } = makeFakeWrapper({
     code: { stdout: `${codeOut}\n`, exitCode: 0 },
     handoff: { stdout: `${handoffOut}\n`, exitCode: 0 },
@@ -54,14 +64,7 @@ test("implement runs code then handoff and exits 0 only when ready", () => {
   try {
     const res = runCompanion(
       ["implement", "--target", ".", "--base", "HEAD", "--task", "fix it"],
-      {
-        cwd,
-        env: {
-          ...env,
-          CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata"),
-          GROK_COMPANION_EXECUTION_CONTEXT: "foreground",
-        },
-      }
+      { cwd, env: companionEnv(env, cwd, callsPath) }
     );
     assert.equal(res.code, 0, `stderr: ${res.stderr}`);
     const codeIdx = res.stdout.indexOf(codeOut);
@@ -71,6 +74,7 @@ test("implement runs code then handoff and exits 0 only when ready", () => {
     assert.ok(codeIdx < handoffIdx, "code envelope must precede handoff envelope");
     // Real handoff ready path: response.integration.ready
     assert.match(res.stdout, /"integration"\s*:\s*\{\s*"ready"\s*:\s*true/);
+    assert.deepEqual(readCalls(callsPath), ["code", "handoff"]);
   } finally {
     cleanup();
     fs.rmSync(cwd, { recursive: true, force: true });
@@ -81,6 +85,7 @@ test("implement exits 1 when handoff not ready", () => {
   const cwd = tempCwd();
   const codeOut = codeEnvelope();
   const handoffOut = handoffEnvelope(false);
+  const callsPath = path.join(cwd, "calls.log");
   const { env, cleanup } = makeFakeWrapper({
     code: { stdout: `${codeOut}\n`, exitCode: 0 },
     handoff: { stdout: `${handoffOut}\n`, exitCode: 1 },
@@ -88,18 +93,12 @@ test("implement exits 1 when handoff not ready", () => {
   try {
     const res = runCompanion(
       ["implement", "--target", ".", "--base", "HEAD", "--task", "fix it"],
-      {
-        cwd,
-        env: {
-          ...env,
-          CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata"),
-          GROK_COMPANION_EXECUTION_CONTEXT: "foreground",
-        },
-      }
+      { cwd, env: companionEnv(env, cwd, callsPath) }
     );
     assert.equal(res.code, 1, `expected exit 1; stderr: ${res.stderr}`);
     assert.ok(res.stdout.includes(codeOut), "code envelope must still be relayed");
     assert.ok(res.stdout.includes(handoffOut), "handoff envelope must still be relayed");
+    assert.deepEqual(readCalls(callsPath), ["code", "handoff"]);
   } finally {
     cleanup();
     fs.rmSync(cwd, { recursive: true, force: true });
@@ -109,6 +108,7 @@ test("implement exits 1 when handoff not ready", () => {
 test("implement exits 1 when code envelope has no runId", () => {
   const cwd = tempCwd();
   const codeOut = codeEnvelope({ runId: null, status: "success" });
+  const callsPath = path.join(cwd, "calls.log");
   // Omit handoff registration: must not spawn handoff without a runId.
   const { env, cleanup } = makeFakeWrapper({
     code: { stdout: `${codeOut}\n`, exitCode: 0 },
@@ -116,14 +116,7 @@ test("implement exits 1 when code envelope has no runId", () => {
   try {
     const res = runCompanion(
       ["implement", "--target", ".", "--base", "HEAD", "--task", "fix it"],
-      {
-        cwd,
-        env: {
-          ...env,
-          CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata"),
-          GROK_COMPANION_EXECUTION_CONTEXT: "foreground",
-        },
-      }
+      { cwd, env: companionEnv(env, cwd, callsPath) }
     );
     assert.equal(res.code, 1, `stderr: ${res.stderr}`);
     assert.ok(res.stdout.includes(codeOut) || res.stderr.includes("no runId"), res.stderr);
@@ -131,6 +124,59 @@ test("implement exits 1 when code envelope has no runId", () => {
       !res.stderr.includes("[fake-wrapper] unregistered mode: 'handoff'"),
       "handoff must not be spawned when code has no runId"
     );
+    assert.deepEqual(readCalls(callsPath), ["code"]);
+  } finally {
+    cleanup();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// Documented: handoff still runs after failed code WHEN a runId exists so
+// not-ready blockers surface. Exit is 1 (not ready).
+test("implement runs handoff after failed code with runId and exits 1", () => {
+  const cwd = tempCwd();
+  const codeOut = codeEnvelope({ status: "failure" });
+  const handoffOut = handoffEnvelope(false);
+  const callsPath = path.join(cwd, "calls.log");
+  const { env, cleanup } = makeFakeWrapper({
+    code: { stdout: `${codeOut}\n`, exitCode: 1 },
+    handoff: { stdout: `${handoffOut}\n`, exitCode: 1 },
+  });
+  try {
+    const res = runCompanion(
+      ["implement", "--target", ".", "--base", "HEAD", "--task", "fix it"],
+      { cwd, env: companionEnv(env, cwd, callsPath) }
+    );
+    assert.equal(res.code, 1, `expected exit 1; stderr: ${res.stderr}`);
+    assert.ok(res.stdout.includes(codeOut), "code envelope must be relayed");
+    assert.ok(res.stdout.includes(handoffOut), "handoff envelope must be relayed after failed code");
+    assert.deepEqual(readCalls(callsPath), ["code", "handoff"]);
+  } finally {
+    cleanup();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// no-runId path: any failure (including spawn failure) normalizes to exit 1
+// rather than the raw spawn exit code.
+test("implement no-runId spawn-failure path returns 1", () => {
+  const cwd = tempCwd();
+  const callsPath = path.join(cwd, "calls.log");
+  // Unregistered code mode -> fake wrapper exits 2; implement must normalize to 1.
+  const { env, cleanup } = makeFakeWrapper({});
+  try {
+    const res = runCompanion(
+      ["implement", "--target", ".", "--base", "HEAD", "--task", "fix it"],
+      { cwd, env: companionEnv(env, cwd, callsPath) }
+    );
+    assert.equal(res.code, 1, `expected exit 1 (not raw spawn code); stderr: ${res.stderr}`);
+    // Either code was never callable, or it ran and returned without a usable runId.
+    const calls = readCalls(callsPath);
+    assert.ok(
+      calls.length === 0 || (calls.length === 1 && calls[0] === "code"),
+      `unexpected calls: ${JSON.stringify(calls)}`
+    );
+    assert.ok(!calls.includes("handoff"), "handoff must not run without runId");
   } finally {
     cleanup();
     fs.rmSync(cwd, { recursive: true, force: true });

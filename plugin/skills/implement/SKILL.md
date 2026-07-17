@@ -34,9 +34,19 @@ use `--task-file -` with a single-quoted heredoc.
 Run a full delegate cycle in one call: Grok `code` in an isolated worktree,
 then an automatic `/grok:handoff` verification on the resulting runId. Relay
 BOTH envelopes verbatim, in order. Integration readiness comes from the SECOND
-(handoff) envelope only. Exit 0 means code succeeded AND handoff is
-dual-condition ready (`response.integration.ready === true`). This still never
-applies, commits, or pushes - parent apply stays manual (see
+(handoff) envelope only.
+
+**Exit contract:** exit **0** only when code succeeded **and** handoff is
+dual-condition ready (`response.integration.ready === true`); exit **1** on
+any other outcome (failed code, not-ready handoff, missing runId, spawn
+failure). Never propagates a raw spawn exit code.
+
+**Handoff after failed code:** when the code envelope carries a usable
+`runId`, handoff **always runs** even if code exited non-zero, so not-ready
+blockers surface on stdout. Without a runId, handoff is skipped and the
+combo exits 1.
+
+This still never applies, commits, or pushes - parent apply stays manual (see
 references/implementation-handoff.md).
 Requires hardened mode; direct mode is refused fail-closed.
 Foreground/background selection: same AskUserQuestion flow as /grok:code.
@@ -97,7 +107,8 @@ node "$SKILL_BASE/run.mjs" implement --target '<target from $ARGUMENTS>' --base 
 ```
 - Return the command stdout envelopes VERBATIM (code then handoff). Do not
   paraphrase, summarize, or add commentary before or after them. Preserve the
-  exit status (0 only when both legs succeeded and handoff is ready).
+  exit status (0 only when code succeeded and handoff is dual-condition ready;
+  1 otherwise, including after a handoff that ran to surface blockers).
 
 Background flow:
 - Set `export GROK_COMPANION_EXECUTION_CONTEXT=background` (see

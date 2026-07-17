@@ -2,13 +2,37 @@
 //
 // Shared temp staging for companion task payloads. Single owner of mkdtemp +
 // 0600 write + best-effort recursive cleanup so stdin staging and task inject
-// stay DRY.
+// stay DRY. Also owns extractTask (read --task / --task-file from argv) so
+// companion and direct-mode share one source.
 
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { readAllStdinSync } from "./read-stdin.mjs";
+
+/**
+ * Read task text from argv: prefer --task-file path (not "-"), else --task.
+ * Missing/unreadable --task-file yields "" (caller decides fail-closed).
+ * @param {string[]} args
+ * @returns {string}
+ */
+export function extractTask(args) {
+  if (!Array.isArray(args)) return "";
+  const tf = args.indexOf("--task-file");
+  if (tf >= 0 && args[tf + 1] && args[tf + 1] !== "-") {
+    try {
+      return fs.readFileSync(args[tf + 1], "utf8");
+    } catch {
+      return "";
+    }
+  }
+  const t = args.indexOf("--task");
+  if (t >= 0 && args[t + 1]) {
+    return args[t + 1];
+  }
+  return "";
+}
 
 /**
  * Stage task text (string or Buffer) under a private temp dir.
