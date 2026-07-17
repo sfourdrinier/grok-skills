@@ -55,10 +55,15 @@ runs/<runId>/
 
 `/grok:handoff` reports ready only when:
 
-1. Manifest loads and validates
+1. Manifest loads and validates (ready=true requires non-empty `changedFiles`,
+   empty blockers, validation flags true, and `patch.bytes > 0`)
 2. `integration.ready === true` on the manifest
-3. Patch re-hash matches
-4. Completed **success** terminal envelope for same `runId`
+3. Completed **success** terminal envelope for same `runId` with `mode: "code"`
+4. Envelope `baseRevision` is non-empty and equals the manifest base
+5. Patch file exists, size matches `patch.bytes` (> 0), and sha256 re-hash matches
+
+Git-reported `changedFiles` paths keep colons and backslashes as filename
+characters; only operator-supplied contract paths reject Windows drive forms.
 
 ## Parent apply checklist
 

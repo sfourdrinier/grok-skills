@@ -441,7 +441,15 @@ def code_handoff_finalize(
             except Exception as exc:
                 _log("code_handoff_finalize", "post-gate changed list failed: {}".format(exc))
         else:
+            # Final capture rejected (secret-material, too-large, etc.): drop
+            # pre-gate patch/path so the forensic manifest does not point at a
+            # stale tree/patch that no longer describes the retained worktree.
             patch_ok = False
+            patch_meta = None
+            patch_path = None
+            # Prefer post-gate write-tree when capture reached it; else clear.
+            result_tree = post_tree if post_tree else None
+            steps.append("forensic-patch-post-gate-rejected")
             if post_meta is None and not any(b.kind in fatal_patch for b in post_blockers):
                 blockers.append(
                     HandoffBlocker(
@@ -452,6 +460,10 @@ def code_handoff_finalize(
                 )
     except Exception as exc:
         patch_ok = False
+        patch_meta = None
+        patch_path = None
+        result_tree = None
+        steps.append("forensic-patch-post-gate-raised")
         blockers.append(
             HandoffBlocker(
                 "artifact-generation-failure",

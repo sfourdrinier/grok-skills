@@ -248,6 +248,18 @@ def validate_implementation_handoff(doc: dict) -> List[str]:
                     errors.append("integration.ready true requires empty blockers")
                 if changed_ok and isinstance(changed, list) and len(changed) < 1:
                     errors.append("integration.ready true requires non-empty changedFiles")
+                # Non-empty changedFiles without a non-empty patch cannot transfer work.
+                if (
+                    changed_ok
+                    and isinstance(changed, list)
+                    and len(changed) >= 1
+                    and isinstance(patch, dict)
+                ):
+                    pb = patch.get("bytes")
+                    if not isinstance(pb, int) or pb < 1:
+                        errors.append(
+                            "integration.ready true requires patch.bytes > 0 when changedFiles is non-empty"
+                        )
                 if validation_shape_ok and isinstance(validation, dict):
                     for vkey in ("requiredCommandsPassed", "buildGatePassed", "allPassed"):
                         if validation.get(vkey) is not True:
@@ -369,13 +381,21 @@ def dual_condition_ready(
         return False, blockers
     env_base = envelope.get("baseRevision")
     man_base = manifest.get("baseRevision")
-    if (
-        isinstance(env_base, str)
-        and env_base
-        and isinstance(man_base, str)
-        and man_base
-        and env_base != man_base
-    ):
+    # Require a non-empty envelope baseRevision equal to the manifest base.
+    # Null/missing envelope base is not a match (corrupt/incomplete terminal evidence).
+    if not isinstance(env_base, str) or not env_base:
+        blockers.append(
+            {
+                "kind": "terminal-envelope-incomplete",
+                "message": (
+                    "integration-ready handoff requires a non-empty envelope "
+                    "baseRevision matching the handoff manifest"
+                ),
+                "detail": {"envelopeBase": env_base, "manifestBase": man_base},
+            }
+        )
+        return False, blockers
+    if not isinstance(man_base, str) or not man_base or env_base != man_base:
         blockers.append(
             {
                 "kind": "artifact-integrity-failure",
@@ -386,8 +406,32 @@ def dual_condition_ready(
         return False, blockers
     rel = manifest.get("patch", {}).get("relativePath")
     expected = manifest.get("patch", {}).get("sha256")
+    expected_bytes = manifest.get("patch", {}).get("bytes")
     if not patch_abs or not patch_abs.is_file():
         blockers.append({"kind": "artifact-integrity-failure", "message": "patch file missing"})
+        return False, blockers
+    try:
+        actual_size = patch_abs.stat().st_size
+    except OSError:
+        blockers.append({"kind": "artifact-integrity-failure", "message": "patch file unreadable"})
+        return False, blockers
+    if not isinstance(expected_bytes, int) or expected_bytes < 1 or actual_size < 1:
+        blockers.append(
+            {
+                "kind": "artifact-integrity-failure",
+                "message": "ready handoff requires a non-empty implementation patch",
+                "detail": {"manifestBytes": expected_bytes, "fileBytes": actual_size},
+            }
+        )
+        return False, blockers
+    if actual_size != expected_bytes:
+        blockers.append(
+            {
+                "kind": "artifact-integrity-failure",
+                "message": "patch byte size does not match handoff manifest",
+                "detail": {"expected": expected_bytes, "actual": actual_size},
+            }
+        )
         return False, blockers
     actual = _sha256_file(patch_abs)
     if actual != expected:

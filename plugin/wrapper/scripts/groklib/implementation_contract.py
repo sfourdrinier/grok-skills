@@ -31,11 +31,15 @@ def normalize_repo_relative(path: str) -> str:
 
     Treats backslash as a path separator (Windows-style operator input). Do **not**
     use this for Git-reported paths - on POSIX backslash is a valid filename char.
+    Rejects Windows drive-letter prefixes (``C:...``) because operators may paste
+    absolute Windows paths into contracts.
     """
     if path is None or not isinstance(path, str):
         raise _contract_error("path must be a non-empty string", {"path": path})
     raw = path.strip().replace("\\", "/")
-    return _normalize_repo_relative_raw(raw, original=path)
+    return _normalize_repo_relative_raw(
+        raw, original=path, reject_windows_drive=True
+    )
 
 
 def normalize_git_repo_path(path: str) -> str:
@@ -44,19 +48,30 @@ def normalize_git_repo_path(path: str) -> str:
     Only forward slash is a separator. Backslash is preserved as a literal
     character so a root file named ``pkg\\evil.ts`` is not treated as under ``pkg/``.
     Does **not** strip whitespace: leading/trailing spaces are valid filename chars.
+    Does **not** reject a second-character colon (``a:b.txt`` is a legal Git path
+    on POSIX); only true absolute paths (leading ``/`` / ``os.path.isabs``) fail.
     """
     if path is None or not isinstance(path, str):
         raise _contract_error("path must be a non-empty string", {"path": path})
     # Never strip: Git paths may begin/end with spaces and still be distinct names.
-    return _normalize_repo_relative_raw(path, original=path)
+    return _normalize_repo_relative_raw(
+        path, original=path, reject_windows_drive=False
+    )
 
 
-def _normalize_repo_relative_raw(raw: str, *, original: str) -> str:
+def _normalize_repo_relative_raw(
+    raw: str, *, original: str, reject_windows_drive: bool = True
+) -> str:
     if not raw or "\x00" in raw:
         raise _contract_error("path is empty or contains NUL", {"path": original})
     if raw in (".", "./"):
         return "."
-    if os.path.isabs(raw) or raw.startswith("/") or (len(raw) > 1 and raw[1] == ":"):
+    # Absolute path: leading slash or OS absolute. Operator paths also reject
+    # Windows drive-letter forms (``C:Users/...``); Git-reported paths do not,
+    # because ``a:b.txt`` is a valid single-component filename under Git/POSIX.
+    if os.path.isabs(raw) or raw.startswith("/"):
+        raise _contract_error("path must be repository-relative (not absolute)", {"path": original})
+    if reject_windows_drive and len(raw) > 1 and raw[1] == ":":
         raise _contract_error("path must be repository-relative (not absolute)", {"path": original})
     cleaned: List[str] = []
     # Split only on forward slash (never on backslash).

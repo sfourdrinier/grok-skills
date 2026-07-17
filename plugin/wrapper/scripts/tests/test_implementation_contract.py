@@ -10,6 +10,7 @@ from groklib import GrokWrapperError
 from groklib.implementation_contract import (
     assert_target_matches,
     load_contract_file,
+    normalize_git_repo_path,
     normalize_repo_relative,
     path_in_scopes,
     trust_model,
@@ -31,6 +32,21 @@ class NormalizePathTests(unittest.TestCase):
 
     def test_normalizes_slashes(self) -> None:
         self.assertEqual(normalize_repo_relative("pkg//src/a.ts"), "pkg/src/a.ts")
+
+    def test_operator_rejects_windows_drive_git_preserves_colon_filename(self) -> None:
+        # Operator contract paths: drive-letter forms are absolute Windows paths.
+        with self.assertRaises(GrokWrapperError):
+            normalize_repo_relative("C:/Users/me/repo/file.ts")
+        with self.assertRaises(GrokWrapperError):
+            normalize_repo_relative("D:secret")
+        # Git-reported paths: second-char colon is a legal filename component.
+        self.assertEqual(normalize_git_repo_path("a:b.txt"), "a:b.txt")
+        self.assertEqual(normalize_git_repo_path("pkg/a:b.txt"), "pkg/a:b.txt")
+        # Absolute Git paths still rejected.
+        with self.assertRaises(GrokWrapperError):
+            normalize_git_repo_path("/etc/passwd")
+        with self.assertRaises(GrokWrapperError):
+            normalize_git_repo_path("../escape")
 
 
 class PathInScopesTests(unittest.TestCase):
@@ -67,6 +83,15 @@ class PathInScopesTests(unittest.TestCase):
         # Trailing space is a different filename; must not match file scope without it.
         self.assertFalse(path_in_scopes("pkg/allowed.ts ", scopes, from_git=True))
         self.assertTrue(path_in_scopes("pkg/allowed.ts", scopes, from_git=True))
+
+    def test_git_path_colon_filename_in_scope(self) -> None:
+        # Operator writeScopes cannot name ``a:b.txt`` as a file path (drive-letter
+        # rejection); root/subtree scopes still cover Git-reported colon names.
+        scopes = [{"kind": "subtree", "path": "."}]
+        self.assertTrue(path_in_scopes("a:b.txt", scopes, from_git=True))
+        scopes_pkg = [{"kind": "subtree", "path": "pkg"}]
+        self.assertTrue(path_in_scopes("pkg/a:b.txt", scopes_pkg, from_git=True))
+        self.assertFalse(path_in_scopes("a:b.txt", scopes_pkg, from_git=True))
 
 
 class ValidateContractTests(unittest.TestCase):

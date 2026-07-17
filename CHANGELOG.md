@@ -17,7 +17,8 @@ for marketplace / package tags.
   `implementation-handoff.json` with `integration.ready` from in-memory
   `terminalOutcome`.
 - **`/grok:handoff --run-id`:** read-only dual-condition ready (manifest + success
-  envelope + patch rehash). Companion thin passthrough (no job/notify/Grok).
+  `mode:code` envelope with matching non-null `baseRevision` + non-empty patch
+  size/rehash). Companion thin passthrough (no job/notify/Grok).
 - Command evidence: sha256 + 4096 redacted tails on wrapper commands.
 - Skills/agents dual-host parent protocol (notify ≠ ready; never auto-apply).
 - Cleanup factual warning when removing an integration-ready handoff.
@@ -26,6 +27,9 @@ for marketplace / package tags.
 
 - Packaging triple **1.6.0**.
 - Seven new ERROR_CLASSES for handoff/contract.
+- Dual-condition / ready integrity: require non-empty envelope base; ready
+  manifests need `patch.bytes > 0` when there are changes; Git paths keep colon
+  filenames; post-gate fatal patch capture clears stale pre-gate patch/tree meta.
 
 ## [1.5.0] - 2026-07-16
 

@@ -142,6 +142,20 @@ class ValidateHandoffTests(unittest.TestCase):
         errs = validate_implementation_handoff(doc)
         self.assertTrue(any("requiredCommandsPassed" in e for e in errs), errs)
 
+    def test_ready_true_rejects_zero_byte_patch_with_changes(self) -> None:
+        doc = self._doc()
+        doc["patch"] = dict(doc["patch"], bytes=0, sha256=hashlib.sha256(b"").hexdigest())
+        errs = validate_implementation_handoff(doc)
+        self.assertTrue(any("patch.bytes" in e for e in errs), errs)
+        # ready=false forensic stub still allows bytes 0
+        doc["integration"] = {"ready": False, "blockers": [{"kind": "secret-material", "message": "x"}]}
+        self.assertEqual(validate_implementation_handoff(doc), [])
+
+    def test_changed_files_colon_filename_accepted(self) -> None:
+        doc = self._doc()
+        doc["changedFiles"] = [{"path": "a:b.txt", "status": "added", "oldPath": None}]
+        self.assertEqual(validate_implementation_handoff(doc), [])
+
     def test_dual_condition_requires_code_envelope_mode(self) -> None:
         import tempfile
 
@@ -178,6 +192,80 @@ class ValidateHandoffTests(unittest.TestCase):
                 patch_abs=p,
             )
             self.assertTrue(ready2)
+
+    def test_dual_condition_rejects_null_envelope_base(self) -> None:
+        import tempfile
+
+        doc = self._doc()
+        patch_bytes = b"patch-body"
+        with tempfile.TemporaryDirectory() as tmp:
+            p = pathlib.Path(tmp) / "implementation.patch"
+            p.write_bytes(patch_bytes)
+            doc["patch"]["sha256"] = hashlib.sha256(patch_bytes).hexdigest()
+            doc["patch"]["bytes"] = len(patch_bytes)
+            ready, blockers = dual_condition_ready(
+                manifest=doc,
+                envelope={
+                    "status": "success",
+                    "runId": doc["runId"],
+                    "mode": "code",
+                    "baseRevision": None,
+                },
+                patch_abs=p,
+            )
+            self.assertFalse(ready)
+            self.assertTrue(
+                any(b.get("kind") == "terminal-envelope-incomplete" for b in blockers),
+                blockers,
+            )
+            ready_empty, blockers_empty = dual_condition_ready(
+                manifest=doc,
+                envelope={
+                    "status": "success",
+                    "runId": doc["runId"],
+                    "mode": "code",
+                    "baseRevision": "",
+                },
+                patch_abs=p,
+            )
+            self.assertFalse(ready_empty)
+            self.assertTrue(
+                any(b.get("kind") == "terminal-envelope-incomplete" for b in blockers_empty),
+                blockers_empty,
+            )
+
+    def test_dual_condition_rejects_empty_patch_bytes_even_if_hash_matches(self) -> None:
+        import tempfile
+
+        doc = self._doc()
+        empty = b""
+        # Corrupt ready=true with empty patch (validator would also reject; dual-condition
+        # must fail closed if a bypassed manifest reaches it).
+        doc["patch"]["sha256"] = hashlib.sha256(empty).hexdigest()
+        doc["patch"]["bytes"] = 0
+        with tempfile.TemporaryDirectory() as tmp:
+            p = pathlib.Path(tmp) / "implementation.patch"
+            p.write_bytes(empty)
+            # Bypass manifest validator by calling dual_condition after forcing ready
+            # (validate is called inside dual_condition - so this path hits validate first)
+            ready, blockers = dual_condition_ready(
+                manifest=doc,
+                envelope={
+                    "status": "success",
+                    "runId": doc["runId"],
+                    "mode": "code",
+                    "baseRevision": doc["baseRevision"],
+                },
+                patch_abs=p,
+            )
+            self.assertFalse(ready)
+            self.assertTrue(
+                any(
+                    b.get("kind") in ("handoff-unavailable", "artifact-integrity-failure")
+                    for b in blockers
+                ),
+                blockers,
+            )
 
 
 class CommandEvidenceTests(unittest.TestCase):
@@ -568,6 +656,121 @@ class WriteManifestRoundTripTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertNotIn("abcdef0123456789deadbeefcafebabe", text)
             self.assertIn("redacted", text.lower())
+
+
+class PostGatePatchClearTests(unittest.TestCase):
+    """When post-gate capture is rejected, pre-gate patch metadata must not survive."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="grok-postgate-")
+        self.repo = gitfixtures.make_repo(self.tmp)
+        (self.repo / "tracked.txt").write_text("v1\n", encoding="utf-8")
+        _git(self.repo, "add", "tracked.txt")
+        _git(self.repo, "commit", "-q", "-m", "base")
+        self.base = subprocess.check_output(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True
+        ).strip()
+        (self.repo / "tracked.txt").write_text("v2\n", encoding="utf-8")
+        self.run_dir = pathlib.Path(self.tmp) / "run"
+        self.artifacts = self.run_dir / "artifacts"
+        self.artifacts.mkdir(parents=True)
+        # Pre-gate patch file that would be stale after a rejected recapture
+        stale = self.artifacts / "implementation.patch"
+        stale.write_bytes(b"STALE-PRE-GATE-PATCH")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_post_gate_secret_material_clears_pre_gate_patch_meta(self) -> None:
+        from groklib.code_handoff_finalize import code_handoff_finalize
+        from groklib.worktree import ExternalWorktree
+        from groklib.modes._worktree import FinalizeStage, WorktreeAccumulator
+
+        pre_meta = {
+            "format": "git-binary-full-index-v1",
+            "relativePath": "artifacts/implementation.patch",
+            "sha256": hashlib.sha256(b"STALE-PRE-GATE-PATCH").hexdigest(),
+            "bytes": len(b"STALE-PRE-GATE-PATCH"),
+        }
+        post_tree = "c" * 40
+        pre_tree = "d" * 40
+
+        call_n = {"n": 0}
+
+        def fake_capture(**_kwargs):
+            call_n["n"] += 1
+            if call_n["n"] == 1:
+                return (
+                    pre_meta,
+                    self.artifacts / "implementation.patch",
+                    pre_tree,
+                    [],
+                    ["phase1-pre"],
+                )
+            # Post-gate: fatal secret-material; no meta, but write-tree reached
+            return (
+                None,
+                None,
+                post_tree,
+                [HandoffBlocker("secret-material", "secret-shaped material in patch", {})],
+                ["phase1-post"],
+            )
+
+        wt = ExternalWorktree(
+            path=self.repo,
+            branch="grok/code/test",
+            base_revision=self.base,
+            repo_root=self.repo,
+        )
+        acc = WorktreeAccumulator()
+        stage = FinalizeStage(
+            result=mock.Mock(),
+            worktree=wt,
+            effective_model="test",
+            progress=mock.Mock(),
+            acc=acc,
+            run_id="20260716T020408Z-a82843",
+        )
+
+        def _ok(*_a, **_k):
+            return None
+
+        def _recorded(**_k):
+            return {"exitStatus": 0}
+
+        with mock.patch(
+            "groklib.code_handoff_finalize.capture_phase1_patch", side_effect=fake_capture
+        ):
+            try:
+                result = code_handoff_finalize(
+                    stage=stage,
+                    sentinel_name=".__grok_sentinel_never__",
+                    contract=None,
+                    artifacts_dir=self.artifacts,
+                    original_baseline=None,
+                    run_build_gate=_ok,
+                    assert_changes_within=_ok,
+                    assert_original_checkout_unmodified=_ok,
+                    assert_cwd_sentinel=_ok,
+                    run_recorded_command=_recorded,
+                )
+            except GrokWrapperError:
+                # secret-material is hard; finalize may raise after writing
+                manifest_path = self.run_dir / "implementation-handoff.json"
+                self.assertTrue(manifest_path.is_file())
+                doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+            else:
+                doc = result.manifest
+
+        self.assertIsNotNone(doc)
+        self.assertFalse(doc["integration"]["ready"])
+        # Stub patch, not the pre-gate secret-free patch metadata
+        self.assertEqual(doc["patch"]["bytes"], 0)
+        self.assertEqual(doc["patch"]["sha256"], "0" * 64)
+        # Prefer post-gate tree when capture reached write-tree
+        self.assertEqual(doc["resultTreeOid"], post_tree)
+        kinds = [b.get("kind") for b in doc["integration"]["blockers"]]
+        self.assertIn("secret-material", kinds)
 
 
 if __name__ == "__main__":
