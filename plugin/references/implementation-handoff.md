@@ -92,3 +92,14 @@ characters; only operator-supplied contract paths reject Windows drive forms.
 
 Notifications (1.5.0) are optional **signals** that a terminal attempt finished.
 They are not proof of integration readiness. Always call handoff before integrate.
+
+## Known limitation: secret-shaped fixture changes (2.0.0+)
+
+The phase-1 patch is scanned for secret-shaped material and REFUSED fail-closed
+(`artifact-generation-failure`) when it matches - even when the "secrets" are
+synthetic fixtures, e.g. moving or editing this repo's own redaction tests.
+Such changes cannot produce a handoff patch artifact by design. Integrate them
+from the retained worktree instead: verify the work in the worktree (test
+counts, suite, caps), generate the diff yourself (`git -C <worktree> add -A &&
+git -C <worktree> diff --cached --binary`), and apply with operator intent.
+Live evidence: docs/checklists/2.0-live-smoke-ledger.md (Task 0.6, cycle 4).
