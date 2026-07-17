@@ -126,17 +126,34 @@ def code_handoff_finalize(
     changed: List[dict] = []
     validation_evidence: List[dict] = []
 
-    # 1. verify sentinel (hard fail - no spoofed workspace)
+    # 1. verify sentinel - policy failure continues forensics when worktree readable
     steps.append("verify-sentinel")
     try:
         assert_cwd_sentinel(worktree, sentinel_name)
-    except GrokWrapperError:
+    except GrokWrapperError as exc:
         sentinel_ok = False
-        raise
+        blockers.append(
+            HandoffBlocker(
+                "wrong-working-directory",
+                str(exc),
+                dict(exc.detail or {}, errorClass=exc.error_class),
+            )
+        )
 
-    # 2. remove exact sentinel only
+    # 2. remove exact sentinel only (skip when sentinel was never valid)
     steps.append("remove-sentinel")
-    _remove_exact_sentinel(worktree.path, sentinel_name)
+    if sentinel_ok:
+        try:
+            _remove_exact_sentinel(worktree.path, sentinel_name)
+        except GrokWrapperError as exc:
+            sentinel_ok = False
+            blockers.append(
+                HandoffBlocker(
+                    "wrong-working-directory",
+                    str(exc),
+                    dict(exc.detail or {}, errorClass=exc.error_class),
+                )
+            )
 
     # 3. HEAD still equals baseRevision
     steps.append("head-check")
@@ -348,6 +365,80 @@ def code_handoff_finalize(
                 "validation-failure",
                 "build gate failed: {}".format(exc),
                 dict(exc.detail or {}, errorClass=exc.error_class),
+            )
+        )
+
+    # 8b. Re-capture patch after validation/gates so handoff matches final worktree.
+    # requiredValidation / build scripts can rewrite tracked files after step 6.
+    steps.append("forensic-patch-post-gate")
+    try:
+        post_meta, post_path, post_tree, post_blockers, post_steps = capture_phase1_patch(
+            worktree_path=worktree.path,
+            base_revision=base_revision,
+            artifacts_dir=artifacts_dir,
+            run_id=run_id,
+        )
+        steps.extend(post_steps)
+        blockers.extend(post_blockers)
+        fatal_patch = {
+            "secret-material",
+            "artifact-too-large",
+            "artifact-generation-failure",
+        }
+        if post_meta is not None and not any(b.kind in fatal_patch for b in post_blockers):
+            if result_tree and post_tree and post_tree != result_tree:
+                steps.append("forensic-patch-post-gate-tree-changed")
+            patch_meta = post_meta
+            patch_path = post_path
+            result_tree = post_tree
+            patch_ok = True
+            # Refresh changed path list + re-check scopes against final tree
+            try:
+                changed = list_changed_paths(worktree.path, base_revision)
+                changed = [c for c in changed if c.get("path") != sentinel_name]
+                stage.acc.changed_files = [c["path"] for c in changed]
+                if contract and scopes:
+                    for entry in changed:
+                        paths_to_check = []
+                        p = entry.get("path") or ""
+                        if p:
+                            paths_to_check.append(("path", p))
+                        old_p = entry.get("oldPath")
+                        if isinstance(old_p, str) and old_p:
+                            paths_to_check.append(("oldPath", old_p))
+                        for which, candidate in paths_to_check:
+                            if not path_in_scopes(candidate, scopes, from_git=True):
+                                scopes_ok = False
+                                blockers.append(
+                                    HandoffBlocker(
+                                        "write-scope-violation",
+                                        "changed path outside writeScopes after gates",
+                                        {
+                                            "path": candidate,
+                                            "field": which,
+                                            "status": entry.get("status"),
+                                        },
+                                    )
+                                )
+            except Exception as exc:
+                _log("code_handoff_finalize", "post-gate changed list failed: {}".format(exc))
+        else:
+            patch_ok = False
+            if post_meta is None and not any(b.kind in fatal_patch for b in post_blockers):
+                blockers.append(
+                    HandoffBlocker(
+                        "artifact-generation-failure",
+                        "post-gate implementation patch not produced",
+                        {},
+                    )
+                )
+    except Exception as exc:
+        patch_ok = False
+        blockers.append(
+            HandoffBlocker(
+                "artifact-generation-failure",
+                "post-gate patch capture raised: {}".format(exc),
+                {},
             )
         )
 

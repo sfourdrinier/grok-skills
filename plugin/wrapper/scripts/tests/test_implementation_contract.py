@@ -62,6 +62,12 @@ class PathInScopesTests(unittest.TestCase):
         # Operator-supplied scopes still accept Windows-style separators.
         self.assertTrue(path_in_scopes(r"pkg\evil.ts", scopes, from_git=False))
 
+    def test_git_path_preserves_trailing_whitespace(self) -> None:
+        scopes = [{"kind": "file", "path": "pkg/allowed.ts"}]
+        # Trailing space is a different filename; must not match file scope without it.
+        self.assertFalse(path_in_scopes("pkg/allowed.ts ", scopes, from_git=True))
+        self.assertTrue(path_in_scopes("pkg/allowed.ts", scopes, from_git=True))
+
 
 class ValidateContractTests(unittest.TestCase):
     def _ok(self, **overrides):
@@ -84,6 +90,25 @@ class ValidateContractTests(unittest.TestCase):
             self._ok(
                 requiredValidation=[{"argv": "pnpm test", "cwd": "."}]
             )
+
+    def test_falsey_required_validation_rejected(self) -> None:
+        for bad in ("", False, 0, {}):
+            with self.assertRaises(GrokWrapperError) as cm:
+                self._ok(requiredValidation=bad)
+            self.assertEqual(cm.exception.error_class, "implementation-contract-invalid")
+        # absent / null still means no validations
+        c = self._ok()
+        self.assertEqual(c["requiredValidation"], [])
+        c2 = validate_contract(
+            {
+                "schemaVersion": 1,
+                "taskId": "t1",
+                "target": "pkg",
+                "writeScopes": [{"kind": "subtree", "path": "pkg"}],
+                "requiredValidation": None,
+            }
+        )
+        self.assertEqual(c2["requiredValidation"], [])
 
     def test_trust_model_constant(self) -> None:
         self.assertEqual(trust_model(), "operator-contract-trusted-no-os-sandbox")

@@ -43,10 +43,12 @@ def normalize_git_repo_path(path: str) -> str:
 
     Only forward slash is a separator. Backslash is preserved as a literal
     character so a root file named ``pkg\\evil.ts`` is not treated as under ``pkg/``.
+    Does **not** strip whitespace: leading/trailing spaces are valid filename chars.
     """
     if path is None or not isinstance(path, str):
         raise _contract_error("path must be a non-empty string", {"path": path})
-    return _normalize_repo_relative_raw(path.strip(), original=path)
+    # Never strip: Git paths may begin/end with spaces and still be distinct names.
+    return _normalize_repo_relative_raw(path, original=path)
 
 
 def _normalize_repo_relative_raw(raw: str, *, original: str) -> str:
@@ -243,9 +245,16 @@ def validate_contract(data: dict) -> dict:
             raise _contract_error("writeScopes[{}].path must be a string".format(i))
         scopes_out.append({"kind": kind, "path": normalize_repo_relative(sp)})
 
-    required = data.get("requiredValidation") or []
-    if not isinstance(required, list):
-        raise _contract_error("requiredValidation must be an array")
+    # Absent/null => no validations. Present non-array (incl. "" / false) => fail closed.
+    if "requiredValidation" not in data or data.get("requiredValidation") is None:
+        required: list = []
+    else:
+        required = data.get("requiredValidation")
+        if not isinstance(required, list):
+            raise _contract_error(
+                "requiredValidation must be an array when present",
+                {"type": type(required).__name__},
+            )
     req_out: List[dict] = []
     for i, entry in enumerate(required):
         if not isinstance(entry, dict):
@@ -267,9 +276,15 @@ def validate_contract(data: dict) -> dict:
             raise _contract_error("requiredValidation[{}].purpose must be a string".format(i))
         req_out.append({"argv": list(argv), "cwd": cwd_norm, "purpose": purpose or ""})
 
-    acceptance = data.get("acceptanceCriteria") or []
-    if acceptance is not None and not isinstance(acceptance, list):
-        raise _contract_error("acceptanceCriteria must be an array when present")
+    if "acceptanceCriteria" not in data or data.get("acceptanceCriteria") is None:
+        acceptance: list = []
+    else:
+        acceptance = data.get("acceptanceCriteria")
+        if not isinstance(acceptance, list):
+            raise _contract_error(
+                "acceptanceCriteria must be an array when present",
+                {"type": type(acceptance).__name__},
+            )
 
     objective = data.get("objective")
     if objective is not None and not isinstance(objective, str):

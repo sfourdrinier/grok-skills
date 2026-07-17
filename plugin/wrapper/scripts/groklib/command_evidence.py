@@ -18,11 +18,17 @@ def _sha256_bytes(data: bytes) -> str:
 
 
 def _tail_text(data: bytes, limit: int = _MAX_TAIL) -> Dict[str, Any]:
+    """Redact the full stream first, then take the tail (never slice before redaction).
+
+    Slicing raw output first can drop a secret marker (e.g. ``Bearer `` or PEM
+    header) that sits just before the retained window, leaking the remainder.
+    """
     raw = data.decode("utf-8", errors="replace")
-    truncated = len(raw) > limit
-    tail = raw[-limit:] if truncated else raw
+    redacted = redact_secret_value_text(raw)
+    truncated = len(redacted) > limit
+    tail = redacted[-limit:] if truncated else redacted
     return {
-        "text": redact_secret_value_text(tail),
+        "text": tail,
         "truncated": truncated,
         "bytes": len(data),
     }

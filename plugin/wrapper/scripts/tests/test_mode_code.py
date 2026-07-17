@@ -340,6 +340,14 @@ class CodeModeTests(WorktreeModeHarness):
         env = json.loads(out)
         self.assertEqual(exit_code, 1, out)
         self.assertEqual(env["error"]["class"], "wrong-working-directory")
+        # Forensic handoff still written so /grok:handoff can observe ready=false
+        run_id = env["runId"]
+        manifest_path = runstate.state_root() / "runs" / run_id / "implementation-handoff.json"
+        self.assertTrue(manifest_path.is_file(), out)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertFalse(manifest["integration"]["ready"])
+        kinds = [b.get("kind") for b in manifest["integration"].get("blockers") or []]
+        self.assertIn("wrong-working-directory", kinds)
 
     def test_code_misplaced_sentinel_is_wrong_working_directory(self) -> None:
         repo = self.make_code_repo()

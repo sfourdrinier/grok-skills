@@ -114,6 +114,8 @@ def capture_phase1_patch(
         steps.append("phase1-write-tree")
         result_tree = _git_ok(worktree_path, ["write-tree"], env=child_env).strip()
         steps.append("phase1-diff")
+        # Diff the temp index against recorded baseRevision (not live HEAD) so
+        # unexpected commits on the worktree branch are still in the forensic patch.
         completed = _run_git_env(
             worktree_path,
             [
@@ -122,6 +124,7 @@ def capture_phase1_patch(
                 "--binary",
                 "--full-index",
                 "--no-ext-diff",
+                base_revision,
             ],
             env=child_env,
         )

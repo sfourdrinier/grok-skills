@@ -103,6 +103,24 @@ class CommandEvidenceTests(unittest.TestCase):
         self.assertIn("durationSeconds", rec)
         self.assertNotIn("detail", rec)
 
+    def test_redact_before_truncate_keeps_secret_marker(self) -> None:
+        # Secret near the tail cut: if we sliced raw first, "Bearer " could fall
+        # outside the window and leave the token body exposed. Redact full first.
+        # Use non-token padding after the secret so the bearer pattern ends cleanly.
+        pad = "n" * 5000
+        secret = " Bearer abcdef0123456789deadbeefcafebabe "
+        raw = (pad + secret + "!" * 200).encode("utf-8")
+        rec = build_command_evidence(
+            argv=["echo"],
+            cwd="/tmp",
+            purpose="t",
+            exit_status=0,
+            stdout=raw,
+        )
+        self.assertTrue(rec["stdoutTail"]["truncated"])
+        self.assertNotIn("abcdef0123456789deadbeefcafebabe", rec["stdoutTail"]["text"])
+        self.assertIn("redacted", rec["stdoutTail"]["text"].lower())
+
     def test_spawn_failure_record_is_envelope_valid(self) -> None:
         from groklib.envelope import failure_envelope, validate_envelope
 
@@ -138,6 +156,38 @@ class Phase1PatchTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_patch_includes_unexpected_commit_vs_base(self) -> None:
+        """When HEAD moved, patch must still be vs baseRevision (not live HEAD)."""
+        (self.repo / "tracked.txt").write_text("v2\n", encoding="utf-8")
+        _git(self.repo, "add", "tracked.txt")
+        _git(self.repo, "commit", "-q", "-m", "unexpected")
+        meta, path, tree, blockers, steps = capture_phase1_patch(
+            worktree_path=self.repo,
+            base_revision=self.base,
+            artifacts_dir=self.artifacts,
+            run_id="20260716T020408Z-a82843",
+        )
+        self.assertIsNotNone(meta)
+        self.assertTrue(path and path.is_file())
+        text = path.read_bytes()
+        # Diff vs base must include the committed change content
+        self.assertIn(b"v2", text)
+        # Apply check against original base still works
+        apply_repo = pathlib.Path(self.tmp) / "apply-base"
+        subprocess.run(
+            ["git", "clone", "--quiet", str(self.repo), str(apply_repo)],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        _git(apply_repo, "reset", "--hard", self.base)
+        r = subprocess.run(
+            ["git", "-C", str(apply_repo), "apply", "--check", "--binary", str(path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertEqual(r.returncode, 0, r.stderr.decode())
 
     def test_add_modify_delete_binary_untracked(self) -> None:
         (self.repo / "tracked.txt").write_text("v2\n", encoding="utf-8")
