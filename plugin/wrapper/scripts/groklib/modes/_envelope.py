@@ -113,6 +113,10 @@ class ModeRun:
     # CLI without engaging grokcli's structured-output validation, so the mode
     # keeps its own missing/invalid classification.
     elicit_schema: Optional[dict] = None
+    # Pre-seeded envelope warnings (e.g. AGENTS.md/CLAUDE.md divergence notes from
+    # rules discovery). Seeded into the local warnings list at the start of
+    # _run_grok_mode_body so they ride the success/failure envelope.
+    initial_warnings: "tuple[str, ...]" = ()
 
 
 def effective_tools(tools: Tuple[str, ...], web_access: bool) -> List[str]:

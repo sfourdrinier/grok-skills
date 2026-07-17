@@ -721,7 +721,7 @@ def _run_grok_mode_body(
     # Best-effort and safely windowed so a concurrently-active run is never reaped.
     runstate.best_effort_reap_stale_temp_homes(runstate.LIVE_START_STALE_HOME_MAX_AGE_SECONDS)
 
-    warnings: List[str] = []
+    warnings: List[str] = list(run.initial_warnings)
     home_cleanup: Optional[HomeCleanup] = None
     # F1-execute-and-verify-drops-result / F1-sigterm-drops-result: the caller-owned holder
     # is populated the instant grokcli.execute produces a result, so a post-run check that

@@ -235,6 +235,78 @@ class RulesTests(unittest.TestCase):
             self.assertIsInstance(entry["bytes"], int)
             self.assertIsInstance(entry["sha256"], str)
 
+    def test_divergent_pair_at_repo_root_yields_one_warning(self) -> None:
+        _write(self.repo_root / "AGENTS.md", "# Agents\n\nAgent rules.\n")
+        _write(self.repo_root / "CLAUDE.md", "# Claude\n\nDifferent rules.\n")
+
+        files, warnings = rules.discover_instruction_files_with_warnings(
+            self.repo_root, self.repo_root
+        )
+
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].repo_relative, "AGENTS.md")
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("only AGENTS.md was sent", warnings[0])
+        self.assertIn("repo root", warnings[0])
+        self.assertIn("ruleFileParity", warnings[0])
+
+    def test_identical_pair_yields_no_warnings_and_matches_discover(self) -> None:
+        content = "# House rules\n\nBe careful.\n"
+        _write(self.repo_root / "AGENTS.md", content)
+        _write(self.repo_root / "CLAUDE.md", content)
+
+        files, warnings = rules.discover_instruction_files_with_warnings(
+            self.repo_root, self.repo_root
+        )
+        plain = rules.discover_instruction_files(self.repo_root, self.repo_root)
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].repo_relative, plain[0].repo_relative)
+        self.assertEqual(files[0].content_bytes, plain[0].content_bytes)
+        self.assertEqual(files[0].sha256, plain[0].sha256)
+
+    def test_single_claude_md_only_yields_no_warnings(self) -> None:
+        _write(self.repo_root / "CLAUDE.md", "# House rules\n\nBe careful.\n")
+
+        files, warnings = rules.discover_instruction_files_with_warnings(
+            self.repo_root, self.repo_root
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].repo_relative, "CLAUDE.md")
+
+    def test_nested_divergent_pair_names_subdirectory_in_warning(self) -> None:
+        nested = self.repo_root / "apps" / "foo"
+        _write(nested / "AGENTS.md", "# Agents nested\n")
+        _write(nested / "CLAUDE.md", "# Claude nested different\n")
+
+        files, warnings = rules.discover_instruction_files_with_warnings(
+            self.repo_root, nested
+        )
+
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].repo_relative, "apps/foo/AGENTS.md")
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("apps/foo", warnings[0])
+        self.assertIn("only AGENTS.md was sent", warnings[0])
+        self.assertNotIn("repo root", warnings[0])
+
+    def test_strict_mode_divergence_raises_identically_with_no_warnings(self) -> None:
+        _write(self.repo_root / "AGENTS.md", _SHARED_ROOT_HEADER + "Root rules.\n")
+        _write(self.repo_root / "CLAUDE.md", _SHARED_ROOT_HEADER + "Root rules!\n")
+
+        with self.assertRaises(RulesParityError) as plain_ctx:
+            rules.discover_instruction_files(self.repo_root, self.repo_root, require_parity=True)
+        with self.assertRaises(RulesParityError) as warn_ctx:
+            rules.discover_instruction_files_with_warnings(
+                self.repo_root, self.repo_root, require_parity=True
+            )
+
+        self.assertEqual(str(plain_ctx.exception), str(warn_ctx.exception))
+        self.assertEqual(plain_ctx.exception.error_class, warn_ctx.exception.error_class)
+
 
 if __name__ == "__main__":
     unittest.main()

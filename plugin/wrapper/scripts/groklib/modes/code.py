@@ -584,9 +584,10 @@ def run(args: argparse.Namespace) -> dict:
 
         _maybe_install_dependencies(stage, worktree.path, target_relative, package_manager, pm_binary)
 
-        instructions = rules.discover_instruction_files(
+        instructions, rule_warnings = rules.discover_instruction_files_with_warnings(
             repo_root, target_abs, require_parity=project_config.require_rule_file_parity
         )
+        stage.acc.warnings.extend(rule_warnings)
         instruction_entries = rules.instruction_envelope_entries(instructions)
         sentinel_name = _SENTINEL_PREFIX + stage.run_id
         task_with_sentinel = _sentinel_directive(sentinel_name) + task_text

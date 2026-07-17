@@ -167,7 +167,7 @@ def run(args: argparse.Namespace) -> dict:
         rules_root = isolation.worktree_path if isolation is not None else repo_root
         rules_target = cwd
         project_config = load_project_config(rules_root)
-        instructions = rules.discover_instruction_files(
+        instructions, rule_warnings = rules.discover_instruction_files_with_warnings(
             rules_root, rules_target, require_parity=project_config.require_rule_file_parity
         )
         prompt_text = rules.build_prompt_payload(instructions, task_text)
@@ -191,6 +191,7 @@ def run(args: argparse.Namespace) -> dict:
             tree_fingerprint_root=(
                 isolation.worktree_path if isolation is not None else None
             ),
+            initial_warnings=tuple(rule_warnings),
         )
         return _shared.run_grok_mode(mode_run, run_paths=pre_paths)
     except BaseException as exc:
