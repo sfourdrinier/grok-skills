@@ -324,8 +324,12 @@ function runWithLiveRelay(wrapper, args, track) {
           summary: code === 0 ? "completed" : `exit ${code}`,
         });
       }
-      // captureStdout: implement needs the code envelope buffer; others get a number.
-      const resolveValue = track?.captureStdout ? { code, stdout: stdoutBuf } : code;
+      // captureStdout: implement/auto need the code envelope buffer + the jobId
+      // so the combo can finalize job status + notification AFTER handoff (not on
+      // the code-leg exit); others get a number.
+      const resolveValue = track?.captureStdout
+        ? { code, stdout: stdoutBuf, jobId: jobAfter?.id ?? null }
+        : code;
       if (!shouldAttemptTerminalNotify({ skipNotify: track?.skipNotify })) {
         resolve(resolveValue);
         return;
@@ -635,16 +639,41 @@ async function dispatch({
       runMode,
       skipNotify: Boolean(noNotify),
     };
+    // Finalize job status + fire exactly one terminal notification on the combo's
+    // TRUE outcome (after handoff / apply), since the code leg's own notify is
+    // suppressed. Prevents /grok:jobs + notifications reporting success for a
+    // not-ready implement or a failed auto-apply.
+    const comboStartedAtMs = Date.now();
+    const finalizeCombo = ({ jobId, finalCode, runId, stdoutText }) => {
+      if (jobId) {
+        updateJob(cwd, jobId, {
+          status: finalCode === 0 ? "success" : "failure",
+          summary: finalCode === 0 ? "ready" : `not ready (exit ${finalCode})`,
+        });
+      }
+      if (Boolean(noNotify)) return Promise.resolve();
+      return maybeNotifyAfterTerminal({
+        cwd,
+        mode: track.notifyMode,
+        runId,
+        code: finalCode,
+        startedAtMs: comboStartedAtMs,
+        stdoutText: stdoutText || "",
+        stderrLine,
+      });
+    };
     if (isAutoCode) {
       return runAutoIntegrate(wrapper, comboRest, runMode, track, {
         runWithLiveRelay,
         stderrLine,
         targetCwd: cwd,
+        finalizeCombo,
       });
     }
     return runImplementCombo(wrapper, comboRest, runMode, track, {
       runWithLiveRelay,
       stderrLine,
+      finalizeCombo,
     });
   }
 

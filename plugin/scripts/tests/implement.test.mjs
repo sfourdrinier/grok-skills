@@ -11,6 +11,7 @@ import { test } from "node:test";
 
 import { DIRECT_NO_HANDOFF_MSG } from "../lib/direct-grok.mjs";
 import { setRunMode } from "../lib/jobs.mjs";
+import { runImplementCombo } from "../lib/implement.mjs";
 import { makeFakeWrapper, readCalls, runCompanion } from "./helpers/fake-wrapper.mjs";
 
 const RUN_ID = "20260716T000000Z-abc123";
@@ -123,6 +124,32 @@ test("implement exits 1 when handoff not ready", () => {
     cleanup();
     fs.rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+test("C6: code leg is skipNotify; finalizeCombo fires once with the true outcome", async () => {
+  // No runId in the code envelope -> runCodeThenHandoff returns before any
+  // handoff spawn, so this unit-tests the finalize wiring without a subprocess.
+  const track = { kind: "code", mode: "code", notifyMode: "implement", runMode: "hardened" };
+  let relayTrack = null;
+  const fakeRelay = async (_wrapper, _args, t) => {
+    relayTrack = t;
+    return {
+      code: 0,
+      stdout: JSON.stringify({ schemaVersion: 1, status: "success", mode: "code" }),
+      jobId: "job-1",
+    };
+  };
+  const finalizeCalls = [];
+  const exit = await runImplementCombo("wrapper", ["--target", ".", "--base", "HEAD"], "hardened", track, {
+    runWithLiveRelay: fakeRelay,
+    stderrLine: () => {},
+    finalizeCombo: async (x) => finalizeCalls.push(x),
+  });
+  assert.equal(exit, 1, "no runId -> exit 1");
+  assert.equal(relayTrack.skipNotify, true, "code leg must suppress its premature notification");
+  assert.equal(finalizeCalls.length, 1, "finalizeCombo must fire exactly once");
+  assert.equal(finalizeCalls[0].finalCode, 1, "finalize must carry the TRUE combo outcome");
+  assert.equal(finalizeCalls[0].jobId, "job-1", "finalize must carry the relay's jobId");
 });
 
 test("implement exits 1 when code envelope has no runId", () => {

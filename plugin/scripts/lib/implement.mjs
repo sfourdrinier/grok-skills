@@ -127,12 +127,18 @@ export async function runCodeThenHandoff(wrapper, rest, track, {
   }
   const wrapperRest = restForWrapperIntegration(rest);
   const codeArgs = ["code", ...wrapperRest];
+  // Suppress the code-leg's terminal notification: the combo's real outcome is
+  // only known after handoff (implement) / apply (auto), so the caller fires one
+  // notification then via finalizeCombo. captureStdout also returns the jobId so
+  // the caller can re-finalize the job status to the true outcome.
   const res = await runWithLiveRelay(wrapper, codeArgs, {
     ...track,
     captureStdout: true,
+    skipNotify: true,
   });
   const codeExit = typeof res === "number" ? res : res.code;
   const stdoutBuf = typeof res === "number" ? "" : res.stdout || "";
+  const jobId = typeof res === "number" ? null : res.jobId ?? null;
   const codeEnvelope = tryParseEnvelope(stdoutBuf);
   const runId = sanitizeRunId(codeEnvelope?.runId);
   if (!runId) {
@@ -146,6 +152,8 @@ export async function runCodeThenHandoff(wrapper, rest, track, {
       handoffEnvelope: null,
       ready: false,
       runId: null,
+      jobId,
+      codeStdout: stdoutBuf,
     };
   }
   stderrLine(
@@ -166,6 +174,8 @@ export async function runCodeThenHandoff(wrapper, rest, track, {
     handoffEnvelope,
     ready,
     runId,
+    jobId,
+    codeStdout: stdoutBuf,
   };
 }
 
@@ -180,6 +190,7 @@ export async function runCodeThenHandoff(wrapper, rest, track, {
 export async function runImplementCombo(wrapper, rest, runMode, track, {
   runWithLiveRelay,
   stderrLine = (line) => process.stderr.write(`${line}\n`),
+  finalizeCombo = null,
 } = {}) {
   if (runMode === "direct") {
     return writeDirectNoHandoffRefuse();
@@ -189,10 +200,23 @@ export async function runImplementCombo(wrapper, rest, runMode, track, {
     stderrLine,
     logPrefix: "implement",
   });
-  if (!result.runId) return 1;
-  return result.codeExit === 0 && result.handoffCode === 0 && result.ready
-    ? 0
-    : 1;
+  const finalCode = !result.runId
+    ? 1
+    : result.codeExit === 0 && result.handoffCode === 0 && result.ready
+      ? 0
+      : 1;
+  // Finalize the job status + fire ONE notification on the true outcome (the
+  // code-leg notify was suppressed), so /grok:jobs and notifications never
+  // report success for a not-ready implement.
+  if (typeof finalizeCombo === "function") {
+    await finalizeCombo({
+      jobId: result.jobId,
+      finalCode,
+      runId: result.runId,
+      stdoutText: result.codeStdout,
+    });
+  }
+  return finalCode;
 }
 
 /**
@@ -214,6 +238,7 @@ export async function runAutoIntegrate(wrapper, rest, runMode, track, {
   runWithLiveRelay,
   stderrLine = (line) => process.stderr.write(`${line}\n`),
   targetCwd = process.cwd(),
+  finalizeCombo = null,
 } = {}) {
   if (runMode === "direct") {
     return writeDirectNoHandoffRefuse();
@@ -223,22 +248,35 @@ export async function runAutoIntegrate(wrapper, rest, runMode, track, {
     stderrLine,
     logPrefix: "auto",
   });
-  if (!result.runId) return 1;
-  if (!(result.codeExit === 0 && result.handoffCode === 0 && result.ready)) {
+  let finalCode;
+  if (!result.runId) {
+    finalCode = 1;
+  } else if (!(result.codeExit === 0 && result.handoffCode === 0 && result.ready)) {
     stderrLine(
       `[grok-auto] not applying: code/handoff not dual-condition ready for ${result.runId}`
     );
-    return 1;
+    finalCode = 1;
+  } else {
+    const targetArg = parseTargetFlag(rest);
+    const targetRepo = resolveTargetWorkspaceRoot(targetCwd, targetArg);
+    stderrLine(`[grok-auto] ready; applying patch to target ${targetRepo}`);
+    const applied = applyVerifiedPatch({
+      wrapper,
+      runId: result.runId,
+      targetRepo,
+      runHandoff: runHandoffCaptured,
+      stderrLine,
+    });
+    finalCode = applied.ok ? 0 : 1;
   }
-  const targetArg = parseTargetFlag(rest);
-  const targetRepo = resolveTargetWorkspaceRoot(targetCwd, targetArg);
-  stderrLine(`[grok-auto] ready; applying patch to target ${targetRepo}`);
-  const applied = applyVerifiedPatch({
-    wrapper,
-    runId: result.runId,
-    targetRepo,
-    runHandoff: runHandoffCaptured,
-    stderrLine,
-  });
-  return applied.ok ? 0 : 1;
+  // Finalize job status + one notification on the true outcome (apply included).
+  if (typeof finalizeCombo === "function") {
+    await finalizeCombo({
+      jobId: result.jobId,
+      finalCode,
+      runId: result.runId,
+      stdoutText: result.codeStdout,
+    });
+  }
+  return finalCode;
 }
