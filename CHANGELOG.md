@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
-## [2.0.0] - unreleased
+## [2.0.0] - 2026-07-17
 
 Peer-agent integration release (plan: docs/superpowers/plans/2026-07-16-peer-agent-integration.md).
 Phases land as sequential PRs; no tag until the release phase. Most implementation

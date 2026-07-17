@@ -1,6 +1,6 @@
 {
   "name": "grok",
-  "version": "1.6.0",
+  "version": "2.0.0",
   "description": "Grok as a peer implementer agent for Codex / ChatGPT: delegate code to an isolated worktree, iterate with continue-run, integrate through verified handoff. Review, reason, and verify included. Not affiliated with xAI.",
   "author": {
     "name": "Stephane Fourdrinier"
