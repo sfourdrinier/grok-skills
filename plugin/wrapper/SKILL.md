@@ -49,7 +49,7 @@ command and hand back exactly what it printed. If you want to explain the
 result in your own words, do that separately, clearly labeled as your own
 summary, AFTER relaying the raw envelope - never instead of it.
 
-## The seven subcommands: when to use each
+## The eight subcommands: when to use each
 
 ### `preflight` - readiness check, no task
 

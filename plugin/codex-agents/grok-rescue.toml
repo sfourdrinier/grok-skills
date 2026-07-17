@@ -29,6 +29,9 @@ Implementation only if user gave target and base -> code (else prefer engineer-c
     --target '<path>' --base '<revision>' --task-file - <<'GROK_TASK'
   <request>
   GROK_TASK
+Then handoff before any integrate (never auto-apply; notify is not ready):
+  node "$GROK_AGENT_RUN" handoff --run-id '<runId from code envelope>'
+Require response.integration.ready dual-condition ready.
 
 Never --task \"...\". Single-quote flag values. No repo exploration beyond forwarding.
 If the call fails, return stderr and a short preflight/setup hint - never return nothing.

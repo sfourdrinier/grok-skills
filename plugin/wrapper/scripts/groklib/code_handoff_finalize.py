@@ -19,6 +19,7 @@ from groklib.implementation_handoff import (
     HARD_BLOCKER_KINDS,
     HandoffBlocker,
     HandoffBuildResult,
+    SOFT_BLOCKER_KINDS,
     _HARD_PRIMARY_MAPPING,
     _STEP_ORDER,
     compute_integration_ready,
@@ -86,6 +87,16 @@ def _contract_sha256(contract: Optional[dict]) -> Optional[str]:
     import hashlib
     payload = json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _clear_stale_patch_file(artifacts_dir: pathlib.Path) -> None:
+    """Remove pre-gate patch bytes so stub meta cannot point at live content."""
+    stale = artifacts_dir / "implementation.patch"
+    try:
+        if stale.is_file():
+            stale.unlink()
+    except OSError as exc:
+        _log("code_handoff_finalize", "could not remove stale patch: {}".format(exc))
 
 def code_handoff_finalize(
     *,
@@ -244,6 +255,12 @@ def code_handoff_finalize(
 
     # 6. phase-1 forensic patch
     steps.append("forensic-patch")
+    fatal_patch = {
+        "secret-material",
+        "artifact-too-large",
+        "artifact-generation-failure",
+    }
+    pre_patch_fatals: List[HandoffBlocker] = []
     try:
         patch_meta, patch_path, result_tree, patch_blockers, patch_steps = capture_phase1_patch(
             worktree_path=worktree.path,
@@ -253,12 +270,8 @@ def code_handoff_finalize(
         )
         steps.extend(patch_steps)
         blockers.extend(patch_blockers)
-        fatal_patch = {
-            "secret-material",
-            "artifact-too-large",
-            "artifact-generation-failure",
-        }
-        patch_ok = patch_meta is not None and not any(b.kind in fatal_patch for b in patch_blockers)
+        pre_patch_fatals = [b for b in patch_blockers if b.kind in fatal_patch]
+        patch_ok = patch_meta is not None and not pre_patch_fatals
     except Exception as exc:
         blockers.append(
             HandoffBlocker("artifact-generation-failure", "patch capture raised: {}".format(exc), {})
@@ -410,7 +423,13 @@ def code_handoff_finalize(
             patch_path = post_path
             result_tree = post_tree
             patch_ok = True
-            # Refresh changed path list + re-check scopes against final tree
+            # Final capture is clean: drop historical pre-gate patch fatals so
+            # forensics do not claim secret/too-large against a clean final patch.
+            if pre_patch_fatals:
+                blockers = [b for b in blockers if b not in pre_patch_fatals]
+                steps.append("forensic-patch-pre-fatals-superseded")
+            # Refresh changed path list + re-check scopes against final tree.
+            # Failure is hard: never keep final patch with stale inventory.
             try:
                 changed = list_changed_paths(worktree.path, base_revision)
                 changed = [c for c in changed if c.get("path") != sentinel_name]
@@ -439,16 +458,27 @@ def code_handoff_finalize(
                                     )
                                 )
             except Exception as exc:
-                _log("code_handoff_finalize", "post-gate changed list failed: {}".format(exc))
+                patch_ok = False
+                patch_meta = None
+                patch_path = None
+                result_tree = None
+                _clear_stale_patch_file(artifacts_dir)
+                blockers.append(
+                    HandoffBlocker(
+                        "artifact-generation-failure",
+                        "post-gate changed list / scope refresh failed: {}".format(exc),
+                        {},
+                    )
+                )
+                steps.append("forensic-patch-post-gate-list-failed")
         else:
-            # Final capture rejected (secret-material, too-large, etc.): drop
-            # pre-gate patch/path so the forensic manifest does not point at a
-            # stale tree/patch that no longer describes the retained worktree.
+            # Final capture rejected: drop pre-gate meta/path and remove disk
+            # bytes so the relativePath does not point at a stale pre-gate patch.
             patch_ok = False
             patch_meta = None
             patch_path = None
-            # Prefer post-gate write-tree when capture reached it; else clear.
             result_tree = post_tree if post_tree else None
+            _clear_stale_patch_file(artifacts_dir)
             steps.append("forensic-patch-post-gate-rejected")
             if post_meta is None and not any(b.kind in fatal_patch for b in post_blockers):
                 blockers.append(
@@ -463,6 +493,7 @@ def code_handoff_finalize(
         patch_meta = None
         patch_path = None
         result_tree = None
+        _clear_stale_patch_file(artifacts_dir)
         steps.append("forensic-patch-post-gate-raised")
         blockers.append(
             HandoffBlocker(
@@ -500,9 +531,9 @@ def code_handoff_finalize(
 
     # 10. terminalOutcome
     steps.append("terminal-outcome")
-    # Ready-only soft blockers (SOFT_BLOCKER_KINDS) never fail the code envelope.
-    # Hard policy failures raise after handoff write so the runner emits failure.
-    policy_fail = [b for b in blockers if b.kind in HARD_BLOCKER_KINDS]
+    # Soft blockers only never fail the code envelope. Every other kind is hard
+    # (including unknown kinds - fail closed).
+    policy_fail = [b for b in blockers if b.kind not in SOFT_BLOCKER_KINDS]
     terminal_outcome = "failed" if policy_fail else "completed"
 
     # 11. compute ready
@@ -521,12 +552,19 @@ def code_handoff_finalize(
         changed_count=len(changed),
     )
 
-    # Ensure result tree
+    # Ensure result tree is a real tree OID (never substitute a commit SHA).
     if not result_tree:
         try:
             result_tree = _git_ok(worktree.path, ["rev-parse", "HEAD^{tree}"]).strip()
         except GrokWrapperError:
-            result_tree = base_revision  # placeholder; validation may fail
+            result_tree = "0" * 40
+            blockers.append(
+                HandoffBlocker(
+                    "artifact-generation-failure",
+                    "could not resolve result tree OID",
+                    {},
+                )
+            )
 
     if patch_meta is None:
         # Minimal stub so manifest validates structure when patch failed
@@ -634,9 +672,10 @@ def code_handoff_finalize(
         # violations[]) so envelope.error.detail matches pre-PR4 callers.
         primary_detail: Dict[str, Any] = {}
         for b in blockers:
-            if b.kind not in HARD_BLOCKER_KINDS:
+            if b.kind in SOFT_BLOCKER_KINDS:
                 continue
-            if _HARD_PRIMARY_MAPPING.get(b.kind) == primary_class:
+            mapped = _HARD_PRIMARY_MAPPING.get(b.kind, "artifact-generation-failure")
+            if mapped == primary_class or b.kind not in HARD_BLOCKER_KINDS:
                 if b.detail:
                     primary_detail.update(b.detail)
                 break

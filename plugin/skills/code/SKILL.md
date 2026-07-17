@@ -123,7 +123,11 @@ with `implementation-contract-invalid`. Trust model:
 `operator-contract-trusted-no-os-sandbox` (no OS filesystem sandbox claim for
 validation commands).
 
-On success or classified failure after Grok, the wrapper writes:
+**Direct run-mode refuses `--contract-file`** (companion fail-closed). Verified
+handoff artifacts (`implementation.patch` + `implementation-handoff.json`) are
+written only on the **hardened** path under the C2 run dir.
+
+On success or classified failure after hardened Grok, the wrapper writes:
 
 - `runs/<runId>/artifacts/implementation.patch` (immutable git binary full-index)
 - `runs/<runId>/implementation-handoff.json`

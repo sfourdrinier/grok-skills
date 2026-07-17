@@ -20,16 +20,21 @@ from groklib import GrokWrapperError, log_stderr, runstate
 from groklib import envelope as envelope_mod
 from groklib.worktree import ExternalWorktree, remove_external_worktree
 
-# Design §14.17 — factual only; do not say "unacknowledged."
+# Design §14.17 - factual only; do not say "unacknowledged."
+# Manifest-ready is write-time only (not dual-condition /grok:handoff ready).
 _READY_HANDOFF_WARNING = (
-    "This run contains an integration-ready handoff. Cleanup will permanently remove "
-    "its retained worktree and stored handoff artifacts. The plugin cannot determine "
-    "whether the implementation was integrated."
+    "This run's handoff manifest claims integration.ready (write-time only; not dual-condition). "
+    "Cleanup will permanently remove its retained worktree and stored handoff artifacts. "
+    "The plugin cannot determine whether the implementation was integrated."
 )
 
 
 def _integration_ready_handoff(run_dir: pathlib.Path) -> bool:
-    """True when implementation-handoff.json exists with integration.ready === true."""
+    """True when implementation-handoff.json claims integration.ready (manifest-only).
+
+    This is NOT dual-condition ready (no envelope/patch rehash). Used only as a
+    cleanup retention warning.
+    """
     path = run_dir / "implementation-handoff.json"
     if not path.is_file():
         return False

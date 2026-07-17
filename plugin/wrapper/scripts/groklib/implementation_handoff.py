@@ -13,16 +13,9 @@ import json
 import os
 import pathlib
 import re
-import secrets
-import shutil
-import stat
-import subprocess
-import tempfile
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from groklib import GrokWrapperError, log_stderr, platformsupport
-from groklib import worktree as worktree_mod
-from groklib.command_evidence import build_command_evidence
 from groklib.envelope import (
     assert_no_secret_material,
     redact_secret_material,
@@ -31,32 +24,16 @@ from groklib.envelope import (
 )
 from groklib.implementation_contract import (
     normalize_git_repo_path,
-    normalize_repo_relative,
-    path_in_scopes,
-    trust_model,
 )
 
 _log = lambda fn, msg: log_stderr("implementation_handoff", fn, msg)
 
-_DEFAULT_PATCH_MAX = 25 * 1024 * 1024
 _PATCH_FORMAT = "git-binary-full-index-v1"
 _RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$")
 # Full Git object IDs only (SHA-1 = 40 hex, SHA-256 = 64 hex). No abbreviations.
 _GIT_OID_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 _PATCH_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
-_EMPTY_HOOKS = worktree_mod._EMPTY_GIT_HOOKS
 _ALLOWED_CHANGE_STATUS = frozenset({"added", "modified", "deleted", "renamed"})
-
-
-def _patch_max_bytes() -> int:
-    raw = (os.environ.get("GROK_HANDOFF_PATCH_MAX_BYTES") or "").strip()
-    if not raw:
-        return _DEFAULT_PATCH_MAX
-    try:
-        n = int(raw)
-    except ValueError:
-        return _DEFAULT_PATCH_MAX
-    return max(1 * 1024 * 1024, min(n, 100 * 1024 * 1024))
 
 
 def _sha256_file(path: pathlib.Path) -> str:
@@ -67,10 +44,6 @@ def _sha256_file(path: pathlib.Path) -> str:
     return h.hexdigest()
 
 
-def _sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
 def _now_utc() -> str:
     return (
         datetime.datetime.now(datetime.timezone.utc)
@@ -78,34 +51,6 @@ def _now_utc() -> str:
         .isoformat()
         .replace("+00:00", "Z")
     )
-
-
-def _run_git_env(repo: pathlib.Path, args: Sequence[str], env: Optional[dict] = None) -> subprocess.CompletedProcess:
-    child = dict(os.environ if env is None else env)
-    argv = ["git", "-c", "core.hooksPath={}".format(_EMPTY_HOOKS), "-C", str(repo)] + [
-        str(a) for a in args
-    ]
-    return subprocess.run(
-        argv,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=child,
-        check=False,
-    )
-
-
-def _git_ok(repo: pathlib.Path, args: Sequence[str], env: Optional[dict] = None) -> str:
-    completed = _run_git_env(repo, args, env=env)
-    if completed.returncode != 0:
-        raise GrokWrapperError(
-            "artifact-generation-failure",
-            "git {} failed".format(" ".join(str(a) for a in args)),
-            {
-                "stderr": (completed.stderr or b"").decode("utf-8", errors="replace").strip(),
-                "exitStatus": completed.returncode,
-            },
-        )
-    return (completed.stdout or b"").decode("utf-8", errors="replace")
 
 
 @dataclasses.dataclass
@@ -463,6 +408,16 @@ def write_manifest(path: pathlib.Path, doc: dict) -> None:
             "handoff manifest failed validation before write",
             {"errors": errs},
         )
+    # Fail closed if residual secret-shaped material survived blocker redaction
+    # (taskId, paths, or opaque values that match known patterns).
+    try:
+        assert_no_secret_material(doc)
+    except SecretMaterialError as exc:
+        raise GrokWrapperError(
+            "artifact-generation-failure",
+            "handoff manifest contains secret-shaped material: {}".format(exc),
+            dict(exc.detail or {}),
+        ) from exc
     text = json.dumps(doc, indent=2, sort_keys=True) + "\n"
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
@@ -522,65 +477,23 @@ def primary_error_from_blockers(blockers: Sequence[HandoffBlocker]) -> Tuple[Opt
     Skips ready-only soft kinds (``no-changes``, ``temp-index-retained``) so a
     soft blocker earlier in the list cannot steal primary class from a later
     hard failure (e.g. unexpected-edits with phase=post-build-gate).
+
+    Unknown kinds (not soft) fail closed as ``artifact-generation-failure``.
     """
     for b in blockers:
-        if b.kind not in HARD_BLOCKER_KINDS:
+        if b.kind in SOFT_BLOCKER_KINDS:
             continue
-        cls = _HARD_PRIMARY_MAPPING.get(b.kind)
-        if cls:
-            return cls, b.message
+        if b.kind in HARD_BLOCKER_KINDS:
+            cls = _HARD_PRIMARY_MAPPING.get(b.kind)
+            if cls:
+                return cls, b.message
+            return "artifact-generation-failure", b.message
+        # Unknown kind: hard fail-closed (do not treat as soft).
+        return (
+            "artifact-generation-failure",
+            b.message or "unknown handoff blocker kind: {}".format(b.kind),
+        )
     return None, None
-
-
-def run_contract_validations(
-    *,
-    worktree_path: pathlib.Path,
-    required: Sequence[dict],
-    run_command: Callable[..., dict],
-) -> Tuple[bool, List[dict], List[HandoffBlocker]]:
-    """Execute requiredValidation entries. run_command(argv, cwd, purpose) -> evidence-like dict with exitStatus."""
-    blockers: List[HandoffBlocker] = []
-    evidence: List[dict] = []
-    all_ok = True
-    for entry in required:
-        argv = list(entry["argv"])
-        rel_cwd = entry.get("cwd") or "."
-        if rel_cwd in (".", "./", ""):
-            cwd = worktree_path
-        else:
-            try:
-                rel = normalize_repo_relative(rel_cwd)
-            except GrokWrapperError as exc:
-                blockers.append(
-                    HandoffBlocker("validation-failure", "invalid validation cwd", {"error": str(exc)})
-                )
-                all_ok = False
-                continue
-            cwd = (worktree_path / rel).resolve()
-            try:
-                cwd.relative_to(worktree_path.resolve())
-            except ValueError:
-                blockers.append(
-                    HandoffBlocker(
-                        "validation-failure",
-                        "validation cwd escapes worktree",
-                        {"cwd": str(cwd)},
-                    )
-                )
-                all_ok = False
-                continue
-        rec = run_command(argv=argv, cwd=cwd, purpose=entry.get("purpose") or "contract-validation")
-        evidence.append(rec)
-        if int(rec.get("exitStatus", 1)) != 0:
-            all_ok = False
-            blockers.append(
-                HandoffBlocker(
-                    "validation-failure",
-                    "requiredValidation command failed",
-                    {"argv": argv, "exitStatus": rec.get("exitStatus")},
-                )
-            )
-    return all_ok, evidence, blockers
 
 # ---------------------------------------------------------------------------
 # Ordered post-Grok finalization (design §14.6) - single entry for code mode
@@ -595,6 +508,7 @@ _STEP_ORDER = (
     "forensic-patch",
     "required-validation",
     "build-gate",
+    "forensic-patch-post-gate",
     "shared-safety",
     "terminal-outcome",
     "compute-ready",

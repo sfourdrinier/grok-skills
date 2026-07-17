@@ -41,14 +41,25 @@ finished. They are **not** permission to integrate. Always call `/grok:handoff
 
 ## Dual-condition ready (required)
 
-Observed `integration.ready` is true only when **all** hold:
+Observed `integration.ready` is true only when **all** hold (wrapper authority;
+do not reimplement a weaker check):
 
 1. Valid `implementation-handoff.json` with `integration.ready === true`
-2. Patch file re-hashes to the manifest sha256
-3. A **success** terminal envelope exists for the same `runId`
+   (also requires non-empty `changedFiles`, empty blockers, validation flags
+   true, and `patch.bytes > 0`)
+2. A **success** terminal envelope for the same `runId` with **`mode: "code"`**
+3. Envelope `baseRevision` is non-empty and **equals** the manifest base
+4. Patch file exists under the run dir, size matches `patch.bytes` (> 0), and
+   sha256 re-hashes to the manifest
 
-Missing envelope → `terminal-envelope-incomplete`. Tampered patch →
-`artifact-integrity-failure`. No artifacts → `handoff-unavailable`.
+Missing/wrong-mode envelope → `terminal-envelope-incomplete`. Null base or
+size/hash mismatch → integrity failure. No artifacts → `handoff-unavailable`.
+
+## Hardened only
+
+Durable handoff artifacts exist only after a **hardened** `code` run. Direct
+run-mode does not write verified handoff state; use `setup --run-mode hardened`
+(or the companion's hardened default) before expecting `/grok:handoff` ready.
 
 ## Parent integrate protocol (document only - never auto-apply)
 

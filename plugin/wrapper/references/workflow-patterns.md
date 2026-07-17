@@ -241,30 +241,40 @@ path is the `verify` mode (recipe 10 above)**, not `--check`. Do not attempt
 to pass `--check`-style flags through this wrapper; they are not part of the
 C8 surface and will be rejected as a `usage-error`.
 
-## 14. Handing a retained worktree to Codex or a developer
+## 14. Integrating a code run (handoff + manual apply)
 
-**When:** A `code` run succeeded and the resulting worktree needs human or
-Codex review, and eventual integration (commit, merge, push) - all of which
-this wrapper deliberately never does automatically.
+**When:** A hardened `code` run finished and a parent agent or developer needs
+to integrate Grok's work. This wrapper never auto-applies, commits, merges,
+or pushes (spec section 5.3 + design §14).
 
 ```bash
+# Optional: re-read terminal envelope / worktree metadata
 python3 plugin/wrapper/scripts/grok_agent.py status --run-id <run-id>
+
+# Required before any apply: dual-condition ready (manifest + success mode:code
+# envelope + matching baseRevision + non-empty patch size/rehash)
+python3 plugin/wrapper/scripts/grok_agent.py handoff --run-id <run-id>
 ```
 
-Use `status` to re-read the full envelope (worktree path/branch, changed
-files, build-gate results) at any later point. To confirm exactly what a
-future cleanup would remove without removing it yet:
+Proceed only when the handoff envelope is `status: success` and
+`response.integration.ready === true`. Then, as the parent/operator:
+
+1. Re-hash `response.handoff.patchPath` (or manifest `patch.sha256`)
+2. `git apply --check --binary <patchPath>` on the intended target checkout
+3. Explicit `git apply --binary <patchPath>` only with operator intent
+4. Re-run project validation on the parent
+
+Do **not** treat `worktreePath` / `worktreeBranch` as an automatic merge root
+and skip handoff - the patch + dual-condition gate is the integration API.
+Notify toasts/webhooks are not ready. Dry-run cleanup (no `--confirm`) still
+shows what would be removed:
 
 ```bash
 python3 plugin/wrapper/scripts/grok_agent.py cleanup --run-id <run-id>
 ```
 
-From there, integration is a normal git operation performed directly against
-`worktreePath`/`worktreeBranch` by the human or by Codex - this wrapper has
-no command for committing, merging, or pushing a worktree; that authority
-expansion is explicitly out of scope (spec section 5.3). Only run `cleanup
---run-id <run-id> --confirm` once the worktree's contents have been
-integrated or are no longer needed.
+Only run `cleanup --run-id <run-id> --confirm` after integration is done or
+the retained worktree is deliberately discarded.
 
 ## Excluded: `--best-of-n`
 

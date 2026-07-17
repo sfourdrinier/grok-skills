@@ -71,8 +71,6 @@ def _normalize_repo_relative_raw(
     # because ``a:b.txt`` is a valid single-component filename under Git/POSIX.
     if os.path.isabs(raw) or raw.startswith("/"):
         raise _contract_error("path must be repository-relative (not absolute)", {"path": original})
-    if reject_windows_drive and len(raw) > 1 and raw[1] == ":":
-        raise _contract_error("path must be repository-relative (not absolute)", {"path": original})
     cleaned: List[str] = []
     # Split only on forward slash (never on backslash).
     for p in raw.split("/"):
@@ -80,9 +78,18 @@ def _normalize_repo_relative_raw(
             continue
         if p == "..":
             raise _contract_error("path must not contain '..'", {"path": original})
+        # Operator paths: reject drive-letter forms on every component so
+        # ``./C:/Users/...`` cannot bypass a leading-raw ``C:`` check.
+        if reject_windows_drive and len(p) > 1 and p[1] == ":" and p[0].isalpha():
+            raise _contract_error(
+                "path must be repository-relative (not absolute)", {"path": original}
+            )
         cleaned.append(p)
     if not cleaned:
         raise _contract_error("path resolves empty", {"path": original})
+    # Also reject bare ``C:foo`` style when it never hit a slash split with a drive.
+    if reject_windows_drive and len(raw) > 1 and raw[1] == ":" and raw[0].isalpha():
+        raise _contract_error("path must be repository-relative (not absolute)", {"path": original})
     return "/".join(cleaned)
 
 
@@ -204,8 +211,20 @@ def load_contract_file(path: pathlib.Path) -> dict:
         raise _contract_error("contract file does not exist", {"path": str(p)})
     # Reject symlink leaf or any symlinked parent directory (fail closed).
     safe = _assert_no_symlink_components(p)
+    # Open with O_NOFOLLOW so a TOCTOU symlink swap after lstat cannot pivot.
     try:
-        text = safe.read_text(encoding="utf-8")
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(str(safe), flags)
+    except OSError as exc:
+        raise _contract_error(
+            "cannot open contract file: {}".format(exc),
+            {"path": str(safe)},
+        ) from exc
+    try:
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+            text = fh.read()
     except UnicodeError as exc:
         # Malformed contracts must classify as implementation-contract-invalid
         # (not top-level unexpected cli-failure).

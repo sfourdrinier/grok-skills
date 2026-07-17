@@ -30,6 +30,12 @@ for marketplace / package tags.
 - Dual-condition / ready integrity: require non-empty envelope base; ready
   manifests need `patch.bytes > 0` when there are changes; Git paths keep colon
   filenames; post-gate fatal patch capture clears stale pre-gate patch/tree meta.
+- Adversarial integrity pass: `list_changed_paths` fail-closed on git fatal;
+  post-gate list/scope refresh hard-fails; unlink stale patch on reject;
+  latin-1 patch secret scan; pre-gate patch fatals superseded by clean post;
+  unknown blockers hard; `resultTreeOid` never a commit SHA; argv redaction in
+  command evidence + spawn logs; `write_manifest` secret scan; `groklib.redaction`
+  extract (envelope under 900 lines); parent docs dual-condition + recipe 14.
 
 ## [1.5.0] - 2026-07-16
 

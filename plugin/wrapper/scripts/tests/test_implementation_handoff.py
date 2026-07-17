@@ -576,12 +576,20 @@ class ReadyAndDualConditionTests(unittest.TestCase):
                 "forensic-patch",
                 "required-validation",
                 "build-gate",
+                "forensic-patch-post-gate",
                 "shared-safety",
                 "terminal-outcome",
                 "compute-ready",
                 "write-manifest",
             ],
         )
+
+    def test_unknown_blocker_kind_is_hard_primary(self) -> None:
+        cls, msg = primary_error_from_blockers(
+            [HandoffBlocker("brand-new-kind", "unexpected")]
+        )
+        self.assertEqual(cls, "artifact-generation-failure")
+        self.assertIn("unexpected", msg)
 
 
 class WriteManifestRoundTripTests(unittest.TestCase):
@@ -771,6 +779,79 @@ class PostGatePatchClearTests(unittest.TestCase):
         self.assertEqual(doc["resultTreeOid"], post_tree)
         kinds = [b.get("kind") for b in doc["integration"]["blockers"]]
         self.assertIn("secret-material", kinds)
+        # Disk must not retain pre-gate patch bytes under the advertised path
+        self.assertFalse((self.artifacts / "implementation.patch").is_file())
+
+
+class ListChangedPathsFailClosedTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="grok-listchg-")
+        self.repo = gitfixtures.make_repo(self.tmp)
+        (self.repo / "f.txt").write_text("x\n", encoding="utf-8")
+        _git(self.repo, "add", "f.txt")
+        _git(self.repo, "commit", "-q", "-m", "base")
+        self.base = subprocess.check_output(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True
+        ).strip()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_git_diff_fatal_raises(self) -> None:
+        with mock.patch(
+            "groklib.handoff_patch._run_git_env",
+            return_value=subprocess.CompletedProcess(
+                args=["git"], returncode=128, stdout=b"", stderr=b"fatal: bad object"
+            ),
+        ):
+            with self.assertRaises(GrokWrapperError) as cm:
+                list_changed_paths(self.repo, self.base)
+            self.assertEqual(cm.exception.error_class, "artifact-generation-failure")
+
+
+class Phase1SecretScanTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="grok-secpatch-")
+        self.repo = gitfixtures.make_repo(self.tmp)
+        (self.repo / "tracked.txt").write_text("v1\n", encoding="utf-8")
+        _git(self.repo, "add", "tracked.txt")
+        _git(self.repo, "commit", "-q", "-m", "base")
+        self.base = subprocess.check_output(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True
+        ).strip()
+        self.artifacts = pathlib.Path(self.tmp) / "artifacts"
+        self.artifacts.mkdir()
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_bearer_in_file_blocks_patch_write(self) -> None:
+        # Split literal so fixtures do not hold contiguous secret-shaped tokens.
+        token = "Bearer " + "abcdef0123456789" + "deadbeefcafebabe"
+        (self.repo / "secret.txt").write_text("key=" + token + "\n", encoding="utf-8")
+        meta, path, tree, blockers, steps = capture_phase1_patch(
+            worktree_path=self.repo,
+            base_revision=self.base,
+            artifacts_dir=self.artifacts,
+            run_id="20260716T020408Z-a82843",
+        )
+        self.assertIsNone(meta)
+        self.assertIsNone(path)
+        self.assertTrue(any(b.kind == "secret-material" for b in blockers))
+        self.assertFalse((self.artifacts / "implementation.patch").is_file())
+
+    def test_binary_patch_bytes_scan_catches_embedded_bearer(self) -> None:
+        # Git may encode binary files without leaving raw ASCII in the patch
+        # body; the scanner itself must still catch secrets in raw byte streams.
+        from groklib.handoff_patch import scan_patch_bytes_for_secrets
+        from groklib.envelope import SecretMaterialError
+
+        token = b"Bearer " + b"abcdef0123456789" + b"deadbeefcafebabe"
+        blob = b"\x00\x01" + token + b"\xff\xfe"
+        with self.assertRaises(SecretMaterialError):
+            scan_patch_bytes_for_secrets(blob)
+        # UTF-8 replace path is weaker; latin-1 path is what production uses.
+        scan_patch_bytes_for_secrets(b"hello without credentials")
 
 
 if __name__ == "__main__":

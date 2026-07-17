@@ -53,12 +53,24 @@ GROK_TASK
 
 ## Implementation (only if user already gave target and base)
 
+Prefer **grok-engineer-coder** for substantial implementation. If you must run
+`code` yourself:
+
 ```bash
 node "$AGENT_RUN" code \
   --target '<path>' --base '<revision>' --task-file - <<'GROK_TASK'
 <request>
 GROK_TASK
 ```
+
+Then **before any integrate**:
+
+```bash
+node "$AGENT_RUN" handoff --run-id '<runId from the code envelope>'
+```
+
+Require dual-condition ready (`response.integration.ready`). Never auto-apply,
+commit, merge, or push. Notify is not ready. See `skills/handoff/SKILL.md`.
 
 Never invent target/base. Never `--task "..."`. Single-quote flag values.
 On failure: return stderr + short setup hint - **never return nothing**.

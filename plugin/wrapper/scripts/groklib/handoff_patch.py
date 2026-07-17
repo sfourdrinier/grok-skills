@@ -47,6 +47,15 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def scan_patch_bytes_for_secrets(patch_bytes: bytes) -> None:
+    """Fail closed if patch bytes contain secret-shaped material.
+
+    Decodes as latin-1 (1:1 with bytes) so ASCII credentials embedded in binary
+    git patch segments still match; UTF-8 replace would destroy them.
+    """
+    assert_no_secret_material(patch_bytes.decode("latin-1"))
+
+
 def _run_git_env(repo: pathlib.Path, args: Sequence[str], env: Optional[dict] = None) -> subprocess.CompletedProcess:
     child = dict(os.environ if env is None else env)
     argv = ["git", "-c", "core.hooksPath={}".format(_EMPTY_HOOKS), "-C", str(repo)] + [
@@ -149,9 +158,10 @@ def capture_phase1_patch(
             )
             return None, None, result_tree, blockers, steps
 
-        # Secret scan on text form
+        # Secret scan: latin-1 is 1:1 with bytes so ASCII secret shapes inside
+        # binary patch segments still match (UTF-8 replace can destroy them).
         try:
-            assert_no_secret_material(patch_bytes.decode("utf-8", errors="replace"))
+            scan_patch_bytes_for_secrets(patch_bytes)
         except SecretMaterialError as exc:
             blockers.append(
                 HandoffBlocker("secret-material", "secret-shaped material in patch", {"error": str(exc)})
@@ -234,13 +244,26 @@ def capture_phase1_patch(
 
 
 def list_changed_paths(worktree_path: pathlib.Path, base_revision: str) -> List[dict]:
-    """NUL-safe changed path list vs base (tracked + untracked exclude-standard)."""
+    """NUL-safe changed path list vs base (tracked + untracked exclude-standard).
+
+    Fail closed: non-(0,1) ``git diff`` or failed ``ls-files`` raises so writeScopes
+    never see a silently incomplete inventory.
+    """
     completed = _run_git_env(
         worktree_path,
         ["diff", "--name-status", "-z", base_revision],
     )
+    if completed.returncode not in (0, 1):
+        raise GrokWrapperError(
+            "artifact-generation-failure",
+            "git diff --name-status failed while listing changes",
+            {
+                "exitStatus": completed.returncode,
+                "stderr": (completed.stderr or b"").decode("utf-8", errors="replace").strip(),
+            },
+        )
     paths: List[dict] = []
-    if completed.returncode in (0, 1) and completed.stdout:
+    if completed.stdout:
         parts = completed.stdout.split(b"\0")
         i = 0
         while i < len(parts):
@@ -274,7 +297,16 @@ def list_changed_paths(worktree_path: pathlib.Path, base_revision: str) -> List[
                 i += 2
     # untracked
     ut = _run_git_env(worktree_path, ["ls-files", "-z", "--others", "--exclude-standard"])
-    if ut.returncode == 0 and ut.stdout:
+    if ut.returncode != 0:
+        raise GrokWrapperError(
+            "artifact-generation-failure",
+            "git ls-files --others failed while listing untracked changes",
+            {
+                "exitStatus": ut.returncode,
+                "stderr": (ut.stderr or b"").decode("utf-8", errors="replace").strip(),
+            },
+        )
+    if ut.stdout:
         for raw in ut.stdout.split(b"\0"):
             if not raw:
                 continue

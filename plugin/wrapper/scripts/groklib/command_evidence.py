@@ -50,8 +50,9 @@ def build_command_evidence(
     purpose, cwd) plus optional evidence hashes/tails. Never adds unknown keys
     (detail belongs on blockers / error.detail, not commands[]).
     """
+    safe_argv = [redact_secret_value_text(str(a)) for a in argv]
     return {
-        "argv": list(argv),
+        "argv": safe_argv,
         "cwd": cwd,
         "purpose": purpose,
         "exitStatus": int(exit_status),

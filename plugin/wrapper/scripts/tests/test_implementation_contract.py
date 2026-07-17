@@ -39,6 +39,11 @@ class NormalizePathTests(unittest.TestCase):
             normalize_repo_relative("C:/Users/me/repo/file.ts")
         with self.assertRaises(GrokWrapperError):
             normalize_repo_relative("D:secret")
+        # Bypass via ./ prefix must still fail closed after component clean.
+        with self.assertRaises(GrokWrapperError):
+            normalize_repo_relative("./C:/Users/me/x")
+        with self.assertRaises(GrokWrapperError):
+            normalize_repo_relative("./C:Users/me")
         # Git-reported paths: second-char colon is a legal filename component.
         self.assertEqual(normalize_git_repo_path("a:b.txt"), "a:b.txt")
         self.assertEqual(normalize_git_repo_path("pkg/a:b.txt"), "pkg/a:b.txt")
@@ -92,6 +97,18 @@ class PathInScopesTests(unittest.TestCase):
         scopes_pkg = [{"kind": "subtree", "path": "pkg"}]
         self.assertTrue(path_in_scopes("pkg/a:b.txt", scopes_pkg, from_git=True))
         self.assertFalse(path_in_scopes("a:b.txt", scopes_pkg, from_git=True))
+
+
+class LoadContractFileTests(unittest.TestCase):
+    def test_missing_and_directory_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            with self.assertRaises(GrokWrapperError):
+                load_contract_file(root / "nope.json")
+            d = root / "dir"
+            d.mkdir()
+            with self.assertRaises(GrokWrapperError):
+                load_contract_file(d)
 
 
 class ValidateContractTests(unittest.TestCase):

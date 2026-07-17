@@ -113,11 +113,17 @@ def _run_recorded_command(argv: List[str], cwd: pathlib.Path, purpose: str) -> d
             shell=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        _log("_run_recorded_command", "could not run {} ({}): {}".format(purpose, argv_str, exc))
+        from groklib.envelope import redact_secret_value_text
+
+        safe_argv = [redact_secret_value_text(str(a)) for a in argv_str]
+        _log(
+            "_run_recorded_command",
+            "could not run {} ({}): {}".format(purpose, safe_argv, exc),
+        )
         raise GrokWrapperError(
             "validation-failure",
             "required command could not be run: {}".format(purpose),
-            {"argv": argv_str, "purpose": purpose},
+            {"argv": safe_argv, "purpose": purpose},
         )
     duration = time.monotonic() - start
     return build_command_evidence(
