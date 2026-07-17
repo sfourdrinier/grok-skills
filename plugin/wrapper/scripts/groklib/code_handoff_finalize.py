@@ -19,10 +19,13 @@ from groklib.implementation_handoff import (
     HARD_BLOCKER_KINDS,
     HandoffBlocker,
     HandoffBuildResult,
+    NO_AUTHORITATIVE_VALIDATION_KIND,
+    NO_AUTHORITATIVE_VALIDATION_MESSAGE,
     SOFT_BLOCKER_KINDS,
     _HARD_PRIMARY_MAPPING,
     _STEP_ORDER,
     compute_integration_ready,
+    enforce_ready_evidence_guard,
     primary_error_from_blockers,
     write_manifest,
 )
@@ -571,6 +574,27 @@ def code_handoff_finalize(
 
     # 11. compute ready
     steps.append("compute-ready")
+    # Authoritative only for gates that ACTUALLY ran (wrapper-executed evidence).
+    contract_validation_ran = bool(
+        contract and isinstance(contract.get("requiredValidation"), list)
+        and len(contract.get("requiredValidation") or []) > 0
+    )
+    build_gate_ran = any(
+        isinstance(c, dict)
+        and str(c.get("purpose") or "").startswith("build-gate:")
+        for c in (stage.acc.commands or [])
+    )
+    # Vacuous pass when a gate did not run still keeps the bool fields true so a
+    # single authoritative gate can satisfy ready; sources.authoritative tracks
+    # whether the gate actually executed.
+    if not (build_gate_ran or contract_validation_ran):
+        blockers.append(
+            HandoffBlocker(
+                NO_AUTHORITATIVE_VALIDATION_KIND,
+                NO_AUTHORITATIVE_VALIDATION_MESSAGE,
+                {},
+            )
+        )
     ready = compute_integration_ready(
         terminal_outcome=terminal_outcome,
         head_matches_base=head_ok,
@@ -616,17 +640,37 @@ def code_handoff_finalize(
             terminal_outcome = "failed"
             ready = False
 
+    if build_gate_ran:
+        build_gate_source: Dict[str, Any] = {
+            "authoritative": True,
+            "passed": bool(build_gate_ok),
+        }
+    else:
+        build_gate_source = {
+            "authoritative": False,
+            "passed": False,
+            "reason": "not executed",
+        }
+    if contract_validation_ran:
+        contract_val_source: Dict[str, Any] = {
+            "authoritative": True,
+            "passed": bool(validation_ok),
+            "trustModel": trust_model(),
+        }
+    else:
+        contract_val_source = {
+            "authoritative": False,
+            "passed": False,
+            "reason": "not executed",
+            "trustModel": trust_model(),
+        }
     validation_block = {
         "requiredCommandsPassed": validation_ok,
         "buildGatePassed": build_gate_ok,
         "allPassed": validation_ok and build_gate_ok,
         "sources": {
-            "wrapperBuildGate": {"authoritative": True, "passed": build_gate_ok},
-            "contractRequiredValidation": {
-                "authoritative": True,
-                "passed": validation_ok,
-                "trustModel": trust_model(),
-            },
+            "wrapperBuildGate": build_gate_source,
+            "contractRequiredValidation": contract_val_source,
             "modelClaimedCommands": {
                 "authoritative": False,
                 "note": "ignored for readiness",
@@ -671,6 +715,26 @@ def code_handoff_finalize(
 
     # 12. write handoff JSON
     steps.append("write-manifest")
+    # CRITICAL anti-forgery: ready=true is impossible without real command evidence.
+    doc = enforce_ready_evidence_guard(doc, list(stage.acc.commands or []))
+    ready = bool(doc.get("integration", {}).get("ready"))
+    # Keep blockers list in sync with any guard-injected soft blocker.
+    if not ready:
+        guard_blockers = doc.get("integration", {}).get("blockers") or []
+        existing_kinds = {b.kind for b in blockers}
+        for raw in guard_blockers:
+            if not isinstance(raw, dict):
+                continue
+            kind = raw.get("kind")
+            if kind == NO_AUTHORITATIVE_VALIDATION_KIND and kind not in existing_kinds:
+                blockers.append(
+                    HandoffBlocker(
+                        NO_AUTHORITATIVE_VALIDATION_KIND,
+                        str(raw.get("message") or NO_AUTHORITATIVE_VALIDATION_MESSAGE),
+                        raw.get("detail") if isinstance(raw.get("detail"), dict) else {},
+                    )
+                )
+                existing_kinds.add(kind)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     try:
         platformsupport.restrict_dir_permissions(artifacts_dir)

@@ -1,8 +1,8 @@
 # wrapper/scripts/groklib/modes/peer_control.py
 #
-# Wrapper-owned unix control socket for the experimental ACP peer channel
-# (0600, companion-uid only) plus small peer lifecycle helpers shared with
-# peer.py (900-line cap).
+# Wrapper-owned unix control socket for the ACP peer channel (0600, companion-uid
+# only) plus small peer lifecycle helpers shared with peer.py (900-line cap).
+# ACP is default; GROK_DISABLE_ACP=1 is the opt-out.
 
 from __future__ import annotations
 
@@ -25,11 +25,16 @@ def _log(function: str, message: str) -> None:
 
 
 def require_experimental_acp() -> None:
-    """Fail closed unless GROK_EXPERIMENTAL_ACP=1 (wrapper-owned gate)."""
-    if os.environ.get("GROK_EXPERIMENTAL_ACP", "").strip() != "1":
+    """Fail closed only when ACP is explicitly disabled (opt-out, Task 7.4).
+
+    Peer modes work by default. Set GROK_DISABLE_ACP=1 to force one-shot code.
+    GROK_EXPERIMENTAL_ACP is no longer a hard gate (legacy opt-in is ignored).
+    """
+    flag = os.environ.get("GROK_DISABLE_ACP", "").strip().lower()
+    if flag in ("1", "true", "yes", "on"):
         raise GrokWrapperError(
             "usage-error",
-            "peer channel is experimental; set GROK_EXPERIMENTAL_ACP=1",
+            "peer channel disabled via GROK_DISABLE_ACP=1; unset it to use ACP peer modes",
         )
 
 

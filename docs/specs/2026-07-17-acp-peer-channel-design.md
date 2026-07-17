@@ -1,20 +1,30 @@
 <!-- docs/specs/2026-07-17-acp-peer-channel-design.md -->
 
-# ACP peer channel (2.0.0 experimental preview) - design
+# ACP peer channel (2.0.0) - design
 
-Authority for Task 5.3 (plan: docs/superpowers/plans/2026-07-16-peer-agent-integration.md).
-Probe evidence: docs/research/2026-07-17-acp-probe.md. Gated behind
-`GROK_EXPERIMENTAL_ACP=1` in **both** the companion and the wrapper (fail closed
-with `usage-error` when unset). Hardened-only; Claude and Codex identical.
+Authority for Task 5.3 (plan: docs/superpowers/plans/2026-07-16-peer-agent-integration.md)
+and Task 7.4 (evidence-backed ready + ACP default). Probe evidence:
+docs/research/2026-07-17-acp-probe.md. **ACP is the default peer channel** for
+`grok-engineer-coder`. Opt out with `GROK_DISABLE_ACP=1` (wrapper + companion)
+to force one-shot `code`. Hardened-only; Claude and Codex identical.
 
-## Status: honest experimental preview
+## Status: evidence-backed peer channel (default)
 
-Peer-preview produces a retained worktree + an honest handoff **manifest that is
-never integration-ready** (`integration.ready` is always false with a
-`handoff-unavailable` blocker). It is **not** eligible for `/grok:handoff`
-(handoff requires a code-mode terminal envelope; peer runs are mode
-`peer-start`). Integration is **manual** from the retained worktree after
-operator review. Do not claim dual-condition handoff or code-parity readiness.
+Peer-stop runs the contract's `requiredValidation` and the workspace build gate
+**for real** via the wrapper's `_run_recorded_command` / `_run_build_gate`
+(same ordered finalize as code/worktree). `integration.ready=true` is possible
+only from non-forgeable wrapper-executed evidence:
+
+- At least one validation source with `authoritative: true` and `passed: true`
+- At least one `commands[]` entry with a real `exitStatus` (never synthesized)
+
+A forgery guard fails closed if ready is claimed without that evidence. When no
+authoritative gate ran (no contract validations + no JS build gate), ready is
+false with a clear `no-authoritative-validation` blocker.
+
+`/grok:handoff` accepts a peer-stop terminal envelope with a ready manifest
+(peer-start/peer-stop lineage), same dual-condition path as code (mode
+`code` or `peer-stop`).
 
 ## Architecture
 
@@ -39,8 +49,9 @@ peer-stop emits the terminal outcome. The resident does not print a second
 stdout envelope (terminal is on the control socket + durable run dir).
 
 peer-stop finalizes: session/cancel, child teardown, forensic path (sentinel,
-scopes, patch, escape), optional sandbox `verify_enforcement`, honest
-not-ready manifest, private-home destroy, terminalize run record.
+scopes, patch, escape), **real** requiredValidation + build gate, optional
+sandbox `verify_enforcement`, evidence-backed ready (or honest not-ready),
+private-home destroy, terminalize run record.
 
 ## Confinement and isolation (honest parity)
 
@@ -49,36 +60,54 @@ not-ready manifest, private-home destroy, terminalize run record.
   sentinel planted, original_baseline + pristine gate scripts captured, no
   .env copy.
 - Stop: `verify_enforcement` against the private home/policy when possible.
-  Failure adds a `sandbox-failure` blocker (integration.ready already false).
+  Failure adds a `sandbox-failure` blocker (forces not-ready).
   Do **not** claim "full code-mode isolation stack" when ACP did not produce
   sandbox-events telemetry - record the miss honestly.
 - `pre_tool_use` deny is registered as NON-enforcement (OS sandbox enforces).
 - Secret redaction: every relayed chunk, control-socket payload, and turn
   envelope passes the same `assert_no_secret_material` scan as
   `emit_envelope` (after redaction).
+- Confinement label: a peer session that passed real gates with a contract
+  scopes list gets `contract-scopes` (same standing as a code run); otherwise
+  `worktree-final-diff-only`.
 
 ### Residual risk: per-frame progress redaction
 
 Progress-chunk redaction is **per-frame**. A secret split across ACP
 `session/update` frames may partially land in `progress.jsonl` before a full
-token shape is visible to the scanner. Honest residual risk for the preview;
-not claimed as a complete secret firewall.
+token shape is visible to the scanner. Honest residual risk; not claimed as a
+complete secret firewall.
 
 ## Manifest honesty (peer-stop)
 
-- Do **not** run contract `requiredValidation` or the wrapper build gate.
-- Do **not** forge `exit_status` (or any other validation evidence).
-- `validation.sources.wrapperBuildGate` and
-  `validation.sources.contractRequiredValidation` are always
-  `authoritative: false` with reason `peer-preview: not executed`.
-- `integration.ready` is always false with blocker
-  `{kind: "handoff-unavailable", message: "peer-preview runs are not
-  integration-ready; apply from the worktree manually after your own review"}`.
+- **DO** run contract `requiredValidation` and the wrapper build gate via
+  real subprocesses. `exitStatus` is never synthesized.
+- `validation.sources.*.authoritative` is true **only** for gates that
+  actually ran. Vacuous bool pass (no validations configured) does not mark
+  a source authoritative.
+- `integration.ready` uses the same `compute_integration_ready` as code, then
+  the forgery guard (`enforce_ready_evidence_guard`): ready requires
+  authoritative source + commands[] evidence.
+- No contract + build gate passes (JS repo) -> ready when other invariants hold.
+- No contract + no gate (non-JS) -> not ready with
+  `no-authoritative-validation` ("no authoritative validation ran").
 - `confinement` is set **before** `write_manifest` (and its secret scan); never
   mutated on disk after the scanned write.
 - Crash-path peer-stop loads `originalBaseline` from `peer.json` (captured at
   start). Never re-capture at stop (re-capture closes the escape window
   fail-open).
+
+## Integration via the active mode
+
+On peer-stop when ready, the companion integrates per the resolved integration
+mode (setup / `--integration` / userConfig):
+
+- **direct** (with consent) or **auto**: apply the verified patch to the target
+  (`git apply --check --binary` then `git apply --binary`)
+- **review** or **worktree**: leave patch + manifest; no apply
+
+Consent gate applies for direct (same as code). Parent may also call
+`/grok:handoff --run-id` on a peer run (dual-condition accepts mode peer-stop).
 
 ## Failure model
 
@@ -89,14 +118,13 @@ not claimed as a complete secret firewall.
 - Stale peer sessions: the stale-home reaper treats peer-active runs as
   leased while pid is alive AND younger than MAX_PEER_LEASE; else reaps.
 - Every error maps to existing ERROR_CLASSES + `acp-failure`.
-- Experimental flag missing in the wrapper -> `usage-error`.
+- `GROK_DISABLE_ACP=1` in the wrapper or companion -> `usage-error` / refuse.
 
 ## Non-goals (v1)
 
 - No host-side ACP server; no session/load reattach (capability noted for
-  v2); no multi-session mux per child; no auto-apply; no dual-condition
-  handoff path for peer; one-stdout-envelope-per-invocation preserved
-  (resident: one running envelope only).
+  v2); no multi-session mux per child; one-stdout-envelope-per-invocation
+  preserved (resident: one running envelope only).
 
 ## Amendments (adversarial review 2026-07-17, REQUIRED)
 
@@ -107,15 +135,17 @@ not claimed as a complete secret firewall.
    mcpServers [], web, sentinel, baseline, no .env).
 4. REDACTION: control-socket + turn envelopes scanned; multi-frame residual
    risk documented; child stderr dropped or redacted.
-5. HANDOFF HONESTY: peer-preview is never integration-ready; not eligible for
-   `/grok:handoff`; manual apply from retained worktree only.
+5. HANDOFF: evidence-backed ready; dual-condition accepts peer-stop envelopes;
+   integrate via active mode (Task 7.4 un-gimp).
 6. pre_tool_use deny is NON-enforcement.
 7. Prompts serialized: one in-flight prompt per session.
-8. WRAPPER GATE: `GROK_EXPERIMENTAL_ACP=1` enforced in the wrapper, not
-   companion-only.
+8. WRAPPER GATE: ACP default; `GROK_DISABLE_ACP=1` is the opt-out (both
+   wrapper and companion). `GROK_EXPERIMENTAL_ACP` is no longer a hard gate.
 9. RUN RECORD: peer-start records worktreePath/lifecycle; peer-stop
    terminalizes so cleanup can remove the worktree.
 10. SINGLE STDOUT: resident peer-start emits only the running envelope.
+11. FORGERY GUARD: ready=true impossible without authoritative source + real
+    commands[] exitStatus (unit-tested fail-closed).
 
 Optional (v1.1+): probe session/load to drop wrapper residency; reassemble
 multi-frame chunks before scanning.

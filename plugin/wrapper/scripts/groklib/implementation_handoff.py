@@ -339,6 +339,107 @@ def compute_integration_ready(
     return True
 
 
+# Evidence-backed ready (Task 7.4): ready=true is only honest when at least one
+# wrapper-executed gate is marked authoritative AND commands[] carries a real
+# exitStatus. Model claims never count.
+NO_AUTHORITATIVE_VALIDATION_KIND = "no-authoritative-validation"
+NO_AUTHORITATIVE_VALIDATION_MESSAGE = "no authoritative validation ran"
+
+
+def command_evidence_supports_ready(commands: Sequence[Any]) -> bool:
+    """True when commands[] has at least one entry with a real int exitStatus."""
+    for cmd in commands or []:
+        if not isinstance(cmd, dict):
+            continue
+        if "exitStatus" not in cmd:
+            continue
+        try:
+            int(cmd["exitStatus"])
+        except (TypeError, ValueError):
+            continue
+        return True
+    return False
+
+
+def authoritative_source_passed(validation: Any) -> bool:
+    """True when any gate source is authoritative and passed."""
+    if not isinstance(validation, dict):
+        return False
+    sources = validation.get("sources")
+    if not isinstance(sources, dict):
+        return False
+    for key in ("wrapperBuildGate", "contractRequiredValidation"):
+        src = sources.get(key)
+        if (
+            isinstance(src, dict)
+            and src.get("authoritative") is True
+            and src.get("passed") is True
+        ):
+            return True
+    return False
+
+
+def ready_evidence_guard_errors(
+    manifest: dict, commands: Sequence[Any]
+) -> List[str]:
+    """Return errors when integration.ready is true without non-forgeable evidence.
+
+    Fail-closed: ready=true requires (1) an authoritative validation source that
+    passed and (2) a commands[] entry with a real exitStatus. Used by the
+    forgery guard and unit tests that attempt to force ready without evidence.
+    """
+    if not isinstance(manifest, dict):
+        return ["manifest must be object"]
+    integration = manifest.get("integration")
+    if not isinstance(integration, dict) or integration.get("ready") is not True:
+        return []
+    errors: List[str] = []
+    if not authoritative_source_passed(manifest.get("validation")):
+        errors.append(
+            "integration.ready true requires an authoritative validation source that passed"
+        )
+    if not command_evidence_supports_ready(commands):
+        errors.append(
+            "integration.ready true requires a commands[] entry with a real exitStatus"
+        )
+    return errors
+
+
+def enforce_ready_evidence_guard(
+    manifest: dict, commands: Sequence[Any]
+) -> dict:
+    """Force ready=false + blocker when ready lacks non-forgeable evidence.
+
+    Mutates ``manifest`` in place and returns it. Never synthesizes command
+    evidence; only downgrades a forged/vacuous ready claim.
+    """
+    errors = ready_evidence_guard_errors(manifest, commands)
+    if not errors:
+        return manifest
+    integration = manifest.get("integration")
+    if not isinstance(integration, dict):
+        integration = {}
+        manifest["integration"] = integration
+    integration["ready"] = False
+    blockers: List[Any] = []
+    raw = integration.get("blockers")
+    if isinstance(raw, list):
+        blockers = list(raw)
+    if not any(
+        isinstance(b, dict) and b.get("kind") == NO_AUTHORITATIVE_VALIDATION_KIND
+        for b in blockers
+    ):
+        blockers.append(
+            {
+                "kind": NO_AUTHORITATIVE_VALIDATION_KIND,
+                "message": NO_AUTHORITATIVE_VALIDATION_MESSAGE,
+                "detail": {"errors": list(errors)},
+            }
+        )
+    integration["blockers"] = blockers
+    return manifest
+
+
 # git-binary-full-index-v1 (and plain unified) path headers.
 _DIFF_GIT_A_B = re.compile(
     rb"^diff --git a/(.+?) b/(.+?)\s*$",
@@ -437,14 +538,19 @@ def dual_condition_ready(
     if envelope.get("runId") != manifest.get("runId"):
         blockers.append({"kind": "handoff-unavailable", "message": "runId mismatch"})
         return False, blockers
-    # Dual-condition ready requires the terminal *code* envelope, not any success
-    # envelope that merely reuses the same runId (corrupt/replaced artifact).
-    if envelope.get("mode") != "code":
+    # Dual-condition ready requires a terminal code or peer-stop envelope, not any
+    # success envelope that merely reuses the same runId (corrupt/replaced artifact).
+    # peer-stop is eligible when its evidence-backed ready manifest passes (Task 7.4).
+    env_mode = envelope.get("mode")
+    if env_mode not in ("code", "peer-stop"):
         blockers.append(
             {
                 "kind": "terminal-envelope-incomplete",
-                "message": "integration-ready handoff requires a success envelope with mode code",
-                "detail": {"envelopeMode": envelope.get("mode")},
+                "message": (
+                    "integration-ready handoff requires a success envelope with "
+                    "mode code or peer-stop"
+                ),
+                "detail": {"envelopeMode": env_mode},
             }
         )
         return False, blockers
@@ -640,7 +746,14 @@ HARD_BLOCKER_KINDS = frozenset(
 )
 
 # Soft blockers only force integration.ready false (never primary ERROR_CLASS alone).
-SOFT_BLOCKER_KINDS = frozenset({"no-changes", "temp-index-retained"})
+SOFT_BLOCKER_KINDS = frozenset(
+    {
+        "no-changes",
+        "temp-index-retained",
+        "no-authoritative-validation",
+        "handoff-unavailable",
+    }
+)
 
 _HARD_PRIMARY_MAPPING = {
     "write-scope-violation": "write-scope-violation",

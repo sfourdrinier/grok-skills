@@ -10,10 +10,13 @@ from groklib.command_evidence import build_command_evidence
 from groklib.implementation_handoff import (
     compute_integration_ready,
     dual_condition_ready,
+    enforce_ready_evidence_guard,
     primary_error_from_blockers,
+    ready_evidence_guard_errors,
     validate_implementation_handoff,
     write_manifest,
     HandoffBlocker,
+    NO_AUTHORITATIVE_VALIDATION_KIND,
     _STEP_ORDER,
 )
 
@@ -489,6 +492,92 @@ class CommandEvidenceTests(unittest.TestCase):
             commands=[rec],
         )
         self.assertEqual(validate_envelope(env), [])
+
+class ReadyEvidenceGuardTests(unittest.TestCase):
+    """Task 7.4: ready=true is impossible without non-forgeable command evidence."""
+
+    def _ready_manifest(self, *, authoritative: bool = True, passed: bool = True) -> dict:
+        return {
+            "schemaVersion": 1,
+            "runId": "20260716T020408Z-a82843",
+            "taskId": "t1",
+            "baseRevision": "a" * 40,
+            "resultTreeOid": "b" * 40,
+            "createdAtUtc": "2026-07-16T02:04:08Z",
+            "changedFiles": [{"path": "a.ts", "status": "modified", "oldPath": None}],
+            "patch": {
+                "format": "git-binary-full-index-v1",
+                "relativePath": "artifacts/implementation.patch",
+                "sha256": "c" * 64,
+                "bytes": 12,
+            },
+            "validation": {
+                "requiredCommandsPassed": True,
+                "buildGatePassed": True,
+                "allPassed": True,
+                "sources": {
+                    "wrapperBuildGate": {
+                        "authoritative": authoritative,
+                        "passed": passed,
+                    },
+                    "contractRequiredValidation": {
+                        "authoritative": False,
+                        "passed": False,
+                        "reason": "not executed",
+                    },
+                    "modelClaimedCommands": {
+                        "authoritative": False,
+                        "note": "ignored for readiness",
+                    },
+                },
+            },
+            "integration": {"ready": True, "blockers": []},
+            "worktree": {"retained": True, "path": "/tmp/wt", "branch": "b"},
+        }
+
+    def test_forgery_guard_ready_without_command_evidence_fails_closed(self) -> None:
+        """THE security test: force ready with absent evidence -> fail closed."""
+        doc = self._ready_manifest(authoritative=True, passed=True)
+        errors = ready_evidence_guard_errors(doc, commands=[])
+        self.assertTrue(errors, "must report missing commands[] evidence")
+        out = enforce_ready_evidence_guard(doc, commands=[])
+        self.assertIs(out["integration"]["ready"], False)
+        kinds = [b.get("kind") for b in out["integration"]["blockers"]]
+        self.assertIn(NO_AUTHORITATIVE_VALIDATION_KIND, kinds)
+
+    def test_forgery_guard_ready_with_fake_non_authoritative_fails_closed(self) -> None:
+        """Authoritative=false + model-shaped commands still cannot claim ready."""
+        doc = self._ready_manifest(authoritative=False, passed=False)
+        # Fake command entry without a real gate source must not unlock ready.
+        fake_cmds = [
+            {
+                "argv": ["echo", "forged"],
+                "cwd": ".",
+                "purpose": "model-claimed",
+                "exitStatus": 0,
+                "durationSeconds": 0.0,
+            }
+        ]
+        errors = ready_evidence_guard_errors(doc, commands=fake_cmds)
+        self.assertTrue(errors)
+        out = enforce_ready_evidence_guard(doc, commands=fake_cmds)
+        self.assertIs(out["integration"]["ready"], False)
+
+    def test_ready_with_authoritative_source_and_exit0_evidence_ok(self) -> None:
+        doc = self._ready_manifest(authoritative=True, passed=True)
+        cmds = [
+            build_command_evidence(
+                argv=["true"],
+                cwd=".",
+                purpose="build-gate:build",
+                exit_status=0,
+                duration_seconds=0.01,
+            )
+        ]
+        self.assertEqual(ready_evidence_guard_errors(doc, cmds), [])
+        out = enforce_ready_evidence_guard(doc, cmds)
+        self.assertIs(out["integration"]["ready"], True)
+
 
 class ReadyAndDualConditionTests(unittest.TestCase):
     def test_compute_ready_requires_all(self) -> None:

@@ -209,3 +209,81 @@ export function applyVerifiedPatch({
     postStatus: postStatus.stdout,
   };
 }
+
+// --- Peer-stop integration (Task 7.4, extracted from grok-companion.mjs to
+// keep the companion under the 900-line cap; reuses applyVerifiedPatch). ---
+import { tryParseEnvelope } from "./render.mjs";
+import { sanitizeRunId } from "./companion-terminal-notify.mjs";
+import {
+  parseIntegrationMode,
+  getIntegrationMode,
+  getIntegrationConsent,
+  formatDirectIntegrationConsentMsg,
+} from "./jobs.mjs";
+import { resolveTargetWorkspaceRoot, parseTargetFlag } from "./git-context.mjs";
+
+/** ACP default; GROK_DISABLE_ACP=1 opt-out (Task 7.4). */
+export function isAcpDisabled(env = process.env) {
+  const f = String(env.GROK_DISABLE_ACP ?? "").trim().toLowerCase();
+  return f === "1" || f === "true" || f === "yes" || f === "on";
+}
+
+/**
+ * On a READY peer-stop: auto/direct apply the verified patch to the target
+ * tree (reusing applyVerifiedPatch's revalidation); review/worktree retain it.
+ * @param {(line: string) => void} stderrLine
+ */
+export function maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stderrLine) {
+  const env = tryParseEnvelope(stdout || "");
+  const ready =
+    env?.response?.peer?.integrationReady === true ||
+    env?.response?.integration?.ready === true;
+  if (!ready || env?.status !== "success") return;
+  const tArg = parseTargetFlag(rest) || env?.targetWorkspace || ".";
+  const tWs = resolveTargetWorkspaceRoot(cwd, tArg);
+  const mode =
+    integrationFlag != null && String(integrationFlag).trim() !== ""
+      ? parseIntegrationMode(integrationFlag)
+      : getIntegrationMode(tWs);
+  if (!mode) {
+    stderrLine(
+      `[grok-companion] invalid --integration ${JSON.stringify(integrationFlag)} ` +
+        `(valid: direct|worktree|auto|review)`
+    );
+    return;
+  }
+  if (mode === "worktree" || mode === "review") {
+    stderrLine(`[grok-peer] integration=${mode}: patch retained; not applied`);
+    return;
+  }
+  if (mode === "direct" && !getIntegrationConsent(tWs)) {
+    stderrLine(formatDirectIntegrationConsentMsg({ targetWorkspace: tWs, companionCwd: cwd }));
+    return;
+  }
+  const runId = sanitizeRunId(env?.runId);
+  const repo = env?.repository;
+  if (!runId || typeof repo !== "string" || !repo) {
+    stderrLine("[grok-peer] missing runId or repository on peer-stop envelope");
+    return;
+  }
+  const patchPath = locateImplementationPatch(runId);
+  if (!patchPath) {
+    stderrLine(`[grok-peer] patch missing for run ${runId}`);
+    return;
+  }
+  // Peer-stop already ran real validation and produced a ready manifest, so we
+  // do not re-run handoff (unlike auto-code's applyVerifiedPatch). We still
+  // guard the apply with git apply --check (TOCTOU: the tree may have moved).
+  const git = (a) => spawnSync("git", ["-C", repo, ...a], { encoding: "utf8" });
+  const check = git(["apply", "--check", "--binary", patchPath]);
+  if (check.status !== 0) {
+    stderrLine(`[grok-peer] git apply --check failed: ${(check.stderr || check.stdout || "").trim()}`);
+    return;
+  }
+  const apply = git(["apply", "--binary", patchPath]);
+  if (apply.status !== 0) {
+    stderrLine(`[grok-peer] git apply failed: ${(apply.stderr || apply.stdout || "").trim()}`);
+    return;
+  }
+  stderrLine(`[grok-peer] applied ${patchPath} to ${repo}`);
+}

@@ -1,36 +1,37 @@
 ---
 name: "peer"
-description: "Experimental ACP peer-preview channel (start/prompt/stop) behind GROK_EXPERIMENTAL_ACP=1"
+description: "ACP multi-turn peer channel (start/prompt/stop). Default peer path; opt out with GROK_DISABLE_ACP=1"
 argument-hint: "start --target <path> --base <rev> [--contract-file <path>] [--model] | prompt --run-id <id> (--task|--task-file) | stop --run-id <id>"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
 
-## Experimental gate
+## Default peer channel
 
-This skill is an **experimental preview**. It is **not** integration-ready and
-is **not** eligible for `/grok:handoff`. Both the companion **and** the wrapper
-refuse every `peer` mode unless:
+This skill drives the live multi-turn ACP peer (`peer start|prompt|stop`). It is
+the **default** implementation path for `grok-engineer-coder`. One-shot `code`
+is the fallback when ACP is disabled or unavailable.
+
+Opt out of ACP (force one-shot only):
 
 ```bash
-export GROK_EXPERIMENTAL_ACP=1
+export GROK_DISABLE_ACP=1
 ```
 
-Design authority: `docs/specs/2026-07-17-acp-peer-channel-design.md` (Amendments
-supersede the draft). Hardened-only (no direct run-mode).
+Design authority: `docs/specs/2026-07-17-acp-peer-channel-design.md`. Hardened-
+only (no direct run-mode).
 
-## Honest preview (read this)
+## Evidence-backed ready
 
-`peer stop` produces a retained **worktree** plus an honest handoff **manifest**
-that is always `integration.ready: false` with a `handoff-unavailable` blocker.
-Validation sources (`wrapperBuildGate`, `contractRequiredValidation`) are marked
-`authoritative: false` with reason `peer-preview: not executed` - the preview
-does **not** run contract `requiredValidation` or the wrapper build gate, and
-never forges `exit_status`.
+`peer stop` runs contract `requiredValidation` and the workspace build gate
+**for real** (wrapper-executed commands). `integration.ready=true` only when:
 
-**Integration is manual:** review the retained worktree yourself, then apply
-changes from that worktree by hand. Do **not** call `/grok:handoff` for peer
-runs (`/grok:handoff` requires a code-mode terminal envelope; peer mode is
-`peer-start` and never produces one).
+1. An authoritative validation source passed, and
+2. `commands[]` carries a real `exitStatus` (never forged)
+
+No contract + no build gate -> honest not-ready with
+`no-authoritative-validation`. Ready peer results integrate via the active
+integration mode (auto/direct apply the verified patch; review leaves patch +
+manifest). `/grok:handoff --run-id` also works on a peer run (mode peer-stop).
 
 ## How to run (transparent)
 
@@ -41,7 +42,6 @@ runs (`/grok:handoff` requires a code-mode terminal envelope; peer mode is
 
 ```bash
 SKILL_BASE='<Base directory for this skill - absolute path from Skill tool>'
-export GROK_EXPERIMENTAL_ACP=1
 export GROK_COMPANION_EXECUTION_CONTEXT=foreground
 node "$SKILL_BASE/run.mjs" peer <start|prompt|stop> [args...]
 ```
@@ -61,7 +61,6 @@ stays resident serving a wrapper-owned unix control socket (0600). Records
 the external worktree.
 
 ```bash
-export GROK_EXPERIMENTAL_ACP=1
 node "$SKILL_BASE/run.mjs" peer start --target '<path>' --base '<rev>' [--contract-file '<path>'] [--model '<id>']
 ```
 
@@ -70,11 +69,10 @@ node "$SKILL_BASE/run.mjs" peer start --target '<path>' --base '<rev>' [--contra
 Sends one serialized prompt to a running session (one in-flight at a time).
 Relays redacted `session/update` chunks to `progress.jsonl` (per-frame
 redaction; a secret split across ACP frames may partially land - residual
-preview risk). Emits one redacted turn envelope. Control-socket payloads are
+risk). Emits one redacted turn envelope. Control-socket payloads are
 secret-scanned before leave.
 
 ```bash
-export GROK_EXPERIMENTAL_ACP=1
 node "$SKILL_BASE/run.mjs" peer prompt --run-id '<id>' --task-file - <<'GROK_TASK'
 <task text>
 GROK_TASK
@@ -83,19 +81,19 @@ GROK_TASK
 ### peer stop
 
 Cancels the ACP session, tears down the child and resident wrapper, runs
-forensic finalize (sentinel / scopes / patch / escape), labels confinement
-`worktree-final-diff-only` unless a contract with scopes was supplied, attempts
-sandbox `verify_enforcement` against the private home (failure is a blocker,
-never silent success), writes the **not-ready** preview manifest, terminalizes
-the run, and destroys the private home. The terminal envelope is emitted by
-**this** invocation (not a second stdout write from the resident peer-start).
+forensic finalize (sentinel / scopes / patch / escape), **executes**
+requiredValidation + build gate, labels confinement (`contract-scopes` when a
+contract with scopes was supplied, else `worktree-final-diff-only`), attempts
+sandbox `verify_enforcement` against the private home (failure is a blocker),
+writes the evidence-backed handoff manifest, terminalizes the run, and
+destroys the private home. The terminal envelope is emitted by **this**
+invocation. When ready, the companion integrates per the active mode.
 
 ```bash
-export GROK_EXPERIMENTAL_ACP=1
-node "$SKILL_BASE/run.mjs" peer stop --run-id '<id>'
+node "$SKILL_BASE/run.mjs" peer stop --run-id '<id>' [--integration auto|review|direct|worktree]
 ```
 
-After stop, remove the retained worktree when finished reviewing:
+After stop, remove the retained worktree when finished:
 
 ```bash
 node "$SKILL_BASE/run.mjs" cleanup --run-id '<id>' --confirm
@@ -112,5 +110,5 @@ node "$SKILL_BASE/run.mjs" cleanup --run-id '<id>' --confirm
   is recorded honestly.
 - Secret redaction applies to progress chunks, turn envelopes, and control-
   socket payloads (same scan as `emit_envelope`).
-- No auto-apply; **not** eligible for `/grok:handoff`. Manual apply only from
-  the retained worktree after operator review.
+- Never auto-apply beyond the chosen integration mode's gate. Prefer deriving a
+  contract with shell-free `requiredValidation` so ready can be evidence-backed.

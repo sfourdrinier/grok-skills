@@ -119,27 +119,29 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 
 ### Added (Phase 5 - experimental ACP peer-preview channel, PR11)
 
-- **Experimental peer-preview channel** behind `GROK_EXPERIMENTAL_ACP=1`
-  (hardened only; enforced in the **wrapper** as well as the companion):
-  `peer start|prompt|stop` drive a long-lived `grok agent stdio` (ACP) session
-  with start parity (sandbox capability, tool allowlist, cwd sentinel,
-  baseline, no .env) before the first prompt. Wrapper-owned 0600 control
-  socket (not a FIFO); peer.json records wrapper+child pid/starttime and the
-  start `originalBaseline`; run.json records `worktreePath` / lifecycle so
+- **ACP peer channel** (hardened only; wrapper + companion): `peer
+  start|prompt|stop` drive a long-lived `grok agent stdio` (ACP) session with
+  start parity (sandbox capability, tool allowlist, cwd sentinel, baseline, no
+  .env) before the first prompt. Wrapper-owned 0600 control socket (not a FIFO);
+  peer.json records wrapper+child pid/starttime and the start
+  `originalBaseline`; run.json records `worktreePath` / lifecycle so
   `cleanup --run-id` can remove the external worktree after peer-stop
   terminalizes. Streamed chunks and control-socket payloads are secret-scanned
   (same guarantee as `emit_envelope`). Resident peer-start emits **exactly one**
   stdout envelope (`running`); peer-stop emits the terminal outcome.
-- **Honest preview finalize (release-hardening):** peer-stop does **not** run
-  contract `requiredValidation` or the wrapper build gate, never forges
-  `exit_status`, and always writes `integration.ready: false` with a
-  `handoff-unavailable` blocker plus `authoritative: false` validation sources
-  (`peer-preview: not executed`). **Not eligible for `/grok:handoff`** -
-  integration is manual from the retained worktree after operator review.
-  Crash-path peer-stop reuses the start baseline (never re-captures). Optional
-  sandbox `verify_enforcement` at stop records failure honestly (no full
-  code-mode isolation claim without telemetry). New `acp-failure` error class;
-  reaper respects live peer homes. Design:
+- **Evidence-backed peer-stop finalize (Task 7.4):** peer-stop runs contract
+  `requiredValidation` and the wrapper build gate **for real** (same ordered
+  finalize as code; exit_status never synthesized). `integration.ready=true`
+  only when an authoritative validation source passed and `commands[]` carries
+  a real `exitStatus` (forgery guard fails closed). No authoritative gate ->
+  honest `no-authoritative-validation` blocker. Ready peer results integrate
+  via the active mode (auto/direct apply verified patch; review leaves patch).
+  `/grok:handoff` accepts peer-stop envelopes. ACP is the **default** peer
+  channel for `grok-engineer-coder`; `GROK_DISABLE_ACP=1` is the opt-out
+  (`GROK_EXPERIMENTAL_ACP` is no longer a hard gate). Crash-path peer-stop
+  reuses the start baseline (never re-captures). Optional sandbox
+  `verify_enforcement` at stop records failure honestly. New `acp-failure`
+  error class; reaper respects live peer homes. Design:
   `docs/specs/2026-07-17-acp-peer-channel-design.md`.
 
 ### Changed (Phase 0)

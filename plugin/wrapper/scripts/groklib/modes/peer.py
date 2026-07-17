@@ -1,9 +1,9 @@
 # wrapper/scripts/groklib/modes/peer.py
 #
-# Experimental ACP peer channel (peer-start / peer-prompt / peer-stop), gated by
-# GROK_EXPERIMENTAL_ACP in the WRAPPER (not companion-only). Control plane is a
+# ACP peer channel (peer-start / peer-prompt / peer-stop). Default peer path;
+# opt out with GROK_DISABLE_ACP=1 (wrapper + companion). Control plane is a
 # wrapper-owned unix socket (0600), not a FIFO. Start parity before first prompt;
-# stop finalizes as an honest peer-preview (never integration-ready).
+# peer-stop runs real requiredValidation + build gate (evidence-backed ready).
 
 from __future__ import annotations
 

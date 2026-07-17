@@ -1,15 +1,12 @@
 # wrapper/scripts/groklib/modes/peer_finalize.py
 #
-# peer-stop finalization for the experimental ACP peer-preview channel.
-# Runs forensic code-path steps (sentinel, scopes, patch, escape) but NEVER
-# executes contract requiredValidation or the wrapper build gate, never forges
-# exit_status, and always writes a not-ready manifest (authoritative=false
-# validation sources + handoff-unavailable). Split from peer.py for the
-# 900-line cap.
+# peer-stop finalization for the ACP peer channel. Runs the SAME ordered
+# finalize as code/worktree (scopes + requiredValidation + build gate) via
+# wrapper-executed commands. integration.ready is evidence-backed only - never
+# forged, never from model claims. Split from peer.py for the 900-line cap.
 
 from __future__ import annotations
 
-import json
 import pathlib
 import tempfile
 from typing import Any, List, Optional
@@ -18,17 +15,15 @@ from groklib import GrokWrapperError, log_stderr, runstate
 from groklib.authhome import PrivateHome, destroy_private_home
 from groklib.code_handoff_finalize import code_handoff_finalize
 from groklib.envelope import build_envelope, redact_secret_material
-from groklib.implementation_contract import trust_model
-from groklib.implementation_handoff import write_manifest
+from groklib.implementation_handoff import (
+    NO_AUTHORITATIVE_VALIDATION_KIND,
+    enforce_ready_evidence_guard,
+    write_manifest,
+)
 from groklib.modes._envelope import grok_usage_response_fields
+from groklib.projectconfig import load_project_config
 from groklib.sandbox import policy_for_mode, verify_enforcement
 from groklib.worktree import ExternalWorktree
-
-_PEER_PREVIEW_REASON = "peer-preview: not executed"
-_HANDOFF_UNAVAILABLE_MESSAGE = (
-    "peer-preview runs are not integration-ready; apply from the worktree "
-    "manually after your own review"
-)
 
 
 def _log(function: str, message: str) -> None:
@@ -36,106 +31,18 @@ def _log(function: str, message: str) -> None:
 
 
 def _confinement_label(contract: Optional[dict]) -> str:
-    """Honest confinement: scopes-backed contract vs worktree-final-diff-only."""
+    """Same standing as code: contract-scopes when scopes present, else final-diff."""
     scopes = (contract or {}).get("writeScopes") if contract else None
     if isinstance(scopes, list) and len(scopes) > 0:
         return "contract-scopes"
     return "worktree-final-diff-only"
 
 
-def _forensics_contract(contract: Optional[dict]) -> Optional[dict]:
-    """Contract for forensic finalize only: scopes kept, requiredValidation stripped.
-
-    Peer-preview must not execute operator requiredValidation commands.
-    """
-    if not isinstance(contract, dict):
-        return None
-    out = dict(contract)
-    out.pop("requiredValidation", None)
-    return out
-
-
-def _preview_validation_block() -> dict:
-    """Honest validation: gates were not executed; sources are non-authoritative."""
-    return {
-        "requiredCommandsPassed": False,
-        "buildGatePassed": False,
-        "allPassed": False,
-        "sources": {
-            "wrapperBuildGate": {
-                "authoritative": False,
-                "passed": False,
-                "reason": _PEER_PREVIEW_REASON,
-            },
-            "contractRequiredValidation": {
-                "authoritative": False,
-                "passed": False,
-                "reason": _PEER_PREVIEW_REASON,
-                "trustModel": trust_model(),
-            },
-            "modelClaimedCommands": {
-                "authoritative": False,
-                "note": "ignored for readiness",
-            },
-        },
-    }
-
-
-def _handoff_unavailable_blocker() -> dict:
-    return {
-        "kind": "handoff-unavailable",
-        "message": _HANDOFF_UNAVAILABLE_MESSAGE,
-    }
-
-
-def _rewrite_preview_manifest(
-    *,
-    manifest_path: pathlib.Path,
-    label: str,
-    extra_blockers: Optional[List[dict]] = None,
-) -> dict:
-    """Force not-ready preview fields and confinement before a scanned write."""
-    if not manifest_path.is_file():
-        raise GrokWrapperError(
-            "artifact-generation-failure",
-            "peer finalize produced no handoff manifest to rewrite",
-            {"path": str(manifest_path)},
-        )
-    try:
-        doc = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise GrokWrapperError(
-            "artifact-generation-failure",
-            "peer finalize could not read handoff manifest: {}".format(exc),
-            {"path": str(manifest_path)},
-        ) from exc
-    if not isinstance(doc, dict):
-        raise GrokWrapperError(
-            "artifact-generation-failure",
-            "peer finalize handoff manifest is not an object",
-            {"path": str(manifest_path)},
-        )
-
-    # Set confinement BEFORE write_manifest scan (never post-mutate after).
-    doc["confinement"] = label
-    doc["validation"] = _preview_validation_block()
-
-    integration = doc.get("integration")
-    if not isinstance(integration, dict):
-        integration = {}
-    blockers: List[dict] = []
-    raw_blockers = integration.get("blockers")
-    if isinstance(raw_blockers, list):
-        for item in raw_blockers:
-            if isinstance(item, dict) and item.get("kind") != "handoff-unavailable":
-                blockers.append(dict(item))
-    blockers.insert(0, _handoff_unavailable_blocker())
-    for extra in extra_blockers or []:
-        if isinstance(extra, dict):
-            blockers.append(dict(extra))
-    doc["integration"] = {"ready": False, "blockers": blockers}
-    write_manifest(manifest_path, doc)
-    return doc
+def _target_relative(peer_doc: dict) -> str:
+    raw = peer_doc.get("targetRelative")
+    if not isinstance(raw, str) or not raw.strip() or raw.strip() in (".", "./"):
+        return ""
+    return raw.strip()
 
 
 def _maybe_verify_sandbox(
@@ -146,12 +53,12 @@ def _maybe_verify_sandbox(
     """Best-effort verify_enforcement at peer-stop; return a blocker on failure.
 
     ACP timing may leave no sandbox-events.jsonl; failure is recorded honestly
-    as a soft not-ready blocker (integration.ready is already always false).
+    as a soft not-ready blocker.
     """
     if not home_path.is_dir():
         return {
             "kind": "sandbox-failure",
-            "message": "peer-preview: private home missing at stop; sandbox not verified",
+            "message": "peer: private home missing at stop; sandbox not verified",
         }
     home = PrivateHome(
         home_dir=home_path,
@@ -170,28 +77,82 @@ def _maybe_verify_sandbox(
     except GrokWrapperError as exc:
         return {
             "kind": "sandbox-failure",
-            "message": "peer-preview sandbox verification failed: {}".format(exc),
+            "message": "peer sandbox verification failed: {}".format(exc),
             "detail": dict(exc.detail or {}, errorClass=exc.error_class),
         }
     except Exception as exc:  # pragma: no cover - defensive
         return {
             "kind": "sandbox-failure",
-            "message": "peer-preview sandbox verification failed: {}".format(exc),
+            "message": "peer sandbox verification failed: {}".format(exc),
         }
     return None
 
 
-def _terminalize_peer_run(run_paths: runstate.RunPaths, envelope: dict) -> None:
-    """Persist terminal envelope + lifecycle so cleanup can rebuild the worktree.
+def _apply_post_finalize_manifest(
+    *,
+    manifest_path: pathlib.Path,
+    label: str,
+    commands: List[dict],
+    extra_blockers: Optional[List[dict]] = None,
+) -> dict:
+    """Set confinement, merge soft blockers, re-run the forgery guard, write."""
+    import json
 
-    Durable envelope mode matches create_run ("peer-start"); stdout may still
-    use peer-stop. Failures are logged only - the operator-facing envelope is
-    already built.
-    """
+    if not manifest_path.is_file():
+        raise GrokWrapperError(
+            "artifact-generation-failure",
+            "peer finalize produced no handoff manifest",
+            {"path": str(manifest_path)},
+        )
+    try:
+        doc = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise GrokWrapperError(
+            "artifact-generation-failure",
+            "peer finalize could not read handoff manifest: {}".format(exc),
+            {"path": str(manifest_path)},
+        ) from exc
+    if not isinstance(doc, dict):
+        raise GrokWrapperError(
+            "artifact-generation-failure",
+            "peer finalize handoff manifest is not an object",
+            {"path": str(manifest_path)},
+        )
+
+    # Confinement BEFORE write_manifest scan (never post-mutate after).
+    doc["confinement"] = label
+    integration = doc.get("integration")
+    if not isinstance(integration, dict):
+        integration = {"ready": False, "blockers": []}
+        doc["integration"] = integration
+    blockers: List[dict] = []
+    raw_blockers = integration.get("blockers")
+    if isinstance(raw_blockers, list):
+        for item in raw_blockers:
+            if isinstance(item, dict):
+                blockers.append(dict(item))
+    for extra in extra_blockers or []:
+        if not isinstance(extra, dict):
+            continue
+        kind = extra.get("kind")
+        if kind and any(b.get("kind") == kind for b in blockers):
+            continue
+        blockers.append(dict(extra))
+    if blockers:
+        # Soft extra blockers force not-ready (compute_integration_ready invariant).
+        integration["ready"] = False
+    integration["blockers"] = blockers
+    # Re-assert anti-forgery after any post-processing (never allow ready without evidence).
+    doc = enforce_ready_evidence_guard(doc, commands)
+    write_manifest(manifest_path, doc)
+    return doc
+
+
+def _terminalize_peer_run(run_paths: runstate.RunPaths, envelope: dict) -> None:
+    """Persist terminal envelope + lifecycle so cleanup can rebuild the worktree."""
     try:
         durable = dict(envelope)
         durable["mode"] = "peer-start"
-        # Internal marker must never land on disk.
         durable.pop("_peerStartAlreadyEmittedRunning", None)
         durable.pop("_suppressStdout", None)
 
@@ -215,6 +176,44 @@ def _terminalize_peer_run(run_paths: runstate.RunPaths, envelope: dict) -> None:
         _log("_terminalize_peer_run", "could not terminalize peer run: {}".format(exc))
 
 
+def _build_gate_runner(
+    stage: Any,
+    *,
+    peer_doc: dict,
+    worktree: ExternalWorktree,
+):
+    """Return a run_build_gate callback that executes the real code-mode gate."""
+    from groklib.modes import code as code_mod
+    from groklib.modes import code_continue
+
+    target_relative = _target_relative(peer_doc)
+    repo_root = pathlib.Path(str(peer_doc.get("repoRoot") or worktree.repo_root))
+    project_config = load_project_config(repo_root)
+    package_manager = peer_doc.get("projectPackageManager")
+    if package_manager is None:
+        package_manager = project_config.package_manager
+    elif package_manager == "":
+        package_manager = None
+    ws_name, pristine_scripts = code_continue.read_committed_manifest_fields_from_ref(
+        worktree.path, worktree.base_revision, target_relative
+    )
+    pm_binary = code_mod._resolve_pm_binary()
+    never_build = project_config.never_build_workspaces
+
+    def _run_build_gate() -> None:
+        code_mod._run_build_gate(
+            stage,
+            target_relative,
+            package_manager,
+            pm_binary,
+            never_build,
+            ws_name,
+            pristine_scripts,
+        )
+
+    return _run_build_gate
+
+
 def finalize_peer_session(
     *,
     run_paths: runstate.RunPaths,
@@ -225,43 +224,31 @@ def finalize_peer_session(
     original_baseline: Any,
     stage: Any,
 ) -> dict:
-    """Quiesce path already done by caller; forensic finalize + honest preview label.
+    """Forensic finalize with REAL requiredValidation + build gate; evidence-backed ready.
 
     Returns a success (or classified failure) C4 envelope for peer-stop.
-    Never forges command exit_status; never claims integration-ready.
+    exit_status comes only from real subprocess runs - nothing synthesizes exit 0.
     """
+    from groklib import worktree_escape
+    from groklib.modes import code as code_mod
+
     sentinel_name = peer_doc.get("sentinelName") or (".grok-run-" + run_paths.run_id)
     artifacts_dir = run_paths.run_dir / "artifacts"
     label = _confinement_label(contract)
-    forensics_contract = _forensics_contract(contract)
-
-    def _run_build_gate() -> None:
-        # Peer-preview: intentionally not executed (no forged pass).
-        return None
-
-    def _run_recorded_command(argv, cwd, purpose):
-        # requiredValidation is stripped; any call is a programming error.
-        raise GrokWrapperError(
-            "cli-failure",
-            "peer-preview does not execute recorded validation commands",
-            {"purpose": purpose, "argv": [str(a) for a in argv], "cwd": str(cwd)},
-        )
-
-    from groklib import worktree_escape
-    from groklib.modes import code as code_mod
+    run_build_gate = _build_gate_runner(stage, peer_doc=peer_doc, worktree=worktree)
 
     try:
         handoff = code_handoff_finalize(
             stage=stage,
             sentinel_name=sentinel_name,
-            contract=forensics_contract,
+            contract=contract,  # FULL contract - requiredValidation executes
             artifacts_dir=artifacts_dir,
             original_baseline=original_baseline,
-            run_build_gate=_run_build_gate,
+            run_build_gate=run_build_gate,
             assert_changes_within=worktree_escape.assert_changes_within,
             assert_original_checkout_unmodified=worktree_escape.assert_original_checkout_unmodified,
             assert_cwd_sentinel=code_mod._assert_cwd_sentinel,
-            run_recorded_command=_run_recorded_command,
+            run_recorded_command=code_mod._run_recorded_command,
         )
     except GrokWrapperError as exc:
         handoff = None
@@ -280,16 +267,36 @@ def finalize_peer_session(
         extra_blockers.append(sandbox_blocker)
 
     manifest_path = run_paths.run_dir / "implementation-handoff.json"
+    commands = list(getattr(getattr(stage, "acc", None), "commands", None) or [])
+    manifest_doc: Optional[dict] = None
     try:
-        _rewrite_preview_manifest(
+        manifest_doc = _apply_post_finalize_manifest(
             manifest_path=manifest_path,
             label=label,
+            commands=commands,
             extra_blockers=extra_blockers,
         )
     except GrokWrapperError as exc:
-        _log("finalize_peer_session", "preview manifest rewrite failed: {}".format(exc))
+        _log("finalize_peer_session", "manifest post-process failed: {}".format(exc))
         if primary_error is None:
             primary_error = exc
+
+    integration_ready = False
+    if isinstance(manifest_doc, dict):
+        integration_ready = bool(
+            (manifest_doc.get("integration") or {}).get("ready") is True
+        )
+        # Defense in depth: ready without command evidence is a programming error.
+        if integration_ready and not commands:
+            integration_ready = False
+            try:
+                enforce_ready_evidence_guard(manifest_doc, commands)
+                write_manifest(manifest_path, manifest_doc)
+            except Exception as exc:
+                _log(
+                    "finalize_peer_session",
+                    "forgery re-guard write failed: {}".format(exc),
+                )
 
     # Destroy private home (auth material first via destroy_private_home).
     home = PrivateHome(
@@ -313,10 +320,26 @@ def finalize_peer_session(
             "sessionId": peer_doc.get("sessionId"),
             "confinement": label,
             "cleanup": cleanup,
-            "integrationReady": False,
-            "preview": True,
+            "integrationReady": integration_ready,
+            "preview": False,
         }
     }
+    if isinstance(manifest_doc, dict):
+        response["integration"] = {
+            "ready": integration_ready,
+            "blockers": list(
+                (manifest_doc.get("integration") or {}).get("blockers") or []
+            ),
+        }
+        # Surface no-authoritative-validation clearly for operators.
+        if not integration_ready:
+            kinds = {
+                b.get("kind")
+                for b in (manifest_doc.get("integration") or {}).get("blockers") or []
+                if isinstance(b, dict)
+            }
+            if NO_AUTHORITATIVE_VALIDATION_KIND in kinds:
+                response["peer"]["notReadyReason"] = NO_AUTHORITATIVE_VALIDATION_KIND
     if result is not None and getattr(result, "answer", None):
         response["result"] = redact_secret_material(
             {"text": result.answer}, redact_keys=True
@@ -339,6 +362,7 @@ def finalize_peer_session(
             changedFiles=list(stage.acc.changed_files or []),
             diffSummary=stage.acc.diff_summary,
             progressStreamPath=str(run_paths.progress_path),
+            commands=list(stage.acc.commands or []),
             response=response,
         )
         _terminalize_peer_run(run_paths, env)
@@ -359,12 +383,8 @@ def finalize_peer_session(
         "progressStreamPath": str(run_paths.progress_path),
         "cleanup": cleanup,
         "response": response,
-        "warnings": list(stage.acc.warnings or [])
-        + [
-            "peer-preview: not integration-ready; not eligible for /grok:handoff",
-        ],
+        "warnings": list(stage.acc.warnings or []),
     }
-    # Full GrokRunResult only (peer stop often uses a minimal stand-in Mock).
     if (
         result is not None
         and isinstance(getattr(result, "stderr", None), (str, type(None)))
