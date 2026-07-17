@@ -78,6 +78,32 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
   recalled the prior turn, appended `beta` in the same worktree, and its
   handoff was dual-condition ready.
 
+### Added (Phase 3 - Claude Code native surface, PR9)
+
+- **`grok-skills` bin shim**: plugins' auto-discovered `bin/` puts one bare
+  command on the Bash tool's PATH (Claude Code only); agents invoke shim-first
+  with the self-locating `run.mjs` fallback everywhere else.
+- Persistent state honors `CLAUDE_PLUGIN_DATA` (atomic complete-marker
+  migration including job bodies and gate state; retryable partials; legacy
+  root stays a frozen snapshot).
+- `userConfig` in the Claude manifest (runMode, notificationMode, sensitive
+  webhook URL); values reach the companion as `CLAUDE_PLUGIN_OPTION_*` env
+  with precedence explicit setup > userConfig env > defaults.
+- SubagentStop handoff nudge (non-blocking, read-only): on
+  grok-engineer-coder stop, advisory context names the run's handoff target,
+  correlated from runIds in the agent's last message (validated) with a
+  workspace-newest fallback. Codex note: plugin hooks stay dormant until
+  trusted via /hooks.
+- Agent frontmatter uses verified-honored keys (maxTurns 40, memory project;
+  model stays inherited - review reversal: the agent is an orchestrator).
+- Companion test suites are fully isolated (fresh XDG/TMPDIR/data/cwd per
+  spawn); the recurring concurrent-suite flake was root-caused (leak tests
+  scanning the shared TMPDIR) and eliminated - proven with 3x-concurrent
+  batches. Validation blockers now name failing tests (TAP not-ok
+  extraction).
+- Deferred by decision: plugin `subagentStatusLine` (overriding all subagent
+  rows to annotate Grok jobs is over-reach for 2.0.0).
+
 ### Changed (Phase 0)
 
 - `plugin/scripts/lib/task-file.mjs`: task-text temp staging deduplicated
@@ -90,7 +116,7 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 
 ### Suite counts (ratchet)
 
-- Wrapper: 653 -> 721. Plugin: 172 -> 203 (end of Phase 2).
+- Wrapper: 653 -> 723. Plugin: 172 -> 232 (end of Phase 3).
 
 ## [1.6.0] - 2026-07-16
 
