@@ -104,6 +104,18 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 - Deferred by decision: plugin `subagentStatusLine` (overriding all subagent
   rows to annotate Grok jobs is over-reach for 2.0.0).
 
+### Added (Phase 4 - Codex parity, PR10)
+
+- `setup --codex-agents-scope user|project`: managed agent TOMLs can install
+  into the project's `.codex/agents/` instead of `~/.codex/agents/`.
+- Managed-agent backups capped at 3 (user files never touched);
+  `nickname_candidates` on both Codex agents.
+- Trust honesty: README/setup state plainly that Codex plugin hooks (stop
+  gate + SubagentStop nudge) are dormant until trusted via `/hooks`;
+  `docs/COMPATIBILITY.md` gains an upstream-gaps table (codex#18988/#18308).
+- Validation blockers and command evidence name failing tests from FULL
+  stdout (`failedTests`), surviving tail truncation.
+
 ### Changed (Phase 0)
 
 - `plugin/scripts/lib/task-file.mjs`: task-text temp staging deduplicated
@@ -116,7 +128,7 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 
 ### Suite counts (ratchet)
 
-- Wrapper: 653 -> 723. Plugin: 172 -> 232 (end of Phase 3).
+- Wrapper: 653 -> 727. Plugin: 172 -> 238 (end of Phase 4).
 
 ## [1.6.0] - 2026-07-16
 

@@ -105,7 +105,7 @@ plugin's own contract -> code -> handoff pipeline.
 | - | Phase 1 adversarial review: 6 findings fixed (exit contract, id collision, summary caps, fencing) | done |
 | 2 (PR8) | Iteration loop: session archive + `code --continue-run` | **done 2026-07-17** |
 | 3 (PR9) | Claude Code native surface (bin/, plugin data dir, SubagentStop, userConfig, agent frontmatter) | **done 2026-07-17** |
-| 4 (PR10) | Codex parity polish | planned |
+| 4 (PR10) | Codex parity polish | **done 2026-07-17** |
 | 5+6 (PR11) | ACP probe/spec/experimental peer channel; manifest polish; release | planned |
 
 ## Recommended next order (after Wave 1 polish)
