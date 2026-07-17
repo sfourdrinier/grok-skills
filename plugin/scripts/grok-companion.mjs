@@ -629,30 +629,21 @@ function hasFlag(args, name) {
   return args.includes(name);
 }
 
-function main() {
-  const cwd = process.cwd();
-  const rawArgs = process.argv.slice(2);
-  const {
-    args: stripped,
-    pretty,
-    runMode: runModeFlag,
-    base: baseRef,
-    resume,
-    fresh,
-    noNotify,
-  } = stripFlags(rawArgs);
-
-  let staged;
-  try {
-    staged = stageStdinTaskFile(stripped);
-  } catch (err) {
-    process.stderr.write(
-      `[grok-companion] could not stage --task-file from stdin: ${err.message}\n` +
-        "Fix: pipe the task on stdin (a single-quoted heredoc) when using --task-file -.\n"
-    );
-    return SPAWN_FAILED_EXIT;
-  }
-
+/**
+ * Post-staging dispatch: every mode path. Staged stdin cleanup is owned by
+ * main()'s finally - finishCleanups here only releases injectTaskFile temps.
+ */
+async function dispatch({
+  cwd,
+  stripped,
+  pretty,
+  runModeFlag,
+  baseRef,
+  resume,
+  fresh,
+  noNotify,
+  staged,
+}) {
   const forwardedArgs = staged ? staged.args : stripped;
   const mode = forwardedArgs[0];
   const rest = forwardedArgs.slice(1);
@@ -753,9 +744,9 @@ function main() {
     skipNotify: Boolean(noNotify),
   };
 
+  // Staged stdin cleanup is owned by main()'s finally - only inject temps here.
   const finishCleanups = (code) => {
     if (extraCleanup) extraCleanup();
-    if (staged) staged.cleanup();
     return code;
   };
 
@@ -832,6 +823,47 @@ function main() {
   }
 
   return finishCleanups(runPassthrough(wrapper, wrapperArgs));
+}
+
+async function main() {
+  const cwd = process.cwd();
+  const rawArgs = process.argv.slice(2);
+  const {
+    args: stripped,
+    pretty,
+    runMode: runModeFlag,
+    base: baseRef,
+    resume,
+    fresh,
+    noNotify,
+  } = stripFlags(rawArgs);
+
+  let staged;
+  try {
+    staged = stageStdinTaskFile(stripped);
+  } catch (err) {
+    process.stderr.write(
+      `[grok-companion] could not stage --task-file from stdin: ${err.message}\n` +
+        "Fix: pipe the task on stdin (a single-quoted heredoc) when using --task-file -.\n"
+    );
+    return SPAWN_FAILED_EXIT;
+  }
+
+  try {
+    return await dispatch({
+      cwd,
+      stripped,
+      pretty,
+      runModeFlag,
+      baseRef,
+      resume,
+      fresh,
+      noNotify,
+      staged,
+    });
+  } finally {
+    if (staged) staged.cleanup();
+  }
 }
 
 Promise.resolve()
