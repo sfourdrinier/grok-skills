@@ -8,12 +8,11 @@
 
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 
-import { readAllStdinSync } from "./lib/read-stdin.mjs";
+import { stageStdinTaskFile, injectTaskFile } from "./lib/task-file.mjs";
 import { resolveWrapperPath, wrapperNotFoundMessage } from "./lib/wrapper.mjs";
 import {
   LiveRelay,
@@ -87,27 +86,6 @@ function stderrLine(line) {
   process.stderr.write(`${line}\n`);
 }
 
-function stageStdinTaskFile(args) {
-  const flagIndex = args.indexOf("--task-file");
-  if (flagIndex < 0 || args[flagIndex + 1] !== "-") {
-    return null;
-  }
-  const taskBytes = readAllStdinSync();
-  const stagingDir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-task-"));
-  const taskPath = path.join(stagingDir, "task");
-  fs.writeFileSync(taskPath, taskBytes, { mode: 0o600 });
-  const staged = args.slice();
-  staged[flagIndex + 1] = taskPath;
-  const cleanup = () => {
-    try {
-      fs.rmSync(stagingDir, { recursive: true, force: true });
-    } catch (err) {
-      stderrLine(`[grok-companion] failed to remove staged task dir ${stagingDir}: ${err.message}`);
-    }
-  };
-  return { args: staged, cleanup };
-}
-
 function spawnFailedMessage(wrapper, detail) {
   return (
     `[grok-companion] failed to launch ${PYTHON} ${wrapper}: ${detail}\n` +
@@ -175,31 +153,6 @@ function extractTask(args) {
     return args[t + 1];
   }
   return "";
-}
-
-function injectTaskFile(args, taskText) {
-  const cleaned = [];
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--task" || args[i] === "--task-file") {
-      i += 1;
-      continue;
-    }
-    cleaned.push(args[i]);
-  }
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-task-"));
-  const taskPath = path.join(dir, "task");
-  fs.writeFileSync(taskPath, taskText, { mode: 0o600 });
-  cleaned.push("--task-file", taskPath);
-  return {
-    args: cleaned,
-    cleanup: () => {
-      try {
-        fs.rmSync(dir, { recursive: true, force: true });
-      } catch {
-        // ignore
-      }
-    },
-  };
 }
 
 function ensureTarget(args, cwd) {
