@@ -6,6 +6,45 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
+## [2.0.0] - unreleased
+
+Peer-agent integration release (plan: docs/superpowers/plans/2026-07-16-peer-agent-integration.md).
+Phases land as sequential PRs; no tag until the release phase. Most implementation
+is delegated to Grok itself through this plugin's own contract -> code -> handoff
+pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
+
+### Added (Phase 0 - hygiene, PR6)
+
+- `tools/verify.sh` + `tools/checks.sh`: one-command verification gate (both unit
+  suites, 900-line cap with ratcheting `tools/cap-allowlist.txt`, ASCII-hyphen
+  check, `claude plugin validate --strict`). CI gains a `mechanical` job.
+- Canonical fake-wrapper test harness for companion tests
+  (`plugin/scripts/tests/helpers/fake-wrapper.mjs`): tests never spawn the real
+  wrapper or the Grok CLI.
+- `plugin/references/argv-safety.md`: single canonical injection-safety
+  reference (task text via stdin heredoc, single-quoted flag values, contract
+  `requiredValidation` argv is shell-free); six skills now carry a short inline
+  summary instead of duplicated rationale.
+- AGENTS.md/CLAUDE.md divergence warning: permissive rules discovery reports
+  when a level's pair differs and only AGENTS.md was sent
+  (`discover_instruction_files_with_warnings`; `ModeRun.initial_warnings`).
+- `docs/checklists/2.0-live-smoke-ledger.md`: append-only live-behavior
+  evidence for the 2.0 work.
+
+### Changed (Phase 0)
+
+- `plugin/scripts/lib/task-file.mjs`: task-text temp staging deduplicated
+  (single owner for the stdin `--task-file -` path and companion injection).
+- Oversized test files split by responsibility (`test_redaction.py`,
+  `test_worktree_escape.py`, `test_handoff_patch.py`,
+  `worktree_test_base.py`); the 900-line cap allowlist is empty.
+- Prose/comments normalized to ASCII hyphens (AGENTS.md rule 12) outside dated
+  evidence archives; enforced by `tools/checks.sh`.
+
+### Suite counts (ratchet)
+
+- Wrapper: 653 -> 677. Plugin: 172 -> 179.
+
 ## [1.6.0] - 2026-07-16
 
 ### Added
