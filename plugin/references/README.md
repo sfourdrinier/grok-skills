@@ -6,11 +6,12 @@ This plugin is a thin surface over the hardened Grok CLI wrapper. It adds no
 safety logic of its own. Skills and agents shell to the companion, which runs
 the wrapper and relays the single JSON result envelope on stdout VERBATIM.
 
-**Agents:** `grok-engineer-coder` (implement in isolated worktree; host
-orchestrates) and `grok-rescue` (diagnosis / second opinion). Claude loads
-`plugin/agents/` automatically. Codex agents auto-install on **SessionStart**
-into `~/.codex/agents/` (absolute `agents/run.mjs`); optional **setup** can force
-or remove managed agents.
+**Agents:** `grok-engineer-coder` (implement via ACP peer default or code;
+edits land per [integration-modes.md](integration-modes.md); host orchestrates)
+and `grok-rescue` (diagnosis / second opinion). Claude loads `plugin/agents/`
+automatically. Codex agents auto-install on **SessionStart** into
+`~/.codex/agents/` (absolute `agents/run.mjs`); optional **setup** can force or
+remove managed agents.
 
 **Invocation:** Claude uses `/grok:…` skills; Codex uses the skill picker /
 `$name` for the same skill names. Prefer each skill’s `$SKILL_BASE/run.mjs`.
@@ -71,8 +72,11 @@ loading, secret scanning, and the fail-closed error model. See
 ## Security model
 
 Trusted-input developer tool. Enforced: write confinement, private auth home,
-redacted single envelope, worktree isolation, gate-script integrity. Not a
-sandbox against an adversarial model. Full notes:
+redacted single envelope, gate-script integrity; worktree isolation when
+**integration** is auto/review (not for default integration=direct - see
+[integration-modes.md](integration-modes.md) and
+[`../../SECURITY.md`](../../SECURITY.md)). Not a sandbox against an adversarial
+model. Full notes:
 [`../../docs/OPEN-SECURITY-DECISIONS.md`](../../docs/OPEN-SECURITY-DECISIONS.md).
 
 ## Wrapper resolution
@@ -98,19 +102,21 @@ Canonical table: root [README.md](../../README.md) (skills + agents). Summary:
 | `/grok:adversarial-review` | `adversarial-review` | Hostile; web on by default |
 | `/grok:dual-lens` | companion | Adversarial then ordinary review |
 | `/grok:reason` | `reason` | Cold second opinion; web off by default |
-| `/grok:code` | `code` | Isolated worktree implementation (+ optional `--contract-file`) |
+| `/grok:code` | `code` | Implementation per [integration mode](integration-modes.md) (+ optional `--contract-file`) |
 | `/grok:verify` | `verify` | Hermetic verify; never `--web` |
-| `/grok:handoff` | `handoff` | Verified implementation by **runId** (1.6.0+; dual-condition ready) |
+| `/grok:handoff` | `handoff` | Verified implementation by **runId** (1.6.0+; dual-condition ready; read-only) |
 | `/grok:debate` | companion | Two reason passes + synthesis |
 | `/grok:status` / `jobs` / `result` / `cancel` | companion | Job inspection |
 | `/grok:transfer` | companion | Claude session → task pack |
 | `/grok:cleanup` | `cleanup` | Dry-run by default; `--confirm` removes |
 
-## Implementation handoff (1.6.0+)
+## Integration modes + handoff (1.6.0+ / 2.0.0)
 
-See [implementation-handoff.md](implementation-handoff.md). After `/grok:code`,
-parents call `/grok:handoff --run-id` before any apply. Notify is not ready.
-No auto-apply.
+Canonical how-edits-land matrix: [integration-modes.md](integration-modes.md)
+(direct default, auto apply-on-ready, review manual). Dual-condition ready and
+manual parent apply checklist: [implementation-handoff.md](implementation-handoff.md).
+After isolated `/grok:code`, parents call `/grok:handoff --run-id` before apply.
+Notify is not ready. Integrate is mode-aware - do not assume never-auto-apply.
 
 ## Execution context and notifications (1.5.0+)
 

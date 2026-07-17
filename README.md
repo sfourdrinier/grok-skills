@@ -1,6 +1,6 @@
 # grok-skills
 
-Run [Grok](https://x.ai) from Claude Code or Codex (the ChatGPT desktop coding surface) as a second pair of hands: review, reason, implement in an isolated worktree, verify. Not affiliated with xAI.
+Run [Grok](https://x.ai) from Claude Code or Codex (the ChatGPT desktop coding surface) as a second pair of hands: review, reason, implement directly in your tree (default) or in an isolated worktree, verify. Not affiliated with xAI.
 
 Works on whatever repo you point it at. The install location of this package is not the repo under review.
 
@@ -9,7 +9,9 @@ Plugin name: `grok`. Claude Code and Codex both install the same package; they
 
 **Division of labor:** Claude Code or Codex = orchestrator. Grok (via this
 plugin) = sandboxed second mind - especially **`grok-engineer-coder`** for
-implementation in an isolated worktree.
+implementation directly in your tree (default) or in an isolated worktree.
+How edits land is mode-aware:
+[plugin/references/integration-modes.md](plugin/references/integration-modes.md).
 
 ---
 
@@ -117,7 +119,8 @@ Typical session:
 /grok:code --target src/my-lib --base main --task "Fix the off-by-one in the paginator"
 /grok:status --run-id <runId from code envelope>
 /grok:handoff --run-id <runId>
-# Only if handoff reports integration.ready: parent applies the patch manually
+# Integrate per mode: direct = edits already live; auto = companion may apply;
+# review = parent applies the patch manually after ready (see integration-modes.md)
 /grok:verify --worktree /path/to/retained-worktree --task "Confirm the fix builds and tests pass"
 ```
 
@@ -188,9 +191,9 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 | `/grok:adversarial-review` | Hostile review that challenges design; web on by default. |
 | `/grok:dual-lens` | Adversarial pass, then ordinary review on the same target. |
 | `/grok:reason` | Cold second opinion on files you name. No automatic repo crawl. Web off by default. |
-| `/grok:code` | Implements in an **external git worktree** off a committed `--base`. Does not commit or push. Optional `--contract-file` (writeScopes + requiredValidation; hardened only). Writes handoff artifacts under the run dir. |
-| `/grok:implement` | **One-call delegate:** `code` then auto-`handoff` on the resulting runId. Relays both envelopes. Exit 0 only when code ok AND handoff dual-condition ready. Hardened only (direct refused). Never applies. |
-| `/grok:handoff` | **Read-only** verified implementation handoff by **`runId` only** (1.6.0+). Dual-condition ready: ready manifest + success envelope + patch rehash. Never applies. Notify is not ready. |
+| `/grok:code` | Implements per **integration mode** (default **direct** = live tree; `auto`/`review` = external worktree off a committed `--base`). Does not commit or push. Optional `--contract-file` (writeScopes + requiredValidation; runMode hardened only). Handoff artifacts under the run dir for isolated modes. See [integration-modes.md](plugin/references/integration-modes.md). |
+| `/grok:implement` | **One-call delegate:** `code` then auto-`handoff` on the resulting runId. Relays both envelopes. Exit 0 only when code ok AND handoff dual-condition ready. Hardened runMode only (runMode direct refused). Verify-only (does not apply); for apply-on-ready use `code --integration auto`. |
+| `/grok:handoff` | **Read-only** verified implementation handoff by **`runId` only** (1.6.0+). Dual-condition ready: ready manifest + success envelope + patch rehash. Never applies (read-only). Notify is not ready. |
 | `/grok:verify` | Pass/fail/inconclusive check on an existing worktree. No `--web`. |
 | `/grok:debate` | Two opposing Grok reason passes + synthesis on a topic. |
 | `/grok:status` | Jobs table, or read-only wrapper status with `--run-id` (or a bare runId - the companion translates; lifecycle projection; exit 1 can mean a failed target). |
@@ -204,7 +207,7 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 
 | Agent | Role |
 |-------|------|
-| **`grok-engineer-coder`** | Prefer for implementation: features, fixes, refactors. Runs Grok `code` in an isolated worktree (optional `verify`). Host plans/merges; Grok writes. |
+| **`grok-engineer-coder`** | Prefer for implementation: features, fixes, refactors. Default multi-turn ACP peer; one-shot `code` fallback. Edits land per [integration mode](plugin/references/integration-modes.md) (default live tree; optional worktree + verify). Host plans/merges; Grok writes. |
 | **`grok-rescue`** | Second opinion / diagnosis via Grok `reason` (or `code` if target+base are already known). |
 
 - **Claude Code:** agents ship in the plugin (`plugin/agents/`). Reload plugins after install.
@@ -233,28 +236,32 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 
 ### Run modes (security posture)
 
-Two postures, same skills:
+Two postures, same skills. This is the **security** axis (`runMode`), not how
+edits land - both axes use the word "direct"; disambiguate in
+[integration-modes.md](plugin/references/integration-modes.md).
 
 | Mode | How | What you get | Handoff artifacts |
 |------|-----|----------------|-------------------|
-| **hardened** (default) | omit, or `/grok:setup` with `--run-mode hardened` | Private Grok home, sandbox verification, worktree isolation, secret redaction. | **Yes** - verified patch + handoff manifest under the run dir. |
-| **direct** | `GROK_SKILLS_MODE=direct` or companion `setup --run-mode direct` | Uses your **installed Grok CLI** and normal `~/.grok` auth - same idea as OpenAI's plugin using your installed Codex. Faster, less isolation. Direct mode does **not** push completion notify in 1.5.0 (job still tracked). Job surface (`result`/`cancel`) accepts `direct-<timestamp>` ids; `handoff`/`status --run-id`/`implement` refuse with an honest message. | **No** - by design: handoff artifacts' value is the isolation evidence (worktree, sentinel, sandbox verification) that direct mode cannot attest. |
+| **hardened** (default) | omit, or `/grok:setup` with `--run-mode hardened` | Private Grok home, sandbox verification, secret redaction; isolation depends on **integration** mode (worktree for auto/review; live tree for integration=direct). | **Yes** for isolated integration paths - verified patch + handoff manifest under the run dir. |
+| **direct** | `GROK_SKILLS_MODE=direct` or companion `setup --run-mode direct` | Uses your **installed Grok CLI** and normal `~/.grok` auth - same idea as OpenAI's plugin using your installed Codex. Faster, less isolation. runMode direct does **not** push completion notify in 1.5.0 (job still tracked). Job surface (`result`/`cancel`) accepts `direct-<timestamp>` ids; `handoff`/`status --run-id`/`implement` refuse with an honest message. | **No** - by design: handoff artifacts' value is the isolation evidence (worktree, sentinel, sandbox verification) that runMode direct cannot attest. |
 
 ### Integration modes (how edits land)
 
 Orthogonal to run mode (security). Default for code/implement is **direct**
-(edit this working tree), but the first direct run in a workspace without
-recorded consent fails closed with a trust summary. Accept once:
+(edit this working tree under hardened-direct), but the first direct run in a
+workspace without recorded consent fails closed with a trust summary. Accept once:
 
 ```bash
 node "$SKILL_BASE/run.mjs" setup --integration direct
 ```
 
-Or opt into isolation for a single run: `--integration worktree` or
-`--integration review`. Settings `userConfig.integrationMode` / env
-`CLAUDE_PLUGIN_OPTION_INTEGRATIONMODE` are a default hint only - they do **not**
-satisfy consent; only setup does. Full mode matrix (Task 7.5 reference) lands
-with the peer-native integration docs.
+Or opt into isolation: `--integration auto` (worktree + apply-on-ready) or
+`--integration review` / `worktree` (worktree + manual parent apply). Settings
+`userConfig.integrationMode` / env `CLAUDE_PLUGIN_OPTION_INTEGRATIONMODE` are a
+default hint only - they do **not** satisfy consent; only setup does.
+
+**Canonical matrix (modes, honesty, two "direct" axes, ACP):**
+[plugin/references/integration-modes.md](plugin/references/integration-modes.md).
 
 On Claude Code, plugin `userConfig` (Settings) can also set the default run mode,
 integration mode, and notification prefs. The host exports them as
@@ -281,18 +288,27 @@ writes under the state root:
 - `runs/<runId>/implementation-handoff.json`
 
 **Parents (Claude Code / Codex) must call `/grok:handoff --run-id <runId>` before
-integrating.** Dual-condition ready is true only when the manifest says ready,
-a **success** terminal envelope exists for that runId, and the patch re-hashes.
-Completion **notifications are not ready** - they only mean a terminal attempt
-finished.
+integrating isolated (auto/review) results.** Dual-condition ready is true only
+when the manifest says ready, a **success** terminal envelope exists for that
+runId, and the patch re-hashes. Completion **notifications are not ready** -
+they only mean a terminal attempt finished.
 
-This plugin **never** auto-applies, commits, merges, cherry-picks, or pushes.
-Parent apply is manual (`git apply --check --binary` then explicit apply). Full
-protocol: [implementation-handoff.md](plugin/references/implementation-handoff.md).
+Integrate is **mode-aware** (canonical:
+[integration-modes.md](plugin/references/integration-modes.md)):
+
+- **direct:** source edits already live in your tree (protected paths rolled
+  back if touched); no patch gate required for the edit to exist
+- **auto:** companion may auto-apply a dual-condition-ready patch after
+  apply-time revalidation
+- **review:** never auto-applies; parent apply is manual (`git apply --check
+  --binary` then explicit apply)
+
+This plugin **never** auto-commits, merges, cherry-picks, or pushes in any mode.
+Handoff checklist: [implementation-handoff.md](plugin/references/implementation-handoff.md).
 
 `--contract-file` is operator-trusted (`operator-contract-trusted-no-os-sandbox`):
 argv arrays only, cwd confined to the worktree, **no** OS filesystem sandbox claim.
-Direct mode (`setup --run-mode direct`) **rejects** `--contract-file` (fail closed);
+runMode direct (`setup --run-mode direct`) **rejects** `--contract-file` (fail closed);
 handoff/status/cleanup always use the hardened wrapper even if prefs say direct.
 
 ### Completion notifications (optional, 1.5.0+)

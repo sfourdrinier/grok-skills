@@ -1,6 +1,6 @@
 ---
 name: "implement"
-description: "One-call delegate: Grok code in an isolated worktree, then auto-handoff verification (never applies)"
+description: "One-call delegate: Grok code then auto-handoff verification (verify-only; mode-aware integrate elsewhere)"
 argument-hint: "--target <path> --base <revision> (--task <text> | --task-file <path>) [--contract-file <path>] [--web] [--model <id>] [--timeout <s>] [--max-turns <n>]"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
@@ -31,10 +31,11 @@ use `--task-file -` with a single-quoted heredoc.
 
 <!-- plugin/skills/implement.md -->
 
-Run a full delegate cycle in one call: Grok `code` in an isolated worktree,
-then an automatic `/grok:handoff` verification on the resulting runId. Relay
-BOTH envelopes verbatim, in order. Integration readiness comes from the SECOND
-(handoff) envelope only.
+Run a full delegate cycle in one call: Grok `code` (per active integration
+mode - see `plugin/references/integration-modes.md`), then an automatic
+`/grok:handoff` verification on the resulting runId. Relay BOTH envelopes
+verbatim, in order. Integration readiness comes from the SECOND (handoff)
+envelope only.
 
 **Exit contract:** exit **0** only when code succeeded **and** handoff is
 dual-condition ready (`response.integration.ready === true`); exit **1** on
@@ -46,11 +47,13 @@ failure). Never propagates a raw spawn exit code.
 blockers surface on stdout. Without a runId, handoff is skipped and the
 combo exits 1.
 
-This still never applies, commits, or pushes - parent apply stays manual (see
-references/implementation-handoff.md). For **apply-on-verified-ready**, use
-`/grok:code --integration auto` (worktree + handoff + apply-time revalidation);
-`implement` stays verify-only.
-Requires hardened mode; direct mode is refused fail-closed.
+`implement` itself is **verify-only**: it does not apply, commit, or push (see
+`plugin/references/integration-modes.md`). For **apply-on-verified-ready**, use
+`/grok:code --integration auto` (worktree + handoff + apply-time revalidation).
+In **review**, parent apply stays manual after ready handoff
+(`references/implementation-handoff.md`). In **direct**, source edits land live
+on the code step (when that mode is active).
+Requires hardened **runMode**; runMode direct is refused fail-closed.
 Foreground/background selection: same AskUserQuestion flow as /grok:code.
 
 Raw slash-command arguments:
@@ -123,10 +126,12 @@ Background flow:
 If the companion prints an actionable "could not locate the Grok wrapper"
 message instead of an envelope, tell the user to run `/grok:setup`.
 
-## Hardened only + no auto-apply
+## Hardened runMode only; verify-only
 
-`implement` requires **hardened** run-mode. Direct mode is refused fail-closed
-(no handoff artifacts exist without isolation evidence). Parent apply stays
-manual after a ready handoff - never auto-apply, commit, or push from
-`implement`. For apply-on-verified-ready, use `/grok:code --integration auto`
-instead. See `skills/handoff/SKILL.md` and `references/implementation-handoff.md`.
+`implement` requires **hardened** runMode. runMode direct is refused fail-closed
+(no handoff artifacts without isolation evidence). `implement` never applies,
+commits, or pushes - it only runs code + handoff verification. How a parent
+(or auto mode) integrates after ready is mode-aware:
+`plugin/references/integration-modes.md`. For apply-on-verified-ready, use
+`/grok:code --integration auto` instead. See `skills/handoff/SKILL.md` and
+`references/implementation-handoff.md`.

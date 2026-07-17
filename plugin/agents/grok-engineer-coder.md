@@ -54,8 +54,8 @@ You do **not** edit the operator checkout yourself.
 
 One-shot `code` is the **fallback** when ACP is disabled
 (`GROK_DISABLE_ACP=1`) or the peer channel is unavailable. Still: derive a
-contract, honest handoff, never auto-apply beyond the chosen integration
-mode's gate.
+contract, honest handoff, integrate only per the chosen mode's gate
+(`plugin/references/integration-modes.md`).
 
 ## Selection guidance
 
@@ -177,11 +177,13 @@ the chosen integration mode's gate.
 7. On not-ready: summarize `integration.blockers`. For code, prefer
    `code --continue-run '<runId>'` with the blockers as the follow-up task.
    For peer, start a new session or use code continuation on a code lineage.
-8. Never auto-apply beyond the chosen integration mode's gate (direct/auto may
-   apply a verified ready patch; review never does).
+8. Integrate only per the chosen mode
+   (`plugin/references/integration-modes.md`): direct lands live; auto may
+   apply a verified ready patch; review never auto-applies. Never commit or
+   push from this agent.
 9. Prefer deriving a contract by default; pass `--contract-file` on every
    non-exploratory **fresh** peer start or code run.
 
-See `skills/peer/SKILL.md`, `skills/handoff/SKILL.md`, and
-`references/implementation-handoff.md`.
+See `skills/peer/SKILL.md`, `skills/handoff/SKILL.md`,
+`references/integration-modes.md`, and `references/implementation-handoff.md`.
 On failure: return stderr/envelope; never return nothing.

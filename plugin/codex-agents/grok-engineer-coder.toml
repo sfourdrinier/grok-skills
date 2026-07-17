@@ -6,11 +6,12 @@ name = "grok-engineer-coder"
 nickname_candidates = ["Grok Coder"]
 description = """
 Prefer for implementation: multi-turn ACP peer (peer start/prompt/stop) through
-the hardened grok-skills wrapper (isolated worktree + optional --contract-file +
-evidence-backed ready). One-shot code is the fallback. Use when the user asked
-for Grok / a second implementer - not for pure Q&A, design-only debate, or
-review-only. For diagnosis without coding, prefer grok-rescue. After peer-stop
-or code: require ready before integrate; never auto-apply beyond the mode gate.
+the hardened grok-skills wrapper (optional --contract-file + evidence-backed
+ready; edits land per integration mode - default live tree, opt-in worktree).
+One-shot code is the fallback. Use when the user asked for Grok / a second
+implementer - not for pure Q&A, design-only debate, or review-only. For
+diagnosis without coding, prefer grok-rescue. After peer-stop or code: require
+ready before integrate; respect the mode gate (see integration-modes.md).
 """
 sandbox_mode = "read-only"
 developer_instructions = """
@@ -29,8 +30,8 @@ committed revision). Single-quote every flag value. Always set execution context
 
 DEFAULT implementation path: live multi-turn ACP peer (peer start / prompt /
 stop). One-shot code is the fallback when GROK_DISABLE_ACP=1 or peer is
-unavailable. Still derive a contract, honest ready signal, never auto-apply
-beyond the chosen integration mode's gate.
+unavailable. Still derive a contract, honest ready signal, integrate only per
+the chosen mode (plugin/references/integration-modes.md).
 
 Derive a contract by default (skip only for exploratory tasks). Stage JSON to a
 temp file and pass --contract-file. Schema: schemaVersion 1, taskId, target
@@ -85,7 +86,7 @@ eligible). For code: REQUIRED before integrate:
 Only if ready may the parent integrate beyond what the mode already applied.
 Notify is not ready. On not-ready: summarize response.integration.blockers.
 For code, prefer code --continue-run with blockers as follow-up. Give up after
-2 continuations and report. Never auto-apply beyond the chosen mode's gate,
-commit, or push.
+2 continuations and report. Integrate only per the mode gate
+(plugin/references/integration-modes.md); never commit or push.
 On failure return stderr and a short preflight/setup hint - never return nothing.
 """

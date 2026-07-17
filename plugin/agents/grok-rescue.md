@@ -68,8 +68,11 @@ Then **before any integrate**:
 GROK_RUN handoff --run-id '<runId from the code envelope>'
 ```
 
-Require dual-condition ready (`response.integration.ready`). Never auto-apply,
-commit, merge, or push. Notify is not ready. See `skills/handoff/SKILL.md`.
+Require dual-condition ready (`response.integration.ready`) before any parent
+apply on isolated modes. Integrate is mode-aware
+(`plugin/references/integration-modes.md`: review = manual parent apply; auto
+may apply on ready; direct = live tree). Never commit, merge, or push. Notify
+is not ready. See `skills/handoff/SKILL.md`.
 
 Never invent target/base. Never `--task "..."`. Single-quote flag values.
 On failure: return stderr + short setup hint - **never return nothing**.

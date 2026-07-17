@@ -60,8 +60,8 @@ Supported flags:
 |------|--------|
 | `--run-mode hardened` | Persist hardened mode (default) |
 | `--run-mode direct` | Persist direct (installed Grok CLI home) |
-| `--integration direct` | Persist integration mode **and** record one-time consent for live-tree edits on the **target** repo (orthogonal to run mode). Consent is keyed on the resolved target workspace, not companion cwd. |
-| `--integration worktree\|auto\|review` | Persist integration mode for the target repo (no consent required; isolated / review paths) |
+| `--integration direct` | Persist integration mode **and** record one-time consent for live-tree edits on the **target** repo (orthogonal to run mode). Consent is keyed on the resolved target workspace, not companion cwd. Canonical matrix: `plugin/references/integration-modes.md`. |
+| `--integration worktree\|auto\|review` | Persist integration mode for the target repo (no consent required; auto = apply-on-ready; review/worktree = isolated, manual parent apply) |
 | `--target <path>` | Repo (or dir) that integration prefs/consent apply to (default `.`). Git toplevel when inside a repo; absolute path when not. Use when consenting for a repo other than companion cwd. |
 | `--notification-mode off\|auto\|native\|webhook` | Completion signal prefs (default `off`; **auto** recommended for background jobs) |
 | `--notification-webhook-url <url>` | Webhook URL when mode is `webhook` |
@@ -101,7 +101,7 @@ node "$SKILL_BASE/run.mjs" setup --enable-review-gate
 
 | Agent | Host | Role |
 |-------|------|------|
-| `grok-engineer-coder` (nickname **Grok Coder**) | Claude (`plugin/agents/`) + Codex (`~/.codex/agents/` or project `.codex/agents/`) | Grok implements code in an isolated worktree; host orchestrates |
+| `grok-engineer-coder` (nickname **Grok Coder**) | Claude (`plugin/agents/`) + Codex (`~/.codex/agents/` or project `.codex/agents/`) | Grok implements via ACP peer (default) or code; edits land per [integration-modes.md](../../references/integration-modes.md); host orchestrates |
 | `grok-rescue` (nickname **Grok Rescue**) | Claude + Codex | Diagnosis / second opinion via Grok `reason` (or `code` if target+base given) |
 
 - **Claude Code:** loads `plugin/agents/` from the install automatically.

@@ -1,6 +1,6 @@
 ---
 name: "code"
-description: "Have Grok implement code in an isolated external worktree (nothing is committed or pushed)"
+description: "Have Grok implement code (default: live tree; opt-in isolated worktree). Nothing is committed or pushed"
 argument-hint: "(--target <path> --base <revision> | --continue-run <runId>) (--task <text> | --task-file <path>) [--contract-file <path>] [--web] [--model <id>] [--timeout <s>] [--max-turns <n>]"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
@@ -32,19 +32,23 @@ use `--task-file -` with a single-quoted heredoc.
 <!-- plugin/skills/code.md -->
 
 Run a Grok `code` implementation through the hardened wrapper and relay its
-result envelope. The wrapper creates and verifies its own external git worktree
-(never the current checkout), runs the workspace build gate, and keeps the
-worktree for inspection. Nothing is ever committed, merged, pushed, or deleted
-automatically.
+result envelope. How edits land is **mode-aware** (canonical:
+`plugin/references/integration-modes.md`): default **direct** edits the real
+tree (hardened-direct; one-time consent); **auto** / **review** use an
+external git worktree. The wrapper runs the workspace build gate. Nothing is
+ever committed, merged, pushed, or deleted automatically.
 
 Raw slash-command arguments:
 `$ARGUMENTS`
 
 Required wrapper flags (copy exactly, substitute only placeholder values):
 - Fresh run: `--target <workspace-relative-path>` and `--base <committed-revision>`
-  are required (the wrapper builds the worktree from a committed revision; if
-  the task depends on uncommitted changes, the run fails closed - the user must
-  commit what the task needs first).
+  are required. For **auto/review** the wrapper builds the worktree from a
+  committed revision (uncommitted task deps fail closed - commit first). For
+  **direct**, `--base` still frames the run; edits land on the live tree
+  (dirty-overlap policy applies; see integration-modes.md).
+- Optional `--integration direct|auto|review|worktree` (default direct when
+  consented; see `plugin/references/integration-modes.md`).
 - Continuation: `--continue-run <runId>` instead of `--target`/`--base` (reuses
   the prior retained worktree; mutually exclusive with `--target`, `--base`, and
   `--contract-file`).
@@ -142,16 +146,16 @@ On success or classified failure after hardened Grok, the wrapper writes:
 - `runs/<runId>/artifacts/implementation.patch` (immutable git binary full-index)
 - `runs/<runId>/implementation-handoff.json`
 
-**Notify is not integrate.** After a code run, parents (Claude Code / Codex)
-must call `/grok:handoff --run-id <runId from the code envelope>` and require
-dual-condition ready before any apply. See `skills/handoff/SKILL.md` and
-`references/implementation-handoff.md`.
+**Notify is not integrate.** After an isolated (`auto`/`review`) code run,
+parents must call `/grok:handoff --run-id <runId from the code envelope>` and
+require dual-condition ready before any apply. In **direct**, source edits are
+already live. See `skills/handoff/SKILL.md`,
+`references/implementation-handoff.md`, and the canonical matrix
+`references/integration-modes.md`.
 
-**Integration modes (brief; full matrix in Task 7.5):**
-- default / `--integration direct` - live tree edits (one-time consent)
-- `--integration worktree` | `review` - isolated worktree; parent apply stays manual
-- `--integration auto` - worktree + dual-condition handoff, then
-  **apply-on-verified-ready** with apply-time revalidation (never half-applies)
+**Integration modes (link only - do not restate):**
+`plugin/references/integration-modes.md` - direct (default, live tree + consent),
+auto (worktree + apply-on-ready), review (worktree + manual parent apply).
 
 ## Iterating on a run (2.0.0+)
 

@@ -34,12 +34,13 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 
 ### Added (Phase 1 - delegation, PR7)
 
-- **`/grok:implement`**: one-call delegate cycle - `code` in an isolated
-  worktree, then automatic `/grok:handoff` verification on the resulting
-  runId; both envelopes relayed in order; exit 0 only on dual-condition
-  ready. Handoff runs even after failed code (with a runId) so blockers
-  surface. Never applies; parent apply stays manual. Hardened-only; direct
-  mode refuses fail-closed.
+- **`/grok:implement`**: one-call delegate cycle - `code` then automatic
+  `/grok:handoff` verification on the resulting runId; both envelopes relayed
+  in order; exit 0 only on dual-condition ready. Handoff runs even after
+  failed code (with a runId) so blockers surface. Verify-only (does not
+  apply); for apply-on-ready use `code --integration auto`. Hardened runMode
+  only; runMode direct refuses fail-closed. Mode matrix:
+  `plugin/references/integration-modes.md`.
 - Contract steering: `--contract-file` objective, acceptance criteria, write
   scopes, and validation commands are injected into Grok's prompt
   (single-line fenced, data-not-instructions framing); a display-only
@@ -143,6 +144,28 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
   `verify_enforcement` at stop records failure honestly. New `acp-failure`
   error class; reaper respects live peer homes. Design:
   `docs/specs/2026-07-17-acp-peer-channel-design.md`.
+
+### Added (Phase 7 - peer-native integration modes + docs)
+
+- **Integration modes** (orthogonal to runMode security): `direct` (DEFAULT),
+  `auto`, `review` (+ `worktree` isolation alias). Canonical reference:
+  `plugin/references/integration-modes.md`.
+- **direct default (hardened-direct):** under runMode hardened, Grok edits the
+  operator's real tree with private home + sandbox-to-repo + redaction;
+  protected paths (`.git`/`.env`/keys/hooks) deny-scanned and rolled back
+  best-effort; source edits land live; one-time `setup --integration direct`
+  consent per target repo (env/userConfig alone never counts).
+- **auto:** isolated worktree + dual-condition ready, then companion
+  apply-on-verified-ready with apply-time revalidation (never half-applies).
+- **review:** worktree + patch + manifest; never auto-applies (manual parent
+  apply after ready handoff).
+- **ACP default peer channel** for `grok-engineer-coder` (multi-turn
+  start/prompt/stop); one-shot `code` is the fallback (`GROK_DISABLE_ACP=1`).
+  Peer results integrate via the same modes.
+- **Docs honesty + DRY:** README top-line pitch matches direct-default;
+  SECURITY states trusted-input posture for integration=direct; skills/agents
+  link the single integration-modes reference (no bare "never auto-apply"
+  absolute claims). Naming disambiguates runMode direct vs integration direct.
 
 ### Changed (Phase 0)
 

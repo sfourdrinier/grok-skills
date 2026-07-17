@@ -71,6 +71,17 @@ characters; only operator-supplied contract paths reject Windows drive forms.
 
 ## Parent apply checklist
 
+Mode-aware integrate (canonical:
+[integration-modes.md](integration-modes.md)):
+
+- **direct:** source edits already live in the operator tree; protected paths
+  rolled back if touched. No patch gate required for the edit to exist.
+- **auto:** companion may auto-apply after dual-condition ready + apply-time
+  revalidation. Use this checklist only if apply did not run or failed.
+- **review:** never auto-applies - use the checklist below.
+
+### Manual apply (review / when auto did not apply)
+
 1. `handoff --run-id` success + ready  
 2. Confirm base still present / ancestry  
 3. Dirty overlap check on target paths  
@@ -79,7 +90,7 @@ characters; only operator-supplied contract paths reject Windows drive forms.
 6. Re-run project validation on parent  
 7. Record runId + patch sha256  
 
-**Never** auto-apply, auto-commit, merge, cherry-pick, or push from this plugin.
+**Never** auto-commit, merge, cherry-pick, or push from this plugin in any mode.
 
 ## transfer vs result vs handoff
 

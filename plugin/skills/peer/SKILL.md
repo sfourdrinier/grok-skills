@@ -30,8 +30,9 @@ only (no direct run-mode).
 
 No contract + no build gate -> honest not-ready with
 `no-authoritative-validation`. Ready peer results integrate via the active
-integration mode (auto/direct apply the verified patch; review leaves patch +
-manifest). `/grok:handoff --run-id` also works on a peer run (mode peer-stop).
+integration mode (canonical: `plugin/references/integration-modes.md` -
+direct: live tree; auto: apply-on-ready; review: patch + manifest only).
+`/grok:handoff --run-id` also works on a peer run (mode peer-stop).
 
 ## How to run (transparent)
 
@@ -110,5 +111,7 @@ node "$SKILL_BASE/run.mjs" cleanup --run-id '<id>' --confirm
   is recorded honestly.
 - Secret redaction applies to progress chunks, turn envelopes, and control-
   socket payloads (same scan as `emit_envelope`).
-- Never auto-apply beyond the chosen integration mode's gate. Prefer deriving a
-  contract with shell-free `requiredValidation` so ready can be evidence-backed.
+- Integrate only per the chosen mode's gate (see
+  `plugin/references/integration-modes.md`: review never auto-applies; auto may
+  after revalidation; direct lands live). Prefer deriving a contract with
+  shell-free `requiredValidation` so ready can be evidence-backed.

@@ -64,11 +64,22 @@ Durable handoff artifacts exist only after a **hardened** `code` run. Direct
 run-mode does not write verified handoff state; use `setup --run-mode hardened`
 (or the companion's hardened default) before expecting `/grok:handoff` ready.
 
-## Parent integrate protocol (document only - never auto-apply)
+## Parent integrate protocol (mode-aware; handoff is read-only)
 
-This plugin **never** auto-applies, commits, merges, cherry-picks, or pushes.
+This skill is **read-only** - it never applies. How results land is mode-aware
+(canonical: `plugin/references/integration-modes.md`):
 
-1. Dispatch `/grok:code` with optional `--contract-file` (writeScopes + validation)
+- **direct:** source edits already live; handoff artifacts may be absent on
+  pure live-tree paths; review the working tree diff
+- **auto:** companion may auto-apply after dual-condition ready + apply-time
+  revalidation (you still may call handoff to observe ready)
+- **review:** never auto-applies; parent apply is manual after ready
+
+This plugin **never** auto-commits, merges, cherry-picks, or pushes in any mode.
+
+### Manual parent apply (review / when auto did not apply)
+
+1. Dispatch `/grok:code` (or peer) with optional `--contract-file`
 2. Wait for terminal status (`/grok:status --run-id` optional)
 3. Run `/grok:handoff --run-id <id>`
 4. Proceed only if envelope status is success and `response.integration.ready`

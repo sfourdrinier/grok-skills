@@ -14,7 +14,9 @@ over. It is **not** a complete sandbox against an adversarial model.
   known secret shapes and for exact injected credential values.
 - **Fail-closed defaults** when the platform, sandbox, or stream cannot be
   verified (not when Grok CLI build string differs from last-validated stamp).
-- **Worktree isolation** for `code` (external worktree + escape detection).
+- **Worktree isolation** for `code` when **integration** is `auto` / `review` /
+  `worktree` (external worktree + escape detection). **Not** claimed for
+  **integration=direct** (default) - see [direct-default trust posture](#direct-default-trust-posture-integrationdirect) below.
 - **Build-gate script integrity** (D1): gate scripts modified by the run are refused.
 
 ### Accepted limits (please read)
@@ -48,15 +50,18 @@ over. It is **not** a complete sandbox against an adversarial model.
 - **Implementation handoff (1.6.0+):** optional `--contract-file` is
   **operator-trusted** content (not untrusted model output).
   `requiredValidation` argv runs with `shell=False` and cwd confined to the
-  worktree; there is **no** OS filesystem sandbox claim for those commands
-  (they can write outside the worktree if the operator points them at a capable
-  binary). Direct mode rejects `--contract-file` (fail closed). Handoff mode
-  re-hashes the patch under the owned run directory only (absolute/`..` paths
-  rejected). Notify is not integration-ready - always call `handoff --run-id`
-  before apply. The plugin never auto-applies. **Direct mode produces no
-  handoff artifacts by design** - the artifacts' value is the isolation
-  evidence (owned worktree, sentinel, sandbox verification) that direct mode
-  cannot attest; use hardened mode for verified handoff.
+  worktree (or target tree); there is **no** OS filesystem sandbox claim for
+  those commands (they can write outside the worktree if the operator points
+  them at a capable binary). **runMode direct** rejects `--contract-file` (fail
+  closed). Handoff mode re-hashes the patch under the owned run directory only
+  (absolute/`..` paths rejected). Notify is not integration-ready - for
+  isolated modes always call `handoff --run-id` before apply. Integrate is
+  **mode-aware** ([integration-modes.md](plugin/references/integration-modes.md)):
+  review never auto-applies; auto may apply a dual-condition-ready patch after
+  revalidation; integration=direct lands source edits live. The plugin never
+  auto-commits, merges, cherry-picks, or pushes. **runMode direct** produces no
+  handoff artifacts by design - the artifacts' value is the isolation evidence
+  that runMode direct cannot attest; use runMode hardened for verified handoff.
 - **Experimental ACP peer-preview (`GROK_EXPERIMENTAL_ACP=1`):** an honest
   preview only. Peer-stop never claims integration-ready, never forges
   validation evidence, and is **not** eligible for `/grok:handoff`. Apply only
@@ -67,6 +72,38 @@ over. It is **not** a complete sandbox against an adversarial model.
   Control-socket payloads and turn envelopes are scanned with the same
   `assert_no_secret_material` path as stdout envelopes. The wrapper enforces
   the experimental env gate (not companion-only).
+
+### Direct-default trust posture (integration=direct)
+
+Canonical product matrix:
+[plugin/references/integration-modes.md](plugin/references/integration-modes.md).
+**Do not** confuse **integration=direct** (how edits land) with **runMode=direct**
+(installed CLI security posture) - both use the word "direct".
+
+**integration=direct is the default** for code / implement / peer. Under runMode
+hardened it is **hardened-direct**: private auth home + OS sandbox write-confined
+to the **repo root** (+ private tmp) + secret redaction on the stdout envelope.
+
+Honest limits (these are deliberate, not temporary gaps to paper over):
+
+1. **Worktree isolation is gone in direct.** Source edits land in the operator
+   checkout live. There is no pre-apply dual-condition gate and no forensic
+   patch required for the edit to exist.
+2. **Private home does not protect the tree.** It isolates Grok credentials /
+   config for the child, not your working tree, `.env`, or git objects.
+3. **Sandbox confine ≠ protect `.git` / `.env` inside the repo.** The write
+   grant is whole-root. Deny-list scan + **post-run rollback** of protected
+   paths (`.git/**`, `.env` / `.env.*`, keys, hooks) are **best-effort**, not
+   seatbelt subpath prevention.
+4. **Grok can still READ your files** (documented D-SECRETREAD). Write
+   confinement is not a read firewall.
+5. **Consent gate:** first direct run without `setup --integration direct`
+   (per target repo) fails closed with a trust summary. Env / userConfig alone
+   never counts as consent.
+
+Choose **integration=auto** or **review** when you want isolation and a verified
+patch before anything lands on the operator tree. Prefer those for untrusted or
+high-risk changes.
 
 ### Session archives
 
