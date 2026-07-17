@@ -310,11 +310,201 @@ class ContinueRunTests(WorktreeModeHarness):
             joined,
         )
 
+    def test_second_continue_of_same_prior_fails_naming_child(self) -> None:
+        """Finding 2: single-lineage - second continue of A fails naming B."""
+        repo = self.make_code_repo()
+
+        def plant(wt: pathlib.Path, run_id: str) -> None:
+            _plant_sentinel_in_worktree(wt, run_id)
+            (wt / "pkg" / "impl.txt").write_text("v1\n", encoding="utf-8")
+
+        exit_code, out = self._run(repo, plant=plant)
+        env = json.loads(out)
+        self.assertEqual(exit_code, 0, out)
+        prior_id = env["runId"]
+
+        def plant2(wt: pathlib.Path, run_id: str) -> None:
+            _plant_sentinel_in_worktree(wt, run_id)
+            (wt / "pkg" / "impl.txt").write_text("v2\n", encoding="utf-8")
+
+        exit_code2, out2 = self.drive(
+            ["code", "--continue-run", prior_id, "--task", "first continue"],
+            repo_root=repo,
+            plant=plant2,
+        )
+        env2 = json.loads(out2)
+        self.assertEqual(exit_code2, 0, out2)
+        child_id = env2["runId"]
+        prior_record = runstate.load_run_record(prior_id)
+        self.assertEqual(prior_record.get("continuedByRunId"), child_id)
+
+        exit_code3, out3 = self.drive(
+            ["code", "--continue-run", prior_id, "--task", "fork sibling"],
+            repo_root=repo,
+            plant=plant2,
+        )
+        env3 = json.loads(out3)
+        self.assertEqual(exit_code3, 1, out3)
+        self.assertEqual(env3["error"]["class"], "invalid-target")
+        msg = env3["error"]["message"]
+        self.assertIn(prior_id, msg)
+        self.assertIn(child_id, msg)
+        self.assertRegex(msg.lower(), r"already continued")
+
+    def test_missing_persisted_contract_when_prior_had_one_fails(self) -> None:
+        """Finding 3: silent contract loss fails closed."""
+        repo = self.make_code_repo()
+        contract = {
+            "schemaVersion": 1,
+            "taskId": "lost-c",
+            "objective": "must not lose me",
+            "target": "pkg",
+            "writeScopes": [{"kind": "subtree", "path": "pkg"}],
+            "acceptanceCriteria": ["ok"],
+            "requiredValidation": [],
+        }
+        cpath = pathlib.Path(self.tmp_root) / "contract-lost.json"
+        cpath.write_text(json.dumps(contract), encoding="utf-8")
+
+        def plant(wt: pathlib.Path, run_id: str) -> None:
+            _plant_sentinel_in_worktree(wt, run_id)
+            (wt / "pkg" / "impl.txt").write_text("x\n", encoding="utf-8")
+
+        exit_code, out = self._run(
+            repo,
+            extra_argv=["--contract-file", str(cpath)],
+            plant=plant,
+        )
+        env = json.loads(out)
+        self.assertEqual(exit_code, 0, out)
+        prior_id = env["runId"]
+        prior_dir = runstate.state_root() / "runs" / prior_id
+        manifest = json.loads(
+            (prior_dir / "implementation-handoff.json").read_text(encoding="utf-8")
+        )
+        self.assertTrue(manifest.get("contractSha256"))
+        (prior_dir / "contract.json").unlink()
+
+        exit_code2, out2 = self.drive(
+            ["code", "--continue-run", prior_id, "--task", "should fail"],
+            repo_root=repo,
+            plant=plant,
+        )
+        env2 = json.loads(out2)
+        self.assertEqual(exit_code2, 1, out2)
+        self.assertEqual(env2["error"]["class"], "implementation-contract-invalid")
+        self.assertRegex(
+            env2["error"]["message"].lower(),
+            r"prior run had a contract but its persisted copy is missing",
+        )
+
+    def test_contract_sha_mismatch_on_continue_fails(self) -> None:
+        """Finding 4: tampered/replaced contract.json fails closed on sha pin."""
+        repo = self.make_code_repo()
+        contract = {
+            "schemaVersion": 1,
+            "taskId": "pin-c",
+            "objective": "pin me",
+            "target": "pkg",
+            "writeScopes": [{"kind": "subtree", "path": "pkg"}],
+            "acceptanceCriteria": ["ok"],
+            "requiredValidation": [],
+        }
+        cpath = pathlib.Path(self.tmp_root) / "contract-pin.json"
+        cpath.write_text(json.dumps(contract), encoding="utf-8")
+
+        def plant(wt: pathlib.Path, run_id: str) -> None:
+            _plant_sentinel_in_worktree(wt, run_id)
+            (wt / "pkg" / "impl.txt").write_text("x\n", encoding="utf-8")
+
+        exit_code, out = self._run(
+            repo,
+            extra_argv=["--contract-file", str(cpath)],
+            plant=plant,
+        )
+        env = json.loads(out)
+        self.assertEqual(exit_code, 0, out)
+        prior_id = env["runId"]
+        prior_dir = runstate.state_root() / "runs" / prior_id
+        # Replace with a different valid contract (same shape, different taskId).
+        tampered = dict(contract)
+        tampered["taskId"] = "tampered"
+        (prior_dir / "contract.json").write_text(
+            json.dumps(tampered, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+
+        exit_code2, out2 = self.drive(
+            ["code", "--continue-run", prior_id, "--task", "should fail sha"],
+            repo_root=repo,
+            plant=plant,
+        )
+        env2 = json.loads(out2)
+        self.assertEqual(exit_code2, 1, out2)
+        self.assertEqual(env2["error"]["class"], "implementation-contract-invalid")
+        self.assertRegex(
+            env2["error"]["message"].lower(),
+            r"does not match the prior run's contractsha256",
+        )
+
+    def test_invalid_prior_base_fails_at_entry(self) -> None:
+        """Finding 5: baseRevision that is not a commit fails invalid-target early."""
+        repo = self.make_code_repo()
+
+        def plant(wt: pathlib.Path, run_id: str) -> None:
+            _plant_sentinel_in_worktree(wt, run_id)
+            (wt / "pkg" / "impl.txt").write_text("v1\n", encoding="utf-8")
+
+        exit_code, out = self._run(repo, plant=plant)
+        env = json.loads(out)
+        self.assertEqual(exit_code, 0, out)
+        prior_id = env["runId"]
+        prior_dir = runstate.state_root() / "runs" / prior_id
+        record_path = prior_dir / "run.json"
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        bogus = "deadbeef" * 5
+        record["baseRevision"] = bogus
+        runstate.write_json_atomic(record_path, record)
+
+        exit_code2, out2 = self.drive(
+            ["code", "--continue-run", prior_id, "--task", "bad base"],
+            repo_root=repo,
+            plant=plant,
+        )
+        env2 = json.loads(out2)
+        self.assertEqual(exit_code2, 1, out2)
+        self.assertEqual(env2["error"]["class"], "invalid-target")
+        self.assertIn(bogus, env2["error"]["message"])
+
+    def test_iteration_cap_enforced_with_usage_error(self) -> None:
+        """Finding 6: continuing past MAX_CONTINUATION_ITERATION is usage-error."""
+        from groklib.modes import code_continue
+
+        repo = self.make_code_repo()
+
+        def plant(wt: pathlib.Path, run_id: str) -> None:
+            _plant_sentinel_in_worktree(wt, run_id)
+            (wt / "pkg" / "impl.txt").write_text("v1\n", encoding="utf-8")
+
+        exit_code, out = self._run(repo, plant=plant)
+        env = json.loads(out)
+        self.assertEqual(exit_code, 0, out)
+        prior_id = env["runId"]
+        prior_dir = runstate.state_root() / "runs" / prior_id
+        record_path = prior_dir / "run.json"
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        record["iteration"] = code_continue.MAX_CONTINUATION_ITERATION
+        runstate.write_json_atomic(record_path, record)
+
+        exit_code2, out2 = self.drive(
+            ["code", "--continue-run", prior_id, "--task", "over cap"],
+            repo_root=repo,
+            plant=plant,
+        )
+        env2 = json.loads(out2)
+        self.assertEqual(exit_code2, 1, out2)
+        self.assertEqual(env2["error"]["class"], "usage-error")
+        self.assertIn(str(code_continue.MAX_CONTINUATION_ITERATION), env2["error"]["message"])
+
 
 if __name__ == "__main__":
-    unittest.main()
-
-
-if __name__ == "__main__":
-    import unittest
     unittest.main()

@@ -2,24 +2,28 @@
 #
 # Continuation helpers for `code --continue-run <runId>` (Task 2.2). Keeps
 # modes/code.py under the 900-line cap: prior-run loading, worktree rebuild,
-# contract persistence, and committed-manifest ref reads.
+# contract persistence, single-lineage claim, and committed-manifest ref reads.
 
 import json
 import os
 import pathlib
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from groklib import GrokWrapperError, log_stderr, runstate
 from groklib import session_store
 from groklib import worktree as worktree_mod
-from groklib.implementation_contract import load_contract_file
+from groklib.code_handoff_finalize import _contract_sha256
+from groklib.implementation_contract import assert_target_matches, load_contract_file
 
 _PACKAGE_JSON = "package.json"
 _CONTRACT_JSON = "contract.json"
+_HANDOFF_JSON = "implementation-handoff.json"
 _TERMINAL_LIFECYCLES = frozenset({"completed", "failed", "canceled"})
 _NO_SESSION_ARCHIVE_WARNING = (
     "prior run has no session archive; continuing in the same worktree with a fresh Grok session"
 )
+# Max iteration number on a successful continue (initial run counts as 1).
+MAX_CONTINUATION_ITERATION = 20
 
 
 def _log(function: str, message: str) -> None:
@@ -122,14 +126,204 @@ def prior_iteration_from_record(record: dict) -> int:
     return 1
 
 
+def _prior_contract_sha256(prior_run_dir: pathlib.Path) -> Optional[str]:
+    """Return non-null contractSha256 from the prior handoff manifest, if any."""
+    path = pathlib.Path(prior_run_dir) / _HANDOFF_JSON
+    if not path.is_file():
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            doc = json.load(handle)
+    except (OSError, ValueError, TypeError) as exc:
+        _log("_prior_contract_sha256", "could not read handoff {}: {}".format(path, exc))
+        return None
+    if not isinstance(doc, dict):
+        return None
+    sha = doc.get("contractSha256")
+    if isinstance(sha, str) and sha.strip():
+        return sha.strip()
+    return None
+
+
+def _assert_base_is_commit(worktree: worktree_mod.ExternalWorktree, prior_id: str) -> None:
+    """Fail closed when baseRevision is not a commit object in the worktree."""
+    base = worktree.base_revision
+    completed = worktree_mod._run_git(
+        worktree.path, ["cat-file", "-e", "{}^{{commit}}".format(base)]
+    )
+    if completed.returncode != 0:
+        raise GrokWrapperError(
+            "invalid-target",
+            "cannot continue run {}: baseRevision {!r} is not a commit in the worktree".format(
+                prior_id, base
+            ),
+            {
+                "runId": prior_id,
+                "reason": "invalid-base-revision",
+                "baseRevision": base,
+                "worktreePath": str(worktree.path),
+            },
+        )
+
+
+def _assert_no_concurrent_writer(worktree_path: pathlib.Path, prior_id: str) -> None:
+    """Fail closed when another non-terminal run records the same worktreePath."""
+    want = str(worktree_path)
+    for other_id in runstate.list_run_ids():
+        if other_id == prior_id:
+            continue
+        try:
+            other = runstate.load_run_record(other_id)
+        except runstate.UnknownRunError:
+            continue
+        if other.get("worktreePath") != want:
+            continue
+        lifecycle = other.get("lifecycle")
+        if lifecycle in _TERMINAL_LIFECYCLES:
+            continue
+        raise GrokWrapperError(
+            "invalid-target",
+            "cannot continue run {}: another non-terminal run {} holds the same worktree".format(
+                prior_id, other_id
+            ),
+            {
+                "runId": prior_id,
+                "reason": "concurrent-writer",
+                "conflictingRunId": other_id,
+                "worktreePath": want,
+                "conflictingLifecycle": lifecycle,
+            },
+        )
+
+
+def _assert_not_already_continued(record: dict, prior_id: str) -> None:
+    child = record.get("continuedByRunId")
+    if isinstance(child, str) and child.strip():
+        raise GrokWrapperError(
+            "invalid-target",
+            "run {} was already continued by {}; continue THAT run (or clean up and start fresh)".format(
+                prior_id, child.strip()
+            ),
+            {
+                "runId": prior_id,
+                "reason": "already-continued",
+                "continuedByRunId": child.strip(),
+            },
+        )
+
+
+def _assert_iteration_cap(prior_iteration: int, prior_id: str) -> None:
+    if prior_iteration >= MAX_CONTINUATION_ITERATION:
+        raise GrokWrapperError(
+            "usage-error",
+            "cannot continue run {}: continuation would exceed the maximum iteration "
+            "cap of {}".format(prior_id, MAX_CONTINUATION_ITERATION),
+            {
+                "runId": prior_id,
+                "priorIteration": prior_iteration,
+                "maxContinuationIteration": MAX_CONTINUATION_ITERATION,
+            },
+        )
+
+
+def _load_and_pin_contract(
+    prior_run_dir: pathlib.Path,
+    record: dict,
+    worktree: worktree_mod.ExternalWorktree,
+    prior_id: str,
+) -> Tuple[Optional[dict], List[str]]:
+    """Load prior contract with integrity pin; return (contract, warnings)."""
+    warnings: List[str] = []
+    expected_sha = _prior_contract_sha256(prior_run_dir)
+    contract: Optional[dict] = None
+    try:
+        contract = load_persisted_contract(prior_run_dir)
+    except GrokWrapperError as exc:
+        if expected_sha is not None:
+            raise GrokWrapperError(
+                "implementation-contract-invalid",
+                "prior run had a contract but its persisted copy is missing",
+                {
+                    "runId": prior_id,
+                    "reason": "persisted-contract-missing",
+                    "contractSha256": expected_sha,
+                    "detail": exc.detail or {},
+                },
+            ) from exc
+        raise
+
+    if expected_sha is not None and contract is None:
+        raise GrokWrapperError(
+            "implementation-contract-invalid",
+            "prior run had a contract but its persisted copy is missing",
+            {
+                "runId": prior_id,
+                "reason": "persisted-contract-missing",
+                "contractSha256": expected_sha,
+            },
+        )
+
+    if contract is not None:
+        target_workspace = record.get("targetWorkspace")
+        if not isinstance(target_workspace, str) or not target_workspace.strip():
+            cli_target = "."
+        else:
+            cli_target = target_workspace
+        assert_target_matches(contract, cli_target)
+
+        if expected_sha is not None:
+            actual = _contract_sha256(contract)
+            if actual != expected_sha:
+                raise GrokWrapperError(
+                    "implementation-contract-invalid",
+                    "persisted contract does not match the prior run's contractSha256 "
+                    "(tampered or replaced)",
+                    {
+                        "runId": prior_id,
+                        "reason": "contract-sha-mismatch",
+                        "expectedSha256": expected_sha,
+                        "actualSha256": actual,
+                    },
+                )
+
+        for scope in contract.get("writeScopes") or []:
+            if not isinstance(scope, dict):
+                continue
+            rel = scope.get("path")
+            if not isinstance(rel, str) or not rel.strip():
+                continue
+            scope_path = worktree.path / rel
+            if not scope_path.exists():
+                warnings.append(
+                    "writeScope path no longer exists in the worktree: {}".format(rel)
+                )
+
+    return contract, warnings
+
+
+def claim_continuation(prior_run_id: str, child_run_id: str) -> dict:
+    """CAS-stamp continuedByRunId on the prior run (single-lineage claim).
+
+    Called once the new run id is known (prepare). Re-checks already-continued
+    under lock so concurrent continues cannot fork siblings.
+    """
+    if not isinstance(child_run_id, str) or not child_run_id.strip():
+        raise GrokWrapperError(
+            "usage-error",
+            "claim_continuation requires a non-empty child run id",
+            {"continueRun": prior_run_id, "childRunId": child_run_id},
+        )
+    return runstate.cas_claim_continuation(prior_run_id.strip(), child_run_id.strip())
+
+
 def resolve_continuation(
     prior_run_id: str,
-) -> Tuple[dict, worktree_mod.ExternalWorktree, pathlib.Path, Optional[dict], list]:
+) -> Tuple[dict, worktree_mod.ExternalWorktree, pathlib.Path, Optional[dict], list, Optional[dict]]:
     """Load and validate a prior code run for continuation.
 
-    Returns (record, worktree, prior_run_dir, session_meta_or_None, warnings).
-    Raises GrokWrapperError(invalid-target|usage-error) with the prior run id
-    and what is missing.
+    Returns (record, worktree, prior_run_dir, session_meta_or_None, warnings, contract).
+    Raises GrokWrapperError(invalid-target|usage-error|implementation-contract-invalid)
+    with the prior run id and what is missing.
     """
     if not isinstance(prior_run_id, str) or not prior_run_id.strip():
         raise GrokWrapperError(
@@ -166,6 +360,11 @@ def resolve_continuation(
             {"runId": prior_id, "lifecycle": lifecycle},
         )
 
+    _assert_not_already_continued(record, prior_id)
+
+    prior_iteration = prior_iteration_from_record(record)
+    _assert_iteration_cap(prior_iteration, prior_id)
+
     worktree = worktree_mod.rebuild_worktree_from_record(record)
     if worktree is None:
         raise GrokWrapperError(
@@ -189,6 +388,9 @@ def resolve_continuation(
                 "worktreePath": str(worktree.path),
             },
         )
+
+    _assert_base_is_commit(worktree, prior_id)
+    _assert_no_concurrent_writer(worktree.path, prior_id)
 
     try:
         worktree_mod.verify_external_worktree(worktree)
@@ -217,4 +419,9 @@ def resolve_continuation(
         session_meta = None
         warnings.append(_NO_SESSION_ARCHIVE_WARNING)
 
-    return record, worktree, prior_run_dir, session_meta, warnings
+    contract, contract_warnings = _load_and_pin_contract(
+        prior_run_dir, record, worktree, prior_id
+    )
+    warnings.extend(contract_warnings)
+
+    return record, worktree, prior_run_dir, session_meta, warnings, contract

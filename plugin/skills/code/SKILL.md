@@ -165,3 +165,10 @@ GROK_TASK
 - Each continuation is a **new** run id with `continuesRunId` + `iteration` on
   `run.json` and the handoff manifest. Handoff the **new** run id before integrate.
 - Prefer at most two continuations, then report blockers rather than looping.
+- **Single-lineage:** each prior may be continued only once (`continuedByRunId`);
+  to iterate further, continue the child run (A->B->C), never fork siblings of A.
+- **Contract pinning:** if the prior had a contract, continuation reloads
+  `runs/<prior>/contract.json` and requires its sha256 to match the prior
+  handoff `contractSha256` (missing or tampered copy fails closed).
+- **Iteration cap:** the wrapper refuses a continue that would exceed iteration
+  20 (`usage-error`); stop earlier when blockers stop moving.

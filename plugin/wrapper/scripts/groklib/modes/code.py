@@ -628,7 +628,7 @@ def run(args: argparse.Namespace) -> dict:
     existing_worktree: Optional[worktree_mod.ExternalWorktree] = None
 
     if continue_id is not None:
-        record, existing_worktree, prior_run_dir, session_meta, cont_warnings = (
+        record, existing_worktree, prior_run_dir, session_meta, cont_warnings, contract = (
             code_continue.resolve_continuation(continue_id)
         )
         continues_run_id = continue_id
@@ -644,7 +644,6 @@ def run(args: argparse.Namespace) -> dict:
         if target_relative in (".",):
             target_relative = ""
         target_abs = repo_root / target_relative if target_relative else repo_root
-        contract = code_continue.load_persisted_contract(prior_run_dir)
         if session_meta is not None:
             session_id = session_meta["grokSessionId"]
             seed_session_from_run_dir = prior_run_dir
@@ -691,6 +690,9 @@ def run(args: argparse.Namespace) -> dict:
 
     def _prepare(stage: WorktreeStage) -> WorktreePrep:
         if existing_worktree is not None:
+            # Single-lineage claim once the new run id exists (CAS on prior).
+            if continues_run_id is not None:
+                code_continue.claim_continuation(continues_run_id, stage.run_id)
             worktree = existing_worktree
             stage.holder.worktree = worktree
             worktree_mod.verify_external_worktree(worktree)

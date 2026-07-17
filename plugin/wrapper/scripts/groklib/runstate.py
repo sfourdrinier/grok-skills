@@ -835,3 +835,47 @@ def best_effort_reap_stale_temp_homes(max_age_seconds: int) -> List[str]:
             "stale private-home reap failed (continuing with the run): {}".format(exc),
         )
         return []
+
+
+def cas_claim_continuation(prior_run_id: str, child_run_id: str) -> dict:
+    """CAS-set ``continuedByRunId`` on a prior run (terminal OK; single-lineage).
+
+    ``cas_update_run_record`` refuses terminal records; continuation claim is the
+    one post-terminal mutation allowed, so this thin helper mirrors its lock +
+    recordRevision CAS pattern for the single ``continuedByRunId`` field only.
+    A prior that already carries ``continuedByRunId`` fails closed as
+    invalid-target (does not raise CasConflictError).
+    """
+    if not is_valid_run_id(prior_run_id):
+        raise UnknownRunError(
+            "not a valid run id: {!r}".format(prior_run_id), {"runId": prior_run_id}
+        )
+    if not is_valid_run_id(child_run_id):
+        raise GrokWrapperError(
+            "usage-error",
+            "continuedByRunId child must be a valid run id",
+            {"runId": prior_run_id, "childRunId": child_run_id},
+        )
+    paths = _run_paths_for(prior_run_id)
+    _verify_paths_owner(paths)
+    with run_lock(paths):
+        record = _load_run_json_unlocked(paths)
+        existing = record.get("continuedByRunId")
+        if isinstance(existing, str) and existing.strip():
+            raise GrokWrapperError(
+                "invalid-target",
+                "run {} was already continued by {}; continue THAT run "
+                "(or clean up and start fresh)".format(prior_run_id, existing.strip()),
+                {
+                    "runId": prior_run_id,
+                    "reason": "already-continued",
+                    "continuedByRunId": existing.strip(),
+                },
+            )
+        current_rev = int(record.get("recordRevision", 0))
+        merged = dict(record)
+        merged["continuedByRunId"] = child_run_id
+        merged["runId"] = paths.run_id
+        merged["recordRevision"] = current_rev + 1
+        write_json_atomic(paths.run_dir / "run.json", merged)
+        return merged

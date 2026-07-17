@@ -889,6 +889,8 @@ git commit -m "feat: archive grok session store per run (groundwork for continue
 
 ### Task 2.2: `code --continue-run <runId>`
 
+> Hardened by review (Phase 2 findings 2-6): single-lineage `continuedByRunId` CAS claim + concurrent-writer guard, contract integrity pin / missing-copy fail-closed, early baseRevision validity, and MAX_CONTINUATION_ITERATION=20.
+
 **Files:**
 - Modify: `plugin/wrapper/scripts/grok_agent.py` (argparse, line ~201-211), `plugin/wrapper/scripts/groklib/modes/code.py` (continuation path in `run()`), `plugin/wrapper/scripts/groklib/code_handoff_finalize.py` (iteration counter in manifest), `plugin/wrapper/scripts/groklib/runstate.py` only if a helper is missing (`load_run_record` exists)
 - Test: `plugin/wrapper/scripts/tests/test_mode_code.py`, `plugin/wrapper/scripts/tests/test_implementation_handoff.py`
