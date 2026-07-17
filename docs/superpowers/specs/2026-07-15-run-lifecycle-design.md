@@ -1,6 +1,6 @@
 # Run lifecycle, isolated review, completion signals, and implementation handoff
 
-**Status:** design revision 12 (PR1 + PR2 on main; PR3 notifications 1.5.0; PR5 = notify dogfood follow-ups: operator re-attempt + direct-mode signal + headless honesty → 1.7.0; **PR3–PR5 quality:** matrix, DRY, internal review)  
+**Status:** design revision 12 (PR1–PR3 on main through 1.5.0; PR4 handoff plan adversarial 2026-07-16 before execute → 1.6.0; PR5 notify follow-ups → 1.7.0; quality: matrix, DRY, internal review)  
 **Date:** 2026-07-16  
 **Product:** grok-skills (Claude Code + Codex)  
 **Baseline:** v1.2.10 (PR1 lifecycle on main as 1.3.x)  

@@ -340,6 +340,14 @@ class CodeModeTests(WorktreeModeHarness):
         env = json.loads(out)
         self.assertEqual(exit_code, 1, out)
         self.assertEqual(env["error"]["class"], "wrong-working-directory")
+        # Forensic handoff still written so /grok:handoff can observe ready=false
+        run_id = env["runId"]
+        manifest_path = runstate.state_root() / "runs" / run_id / "implementation-handoff.json"
+        self.assertTrue(manifest_path.is_file(), out)
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertFalse(manifest["integration"]["ready"])
+        kinds = [b.get("kind") for b in manifest["integration"].get("blockers") or []]
+        self.assertIn("wrong-working-directory", kinds)
 
     def test_code_misplaced_sentinel_is_wrong_working_directory(self) -> None:
         repo = self.make_code_repo()
@@ -546,6 +554,227 @@ class CodeModeTests(WorktreeModeHarness):
         tools = self.flag_value(argv, "--tools").split(",")
         self.assertIn("search_replace", tools)
         self.assertIn("run_terminal_command", tools)
+
+
+    def test_code_writes_handoff_artifacts_and_step_order(self) -> None:
+        """PR4: successful code writes handoff JSON + patch; steps include locked order."""
+        repo = self.make_code_repo()
+
+        def plant(wt: pathlib.Path, run_id: str) -> None:
+            _plant_sentinel_in_worktree(wt, run_id)
+            target = wt / "pkg" / "impl.txt"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("implemented\n", encoding="utf-8")
+
+        exit_code, out = self._run(repo, plant=plant)
+        env = json.loads(out)
+        self.assertEqual(exit_code, 0, out)
+        run_id = env["runId"]
+        run_dir = runstate.state_root() / "runs" / run_id
+        manifest_path = run_dir / "implementation-handoff.json"
+        patch_path = run_dir / "artifacts" / "implementation.patch"
+        self.assertTrue(manifest_path.is_file(), "missing implementation-handoff.json")
+        self.assertTrue(patch_path.is_file(), "missing implementation.patch")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        from groklib.implementation_handoff import validate_implementation_handoff, _STEP_ORDER
+        self.assertEqual(validate_implementation_handoff(manifest), [])
+        self.assertIn("impl.txt", " ".join(c.get("path", "") for c in manifest.get("changedFiles", [])))
+        # handoff mode dual-condition
+        code_h, out_h = self.drive(["handoff", "--run-id", run_id], repo_root=repo)
+        env_h = json.loads(out_h)
+        self.assertEqual(code_h, 0, out_h)
+        self.assertTrue(env_h["response"]["integration"]["ready"])
+
+    def test_code_empty_contract_file_flag_is_invalid(self) -> None:
+        """Present empty --contract-file must fail closed before Grok (not silent no-contract)."""
+        import argparse
+        from unittest import mock
+
+        from groklib import GrokWrapperError
+        from groklib.modes import code as code_mod
+
+        ns = argparse.Namespace(
+            target="pkg",
+            base="HEAD",
+            task="x",
+            task_file=None,
+            model="grok-4.5",
+            timeout=10,
+            max_turns=None,
+            web=None,
+            contract_file="",
+            grok_binary="/bin/true",
+        )
+        with mock.patch.object(code_mod._shared, "resolve_binary", return_value=pathlib.Path("/bin/true")):
+            with mock.patch.object(code_mod._shared, "resolve_task_text", return_value="task"):
+                with mock.patch.object(
+                    code_mod,
+                    "_resolve_repo_target",
+                    return_value=(pathlib.Path("/tmp"), pathlib.Path("/tmp/pkg"), "pkg"),
+                ):
+                    with mock.patch.object(code_mod, "load_project_config") as lpc:
+                        cfg = mock.Mock()
+                        cfg.package_manager = None
+                        cfg.never_build_workspaces = {}
+                        cfg.require_rule_file_parity = False
+                        lpc.return_value = cfg
+                        with self.assertRaises(GrokWrapperError) as cm:
+                            code_mod.run(ns)
+                        self.assertEqual(cm.exception.error_class, "implementation-contract-invalid")
+
+    def test_code_contract_scope_violation_fails(self) -> None:
+        repo = self.make_code_repo()
+        contract = {
+            "schemaVersion": 1,
+            "taskId": "scope-test",
+            "target": "pkg",
+            "writeScopes": [{"kind": "file", "path": "pkg/only-this.ts"}],
+            "requiredValidation": [],
+        }
+        cpath = pathlib.Path(self.tmp_root) / "contract.json"
+        cpath.write_text(json.dumps(contract), encoding="utf-8")
+
+        def plant(wt: pathlib.Path, run_id: str) -> None:
+            _plant_sentinel_in_worktree(wt, run_id)
+            (wt / "pkg" / "outside.ts").write_text("x\n", encoding="utf-8")
+
+        exit_code, out = self._run(
+            repo,
+            extra_argv=["--contract-file", str(cpath)],
+            plant=plant,
+        )
+        env = json.loads(out)
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(env["error"]["class"], "write-scope-violation")
+        run_id = env["runId"]
+        manifest_path = runstate.state_root() / "runs" / run_id / "implementation-handoff.json"
+        self.assertTrue(manifest_path.is_file())
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertFalse(manifest["integration"]["ready"])
+
+    def test_code_rename_source_outside_scope_fails(self) -> None:
+        """Rename oldPath must be in writeScopes, not only the destination."""
+        import subprocess
+
+        repo = self.make_code_repo()
+        (repo / "pkg" / "outside.ts").write_text("x\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "pkg/outside.ts"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-q", "-m", "outside"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        contract = {
+            "schemaVersion": 1,
+            "taskId": "rename-scope",
+            "target": "pkg",
+            "writeScopes": [{"kind": "subtree", "path": "pkg/allowed"}],
+            "requiredValidation": [],
+        }
+        cpath = pathlib.Path(self.tmp_root) / "contract-rename.json"
+        cpath.write_text(json.dumps(contract), encoding="utf-8")
+        (repo / "pkg" / "allowed").mkdir(exist_ok=True)
+        (repo / "pkg" / "allowed" / ".keep").write_text("", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "pkg/allowed/.keep"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-q", "-m", "allowed dir"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        def plant(wt: pathlib.Path, run_id: str) -> None:
+            _plant_sentinel_in_worktree(wt, run_id)
+            (wt / "pkg" / "allowed").mkdir(exist_ok=True)
+            subprocess.run(
+                ["git", "-C", str(wt), "mv", "pkg/outside.ts", "pkg/allowed/outside.ts"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+        exit_code, out = self._run(
+            repo,
+            extra_argv=["--contract-file", str(cpath)],
+            plant=plant,
+        )
+        env = json.loads(out)
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(env["error"]["class"], "write-scope-violation")
+
+    def test_code_unexpected_commit_no_reset_forensics(self) -> None:
+        """HEAD moved after Grok → unexpected-commit; worktree preserved; handoff written."""
+        import subprocess
+
+        repo = self.make_code_repo()
+        base_sha = subprocess.check_output(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"], text=True
+        ).strip()
+
+        def plant(wt: pathlib.Path, run_id: str) -> None:
+            _plant_sentinel_in_worktree(wt, run_id)
+            (wt / "pkg" / "moved.txt").write_text("payload\n", encoding="utf-8")
+            # Simulate an unexpected commit on the worktree branch (policy violation).
+            subprocess.run(
+                ["git", "-C", str(wt), "add", "pkg/moved.txt"],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(wt),
+                    "-c",
+                    "user.email=test@example.com",
+                    "-c",
+                    "user.name=test",
+                    "commit",
+                    "-q",
+                    "-m",
+                    "unexpected",
+                ],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            head_after = subprocess.check_output(
+                ["git", "-C", str(wt), "rev-parse", "HEAD"], text=True
+            ).strip()
+            self.assertNotEqual(head_after, base_sha)
+
+        exit_code, out = self._run(repo, plant=plant)
+        env = json.loads(out)
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(env["error"]["class"], "unexpected-commit")
+        run_id = env["runId"]
+        run_dir = runstate.state_root() / "runs" / run_id
+        manifest_path = run_dir / "implementation-handoff.json"
+        self.assertTrue(manifest_path.is_file(), "forensic handoff must still be written")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertFalse(manifest["integration"]["ready"])
+        kinds = [b.get("kind") for b in manifest["integration"].get("blockers") or []]
+        self.assertIn("unexpected-commit", kinds)
+        # Worktree retained; HEAD not reset to base
+        wt_path = pathlib.Path(env["worktreePath"] or "")
+        self.assertTrue(wt_path.is_dir(), env)
+        head_now = subprocess.check_output(
+            ["git", "-C", str(wt_path), "rev-parse", "HEAD"], text=True
+        ).strip()
+        self.assertNotEqual(head_now, base_sha, "must not reset worktree HEAD after unexpected-commit")
+        self.assertEqual(env["cleanup"]["status"], "retained")
 
 
 class CwdSentinelTests(unittest.TestCase):

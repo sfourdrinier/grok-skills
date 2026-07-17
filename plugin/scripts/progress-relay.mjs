@@ -77,7 +77,7 @@ const DEFAULT_DISCOVERY_GRACE_MS = 1500;
 // apply the SAME redaction before printing.
 //
 // The pattern SOURCES below are a hand-mirror of the Python source of truth
-// (groklib/envelope.py _SECRET_VALUE_PATTERNS). Node stdlib cannot import the
+// (groklib/redaction.py _SECRET_VALUE_PATTERNS). Node stdlib cannot import the
 // Python module, so the drift-guard test (progress-relay.test.mjs) reads the
 // Python table and asserts these byte-identical strings still match, so the two
 // redactors cannot diverge. Each entry is [label, pythonPatternSource]; the JS

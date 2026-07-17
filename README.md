@@ -113,6 +113,9 @@ Typical session:
 /grok:preflight
 /grok:review --target src/my-lib --task "Find correctness bugs and unsafe error handling"
 /grok:code --target src/my-lib --base main --task "Fix the off-by-one in the paginator"
+/grok:status --run-id <runId from code envelope>
+/grok:handoff --run-id <runId>
+# Only if handoff reports integration.ready: parent applies the patch manually
 /grok:verify --worktree /path/to/retained-worktree --task "Confirm the fix builds and tests pass"
 ```
 
@@ -183,7 +186,8 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 | `/grok:adversarial-review` | Hostile review that challenges design; web on by default. |
 | `/grok:dual-lens` | Adversarial pass, then ordinary review on the same target. |
 | `/grok:reason` | Cold second opinion on files you name. No automatic repo crawl. Web off by default. |
-| `/grok:code` | Implements in an **external git worktree** off a committed `--base`. Does not commit or push. |
+| `/grok:code` | Implements in an **external git worktree** off a committed `--base`. Does not commit or push. Optional `--contract-file` (writeScopes + requiredValidation; hardened only). Writes handoff artifacts under the run dir. |
+| `/grok:handoff` | **Read-only** verified implementation handoff by **`runId` only** (1.6.0+). Dual-condition ready: ready manifest + success envelope + patch rehash. Never applies. Notify is not ready. |
 | `/grok:verify` | Pass/fail/inconclusive check on an existing worktree. No `--web`. |
 | `/grok:debate` | Two opposing Grok reason passes + synthesis on a topic. |
 | `/grok:status` | Jobs table, or read-only wrapper status with `--run-id` (lifecycle projection; exit 1 can mean a failed target). |
@@ -231,6 +235,29 @@ node "$SKILL_BASE/run.mjs" setup --run-mode hardened
 # Or from a known install:
 node "${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}/scripts/grok-companion.mjs" setup --run-mode hardened
 ```
+
+### Implementation handoff (1.6.0+) - peer multi-agent integrate API
+
+After a hardened `/grok:code` run (with or without `--contract-file`), the wrapper
+writes under the state root:
+
+- `runs/<runId>/artifacts/implementation.patch` (immutable git binary full-index)
+- `runs/<runId>/implementation-handoff.json`
+
+**Parents (Claude Code / Codex) must call `/grok:handoff --run-id <runId>` before
+integrating.** Dual-condition ready is true only when the manifest says ready,
+a **success** terminal envelope exists for that runId, and the patch re-hashes.
+Completion **notifications are not ready** - they only mean a terminal attempt
+finished.
+
+This plugin **never** auto-applies, commits, merges, cherry-picks, or pushes.
+Parent apply is manual (`git apply --check --binary` then explicit apply). Full
+protocol: [implementation-handoff.md](plugin/references/implementation-handoff.md).
+
+`--contract-file` is operator-trusted (`operator-contract-trusted-no-os-sandbox`):
+argv arrays only, cwd confined to the worktree, **no** OS filesystem sandbox claim.
+Direct mode (`setup --run-mode direct`) **rejects** `--contract-file` (fail closed);
+handoff/status/cleanup always use the hardened wrapper even if prefs say direct.
 
 ### Completion notifications (optional, 1.5.0+)
 
@@ -376,6 +403,8 @@ Compatibility notes and versions tested: [docs/COMPATIBILITY.md](docs/COMPATIBIL
 | Want managed Codex agents gone | Disable/uninstall plugin first (SessionStart reinstalls while enabled), then `setup --remove-codex-agents`. |
 | Review notes files changed during the run | Informational only (dev servers, logs, other editors, or Grok listing paths). Review still **succeeds**; findings apply. Not a failure. See [over-conservatism audit](docs/reviews/2026-07-15-over-conservatism-audit.md). |
 | No completion toast after a long job | Notifications default **off**. Run `/grok:setup --notification-mode auto` and use a **background** skill run (execution context). Headless/Windows: use `webhook`. Direct mode has no push notify in 1.5.0. |
+| Toast arrived but cannot integrate | Notify is only a signal. Call `/grok:handoff --run-id` and require dual-condition ready before any apply. |
+| `--contract-file` in direct mode | Fail closed. Use hardened mode (`setup --run-mode hardened`) for contracts and handoff artifacts. |
 
 ---
 

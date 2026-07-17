@@ -78,4 +78,16 @@ GROK_TASK
 ```
 
 Return envelopes **verbatim**. Do not commit, push, or chain other modes.
+
+## After a code run: handoff before integrate (1.6.0+)
+
+1. Read `runId` from the code envelope (success or failure with retained worktree).
+2. Optionally `/grok:status --run-id <runId>` for progress.
+3. **Required before integrate:** `node "$AGENT_RUN" handoff --run-id '<runId>'`.
+4. Integrate only when handoff status is success and `response.integration.ready`.
+5. Completion **notify** is not ready - always call handoff.
+6. Parent apply is **manual** (`git apply --check --binary` then explicit apply). Never auto-apply.
+7. Optional: pass `--contract-file '<path>'` on code for writeScopes + requiredValidation.
+
+See `skills/handoff/SKILL.md` and `references/implementation-handoff.md`.
 On failure: return stderr/envelope; never return nothing.

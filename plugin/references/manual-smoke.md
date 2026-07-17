@@ -21,7 +21,8 @@ Preferred (GitHub marketplace):
 2. `/plugin install grok@grok-skills`
 3. Reload plugins / restart session.
 4. Confirm `/grok:` lists: preflight, setup, review, reason, code, verify,
-   status, cleanup, jobs, result, cancel, transfer, debate, adversarial-review.
+   handoff, status, cleanup, jobs, result, cancel, transfer, debate,
+   adversarial-review.
 5. Optional unit tests from a clone:
    - `cd plugin/wrapper/scripts && python3 -m unittest discover -s tests -q`
    - `cd plugin/scripts && node --test tests/*.test.mjs`
@@ -66,6 +67,10 @@ the Grok CLI is ready.
 - [ ] `/grok:review --target . --task "list top risks"` → one review envelope (live checkout)
 - [ ] `/grok:review --target . --isolated --task "list risks"` → isolation worktree cleaned after run
 - [ ] `/grok:code --target . --base HEAD --task "trivial helper"` → worktree retained, no auto-commit
+- [ ] Dual-host (Claude + Codex): after code, `/grok:status --run-id <id>` then
+      `/grok:handoff --run-id <id>` → dual-condition ready only when success + patch
+- [ ] Failed code / no changes → handoff ready false; tampered patch → integrity failure
+- [ ] Notify does not replace handoff (integrate only after handoff ready)
 - [ ] `/grok:verify --worktree <path> --task "confirm tests"` → verifier verdict; `--web` refused
 - [ ] `/grok:status --run-id <id>` → prior envelope
 - [ ] Background-style live run with `GROK_COMPANION_EXECUTION_CONTEXT=background` and

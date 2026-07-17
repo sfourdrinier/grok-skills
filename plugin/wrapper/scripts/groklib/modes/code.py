@@ -26,10 +26,12 @@ import subprocess
 import time
 from typing import Dict, List, Optional, Tuple
 
-from groklib import GrokWrapperError, log_stderr
+from groklib import GrokWrapperError, log_stderr, runstate
 from groklib import rules
 from groklib import worktree as worktree_mod
 from groklib import worktree_escape
+from groklib.implementation_contract import assert_target_matches, load_contract_file
+from groklib.code_handoff_finalize import code_handoff_finalize
 from groklib.projectconfig import ProjectConfig, build_gate_command, install_command, load_project_config
 from groklib.modes import _shared
 from groklib.modes._worktree import (
@@ -92,7 +94,12 @@ def _run_recorded_command(argv: List[str], cwd: pathlib.Path, purpose: str) -> d
     ``validation-failure``: a required command that cannot even run has not
     passed. The nonzero-exit decision is left to the caller so the record is
     always captured on ``acc.commands`` before any failure is raised.
+
+    Includes bounded redacted evidence (sha256 + 4k tails) per design §14.13.
+    Always uses shell=False (argv list only).
     """
+    from groklib.command_evidence import build_command_evidence
+
     argv_str = [str(token) for token in argv]
     start = time.monotonic()
     try:
@@ -101,26 +108,33 @@ def _run_recorded_command(argv: List[str], cwd: pathlib.Path, purpose: str) -> d
             cwd=str(cwd),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
             timeout=_COMMAND_TIMEOUT_SECONDS,
             check=False,
+            shell=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        _log("_run_recorded_command", "could not run {} ({}): {}".format(purpose, argv_str, exc))
+        from groklib.envelope import redact_secret_value_text
+
+        safe_argv = [redact_secret_value_text(str(a)) for a in argv_str]
+        _log(
+            "_run_recorded_command",
+            "could not run {} ({}): {}".format(purpose, safe_argv, exc),
+        )
         raise GrokWrapperError(
             "validation-failure",
             "required command could not be run: {}".format(purpose),
-            {"argv": argv_str, "purpose": purpose},
+            {"argv": safe_argv, "purpose": purpose},
         )
     duration = time.monotonic() - start
-    return {
-        "argv": argv_str,
-        "exitStatus": completed.returncode,
-        "durationSeconds": round(duration, 6),
-        "purpose": purpose,
-        "cwd": str(cwd),
-    }
+    return build_command_evidence(
+        argv=argv_str,
+        cwd=str(cwd),
+        purpose=purpose,
+        exit_status=int(completed.returncode),
+        stdout=completed.stdout or b"",
+        stderr=completed.stderr or b"",
+        duration_seconds=round(duration, 6),
+    )
 
 
 def _target_in_worktree(worktree_path: pathlib.Path, target_relative: str) -> pathlib.Path:
@@ -506,6 +520,22 @@ def run(args: argparse.Namespace) -> dict:
 
     web_access = resolve_web_access("code", getattr(args, "web", None))
 
+    # Optional operator-trusted implementation contract (design §14.3). Loaded
+    # and validated BEFORE Grok so bad contracts never spawn a model.
+    # Present empty/blank --contract-file is invalid (not "no contract").
+    contract: Optional[dict] = None
+    contract_file = getattr(args, "contract_file", None)
+    if contract_file is not None:
+        if not str(contract_file).strip():
+            raise GrokWrapperError(
+                "implementation-contract-invalid",
+                "--contract-file was provided but is empty; omit the flag or pass a path",
+                {"contractFile": contract_file},
+            )
+        contract = load_contract_file(pathlib.Path(str(contract_file).strip()))
+        cli_target = target_relative if target_relative else "."
+        assert_target_matches(contract, cli_target)
+
     required_paths: Tuple[str, ...] = (target_relative,) if target_relative else ()
 
     # Entry baseline of the ORIGINAL checkout's tracked working-tree divergence,
@@ -571,39 +601,34 @@ def run(args: argparse.Namespace) -> dict:
         )
 
     def _finalize(stage: FinalizeStage) -> None:
-        worktree = stage.worktree
-        # P3: derive the sentinel name from the run id (the same source _prepare
-        # uses), never re-derive it from worktree.path.name, so the two cannot
-        # drift apart even if the C2 path==run_id invariant ever changed.
+        # Design §14.6 ordered post-Grok path (single function, no parallel pipeline).
+        # Handoff JSON is written before any primary raise so phase-2 precedes the
+        # runner's terminal envelope publish.
         sentinel_name = _SENTINEL_PREFIX + stage.run_id
-        _assert_cwd_sentinel(worktree, sentinel_name)
-        stage.acc.effective_working_directory = str(worktree.path)
+        artifacts_dir = runstate.state_root() / "runs" / stage.run_id / "artifacts"
 
-        changed_files, diff_text = worktree_mod.diff_summary(worktree)
-        stage.acc.changed_files = changed_files
-        stage.acc.diff_summary = diff_text
-        worktree_escape.assert_changes_within(
-            worktree, (worktree.path,), original_baseline=original_baseline
-        )
+        def _build_gate() -> None:
+            _run_build_gate(
+                stage,
+                target_relative,
+                package_manager,
+                pm_binary,
+                project_config.never_build_workspaces,
+                captured_workspace_name[0],
+                captured_workspace_scripts[0],
+            )
 
-        _run_build_gate(
-            stage,
-            target_relative,
-            package_manager,
-            pm_binary,
-            project_config.never_build_workspaces,
-            captured_workspace_name[0],
-            captured_workspace_scripts[0],
-        )
-
-        # PR968 codex post-build-gate escape re-scan: the build gate above ran
-        # Grok-modifiable pnpm scripts in the UNSANDBOXED wrapper process, AFTER the
-        # entry escape scan already passed. A build/typecheck/lint/test script that
-        # wrote into the operator's REAL checkout would otherwise go undetected, so
-        # the original-checkout comparison is re-run. Scoped to the real checkout
-        # only: the worktree's own build outputs and global pnpm caches are ignored.
-        worktree_escape.assert_original_checkout_unmodified(
-            worktree, (worktree.path,), original_baseline=original_baseline
+        code_handoff_finalize(
+            stage=stage,
+            sentinel_name=sentinel_name,
+            contract=contract,
+            artifacts_dir=artifacts_dir,
+            original_baseline=original_baseline,
+            run_build_gate=_build_gate,
+            assert_changes_within=worktree_escape.assert_changes_within,
+            assert_original_checkout_unmodified=worktree_escape.assert_original_checkout_unmodified,
+            assert_cwd_sentinel=_assert_cwd_sentinel,
+            run_recorded_command=_run_recorded_command,
         )
 
     return run_worktree_mode(

@@ -143,3 +143,7 @@ git tag -a "v${VER}" -m "v${VER}: summary"
 git push origin main && git push origin "v${VER}"
 gh release create "v${VER}" --title "v${VER} — summary" --notes "See CHANGELOG.md"
 ```
+
+## 1.6.0 implementation handoff
+
+After merge: tag `v1.6.0`. Smoke dual-host code → status → handoff; failed code ready false; notify is signal only.

@@ -80,6 +80,7 @@ const WRAPPER_MODES = new Set([
   "verify",
   "status",
   "cleanup",
+  "handoff",
 ]);
 
 function stderrLine(line) {
@@ -456,6 +457,12 @@ function runStatus(wrapper, args) {
   return runPassthrough(wrapper, args);
 }
 
+function runHandoff(wrapper, args) {
+  // Read-only like status: no job, no live relay, no notify, no Grok spawn.
+  // Dual-condition ready is computed inside the wrapper handoff mode.
+  return runPassthrough(wrapper, args);
+}
+
 function cmdJobs(cwd) {
   process.stdout.write(formatJobsTable(listJobs(cwd)));
   return 0;
@@ -799,17 +806,35 @@ function main() {
     return code;
   };
 
+  // Read-only durable-run modes always use the hardened wrapper (state under
+  // XDG runs/), even when workspace prefs are setup --run-mode direct.
+  const WRAPPER_ONLY_MODES = new Set(["status", "cleanup", "handoff"]);
+  // argparse accepts both "--contract-file PATH" and "--contract-file=PATH".
+  const hasContractFile = wrapperArgs.some(
+    (a) => a === "--contract-file" || (typeof a === "string" && a.startsWith("--contract-file="))
+  );
+
   if (runMode === "direct") {
-    return Promise.resolve(
-      captureAndTrack(null, wrapperArgs, {
-        cwd,
-        mode: wrapperMode,
-        kind: track.kind,
-        runMode: "direct",
-        notifyMode: track.notifyMode,
-        skipNotify: track.skipNotify,
-      })
-    ).then(finishCleanups);
+    if (wrapperMode === "code" && hasContractFile) {
+      process.stderr.write(
+        "[grok-companion] --contract-file requires hardened mode (fail closed). " +
+          "Run setup --run-mode hardened, or omit --contract-file for direct code.\n"
+      );
+      return finishCleanups(1);
+    }
+    if (!WRAPPER_ONLY_MODES.has(wrapperMode)) {
+      return Promise.resolve(
+        captureAndTrack(null, wrapperArgs, {
+          cwd,
+          mode: wrapperMode,
+          kind: track.kind,
+          runMode: "direct",
+          notifyMode: track.notifyMode,
+          skipNotify: track.skipNotify,
+        })
+      ).then(finishCleanups);
+    }
+    // handoff/status/cleanup: fall through to wrapper path below
   }
 
   const wrapper = resolveWrapperPath(process.env);
@@ -834,6 +859,10 @@ function main() {
 
   if (wrapperMode === "status") {
     return finishCleanups(runStatus(wrapper, wrapperArgs));
+  }
+
+  if (wrapperMode === "handoff") {
+    return finishCleanups(runHandoff(wrapper, wrapperArgs));
   }
 
   if (WRAPPER_MODES.has(wrapperMode) || wrapperArgs[0]) {

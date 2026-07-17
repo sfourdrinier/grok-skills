@@ -8,7 +8,7 @@
 import argparse
 from typing import Callable, Dict
 
-from groklib.modes import cleanup, code, preflight, reason, review, status, verify
+from groklib.modes import cleanup, code, handoff, preflight, reason, review, status, verify
 
 MODES: Dict[str, Callable[[argparse.Namespace], dict]] = {
     "preflight": preflight.run,
@@ -18,4 +18,5 @@ MODES: Dict[str, Callable[[argparse.Namespace], dict]] = {
     "verify": verify.run,
     "status": status.run,
     "cleanup": cleanup.run,
+    "handoff": handoff.run,
 }

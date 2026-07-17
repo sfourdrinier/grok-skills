@@ -1,14 +1,14 @@
-# Run lifecycle program — Implementation Plan (revision 12)
+# Run lifecycle program — Implementation Plan (revision 13)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans. Checkboxes track progress.
 
 **Goal:** Full run lifecycle with CAS, crash-consistent terminal persistence, read-only status, process finalize worker, **opt-in** isolated review, at-most-once notify attempts, verified `code` implementation handoff, and (later) **notify dogfood follow-ups as PR5** — **five PRs**.
 
-**Design:** [docs/superpowers/specs/2026-07-15-run-lifecycle-design.md](../specs/2026-07-15-run-lifecycle-design.md) **revision 12**.
+**Design:** [docs/superpowers/specs/2026-07-15-run-lifecycle-design.md](../specs/2026-07-15-run-lifecycle-design.md) **revision 12** (+ PR4 plan adversarial 2026-07-16).
 
-**Baseline:** v1.2.10; **PR1 shipped** on main as **1.3.x**. **Versions:** 1.3.x (done) → 1.4.0 → 1.5.0 → 1.6.0 → **1.7.0** (PR5).
+**Baseline:** v1.2.10; **PR1–PR3 shipped** (1.3.x–1.5.0). **Versions:** 1.5.0 (done) → **1.6.0 (PR4 handoff)** → 1.7.0 (PR5).
 
-**Rule:** Design §4–§14 are authority for PR1–PR4. Rev 9: PR2 isolation is **opt-in** (`--isolated` only). **Rev 10:** operator notify retry is **PR5**. **Rev 11:** quality gates. **Rev 12:** PR5 scope = (A) operator re-attempt, (B) direct-mode completion signal, (C) headless/native honesty — after PR3 dogfood.
+**Rule:** Design §4–§14 are authority for PR1–PR4. Rev 9: PR2 isolation is **opt-in**. **Rev 10–12:** PR5 notify follow-ups. **Rev 11:** quality gates. **Rev 13:** PR4 plan adversarial pre-execution (FinalizeStage integration, dual-host parent, companion thinness, ERROR_CLASS mapping, direct fail-closed, notify ≠ ready).
 
 **PR1 done. PR2 (opt-in isolation) on branch / review. PR3–PR5 follow execution order + quality gates below.**
 
@@ -184,10 +184,13 @@ Packaging triple + CHANGELOG only after Gates A–D. Tag only after merge policy
 | `plugin/wrapper/scripts/groklib/modes/handoff.py` | **New** — read-only |
 | `plugin/wrapper/scripts/groklib/modes/cleanup.py` | factual ready-handoff warning (§14.17) |
 | `plugin/wrapper/scripts/groklib/envelope.py` | **seven** PR4 error classes in ERROR_CLASSES + MODES += `handoff` (see list below) |
-| `plugin/scripts/grok-companion.mjs` | WRAPPER_MODES += `handoff`; **not** STREAMING; `runHandoff()` |
-| `plugin/skills/handoff/SKILL.md` | **New** |
+| `plugin/scripts/grok-companion.mjs` | WRAPPER_MODES += `handoff`; **not** STREAMING; thin `runHandoff()` (≤900 lines) |
+| `plugin/skills/handoff/SKILL.md` | **New** — parent protocol + dual-condition ready |
 | `plugin/skills/handoff/run.mjs` | **New** |
-| `plugin/skills/code/SKILL.md` | contract-file; handoff pointer; one target |
+| `plugin/skills/code/SKILL.md` | contract-file; runId; handoff pointer; notify ≠ ready |
+| `plugin/agents/grok-engineer-coder.md` | after code → handoff before host integrate |
+| `plugin/codex-agents/grok-engineer-coder.toml` | same parent loop |
+| `plugin/references/implementation-handoff.md` | **New** — schema fields + parent git apply checklist |
 | `plugin/wrapper/scripts/tests/test_implementation_contract.py` | **New** |
 | `plugin/wrapper/scripts/tests/test_implementation_handoff.py` | **New** |
 | `plugin/wrapper/scripts/tests/test_mode_handoff.py` | **New** |
@@ -483,72 +486,130 @@ Design §11: exclusive pending; already-attempted; complete marker; shell false;
 
 ## PR4 — Verified implementation handoff (→ 1.6.0)
 
-**Authority:** design §14. **Quality:** Gates A–E.  
-**DRY:** One contract parser; one handoff validator used by writer **and** `handoff` mode; one finalization order function; command evidence helper shared by all gate commands.
+**Authority:** design §14. **Quality:** Gates A–E (same bar as PR3).  
+**Branch:** `feat/pr4-implementation-handoff-1.6.0`.  
+**Pre-execution review:** [reviews/2026-07-16-pr4-plan-adversarial.md](../reviews/2026-07-16-pr4-plan-adversarial.md) (rev 13 plan updates below).  
+**Product north star:** Grok as **peer implementer** for Claude Code + Codex multi-agent loops; handoff is the integration API.
+
+**DRY:** One contract parser; one handoff validator used by writer **and** `handoff` mode; **one** post-Grok order function wired into existing `FinalizeStage` / code finalize (no second pipeline); one command-evidence helper; companion handoff is thin passthrough only.
+
+**Grounding (1.5.0 tip):** `code.py` + `_worktree.FinalizeStage` already own sentinel, build gate, escape, envelope; `envelope.MODES` has no `handoff` yet; PR4 ERROR_CLASSES not registered; companion ≤900 lines - **must not re-bloat**.
+
+### Locked decisions from plan adversarial (rev 13)
+
+| Topic | Decision |
+|-------|----------|
+| Finalize integration | Extend **existing** code finalize / `FinalizeStage` path; do not invent a parallel finalizer |
+| Direct mode | **Fail closed** for `--contract-file` and for producing integration-ready handoff when not on hardened external worktree path; document clearly |
+| Companion | `handoff` in WRAPPER_MODES only; `runHandoff()` mirrors `runStatus` (no job, no relay, no notify, no Grok); keep companion ≤900 lines (extract helpers if needed) |
+| Notify vs handoff | Notify is optional **signal** only; parents **must** call `/grok:handoff --run-id` before integrate |
+| Dual-host parent | Skills + agents (Claude + Codex) document parent loop; dual-host smoke mandatory |
+| Schema docs | No second public JSON Schema file; markdown reference + single `validate_implementation_handoff` |
+| Blockers vs ERROR_CLASSES | Map primary blocker → envelope `error.class` via table in Task 4.0; not every blocker is its own ERROR_CLASS |
+| Contract path read | Regular file only; reject symlink escape / non-file; operator-trusted content after load |
+| Auto-apply | Still **out of PR4** |
+
+### ERROR_CLASSES (exactly seven new for PR4)
+
+```text
+implementation-contract-invalid
+write-scope-violation
+unexpected-commit
+artifact-generation-failure
+artifact-integrity-failure
+handoff-unavailable
+terminal-envelope-incomplete
+```
+
+**Primary class mapping (normative for Task 4.7):**
+
+| Situation | Envelope `error.class` (typical) | Handoff blockers |
+|-----------|----------------------------------|------------------|
+| Bad/missing contract before Grok | `implementation-contract-invalid` | n/a (pre-Grok fail) |
+| Scope violation post-Grok | `write-scope-violation` | `write-scope-violation` |
+| HEAD moved | `unexpected-commit` | `unexpected-commit` |
+| Patch build/size/secret fail | `artifact-generation-failure` | `secret-material` / size / capture errors |
+| Handoff rehash/load fail | `artifact-integrity-failure` | integrity |
+| No handoff / not code run | `handoff-unavailable` | n/a |
+| Manifest ready but no success envelope | observed ready false | `terminal-envelope-incomplete` |
+| Build gate / validation exit | `validation-failure` (existing) | `validation-failure` / build-gate |
+| Wrong cwd sentinel | `wrong-working-directory` (existing) | sentinel |
+
+(`temp-index-retained`, `no-changes`, `secret-material` are handoff **blocker** strings unless chosen as primary class above.)
 
 ### Task 4.0 — Failure-mode matrix + DRY plan (Gate A)
 
-Minimal rows:
+Commit matrix + DRY names **before** implementation. Artifact may live under `docs/superpowers/reviews/YYYY-MM-DD-pr4-handoff-matrix.md`.
 
 | Surface | Crash / silent wrong | Fail closed | Test |
 |---------|----------------------|-------------|------|
-| Finalization order §14.6 | Step skipped / reordered | assert order | yes |
-| Sentinel | Missing/symlink/user path | blocker | yes |
+| Finalization order §14.6 | Step skipped / reordered | assert order on **FinalizeStage path** | yes |
+| Second pipeline | Parallel finalizer drifts | Forbidden; single ordered function | review |
+| Sentinel | Missing/symlink/user path | fail / blocker | yes |
 | Unexpected commit | HEAD ≠ base | blocker; no reset | yes |
-| Write scopes | Escape / prefix confusion | blocker; forensics continue when safe | yes |
+| Write scopes | Escape / string-prefix false friend | blocker; forensics continue when safe | yes |
+| Contract path read | Symlink / non-file | `implementation-contract-invalid` | yes |
 | Temp index | Left on disk | `temp-index-retained` | yes |
 | Temp index delete race | Delete err but gone | warning only | yes |
-| requiredValidation | shell=true / cwd escape | reject; no OS-sandbox claim | yes |
+| requiredValidation | shell / cwd escape | reject; no OS-sandbox claim | yes |
 | Original checkout dirty after validation | — | ready false | yes |
 | Manifest then envelope | Crash between | dual-condition handoff not ready | yes |
+| Envelope then lifecycle | Crash between | status derives; handoff dual-condition | yes |
 | Rewrite ready-true after terminal | — | forbidden | yes |
-| `/grok:handoff` | Spawns Grok | must not | yes |
+| `/grok:handoff` | Spawns Grok / creates job / notify | must not | yes |
+| Companion size | Bloat >900 lines | extract / thin only | yes |
+| Direct + contract | Silent no-handoff | fail closed | yes |
+| Notify mistaken for ready | Parent applies without handoff | skill/docs forbid | dual-host |
+| Oversized patch | Truncate | never; fail closed | yes |
+| Odd paths | line-split porcelain | `-z` only | yes |
+| Dual-host | Claude-only docs | both hosts smoke | yes |
 
-- [ ] Matrix committed.  
-- [ ] Name single modules: contract parse, patch builder, validate_implementation_handoff, run_post_grok_finalization (order), command_evidence.  
+- [ ] Matrix committed (include ERROR_CLASS mapping table above).  
+- [ ] Name single modules: `implementation_contract.py`, `implementation_handoff.py` (patch + validate), post-Grok order **called from code finalize**, `command_evidence` helper.  
 - [ ] **Commit** `docs: PR4 failure-mode matrix and DRY boundaries`
 
 ### Task 4.1 — Contract module
 
 **Create** `implementation_contract.py` per design §14.3.
 
-- [ ] Parse/validate schemaVersion, taskId, target, scopes, requiredValidation argv.  
-- [ ] `path_in_scopes` component semantics.  
-- [ ] Classify `implementation-contract-invalid`.  
-- [ ] Trust model in module docstring.  
-- [ ] Tests: prefix confusion, traversal, absolute, empty scopes.  
+- [ ] Parse/validate schemaVersion, taskId, target, scopes, requiredValidation argv (array only).  
+- [ ] Load path: regular file; reject symlink escape / directories.  
+- [ ] `path_in_scopes` **path-component** prefix (not string prefix).  
+- [ ] Classify `implementation-contract-invalid` **before** Grok.  
+- [ ] Trust model docstring: `operator-contract-trusted-no-os-sandbox`.  
+- [ ] Tests: prefix confusion, traversal, absolute, empty scopes, symlink file, missing value.  
 - [ ] **Commit** `contract: parse write scopes and validation descriptors`
 
 ### Task 4.2 — Unexpected commit as blocker
 
-- [ ] After Grok: HEAD must equal base; else blocker `unexpected-commit`; no reset; continue if readable.  
+- [ ] After Grok: HEAD must equal recorded base; else blocker `unexpected-commit`; **no** reset; continue forensics if readable.  
 - [ ] **Commit** `code: unexpected-commit blocker without aborting forensics`
 
-### Task 4.3 — Finalization order + write scopes
+### Task 4.3 — Finalization order + write scopes (into existing finalize)
 
-Implement design §14.6 order in **one** function (no copy-pasted step lists in code/verify):
+Implement design §14.6 order in **one** function invoked from **existing** code `finalize(FinalizeStage)` / `_worktree` path (no copy-pasted parallel pipeline):
 
 ```text
 verify sentinel → remove exact sentinel → HEAD check → changed files
 → write scopes → forensic patch → requiredValidation → build gate
-→ shared safety → ready → final handoff JSON → terminal envelope
+→ shared safety → terminalOutcome + ready → final handoff JSON → terminal envelope
 ```
 
 - [ ] Sentinel never in changed files/patch.  
 - [ ] Malformed/missing/symlink sentinel fails.  
 - [ ] Cannot remove user-authored similarly named path.  
 - [ ] Scope violation → blocker + continue forensics when safe.  
-- [ ] Test asserts step order.  
+- [ ] Test asserts step order on the real finalize path.  
 - [ ] **Commit** `code: locked post-Grok finalization order`
 
 ### Task 4.4 — Phase-1 forensic patch
 
-**Create** `implementation_handoff.py` phase 1: unique temp index; `finally` delete + post-check §14.7; binary full-index patch; size limit; secret scan; 0600/0700.
+**Create** `implementation_handoff.py` phase 1: unique temp index; `finally` delete + post-check §14.7; binary full-index patch (`--binary --full-index --no-ext-diff`); size limit; secret scan; 0600/0700.
 
 - [ ] Index still exists → `temp-index-retained`, ready false.  
 - [ ] Delete errors but path absent → warning only.  
-- [ ] Tests: add/modify/delete/rename/binary/symlink/mode; untracked in; ignored out; sentinel out; `-z` odd paths; both cleanup cases.  
-- [ ] Apply to base → resultTreeOid.  
+- [ ] Tests: add/modify/delete/rename/binary/symlink/mode; untracked in; ignored out; sentinel out; `-z` odd paths; both cleanup cases; oversized fail closed **without** truncate.  
+- [ ] Apply to base → `resultTreeOid` (verify patch reconstructs tree).  
 - [ ] **Commit** `handoff: phase-1 immutable git patch`
 
 ### Task 4.5 — Execute contract validation (operator-trusted)
@@ -560,6 +621,7 @@ verify sentinel → remove exact sentinel → HEAD check → changed files
 - [ ] Evidence before interpreting exit.  
 - [ ] Nonzero → blocker; ready false.  
 - [ ] `trustModel` = `operator-contract-trusted-no-os-sandbox`.  
+- [ ] Prefer package-manager scripts in docs; arbitrary argv allowed under operator trust only.  
 - [ ] Tests: cwd escape; shell not used; checkout dirty blocks ready.  
 - [ ] **Do not** claim OS “cannot write outside worktree.”  
 - [ ] **Commit** `code: execute operator-trusted contract requiredValidation`
@@ -567,6 +629,7 @@ verify sentinel → remove exact sentinel → HEAD check → changed files
 ### Task 4.6 — Command evidence tails
 
 - [ ] **One** helper: sha256 + 4096 redacted tails + truncated flags.  
+- [ ] Reuse for build gate + requiredValidation (DRY with code’s recorded commands where possible).  
 - [ ] Never full logs on envelope stdout.  
 - [ ] **Commit** `commands: bounded redacted evidence`
 
@@ -577,19 +640,22 @@ verify sentinel → remove exact sentinel → HEAD check → changed files
 - [ ] Envelope-first terminal persist.  
 - [ ] **`validate_implementation_handoff` single function** used by writer.  
 - [ ] validation.sources §14.10.  
+- [ ] Primary ERROR_CLASS mapping table from Task 4.0.  
 - [ ] Never rewrite ready-true after terminal envelope published.  
+- [ ] Direct mode: no integration-ready handoff (fail closed earlier if contract requested).  
 - [ ] Tests: sandbox/build/validation fail; success ready; multi-blocker; empty; crash between manifest/envelope; crash between envelope/lifecycle.  
 - [ ] **Commit** `handoff: phase-2 manifest from terminalOutcome`
 
-### Task 4.8 — Mode `handoff` (non-streaming)
+### Task 4.8 — Mode `handoff` (non-streaming) + dual-host parent wiring
 
-- [ ] WRAPPER_MODES only; not STREAMING_MODES.  
-- [ ] `runHandoff()` like status.  
+- [ ] Register `handoff` in `envelope.MODES` + companion WRAPPER_MODES only; **not** STREAMING_MODES.  
+- [ ] Companion: thin `runHandoff()` like `runStatus` (stdio passthrough / no job / no notify / no Grok).  
+- [ ] Keep `grok-companion.mjs` ≤900 lines (extract if needed).  
 - [ ] **Same** `validate_implementation_handoff` as writer (DRY).  
-- [ ] Dual-condition ready §14.12.  
-- [ ] Rehash patch; integrity; unavailable; `terminal-envelope-incomplete`.  
-- [ ] Skill + run.mjs.  
-- [ ] Tests: no Grok; no companion job; read-only; dual-condition ready.  
+- [ ] Dual-condition ready §14.12; rehash patch; `artifact-integrity-failure` / `handoff-unavailable` / `terminal-envelope-incomplete`.  
+- [ ] Skills: `handoff/SKILL.md` + `run.mjs`; update `code/SKILL.md` (contract-file, runId, handoff pointer, notify ≠ ready).  
+- [ ] Agents: `grok-engineer-coder` + codex-agents TOML: after code success → status optional → **handoff --run-id** → only then parent integrate protocol.  
+- [ ] Tests: no Grok; no companion job; read-only; dual-condition ready; companion line-count contract.  
 - [ ] **Commit** `handoff: read-only non-streaming /grok:handoff`
 
 ### Task 4.9 — Cleanup factual warning
@@ -599,20 +665,47 @@ verify sentinel → remove exact sentinel → HEAD check → changed files
 
 ### Task 4.10 — Internal code review (Gate D)
 
-- [ ] Spec + quality pass (order, dual-condition ready, DRY validators, no OS-sandbox lies).  
-- [ ] Artifact `docs/superpowers/reviews/YYYY-MM-DD-pr4-handoff.md`.  
+- [ ] Spec + quality pass (order on FinalizeStage, dual-condition ready, DRY validators, no OS-sandbox lies, companion thinness, direct fail-closed, dual-host parent text).  
+- [ ] Artifact `docs/superpowers/reviews/YYYY-MM-DD-pr4-handoff.md` (+ reference plan adversarial).  
 - [ ] Zero open remediable findings.  
 - [ ] **Commit** `review: PR4 internal review artifact`
 
 ### Task 4.11 — Docs + dual-host smoke + 1.6.0 (Gate E)
 
-- [ ] All PR4 docs from file map.  
-- [ ] Parent protocol + transfer vs handoff.  
+- [ ] All PR4 docs from file map + **`plugin/references/implementation-handoff.md`** (schema fields, parent apply checklist with `git apply --check --binary`, transfer vs result vs handoff table, notify is signal only).  
+- [ ] README / COMPATIBILITY / RELEASE / manual-smoke / authority-policies / wrapper SKILL.  
 - [ ] Path headers / skill frontmatter.  
 - [ ] Suites + `claude plugin validate ./plugin --strict`.  
-- [ ] Dual-host smoke §14.19.  
-- [ ] Packaging triple **1.6.0**; tag after merge.  
+- [ ] Dual-host smoke §14.19 (Claude + Codex): code → status → handoff; failed code ready false; tampered patch integrity failure.  
+- [ ] Packaging triple **1.6.0**; CHANGELOG; tag **after merge** to main.  
 - [ ] **Commit** `release: 1.6.0 implementation handoff`
+
+### PR4 non-goals (reaffirmed)
+
+- Auto-apply, auto-commit, merge, cherry-pick, push  
+- OS-sandbox of requiredValidation  
+- Multi-root build gates in one run  
+- Exactly-once delivery of handoff or notify  
+- PR5 notify items (direct notify, operator re-fire, headless polish) except docs cross-links  
+- **ACP (Agent Client Protocol) client/server** in this plugin - see note below  
+
+### Note: Grok CLI ACP support (does **not** change PR4 scope)
+
+xAI's Grok CLI / Grok Build supports **ACP** (Agent Client Protocol: open JSON-RPC
+IDE↔agent standard; e.g. Zed/JetBrains registry, `grok agent stdio`). That path
+lets an **editor** drive Grok as a coding agent directly.
+
+**This repo (grok-skills) is a different surface:** Claude Code / Codex plugin →
+companion → hardened wrapper → Grok CLI **headless** modes → one JSON envelope.
+PR4 handoff is the **orchestrator peer** integration API (`runId` → immutable
+patch + ready manifest for parent agents), not ACP session transport.
+
+| Question | Answer for PR4 |
+|----------|----------------|
+| Does ACP make handoff unnecessary? | **No.** ACP is editor↔agent session protocol; handoff is parent-agent integrate artifacts after an isolated `code` run. |
+| Should PR4 speak ACP? | **No.** Do not implement ACP in the plugin or map envelopes to ACP RPC in 1.6.0. |
+| Is ACP relevant later? | Optional future research (e.g. document coexistence). Not a PR4/PR5 gate. |
+| Practical user impact | Users may use Grok via ACP **or** via this plugin; same CLI binary, different integration. |
 
 ---
 
@@ -778,7 +871,8 @@ No parallel tracks for PR1–PR4. PR5 may wait on real notify demand after 1.5.0
 Revision **9:** PR2 isolation opt-in only.  
 Revision **10:** PR5 = operator notify re-attempt only.  
 Revision **11:** PR3–PR5 **quality gates** (failure-mode matrix, **DRY**, **internal code review as PR tasks**); suites alone are not done.  
-Revision **12:** PR5 expanded after PR3 dogfood prioritization: **A** operator re-attempt, **B** direct-mode completion signal, **C** headless/native honesty (1.7.0).
+Revision **12:** PR5 expanded after PR3 dogfood prioritization: **A** operator re-attempt, **B** direct-mode completion signal, **C** headless/native honesty (1.7.0).  
+Revision **13:** PR4 plan adversarial pre-execution ([reviews/2026-07-16-pr4-plan-adversarial.md](../reviews/2026-07-16-pr4-plan-adversarial.md)); handoff tasks strengthened for peer multi-agent loops.
 
 Paths:
 

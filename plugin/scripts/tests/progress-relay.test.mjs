@@ -46,7 +46,7 @@ const RUNSTATE_PY = path.resolve(
   "groklib",
   "runstate.py"
 );
-const ENVELOPE_PY = path.resolve(path.dirname(RUNSTATE_PY), "envelope.py");
+const ENVELOPE_PY = path.resolve(path.dirname(RUNSTATE_PY), "redaction.py");
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "grok-relay-test-"));
@@ -572,10 +572,11 @@ test("F-RELAY-SECRET: benign prose mentioning 'bearer' is not mangled", () => {
   assert.ok(!line.includes("[redacted-"), "benign prose is not redacted");
 });
 
-test("F-DRY-SECRET-MIRROR: the Node redaction patterns match the Python envelope source of truth", () => {
+test("F-DRY-SECRET-MIRROR: the Node redaction patterns match the Python redaction source of truth", () => {
   const py = fs.readFileSync(ENVELOPE_PY, "utf8");
-  const blockMatch = /_SECRET_VALUE_PATTERNS[^=]*=\s*\(([\s\S]*?)\n\)/.exec(py);
-  assert.ok(blockMatch, "could not find _SECRET_VALUE_PATTERNS in envelope.py");
+  // Anchor to the assignment line (not comments that mention the name).
+  const blockMatch = /^_SECRET_VALUE_PATTERNS[^\n]*=\s*\(([\s\S]*?)^\)/m.exec(py);
+  assert.ok(blockMatch, "could not find _SECRET_VALUE_PATTERNS in redaction.py");
 
   const entryRe = /\("([a-z0-9-]+)",\s*re\.compile\(r"([^"]+)"\)\)/g;
   const pyEntries = [];
@@ -587,7 +588,7 @@ test("F-DRY-SECRET-MIRROR: the Node redaction patterns match the Python envelope
   assert.deepEqual(
     pyEntries,
     SECRET_VALUE_PATTERNS_PY,
-    "the Node SECRET_VALUE_PATTERNS_PY mirror drifted from envelope.py _SECRET_VALUE_PATTERNS"
+    "the Node SECRET_VALUE_PATTERNS_PY mirror drifted from redaction.py _SECRET_VALUE_PATTERNS"
   );
 });
 

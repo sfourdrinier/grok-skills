@@ -322,3 +322,14 @@ test("code/reason/verify dual-lens fenced runs export execution context", () => 
   const dual = fs.readFileSync(path.join(root, "skills/dual-lens/SKILL.md"), "utf8");
   assert.match(dual, /--no-notify/, "dual-lens first pass suppresses intermediate notify");
 });
+
+test("handoff/status/cleanup force wrapper; contract-file fails closed in direct", () => {
+  const src = fs.readFileSync(COMPANION, "utf8");
+  assert.match(src, /WRAPPER_ONLY_MODES/);
+  assert.match(src, /handoff/);
+  assert.match(src, /--contract-file requires hardened mode/);
+  assert.match(src, /function runHandoff/);
+  // equals-form and space-form both detected
+  assert.match(src, /--contract-file=/);
+  assert.match(src, /startsWith\("--contract-file="\)/);
+});
