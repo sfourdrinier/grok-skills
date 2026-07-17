@@ -14,9 +14,53 @@ import {
   makeFakeWrapper,
   runCompanion,
 } from "./helpers/fake-wrapper.mjs";
+import { runPeerStartBackground } from "../lib/peer-acp.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const COMPANION = path.resolve(SCRIPT_DIR, "..", "grok-companion.mjs");
+
+/** Write a temp "wrapper" that prints one envelope line then exits. */
+function fakeEnvelopeWrapper(envelopeLine) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "peer-start-"));
+  const file = path.join(dir, "fake-wrapper.mjs");
+  fs.writeFileSync(
+    file,
+    `process.stdout.write(${JSON.stringify(envelopeLine + "\n")});\n`
+  );
+  return { file, cleanup: () => fs.rmSync(dir, { recursive: true, force: true }) };
+}
+
+test("peer-start background: non-running first envelope exits nonzero", async () => {
+  const { file, cleanup } = fakeEnvelopeWrapper(
+    JSON.stringify({ status: "failure", mode: "peer-start", error_class: "auth-missing" })
+  );
+  try {
+    const code = await runPeerStartBackground(process.execPath, file, [], {
+      spawnFailedMessage: () => "",
+      signalExit: 1,
+      spawnFailedExit: 4,
+    });
+    assert.notEqual(code, 0, "a pre-resident failure envelope must not exit 0");
+  } finally {
+    cleanup();
+  }
+});
+
+test("peer-start background: running envelope exits 0", async () => {
+  const { file, cleanup } = fakeEnvelopeWrapper(
+    JSON.stringify({ status: "running", mode: "peer-start", runId: "x" })
+  );
+  try {
+    const code = await runPeerStartBackground(process.execPath, file, [], {
+      spawnFailedMessage: () => "",
+      signalExit: 1,
+      spawnFailedExit: 4,
+    });
+    assert.equal(code, 0);
+  } finally {
+    cleanup();
+  }
+});
 
 function runCompanionLegacy(args, env = {}) {
   return spawnSync(process.execPath, [COMPANION, ...args], {

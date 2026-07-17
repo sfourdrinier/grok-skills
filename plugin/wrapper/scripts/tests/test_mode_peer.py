@@ -101,7 +101,12 @@ class PeerLifecycleTests(PeerTestBase):
             task_file=None,
         )
         spawn = mock.Mock(side_effect=AssertionError("must not spawn on parity failure"))
-        with mock.patch.object(peer_mod, "_spawn_acp_child", spawn):
+        # Fake home creation + source so a clean CI home (no ~/.grok/auth.json)
+        # does not raise auth-missing in the REAL create_private_home before the
+        # mocked _assert_start_parity is reached (CI-breaker).
+        with mock.patch.object(peer_mod, "source_grok_dir", lambda: source), \
+             mock.patch.object(peer_mod, "create_private_home", self._fake_create_home), \
+             mock.patch.object(peer_mod, "_spawn_acp_child", spawn):
             with mock.patch.object(peer_mod, "require_probed_platform_for_live", return_value=None):
                 with mock.patch.object(peer_mod, "check_version", return_value="0.0.0"):
                     with mock.patch.object(

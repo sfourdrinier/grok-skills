@@ -20,7 +20,10 @@ from groklib.implementation_handoff import (
     enforce_ready_evidence_guard,
     write_manifest,
 )
-from groklib.modes._envelope import grok_usage_response_fields
+from groklib.modes._envelope import (
+    AUTH_TEARDOWN_FAILED_ERROR_CLASS,
+    grok_usage_response_fields,
+)
 from groklib.projectconfig import load_project_config
 from groklib.sandbox import policy_for_mode, verify_enforcement
 from groklib.worktree import ExternalWorktree
@@ -305,6 +308,21 @@ def finalize_peer_session(
         config_path=home_path / ".grok" / "config.toml",
     )
     cleanup = destroy_private_home(home)
+
+    # Fail closed when auth teardown could not be confirmed clean: a "failed"
+    # cleanup means credential material may remain on disk, so peer-stop must NOT
+    # report success (parity with the shared worktree lifecycle, which flips a
+    # failed teardown to cleanup-failure).
+    if (
+        isinstance(cleanup, dict)
+        and cleanup.get("status") == "failed"
+        and primary_error is None
+    ):
+        primary_error = GrokWrapperError(
+            AUTH_TEARDOWN_FAILED_ERROR_CLASS,
+            "the peer private-home auth-material teardown could not be confirmed clean",
+            {"reason": "auth-teardown-failed", "cleanupStatus": "failed"},
+        )
 
     # Mark peer lifecycle stopped.
     try:

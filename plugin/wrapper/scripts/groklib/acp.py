@@ -32,7 +32,16 @@ def decode_frame(raw: bytes) -> Dict[str, Any]:
     """Decode one ndjson JSON-RPC frame; raises acp-failure on malformed input."""
     if not isinstance(raw, (bytes, bytearray)):
         raise GrokWrapperError("acp-failure", "ACP frame must be bytes", {"type": type(raw).__name__})
-    text = raw.decode("utf-8", errors="replace").strip()
+    # Fail closed on undecodable bytes (matches the streaming F-STREAM-DECODE
+    # invariant): errors="replace" would turn corruption into U+FFFD and let a
+    # malformed frame parse as valid JSON.
+    try:
+        text = raw.decode("utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise GrokWrapperError(
+            "acp-failure",
+            "malformed ACP frame bytes (invalid UTF-8): {}".format(exc),
+        ) from exc
     if not text:
         raise GrokWrapperError("acp-failure", "empty ACP frame")
     try:

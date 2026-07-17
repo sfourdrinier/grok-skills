@@ -451,6 +451,31 @@ def kill_process_tree(proc: "subprocess.Popen") -> None:
     _kill_process_tree_for(current_platform(), proc)
 
 
+def kill_process_tree_by_pid(pid: int) -> None:
+    """Best-effort force-kill a persisted pid + its group (no live Popen needed).
+
+    For callers that only hold a recorded pid (e.g. the peer-stop fallback) and
+    cannot pass a Popen. Never raises: an already-exited process is not an error.
+    """
+    if not isinstance(pid, int):
+        return
+    if _is_posix_platform(current_platform()):
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except OSError as exc:
+            _log("kill_process_tree_by_pid", "killpg failed for pid {}: {}".format(pid, exc))
+        return
+    try:
+        subprocess.run(
+            ["taskkill", "/T", "/F", "/PID", str(pid)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except OSError as exc:
+        _log("kill_process_tree_by_pid", "taskkill unavailable for pid {}: {}".format(pid, exc))
+
+
 def require_probed_platform_for_live() -> None:
     """Fail closed (probe-required) when this host has no captured Grok sandbox probe report.
 

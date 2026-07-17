@@ -24,6 +24,7 @@ from groklib import platformsupport
 from groklib import worktree as worktree_mod
 from groklib import worktree_escape
 from groklib import acp as acp_mod
+from groklib import grokcli
 from groklib.authhome import (
     PrivateHome,
     create_private_home,
@@ -47,6 +48,10 @@ from groklib.grokcli import check_version
 from groklib.implementation_contract import assert_target_matches, load_contract_file
 from groklib.modes import _shared
 from groklib.modes import peer_control
+from groklib.modes.peer_process import (
+    kill_recorded_child as _kill_recorded_child,
+    spawn_acp_child as _spawn_acp_child,
+)
 from groklib.modes.review import _resolve_target as _resolve_repo_target
 from groklib.platformsupport import require_probed_platform_for_live
 from groklib.progress import ProgressWriter
@@ -118,55 +123,6 @@ class PeerSession:
 
 def source_grok_dir() -> pathlib.Path:
     return _shared.source_grok_dir()
-
-
-def _spawn_acp_child(
-    *,
-    binary: pathlib.Path,
-    home: PrivateHome,
-    worktree: worktree_mod.ExternalWorktree,
-    leader_socket: pathlib.Path,
-    model: str,
-) -> subprocess.Popen:
-    """Spawn ``grok agent stdio`` in the private home / worktree cwd."""
-    env = os.environ.copy()
-    env["HOME"] = str(home.home_dir)
-    env["GROK_HOME"] = str(home.grok_dir)
-    # Drop injected secrets from the parent env (defense in depth).
-    for key in list(env.keys()):
-        lower = key.lower()
-        if any(s in lower for s in ("token", "secret", "password", "api_key", "apikey")):
-            if lower not in ("inputtokens", "outputtokens"):
-                env.pop(key, None)
-    # --model belongs on `grok agent` (not the stdio subcommand). Unknown
-    # flags after `stdio` make the CLI exit 2 with an empty stdout.
-    argv = [str(binary), "agent"]
-    if model:
-        argv.extend(["--model", model])
-    argv.extend(
-        [
-            "stdio",
-            "--leader-socket",
-            str(leader_socket),
-        ]
-    )
-    try:
-        proc = subprocess.Popen(
-            argv,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,  # amendment 4: drop or redact child stderr
-            cwd=str(worktree.path),
-            env=env,
-            **platformsupport.spawn_kwargs_new_group(),
-        )
-    except OSError as exc:
-        raise GrokWrapperError(
-            "acp-failure",
-            "could not spawn grok agent stdio: {}".format(exc),
-            {"binary": str(binary)},
-        ) from exc
-    return proc
 
 
 def _assert_start_parity(
@@ -542,20 +498,31 @@ def run_peer_start(args: argparse.Namespace) -> dict:
     )
     del _pristine_name  # captured for parity; gate runs at stop via finalize
 
-    private_tmp = pathlib.Path(tempfile.mkdtemp(prefix="gs-peer-tmp-"))
-    try:
-        platformsupport.restrict_dir_permissions(private_tmp)
-    except OSError:
-        pass
-    policy = policy_for_mode("peer", worktree=worktree.path, private_tmp=private_tmp)
+    # Two-phase policy (mirrors _direct.py): render sandbox.toml from an os-temp
+    # placeholder (a superset of <home>/tmp, which does not exist until the home
+    # is created), create the home, then rebuild the policy with the real
+    # <home>/tmp. This makes the child's TMPDIR (grokcli minimal env), the
+    # enforced sandbox profile, and the stop-time verify_enforcement all agree on
+    # <home>/tmp - and that tmp dies with the private home instead of leaking
+    # (was: a standalone gs-peer-tmp mkdtemp granted as a sandbox root but never
+    # recorded in peer.json nor removed on stop).
     real_home = source_grok_dir().parent
-    sandbox_toml = render_sandbox_toml(policy, real_home=real_home)
+    os_temp = pathlib.Path(tempfile.gettempdir()).resolve()
+    placeholder_policy = policy_for_mode(
+        "peer", worktree=worktree.path, private_tmp=os_temp
+    )
+    sandbox_toml = render_sandbox_toml(placeholder_policy, real_home=real_home)
     config_toml = render_config_toml(mode="peer")
     home = create_private_home(
         source_grok_dir=source_grok_dir(),
         auth_file_names=_shared.AUTH_FILE_NAMES,
         config_toml=config_toml,
         sandbox_toml=sandbox_toml,
+    )
+    private_tmp = grokcli.private_tmp_dir(home)
+    grokcli._ensure_private_tmp(private_tmp)
+    policy = policy_for_mode(
+        "peer", worktree=worktree.path, private_tmp=private_tmp.resolve()
     )
     leader_socket = runstate.allocate_leader_socket(home.home_dir, run_paths.run_id)
     sentinel_name = _SENTINEL_PREFIX + run_paths.run_id
@@ -577,6 +544,7 @@ def run_peer_start(args: argparse.Namespace) -> dict:
         worktree=worktree,
         leader_socket=leader_socket,
         model=model,
+        policy=policy,
     )
     acp = AcpClient(child, timeout_seconds=timeout)
     try:
@@ -721,13 +689,18 @@ def run_peer_start(args: argparse.Namespace) -> dict:
     except Exception:
         pass
 
+    # Arm suppression BEFORE serving: if _serve_control_plane raises (e.g. an
+    # accept() error or a stop/finalize exception), the running envelope above is
+    # already the single stdout write; without arming here the exception would
+    # reach grok_agent.main and emit a SECOND envelope for this process,
+    # violating the one-stdout-envelope contract.
+    arm_peer_resident_stdout_suppress()
     final = _serve_control_plane(session_obj, running_env, preopened=control_srv)
     # Resident process: exactly ONE stdout envelope (the running one above).
     # Terminal outcome is delivered on the control socket to peer-stop and
     # durable in the run dir; suppress the entrypoint's post-return emit.
     final = dict(final)
     final["_peerStartAlreadyEmittedRunning"] = True
-    arm_peer_resident_stdout_suppress()
     return final
 
 
@@ -794,6 +767,10 @@ def run_peer_stop(args: argparse.Namespace) -> dict:
             return _connect_control(socket_path, {"op": "stop"}, timeout=1800.0)
         except GrokWrapperError as exc:
             _log("run_peer_stop", "socket stop failed, attempting local finalize: {}".format(exc))
+    # Kill the recorded ACP child if still alive (start-token match) so a stale
+    # `grok agent stdio` does not keep running in the retained worktree after
+    # peer-stop. The resident stop path kills it; the fallback must too.
+    _kill_recorded_child(doc)
     # Fallback: local finalize when resident wrapper is already gone.
     # MUST use original_baseline from peer-start (never re-capture: closes escape window).
     from groklib.modes import peer_finalize

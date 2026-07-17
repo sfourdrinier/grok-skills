@@ -122,6 +122,16 @@ class AcpFramingTests(unittest.TestCase):
         decoded = acp.decode_frame(frame)
         self.assertEqual(decoded, payload)
 
+    def test_decode_frame_rejects_invalid_utf8(self) -> None:
+        from groklib import acp
+        from groklib import GrokWrapperError
+
+        # Invalid UTF-8 (lone continuation byte) must fail closed, not be
+        # silently replaced with U+FFFD and parsed (review: fail-closed stream).
+        with self.assertRaises(GrokWrapperError) as ctx:
+            acp.decode_frame(b'{"a":"\xff\xfe"}\n')
+        self.assertEqual(ctx.exception.error_class, "acp-failure")
+
     def test_initialize_handshake_against_fake_stdio_peer(self) -> None:
         from groklib import acp
 

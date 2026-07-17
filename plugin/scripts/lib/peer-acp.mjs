@@ -70,12 +70,26 @@ export function runPeerStartBackground(python, wrapper, args, {
         if (nl >= 0 && !settled) {
           const line = stdoutBuf.slice(0, nl + 1);
           process.stdout.write(line.endsWith("\n") ? line : `${line}\n`);
+          // peer-start emits exactly one envelope. status "running" = the
+          // resident session is up (background it, exit 0). Any other status is
+          // a pre-resident failure (auth/probe/usage) and must NOT look like a
+          // successful start - propagate a nonzero exit.
+          let running = false;
           try {
-            child.unref();
+            running = JSON.parse(line.trim()).status === "running";
           } catch {
-            /* ignore */
+            running = false;
           }
-          finish(0);
+          if (running) {
+            try {
+              child.unref();
+            } catch {
+              /* ignore */
+            }
+            finish(0);
+          } else {
+            finish(signalExit);
+          }
         }
       });
     }
