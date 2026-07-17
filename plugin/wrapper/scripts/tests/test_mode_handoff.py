@@ -17,6 +17,11 @@ _RUN_ID = "20260716T120000Z-abcdef"
 
 
 def _valid_manifest(run_id: str, patch_sha: str, ready: bool = True) -> dict:
+    changed = (
+        [{"path": "pkg/a.ts", "status": "modified", "oldPath": None}]
+        if ready
+        else []
+    )
     return {
         "schemaVersion": 1,
         "runId": run_id,
@@ -24,7 +29,7 @@ def _valid_manifest(run_id: str, patch_sha: str, ready: bool = True) -> dict:
         "baseRevision": "a" * 40,
         "resultTreeOid": "b" * 40,
         "createdAtUtc": "2026-07-16T12:00:00Z",
-        "changedFiles": [{"path": "pkg/a.ts", "status": "modified", "oldPath": None}],
+        "changedFiles": changed,
         "patch": {
             "format": "git-binary-full-index-v1",
             "relativePath": "artifacts/implementation.patch",
@@ -37,7 +42,10 @@ def _valid_manifest(run_id: str, patch_sha: str, ready: bool = True) -> dict:
             "allPassed": True,
             "sources": {},
         },
-        "integration": {"ready": ready, "blockers": [] if ready else [{"kind": "no-changes", "message": "x"}]},
+        "integration": {
+            "ready": ready,
+            "blockers": [] if ready else [{"kind": "no-changes", "message": "x"}],
+        },
         "worktree": {"retained": True, "path": "/tmp/wt", "branch": "grok/code/" + run_id},
     }
 
@@ -138,6 +146,30 @@ class HandoffModeTests(ModeHarness):
         env = json.loads(out)
         self.assertEqual(code, 1, out)
         self.assertEqual(env["error"]["class"], "artifact-integrity-failure")
+
+    def test_handoff_invalid_utf8_manifest_is_integrity_failure(self) -> None:
+        paths = runstate.create_run("code")
+        run_id = paths.run_id
+        rec = runstate.set_lifecycle(paths, 0, "running")
+        rev = int(rec["recordRevision"])
+        rec = runstate.cas_update_run_record(
+            paths,
+            rev,
+            {
+                "repository": "/tmp/repo",
+                "baseRevision": "a" * 40,
+                "status": "running",
+            },
+        )
+        rev = int(rec["recordRevision"])
+        runstate.set_lifecycle(paths, rev, "finalizing")
+        # Invalid UTF-8 bytes (not a valid text file)
+        (paths.run_dir / "implementation-handoff.json").write_bytes(b"\xff\xfe not utf8 {")
+        code, out = self.drive(["handoff", "--run-id", run_id])
+        env = json.loads(out)
+        self.assertEqual(code, 1, out)
+        self.assertEqual(env["error"]["class"], "artifact-integrity-failure")
+        self.assertIn("utf-8", json.dumps(env["error"]).lower() + env["error"]["message"].lower())
 
 
 if __name__ == "__main__":

@@ -585,6 +585,43 @@ class CodeModeTests(WorktreeModeHarness):
         self.assertEqual(code_h, 0, out_h)
         self.assertTrue(env_h["response"]["integration"]["ready"])
 
+    def test_code_empty_contract_file_flag_is_invalid(self) -> None:
+        """Present empty --contract-file must fail closed before Grok (not silent no-contract)."""
+        import argparse
+        from unittest import mock
+
+        from groklib import GrokWrapperError
+        from groklib.modes import code as code_mod
+
+        ns = argparse.Namespace(
+            target="pkg",
+            base="HEAD",
+            task="x",
+            task_file=None,
+            model="grok-4.5",
+            timeout=10,
+            max_turns=None,
+            web=None,
+            contract_file="",
+            grok_binary="/bin/true",
+        )
+        with mock.patch.object(code_mod._shared, "resolve_binary", return_value=pathlib.Path("/bin/true")):
+            with mock.patch.object(code_mod._shared, "resolve_task_text", return_value="task"):
+                with mock.patch.object(
+                    code_mod,
+                    "_resolve_repo_target",
+                    return_value=(pathlib.Path("/tmp"), pathlib.Path("/tmp/pkg"), "pkg"),
+                ):
+                    with mock.patch.object(code_mod, "load_project_config") as lpc:
+                        cfg = mock.Mock()
+                        cfg.package_manager = None
+                        cfg.never_build_workspaces = {}
+                        cfg.require_rule_file_parity = False
+                        lpc.return_value = cfg
+                        with self.assertRaises(GrokWrapperError) as cm:
+                            code_mod.run(ns)
+                        self.assertEqual(cm.exception.error_class, "implementation-contract-invalid")
+
     def test_code_contract_scope_violation_fails(self) -> None:
         repo = self.make_code_repo()
         contract = {

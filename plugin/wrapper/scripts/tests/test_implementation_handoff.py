@@ -83,6 +83,38 @@ class ValidateHandoffTests(unittest.TestCase):
         errs = validate_implementation_handoff(doc)
         self.assertTrue(any("oldPath" in e for e in errs))
 
+    def test_ready_true_rejects_empty_changed_files(self) -> None:
+        doc = self._doc()
+        doc["changedFiles"] = []
+        doc["integration"] = {"ready": True, "blockers": []}
+        errs = validate_implementation_handoff(doc)
+        self.assertTrue(any("changedFiles" in e for e in errs), errs)
+
+    def test_ready_true_rejects_nonempty_blockers(self) -> None:
+        doc = self._doc()
+        doc["integration"] = {
+            "ready": True,
+            "blockers": [{"kind": "write-scope-violation", "message": "x"}],
+        }
+        errs = validate_implementation_handoff(doc)
+        self.assertTrue(any("blockers" in e for e in errs), errs)
+
+    def test_git_object_ids_must_be_full_hex(self) -> None:
+        doc = self._doc()
+        doc["baseRevision"] = "not-a-sha"
+        errs = validate_implementation_handoff(doc)
+        self.assertTrue(any("baseRevision" in e for e in errs), errs)
+        doc = self._doc()
+        doc["resultTreeOid"] = "abc"
+        errs = validate_implementation_handoff(doc)
+        self.assertTrue(any("resultTreeOid" in e for e in errs), errs)
+
+    def test_ready_false_allows_empty_changed_files(self) -> None:
+        doc = self._doc()
+        doc["changedFiles"] = []
+        doc["integration"] = {"ready": False, "blockers": [{"kind": "no-changes", "message": "x"}]}
+        self.assertEqual(validate_implementation_handoff(doc), [])
+
 
 class CommandEvidenceTests(unittest.TestCase):
     def test_tails_and_hashes(self) -> None:
@@ -316,7 +348,7 @@ class ReadyAndDualConditionTests(unittest.TestCase):
             "baseRevision": "a" * 40,
             "resultTreeOid": "b" * 40,
             "createdAtUtc": "2026-07-16T02:04:08Z",
-            "changedFiles": [],
+            "changedFiles": [{"path": "a.ts", "status": "modified", "oldPath": None}],
             "patch": {
                 "format": "git-binary-full-index-v1",
                 "relativePath": "artifacts/implementation.patch",
@@ -425,6 +457,48 @@ class WriteManifestRoundTripTests(unittest.TestCase):
             write_manifest(path, doc)
             loaded = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(validate_implementation_handoff(loaded), [])
+
+    def test_write_manifest_redacts_secret_argv_in_blockers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "implementation-handoff.json"
+            doc = {
+                "schemaVersion": 1,
+                "runId": "20260716T020408Z-a82843",
+                "taskId": "t1",
+                "baseRevision": "a" * 40,
+                "resultTreeOid": "b" * 40,
+                "createdAtUtc": "2026-07-16T02:04:08Z",
+                "changedFiles": [],
+                "patch": {
+                    "format": "git-binary-full-index-v1",
+                    "relativePath": "artifacts/implementation.patch",
+                    "sha256": "d" * 64,
+                    "bytes": 0,
+                },
+                "validation": {
+                    "requiredCommandsPassed": False,
+                    "buildGatePassed": True,
+                    "allPassed": False,
+                    "sources": {},
+                },
+                "integration": {
+                    "ready": False,
+                    "blockers": [
+                        {
+                            "kind": "validation-failure",
+                            "message": "failed",
+                            "detail": {
+                                "argv": ["tool", "Bearer abcdef0123456789deadbeefcafebabe"],
+                            },
+                        }
+                    ],
+                },
+                "worktree": {"retained": True, "path": "/t", "branch": "b"},
+            }
+            write_manifest(path, doc)
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("abcdef0123456789deadbeefcafebabe", text)
+            self.assertIn("redacted", text.lower())
 
 
 if __name__ == "__main__":

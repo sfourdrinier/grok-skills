@@ -14,6 +14,7 @@ from groklib import GrokWrapperError, log_stderr, platformsupport
 from groklib.command_evidence import build_command_evidence
 from groklib.handoff_patch import capture_phase1_patch, list_changed_paths
 from groklib.implementation_contract import normalize_repo_relative, path_in_scopes, trust_model
+from groklib.envelope import redact_secret_material, redact_secret_value_text
 from groklib.implementation_handoff import (
     HARD_BLOCKER_KINDS,
     HandoffBlocker,
@@ -24,6 +25,10 @@ from groklib.implementation_handoff import (
     primary_error_from_blockers,
     write_manifest,
 )
+
+
+def _redact_argv(argv: list) -> list:
+    return [redact_secret_value_text(str(a)) for a in argv]
 
 _log = lambda fn, msg: log_stderr("code_handoff_finalize", fn, msg)
 _PATCH_FORMAT = "git-binary-full-index-v1"
@@ -291,22 +296,30 @@ def code_handoff_finalize(
                     )
                     continue
             purpose = entry.get("purpose") or "contract-validation"
+            safe_argv = _redact_argv(argv)
             try:
                 rec = run_recorded_command(argv, cwd, purpose)
             except GrokWrapperError as exc:
                 # Launch/spawn failure: record blocker and continue so phase-2
                 # handoff manifest is still written for /grok:handoff forensics.
+                # Redact argv/detail before they touch the manifest or envelope.
                 validation_ok = False
+                safe_detail = redact_secret_material(
+                    dict(exc.detail or {}, errorClass=exc.error_class, argv=safe_argv),
+                    redact_keys=True,
+                )
                 blockers.append(
                     HandoffBlocker(
                         "validation-failure",
-                        "requiredValidation command could not be run: {}".format(exc),
-                        dict(exc.detail or {}, errorClass=exc.error_class, argv=argv),
+                        redact_secret_value_text(
+                            "requiredValidation command could not be run: {}".format(exc)
+                        ),
+                        safe_detail if isinstance(safe_detail, dict) else {"argv": safe_argv},
                     )
                 )
                 stage.acc.commands.append(
                     build_command_evidence(
-                        argv=argv,
+                        argv=safe_argv,
                         cwd=str(cwd),
                         purpose=purpose,
                         exit_status=-1,
@@ -318,13 +331,18 @@ def code_handoff_finalize(
                 rec = {
                     **rec,
                     **build_command_evidence(
-                        argv=argv,
+                        argv=list(rec.get("argv") or safe_argv),
                         cwd=str(cwd),
                         purpose=purpose,
                         exit_status=int(rec.get("exitStatus", 1)),
                         duration_seconds=float(rec.get("durationSeconds") or 0.0),
                     ),
                 }
+            # Persist redacted argv on envelope commands[] even for successful runs
+            # if operator put secret-shaped tokens in contract argv.
+            if isinstance(rec.get("argv"), list):
+                rec = dict(rec)
+                rec["argv"] = _redact_argv(rec["argv"])
             stage.acc.commands.append(rec)
             validation_evidence.append(rec)
             try:
@@ -347,7 +365,7 @@ def code_handoff_finalize(
                     HandoffBlocker(
                         "validation-failure",
                         "requiredValidation command failed",
-                        {"argv": argv, "exitStatus": rec.get("exitStatus")},
+                        {"argv": safe_argv, "exitStatus": rec.get("exitStatus")},
                     )
                 )
     else:

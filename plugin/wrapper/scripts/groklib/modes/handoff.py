@@ -22,10 +22,14 @@ def _log(function: str, message: str) -> None:
 
 
 def _load_json(path: pathlib.Path) -> Tuple[Optional[dict], Optional[str]]:
+    """Load JSON object from path. Corrupt UTF-8/JSON => classified reason, never uncaught."""
     if not path.is_file():
         return None, "missing"
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+    except UnicodeError as exc:
+        # Invalid UTF-8 must not escape to top-level cli-failure (artifact integrity).
+        return None, "invalid-utf8: {}".format(exc)
     except (OSError, json.JSONDecodeError) as exc:
         return None, str(exc)
     if not isinstance(data, dict):
@@ -62,7 +66,7 @@ def _load_stored_envelope(run_id: str, path: pathlib.Path) -> Optional[dict]:
         return None
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, json.JSONDecodeError, UnicodeError):
         return None
     if not isinstance(raw, dict):
         return None
@@ -124,12 +128,20 @@ def run(args: argparse.Namespace) -> dict:
     manifest_path = run_dir / "implementation-handoff.json"
     manifest, load_err = _load_json(manifest_path)
     if manifest is None:
+        # Present-but-corrupt (UTF-8/JSON) is integrity; missing is unavailable.
+        reason = load_err or "missing"
+        if reason == "missing":
+            err_class = "handoff-unavailable"
+            message = "implementation handoff artifacts are not available for this run"
+        else:
+            err_class = "artifact-integrity-failure"
+            message = "implementation handoff manifest is unreadable or corrupt"
         return envelope_mod.failure_envelope(
             run_id=str(run_id),
             mode="handoff",
-            error_class="handoff-unavailable",
-            message="implementation handoff artifacts are not available for this run",
-            detail={"reason": load_err or "missing", "path": str(manifest_path)},
+            error_class=err_class,
+            message=message,
+            detail={"reason": reason, "path": str(manifest_path)},
             progressStreamPath=None,
         )
 

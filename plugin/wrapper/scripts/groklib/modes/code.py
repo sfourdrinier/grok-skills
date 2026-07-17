@@ -516,10 +516,17 @@ def run(args: argparse.Namespace) -> dict:
 
     # Optional operator-trusted implementation contract (design §14.3). Loaded
     # and validated BEFORE Grok so bad contracts never spawn a model.
+    # Present empty/blank --contract-file is invalid (not "no contract").
     contract: Optional[dict] = None
     contract_file = getattr(args, "contract_file", None)
-    if contract_file:
-        contract = load_contract_file(pathlib.Path(contract_file))
+    if contract_file is not None:
+        if not str(contract_file).strip():
+            raise GrokWrapperError(
+                "implementation-contract-invalid",
+                "--contract-file was provided but is empty; omit the flag or pass a path",
+                {"contractFile": contract_file},
+            )
+        contract = load_contract_file(pathlib.Path(str(contract_file).strip()))
         cli_target = target_relative if target_relative else "."
         assert_target_matches(contract, cli_target)
 

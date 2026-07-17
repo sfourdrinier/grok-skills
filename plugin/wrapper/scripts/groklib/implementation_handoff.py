@@ -23,7 +23,12 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from groklib import GrokWrapperError, log_stderr, platformsupport
 from groklib import worktree as worktree_mod
 from groklib.command_evidence import build_command_evidence
-from groklib.envelope import assert_no_secret_material, SecretMaterialError
+from groklib.envelope import (
+    assert_no_secret_material,
+    redact_secret_material,
+    redact_secret_value_text,
+    SecretMaterialError,
+)
 from groklib.implementation_contract import (
     normalize_repo_relative,
     path_in_scopes,
@@ -35,7 +40,11 @@ _log = lambda fn, msg: log_stderr("implementation_handoff", fn, msg)
 _DEFAULT_PATCH_MAX = 25 * 1024 * 1024
 _PATCH_FORMAT = "git-binary-full-index-v1"
 _RUN_ID_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$")
+# Full Git object IDs only (SHA-1 = 40 hex, SHA-256 = 64 hex). No abbreviations.
+_GIT_OID_RE = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
+_PATCH_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 _EMPTY_HOOKS = worktree_mod._EMPTY_GIT_HOOKS
+_ALLOWED_CHANGE_STATUS = frozenset({"added", "modified", "deleted", "renamed"})
 
 
 def _patch_max_bytes() -> int:
@@ -123,7 +132,12 @@ class HandoffBuildResult:
 
 
 def validate_implementation_handoff(doc: dict) -> List[str]:
-    """Return list of validation errors (empty if ok). Single source for writer + handoff mode."""
+    """Return list of validation errors (empty if ok). Single source for writer + handoff mode.
+
+    Structural + consistency checks for both writer and ``/grok:handoff``. When
+    ``integration.ready`` is true, additional fail-closed rules apply so a
+    corrupted ready=true manifest cannot be dual-condition ready.
+    """
     errors: List[str] = []
     if not isinstance(doc, dict):
         return ["root must be object"]
@@ -132,32 +146,49 @@ def validate_implementation_handoff(doc: dict) -> List[str]:
     run_id = doc.get("runId")
     if not isinstance(run_id, str) or not _RUN_ID_RE.match(run_id):
         errors.append("runId invalid")
-    for key in ("taskId", "baseRevision", "resultTreeOid", "createdAtUtc"):
-        if not isinstance(doc.get(key), str) or not doc.get(key):
+    task_id = doc.get("taskId")
+    if not isinstance(task_id, str) or not task_id:
+        errors.append("taskId must be non-empty string")
+    created = doc.get("createdAtUtc")
+    if not isinstance(created, str) or not created:
+        errors.append("createdAtUtc must be non-empty string")
+    for key in ("baseRevision", "resultTreeOid"):
+        val = doc.get(key)
+        if not isinstance(val, str) or not val:
             errors.append("{} must be non-empty string".format(key))
+        elif not _GIT_OID_RE.match(val):
+            errors.append("{} must be a full Git object id (40 or 64 hex chars)".format(key))
     patch = doc.get("patch")
     if not isinstance(patch, dict):
         errors.append("patch must be object")
     else:
         if patch.get("format") != _PATCH_FORMAT:
             errors.append("patch.format invalid")
-        for k in ("relativePath", "sha256"):
-            if not isinstance(patch.get(k), str) or not patch.get(k):
-                errors.append("patch.{} required".format(k))
+        rel = patch.get("relativePath")
+        if not isinstance(rel, str) or not rel:
+            errors.append("patch.relativePath required")
+        sha = patch.get("sha256")
+        if not isinstance(sha, str) or not sha:
+            errors.append("patch.sha256 required")
+        elif not _PATCH_SHA256_RE.match(sha):
+            errors.append("patch.sha256 must be 64 hex chars")
         if not isinstance(patch.get("bytes"), int) or patch.get("bytes") < 0:
             errors.append("patch.bytes must be non-negative int")
     changed = doc.get("changedFiles")
     if not isinstance(changed, list):
         errors.append("changedFiles must be array")
+        changed_ok = False
     else:
-        _ALLOWED_CHANGE_STATUS = frozenset({"added", "modified", "deleted", "renamed"})
+        changed_ok = True
         for i, item in enumerate(changed):
             if not isinstance(item, dict):
                 errors.append("changedFiles[{}] must be object".format(i))
+                changed_ok = False
                 continue
             p = item.get("path")
             if not isinstance(p, str) or not p:
                 errors.append("changedFiles[{}].path must be non-empty string".format(i))
+                changed_ok = False
             st = item.get("status")
             if st not in _ALLOWED_CHANGE_STATUS:
                 errors.append(
@@ -165,11 +196,14 @@ def validate_implementation_handoff(doc: dict) -> List[str]:
                         i, sorted(_ALLOWED_CHANGE_STATUS)
                     )
                 )
+                changed_ok = False
             old = item.get("oldPath")
             if old is not None and not isinstance(old, str):
                 errors.append("changedFiles[{}].oldPath must be string or null".format(i))
+                changed_ok = False
             if st == "renamed" and (not isinstance(old, str) or not old):
                 errors.append("changedFiles[{}].oldPath required for renamed".format(i))
+                changed_ok = False
     validation = doc.get("validation")
     if not isinstance(validation, dict):
         errors.append("validation must be object")
@@ -177,14 +211,41 @@ def validate_implementation_handoff(doc: dict) -> List[str]:
     if not isinstance(integration, dict):
         errors.append("integration must be object")
     else:
-        if not isinstance(integration.get("ready"), bool):
+        ready = integration.get("ready")
+        if not isinstance(ready, bool):
             errors.append("integration.ready must be bool")
-        if not isinstance(integration.get("blockers"), list):
+        blockers = integration.get("blockers")
+        if not isinstance(blockers, list):
             errors.append("integration.blockers must be array")
+        else:
+            # ready=true is only valid with empty blockers and at least one change.
+            if ready is True:
+                if blockers:
+                    errors.append("integration.ready true requires empty blockers")
+                if changed_ok and isinstance(changed, list) and len(changed) < 1:
+                    errors.append("integration.ready true requires non-empty changedFiles")
     worktree = doc.get("worktree")
     if not isinstance(worktree, dict):
         errors.append("worktree must be object")
     return errors
+
+
+def redact_handoff_blocker(blocker: dict) -> dict:
+    """Deep-redact a handoff blocker dict before it is persisted or returned."""
+    if not isinstance(blocker, dict):
+        return {"kind": "validation-failure", "message": "invalid blocker"}
+    out: Dict[str, Any] = {}
+    kind = blocker.get("kind")
+    out["kind"] = kind if isinstance(kind, str) else "validation-failure"
+    msg = blocker.get("message")
+    out["message"] = redact_secret_value_text(str(msg) if msg is not None else "")
+    if "detail" in blocker and blocker["detail"] is not None:
+        out["detail"] = redact_secret_material(blocker["detail"], redact_keys=True)
+    return out
+
+
+def redact_handoff_blockers(blockers: Sequence[Any]) -> List[dict]:
+    return [redact_handoff_blocker(b if isinstance(b, dict) else {"kind": "validation-failure", "message": str(b)}) for b in blockers]
 
 
 def compute_integration_ready(
@@ -275,6 +336,15 @@ def dual_condition_ready(
 
 
 def write_manifest(path: pathlib.Path, doc: dict) -> None:
+    """Validate, secret-redact blockers, and write implementation-handoff.json (mode 0600)."""
+    # Never persist raw secret-shaped argv/details from operator validation failures.
+    if isinstance(doc, dict):
+        doc = dict(doc)
+        integration = doc.get("integration")
+        if isinstance(integration, dict) and isinstance(integration.get("blockers"), list):
+            integration = dict(integration)
+            integration["blockers"] = redact_handoff_blockers(integration["blockers"])
+            doc["integration"] = integration
     errs = validate_implementation_handoff(doc)
     if errs:
         raise GrokWrapperError(
