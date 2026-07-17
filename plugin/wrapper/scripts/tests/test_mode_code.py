@@ -826,5 +826,36 @@ class CwdSentinelTests(unittest.TestCase):
         self.assertEqual(ctx2.exception.error_class, "wrong-working-directory")
 
 
+class ContractDirectiveTests(unittest.TestCase):
+    """Contract objective/criteria/scopes are injected into Grok's code prompt."""
+
+    def test_contract_directive_includes_objective_criteria_and_scopes(self) -> None:
+        from groklib.modes import code as code_mod
+
+        contract = {
+            "schemaVersion": 1,
+            "taskId": "T-1",
+            "objective": "Fix the paginator off-by-one",
+            "target": ".",
+            "writeScopes": [{"kind": "subtree", "path": "src/pager"}],
+            "acceptanceCriteria": [
+                "page 2 of a 21-item list shows item 11 first",
+                "existing pager tests still pass",
+            ],
+            "requiredValidation": [{"argv": ["true"], "cwd": ".", "purpose": "smoke"}],
+            "trustModel": "operator-contract-trusted-no-os-sandbox",
+        }
+        text = code_mod._contract_directive(contract)
+        self.assertIn("Fix the paginator off-by-one", text)
+        self.assertIn("page 2 of a 21-item list", text)
+        self.assertIn("src/pager", text)
+        self.assertIn("only within these paths", text.lower())
+
+    def test_contract_directive_empty_without_contract(self) -> None:
+        from groklib.modes import code as code_mod
+
+        self.assertEqual(code_mod._contract_directive(None), "")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -186,6 +186,36 @@ def _sentinel_directive(sentinel_name: str) -> str:
     )
 
 
+def _contract_directive(contract: Optional[dict]) -> str:
+    """Render the operator contract as prompt text so Grok knows the objective,
+    the acceptance criteria it must satisfy, and the write scopes it must stay
+    inside. Enforcement stays wrapper-side (scopes/validation at finalize);
+    this directive is steering, not the enforcement surface."""
+    if not contract:
+        return ""
+    lines: List[str] = ["## Implementation contract (operator-supplied)", ""]
+    objective = contract.get("objective") or ""
+    if objective.strip():
+        lines += ["Objective: {}".format(objective.strip()), ""]
+    criteria = [c for c in contract.get("acceptanceCriteria") or [] if isinstance(c, str) and c.strip()]
+    if criteria:
+        lines.append("Acceptance criteria (ALL must hold when you finish):")
+        lines += ["- {}".format(c.strip()) for c in criteria]
+        lines.append("")
+    scopes = contract.get("writeScopes") or []
+    if scopes:
+        lines.append("You may create or modify files ONLY within these paths (relative to the repo root):")
+        lines += ["- {} ({})".format(s.get("path"), s.get("kind")) for s in scopes]
+        lines.append("Changes outside these scopes will be rejected by the wrapper.")
+        lines.append("")
+    required = contract.get("requiredValidation") or []
+    if required:
+        lines.append("After implementing, these commands must exit 0 (the wrapper runs them):")
+        lines += ["- {}".format(" ".join(e.get("argv", []))) for e in required]
+        lines.append("")
+    return "\n".join(lines) + "\n"
+
+
 def _is_regular_file_no_symlink(path: pathlib.Path) -> bool:
     """True only when ``path`` is a REGULAR file and NOT a symlink (lstat, no following).
 
@@ -590,7 +620,7 @@ def run(args: argparse.Namespace) -> dict:
         stage.acc.warnings.extend(rule_warnings)
         instruction_entries = rules.instruction_envelope_entries(instructions)
         sentinel_name = _SENTINEL_PREFIX + stage.run_id
-        task_with_sentinel = _sentinel_directive(sentinel_name) + task_text
+        task_with_sentinel = _sentinel_directive(sentinel_name) + _contract_directive(contract) + task_text
         prompt_text = rules.build_prompt_payload(instructions, task_with_sentinel)
 
         return WorktreePrep(
