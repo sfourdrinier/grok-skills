@@ -215,13 +215,34 @@ def _load_single_instruction(level_dir: pathlib.Path, resolved_root: pathlib.Pat
 
 
 def _divergence_warning_for_level(level_dir: pathlib.Path, resolved_root: pathlib.Path) -> str:
-    """Build the permissive-mode warning when AGENTS.md and CLAUDE.md bytes diverge at one level."""
+    """Build the permissive-mode warning when AGENTS.md and CLAUDE.md bodies diverge at one level."""
     dir_relative = _posix_dir_relative(level_dir, resolved_root)
     location = "repo root" if dir_relative == "" else dir_relative
     return (
         "AGENTS.md and CLAUDE.md differ at {}; only AGENTS.md was sent to Grok "
         "(set ruleFileParity to enforce matching pairs)"
     ).format(location)
+
+
+def _is_agents_md_pointer(content_bytes: bytes) -> bool:
+    """True when CLAUDE.md is a pointer whose entire meaningful content is ``@AGENTS.md``.
+
+    Surrounding whitespace and newlines are ignored. Invalid UTF-8 is never a
+    pointer (callers that already UTF-8-validated via ``_read_instruction_bytes``
+    never hit the decode failure path here).
+    """
+    try:
+        text = content_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return text.strip() == "@AGENTS.md"
+
+
+def _bodies_after_first_line(agents_bytes: bytes, claude_bytes: bytes) -> Tuple[bytes, bytes]:
+    """Return the file bodies after line 1 for both sides (same slice as strict parity)."""
+    _agents_header, agents_body = _split_header(agents_bytes)
+    _claude_header, claude_body = _split_header(claude_bytes)
+    return agents_body, claude_body
 
 
 def _discover_permissive(
@@ -233,11 +254,13 @@ def _discover_permissive(
     neither file exists; load the single present file when only one exists; when
     BOTH exist, load AGENTS.md as the representative block (the same representative
     strict mode uses, and the order the shared header lists) so identical pairs are
-    not duplicated. When both exist and their full bytes differ, append one
-    divergence warning (files are not re-read: CLAUDE.md is read only for the
-    comparison, reusing AGENTS.md bytes already loaded). No byte-parity or
-    path-header enforcement -- that is the opt-in strict mode. A repo carrying
-    only a CLAUDE.md (the common Claude Code case) loads that single file.
+    not duplicated. When both exist, CLAUDE.md is read once for comparison: a
+    pointer-style CLAUDE.md whose stripped content is exactly ``@AGENTS.md`` never
+    warns; otherwise bodies after the first line are compared with the same
+    ``_split_header`` semantics strict mode uses, and a body mismatch appends one
+    divergence warning. No path-header enforcement -- that is the opt-in strict
+    mode. A repo carrying only a CLAUDE.md (the common Claude Code case) loads
+    that single file.
     """
     discovered: List[InstructionFile] = []
     warnings: List[str] = []
@@ -246,8 +269,12 @@ def _discover_permissive(
         if agents_name is not None and claude_name is not None:
             agents_file = _load_single_instruction(level_dir, resolved_root, agents_name)
             claude_bytes = _read_instruction_bytes(level_dir / claude_name)
-            if agents_file.content_bytes != claude_bytes:
-                warnings.append(_divergence_warning_for_level(level_dir, resolved_root))
+            if not _is_agents_md_pointer(claude_bytes):
+                agents_body, claude_body = _bodies_after_first_line(
+                    agents_file.content_bytes, claude_bytes
+                )
+                if agents_body != claude_body:
+                    warnings.append(_divergence_warning_for_level(level_dir, resolved_root))
             discovered.append(agents_file)
         elif agents_name is not None:
             discovered.append(_load_single_instruction(level_dir, resolved_root, agents_name))
@@ -280,6 +307,8 @@ def _discover_strict(resolved_root: pathlib.Path, levels: List[pathlib.Path]) ->
         agents_bytes = _read_instruction_bytes(agents_path)
         claude_bytes = _read_instruction_bytes(claude_path)
 
+        # Headers for path-header validation; body parity shares ``_split_header``
+        # with permissive divergence (via ``_bodies_after_first_line``).
         agents_header, agents_body = _split_header(agents_bytes)
         claude_header, claude_body = _split_header(claude_bytes)
 
@@ -318,7 +347,9 @@ def discover_instruction_files_with_warnings(
     """Same discovery as discover_instruction_files, plus divergence warnings.
 
     Returns (files, warnings). A warning fires only in permissive mode when a
-    level carries BOTH AGENTS.md and CLAUDE.md whose bytes differ:
+    level carries BOTH AGENTS.md and CLAUDE.md, CLAUDE.md is not a pointer
+    whose stripped content is exactly ``@AGENTS.md``, and the bodies after the
+    first line differ (same comparison ruleFileParity enforces):
     'AGENTS.md and CLAUDE.md differ at <repo-relative-dir or repo root>; only
     AGENTS.md was sent to Grok (set ruleFileParity to enforce matching pairs)'.
 

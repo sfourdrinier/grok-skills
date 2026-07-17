@@ -134,6 +134,101 @@ class LifecycleCasFailClosedTests(unittest.TestCase):
         self.assertEqual(envelope["status"], "success", envelope)
         self.assertIn("seeded", envelope.get("warnings") or [])
 
+    def test_divergent_rules_warning_reaches_success_envelope(self) -> None:
+        """Live review-path envelope carries discovery divergence warnings (finding 4)."""
+        from groklib import rules
+
+        repo = Path(self.tmp_root) / "repo"
+        repo.mkdir()
+        (repo / "AGENTS.md").write_text("# Agents\n\nAgent rules.\n", encoding="utf-8")
+        (repo / "CLAUDE.md").write_text("# Claude\n\nDifferent rules.\n", encoding="utf-8")
+
+        # Same discovery call review mode makes before ModeRun construction.
+        _files, rule_warnings = rules.discover_instruction_files_with_warnings(repo, repo)
+        self.assertTrue(
+            any("only AGENTS.md was sent" in warning for warning in rule_warnings),
+            rule_warnings,
+        )
+
+        paths = runstate.create_run("review")
+        progress = ProgressWriter(paths.run_id, paths.progress_path)
+        run = _make_mode_run(
+            cwd=repo,
+            initial_warnings=tuple(rule_warnings),
+            instructions=[
+                {
+                    "path": entry.repo_relative,
+                    "bytes": len(entry.content_bytes),
+                    "sha256": entry.sha256,
+                }
+                for entry in _files
+            ],
+        )
+
+        private_home = PrivateHome(
+            home_dir=Path(self.tmp_root) / "fake-home",
+            grok_dir=Path(self.tmp_root) / "fake-home" / ".grok",
+            config_path=Path(self.tmp_root) / "fake-home" / ".grok" / "config.toml",
+        )
+        private_home.home_dir.mkdir(parents=True)
+        private_home.grok_dir.mkdir(parents=True)
+
+        fake_result = GrokRunResult(
+            argv=("/nonexistent/grok",),
+            exit_status=0,
+            stdout="{}",
+            stderr="",
+            duration_seconds=0.01,
+            parsed={"usage": {}, "num_turns": 1},
+            stop_reason="end_turn",
+            session_id="sess",
+            request_id="req",
+            model_usage=None,
+            effective_model="grok-4.5",
+            final_text="ok",
+            structured=None,
+        )
+        sandbox_obj = {
+            "requestedProfile": "read-only",
+            "reportedProfile": "read-only",
+            "enforced": True,
+            "evidence": "test",
+        }
+
+        def _fake_execute(*args, **_kwargs):
+            if len(args) >= 7 and args[6] is not None:
+                args[6][0] = fake_result
+            return fake_result, sandbox_obj, "grok-4.5"
+
+        with mock.patch.object(_shared, "create_private_home", return_value=private_home), mock.patch(
+            "groklib.preflight_cache.ensure_ready", return_value=None
+        ), mock.patch(
+            "groklib.platformsupport.require_probed_platform_for_live", return_value=None
+        ), mock.patch.object(
+            _shared, "_execute_and_verify", side_effect=_fake_execute
+        ), mock.patch.object(
+            _shared, "policy_for_mode", return_value=types.SimpleNamespace()
+        ), mock.patch.object(
+            _shared, "render_sandbox_toml", return_value=""
+        ), mock.patch.object(
+            _shared, "render_config_toml", return_value=""
+        ), mock.patch(
+            "groklib.modes._envelope.destroy_private_home",
+            return_value={"status": "clean", "detail": None},
+        ), mock.patch.object(
+            _shared, "_capture_review_fs_baseline", return_value=None
+        ), mock.patch.object(
+            _shared, "_report_repo_fs_drift", return_value=None
+        ):
+            envelope = _run_grok_mode_body(run, paths, progress, [None], [None])
+
+        self.assertEqual(envelope["status"], "success", envelope)
+        warnings = envelope.get("warnings") or []
+        self.assertTrue(
+            any("only AGENTS.md was sent" in str(warning) for warning in warnings),
+            warnings,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -279,8 +279,9 @@ class RulesTests(unittest.TestCase):
 
     def test_nested_divergent_pair_names_subdirectory_in_warning(self) -> None:
         nested = self.repo_root / "apps" / "foo"
-        _write(nested / "AGENTS.md", "# Agents nested\n")
-        _write(nested / "CLAUDE.md", "# Claude nested different\n")
+        # Multi-line bodies so divergence is after the first line (header alignment).
+        _write(nested / "AGENTS.md", "# Agents nested\nAgent body.\n")
+        _write(nested / "CLAUDE.md", "# Claude nested different\nClaude body.\n")
 
         files, warnings = rules.discover_instruction_files_with_warnings(
             self.repo_root, nested
@@ -306,6 +307,51 @@ class RulesTests(unittest.TestCase):
 
         self.assertEqual(str(plain_ctx.exception), str(warn_ctx.exception))
         self.assertEqual(plain_ctx.exception.error_class, warn_ctx.exception.error_class)
+
+    def test_pointer_claude_md_yields_no_warnings(self) -> None:
+        # Pointer-style CLAUDE.md means "use AGENTS.md" - no divergence in intent.
+        _write(self.repo_root / "AGENTS.md", "# Agents\n\nFull agent rules.\n")
+        _write(self.repo_root / "CLAUDE.md", "@AGENTS.md\n")
+
+        files, warnings = rules.discover_instruction_files_with_warnings(
+            self.repo_root, self.repo_root
+        )
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(len(files), 1)
+        self.assertEqual(files[0].repo_relative, "AGENTS.md")
+
+    def test_pointer_claude_md_with_surrounding_whitespace_yields_no_warnings(self) -> None:
+        _write(self.repo_root / "AGENTS.md", "# Agents\n\nFull agent rules.\n")
+        _write(self.repo_root / "CLAUDE.md", "\n  @AGENTS.md  \n\n")
+
+        _files, warnings = rules.discover_instruction_files_with_warnings(
+            self.repo_root, self.repo_root
+        )
+
+        self.assertEqual(warnings, [])
+
+    def test_header_only_difference_yields_no_warnings(self) -> None:
+        # Same semantics as strict ruleFileParity: compare bodies after line 1.
+        _write(self.repo_root / "AGENTS.md", "<!-- AGENTS.md -->\nRoot rules.\n")
+        _write(self.repo_root / "CLAUDE.md", "<!-- CLAUDE.md -->\nRoot rules.\n")
+
+        _files, warnings = rules.discover_instruction_files_with_warnings(
+            self.repo_root, self.repo_root
+        )
+
+        self.assertEqual(warnings, [])
+
+    def test_body_divergence_after_matching_headers_yields_one_warning(self) -> None:
+        _write(self.repo_root / "AGENTS.md", _SHARED_ROOT_HEADER + "Root rules.\n")
+        _write(self.repo_root / "CLAUDE.md", _SHARED_ROOT_HEADER + "Different body.\n")
+
+        _files, warnings = rules.discover_instruction_files_with_warnings(
+            self.repo_root, self.repo_root
+        )
+
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("only AGENTS.md was sent", warnings[0])
 
 
 if __name__ == "__main__":
