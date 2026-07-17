@@ -190,7 +190,8 @@ def code_handoff_finalize(
             if isinstance(old_p, str) and old_p:
                 paths_to_check.append(("oldPath", old_p))
             for which, candidate in paths_to_check:
-                if not path_in_scopes(candidate, scopes):
+                # Git-reported paths: preserve backslash as a literal filename char.
+                if not path_in_scopes(candidate, scopes, from_git=True):
                     scopes_ok = False
                     blockers.append(
                         HandoffBlocker(
@@ -292,7 +293,7 @@ def code_handoff_finalize(
                         cwd=str(cwd),
                         purpose=purpose,
                         exit_status=-1,
-                        detail=str(exc),
+                        duration_seconds=0.0,
                     )
                 )
                 continue
@@ -304,6 +305,7 @@ def code_handoff_finalize(
                         cwd=str(cwd),
                         purpose=purpose,
                         exit_status=int(rec.get("exitStatus", 1)),
+                        duration_seconds=float(rec.get("durationSeconds") or 0.0),
                     ),
                 }
             stage.acc.commands.append(rec)

@@ -120,16 +120,15 @@ def _run_recorded_command(argv: List[str], cwd: pathlib.Path, purpose: str) -> d
             {"argv": argv_str, "purpose": purpose},
         )
     duration = time.monotonic() - start
-    evidence = build_command_evidence(
+    return build_command_evidence(
         argv=argv_str,
         cwd=str(cwd),
         purpose=purpose,
         exit_status=int(completed.returncode),
         stdout=completed.stdout or b"",
         stderr=completed.stderr or b"",
+        duration_seconds=round(duration, 6),
     )
-    evidence["durationSeconds"] = round(duration, 6)
-    return evidence
 
 
 def _target_in_worktree(worktree_path: pathlib.Path, target_relative: str) -> pathlib.Path:

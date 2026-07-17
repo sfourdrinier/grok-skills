@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import hashlib
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from groklib.envelope import redact_secret_value_text
 
@@ -36,19 +36,22 @@ def build_command_evidence(
     exit_status: int,
     stdout: bytes = b"",
     stderr: bytes = b"",
-    detail: Optional[str] = None,
+    duration_seconds: float = 0.0,
 ) -> dict:
-    """Build a single command evidence record (never full logs on envelope stdout)."""
-    rec: Dict[str, Any] = {
+    """Build a C4-compatible commands[] record with bounded redacted evidence.
+
+    Always includes required envelope fields (argv, exitStatus, durationSeconds,
+    purpose, cwd) plus optional evidence hashes/tails. Never adds unknown keys
+    (detail belongs on blockers / error.detail, not commands[]).
+    """
+    return {
         "argv": list(argv),
         "cwd": cwd,
         "purpose": purpose,
         "exitStatus": int(exit_status),
+        "durationSeconds": float(duration_seconds),
         "stdoutSha256": _sha256_bytes(stdout or b""),
         "stderrSha256": _sha256_bytes(stderr or b""),
         "stdoutTail": _tail_text(stdout or b""),
         "stderrTail": _tail_text(stderr or b""),
     }
-    if detail:
-        rec["detail"] = redact_secret_value_text(str(detail))
-    return rec

@@ -27,32 +27,56 @@ def _contract_error(message: str, detail: Optional[dict] = None) -> GrokWrapperE
 
 
 def normalize_repo_relative(path: str) -> str:
-    """Normalize a repo-relative path; reject absolute, empty, NUL, or .. segments."""
+    """Normalize an operator-supplied repo-relative path (contract scopes/target).
+
+    Treats backslash as a path separator (Windows-style operator input). Do **not**
+    use this for Git-reported paths - on POSIX backslash is a valid filename char.
+    """
     if path is None or not isinstance(path, str):
         raise _contract_error("path must be a non-empty string", {"path": path})
     raw = path.strip().replace("\\", "/")
+    return _normalize_repo_relative_raw(raw, original=path)
+
+
+def normalize_git_repo_path(path: str) -> str:
+    """Normalize a Git-reported repo-relative path for scope checks.
+
+    Only forward slash is a separator. Backslash is preserved as a literal
+    character so a root file named ``pkg\\evil.ts`` is not treated as under ``pkg/``.
+    """
+    if path is None or not isinstance(path, str):
+        raise _contract_error("path must be a non-empty string", {"path": path})
+    return _normalize_repo_relative_raw(path.strip(), original=path)
+
+
+def _normalize_repo_relative_raw(raw: str, *, original: str) -> str:
     if not raw or "\x00" in raw:
-        raise _contract_error("path is empty or contains NUL", {"path": path})
+        raise _contract_error("path is empty or contains NUL", {"path": original})
     if raw in (".", "./"):
         return "."
     if os.path.isabs(raw) or raw.startswith("/") or (len(raw) > 1 and raw[1] == ":"):
-        raise _contract_error("path must be repository-relative (not absolute)", {"path": path})
+        raise _contract_error("path must be repository-relative (not absolute)", {"path": original})
     cleaned: List[str] = []
-    for p in pathlib.PurePosixPath(raw).parts:
+    # Split only on forward slash (never on backslash).
+    for p in raw.split("/"):
         if p in ("", "."):
             continue
         if p == "..":
-            raise _contract_error("path must not contain '..'", {"path": path})
+            raise _contract_error("path must not contain '..'", {"path": original})
         cleaned.append(p)
     if not cleaned:
-        raise _contract_error("path resolves empty", {"path": path})
+        raise _contract_error("path resolves empty", {"path": original})
     return "/".join(cleaned)
 
 
-def path_in_scopes(path: str, scopes: Sequence[dict]) -> bool:
-    """True when path is covered by a file (exact) or subtree (component prefix) scope."""
+def path_in_scopes(path: str, scopes: Sequence[dict], *, from_git: bool = False) -> bool:
+    """True when path is covered by a file (exact) or subtree (component prefix) scope.
+
+    When ``from_git`` is True, the path is treated as Git-reported (backslash is
+    literal). Scope entries are always operator-normalized (slash conversion).
+    """
     try:
-        norm = normalize_repo_relative(path)
+        norm = normalize_git_repo_path(path) if from_git else normalize_repo_relative(path)
     except GrokWrapperError:
         return False
     path_parts = norm.split("/")
@@ -62,6 +86,7 @@ def path_in_scopes(path: str, scopes: Sequence[dict]) -> bool:
         if not isinstance(sp, str):
             continue
         try:
+            # Scopes are already normalized at contract load; re-normalize as operator paths.
             scope_norm = normalize_repo_relative(sp)
         except GrokWrapperError:
             continue
@@ -80,32 +105,98 @@ def path_in_scopes(path: str, scopes: Sequence[dict]) -> bool:
     return False
 
 
-def load_contract_file(path: pathlib.Path) -> dict:
-    """Load and parse a contract file. Rejects non-regular files and dangling/evil links."""
-    p = pathlib.Path(path)
-    if not p.exists():
-        raise _contract_error("contract file does not exist", {"path": str(p)})
-    # Reject symlink: use lstat
+def _is_top_level_os_alias_symlink(component: pathlib.Path, final_abs: pathlib.Path) -> bool:
+    """Allow only top-level OS mount aliases (e.g. /var -> /private/var, /tmp).
+
+    User-controlled intermediate directory symlinks (``.../contracts`` -> elsewhere)
+    always have more than two path parts and are rejected.
+    """
+    # Top-level only: "/", "var" -> parts ('/', 'var') length 2
+    if len(component.parts) > 2:
+        return False
+    try:
+        final_abs.resolve().relative_to(component.resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _assert_no_symlink_components(path: pathlib.Path) -> pathlib.Path:
+    """Reject symlink leaf or user-controlled symlink parents; return path to open."""
+    import stat as statmod
+
+    p = path.expanduser()
+    if not p.is_absolute():
+        # Relative: walk from cwd through each user-supplied component (strict).
+        accum = pathlib.Path.cwd()
+        for part in p.parts:
+            accum = accum / part
+            try:
+                st = accum.lstat()
+            except OSError as exc:
+                raise _contract_error(
+                    "cannot stat contract path component: {}".format(exc),
+                    {"path": str(accum)},
+                ) from exc
+            if statmod.S_ISLNK(st.st_mode):
+                raise _contract_error(
+                    "contract path must not contain symlink components",
+                    {"path": str(accum)},
+                )
+        if not statmod.S_ISREG(accum.lstat().st_mode):
+            raise _contract_error("contract path must be a regular file", {"path": str(accum)})
+        return accum
+
+    # Absolute: walk each component; allow only top-level OS path aliases.
+    p = p.absolute()
+    parts = p.parts
+    if not parts:
+        raise _contract_error("contract path is empty", {"path": str(path)})
+    accum = pathlib.Path(parts[0])
+    for part in parts[1:]:
+        accum = accum / part
+        try:
+            st = accum.lstat()
+        except OSError as exc:
+            raise _contract_error(
+                "cannot stat contract path component: {}".format(exc),
+                {"path": str(accum)},
+            ) from exc
+        if statmod.S_ISLNK(st.st_mode):
+            # Leaf symlink always rejected; intermediate only if not OS top-level alias.
+            if accum == p or not _is_top_level_os_alias_symlink(accum, p):
+                raise _contract_error(
+                    "contract path must not contain symlink components",
+                    {"path": str(accum)},
+                )
     try:
         st = p.lstat()
     except OSError as exc:
         raise _contract_error("cannot stat contract file: {}".format(exc), {"path": str(p)}) from exc
-    import stat as statmod
-
     if statmod.S_ISLNK(st.st_mode):
         raise _contract_error("contract path must not be a symlink", {"path": str(p)})
     if not statmod.S_ISREG(st.st_mode):
         raise _contract_error("contract path must be a regular file", {"path": str(p)})
+    return p
+
+
+def load_contract_file(path: pathlib.Path) -> dict:
+    """Load and parse a contract file. Rejects non-regular files and symlink escapes."""
+    p = pathlib.Path(path)
+    if not p.exists():
+        raise _contract_error("contract file does not exist", {"path": str(p)})
+    # Reject symlink leaf or any symlinked parent directory (fail closed).
+    safe = _assert_no_symlink_components(p)
     try:
-        text = p.read_text(encoding="utf-8")
+        text = safe.read_text(encoding="utf-8")
     except OSError as exc:
-        raise _contract_error("cannot read contract file: {}".format(exc), {"path": str(p)}) from exc
+        raise _contract_error("cannot read contract file: {}".format(exc), {"path": str(safe)}) from exc
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
-        raise _contract_error("contract JSON is invalid: {}".format(exc), {"path": str(p)}) from exc
+        raise _contract_error("contract JSON is invalid: {}".format(exc), {"path": str(safe)}) from exc
     if not isinstance(data, dict):
-        raise _contract_error("contract root must be a JSON object", {"path": str(p)})
+        raise _contract_error("contract root must be a JSON object", {"path": str(safe)})
     return validate_contract(data)
 
 

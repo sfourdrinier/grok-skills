@@ -809,11 +809,10 @@ function main() {
   // Read-only durable-run modes always use the hardened wrapper (state under
   // XDG runs/), even when workspace prefs are setup --run-mode direct.
   const WRAPPER_ONLY_MODES = new Set(["status", "cleanup", "handoff"]);
-  const contractFileIdx = wrapperArgs.indexOf("--contract-file");
-  const hasContractFile =
-    contractFileIdx >= 0 &&
-    typeof wrapperArgs[contractFileIdx + 1] === "string" &&
-    !String(wrapperArgs[contractFileIdx + 1]).startsWith("-");
+  // argparse accepts both "--contract-file PATH" and "--contract-file=PATH".
+  const hasContractFile = wrapperArgs.some(
+    (a) => a === "--contract-file" || (typeof a === "string" && a.startsWith("--contract-file="))
+  );
 
   if (runMode === "direct") {
     if (wrapperMode === "code" && hasContractFile) {

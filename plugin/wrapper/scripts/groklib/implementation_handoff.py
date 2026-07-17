@@ -149,6 +149,27 @@ def validate_implementation_handoff(doc: dict) -> List[str]:
     changed = doc.get("changedFiles")
     if not isinstance(changed, list):
         errors.append("changedFiles must be array")
+    else:
+        _ALLOWED_CHANGE_STATUS = frozenset({"added", "modified", "deleted", "renamed"})
+        for i, item in enumerate(changed):
+            if not isinstance(item, dict):
+                errors.append("changedFiles[{}] must be object".format(i))
+                continue
+            p = item.get("path")
+            if not isinstance(p, str) or not p:
+                errors.append("changedFiles[{}].path must be non-empty string".format(i))
+            st = item.get("status")
+            if st not in _ALLOWED_CHANGE_STATUS:
+                errors.append(
+                    "changedFiles[{}].status must be one of {}".format(
+                        i, sorted(_ALLOWED_CHANGE_STATUS)
+                    )
+                )
+            old = item.get("oldPath")
+            if old is not None and not isinstance(old, str):
+                errors.append("changedFiles[{}].oldPath must be string or null".format(i))
+            if st == "renamed" and (not isinstance(old, str) or not old):
+                errors.append("changedFiles[{}].oldPath required for renamed".format(i))
     validation = doc.get("validation")
     if not isinstance(validation, dict):
         errors.append("validation must be object")

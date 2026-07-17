@@ -71,6 +71,18 @@ class ValidateHandoffTests(unittest.TestCase):
         errs = validate_implementation_handoff(doc)
         self.assertTrue(any("format" in e for e in errs))
 
+    def test_changed_files_entries_must_be_shaped(self) -> None:
+        doc = self._doc()
+        doc["changedFiles"] = ["not-an-object"]
+        errs = validate_implementation_handoff(doc)
+        self.assertTrue(any("changedFiles[0]" in e for e in errs))
+        doc["changedFiles"] = [{"path": "a.ts"}]  # missing status
+        errs = validate_implementation_handoff(doc)
+        self.assertTrue(any("status" in e for e in errs))
+        doc["changedFiles"] = [{"path": "a.ts", "status": "renamed", "oldPath": None}]
+        errs = validate_implementation_handoff(doc)
+        self.assertTrue(any("oldPath" in e for e in errs))
+
 
 class CommandEvidenceTests(unittest.TestCase):
     def test_tails_and_hashes(self) -> None:
@@ -88,6 +100,27 @@ class CommandEvidenceTests(unittest.TestCase):
         self.assertLessEqual(len(rec["stdoutTail"]["text"]), 4096)
         # redaction applied on stderr tail
         self.assertIn("stderrTail", rec)
+        self.assertIn("durationSeconds", rec)
+        self.assertNotIn("detail", rec)
+
+    def test_spawn_failure_record_is_envelope_valid(self) -> None:
+        from groklib.envelope import failure_envelope, validate_envelope
+
+        rec = build_command_evidence(
+            argv=["missing-bin"],
+            cwd="/tmp",
+            purpose="contract-validation",
+            exit_status=-1,
+            duration_seconds=0.0,
+        )
+        env = failure_envelope(
+            run_id="20260716T120000Z-abcdef",
+            mode="code",
+            error_class="validation-failure",
+            message="requiredValidation could not run",
+            commands=[rec],
+        )
+        self.assertEqual(validate_envelope(env), [])
 
 
 class Phase1PatchTests(unittest.TestCase):

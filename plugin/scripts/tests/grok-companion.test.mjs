@@ -329,4 +329,7 @@ test("handoff/status/cleanup force wrapper; contract-file fails closed in direct
   assert.match(src, /handoff/);
   assert.match(src, /--contract-file requires hardened mode/);
   assert.match(src, /function runHandoff/);
+  // equals-form and space-form both detected
+  assert.match(src, /--contract-file=/);
+  assert.match(src, /startsWith\("--contract-file="\)/);
 });

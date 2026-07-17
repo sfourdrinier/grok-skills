@@ -54,6 +54,14 @@ class PathInScopesTests(unittest.TestCase):
         self.assertTrue(path_in_scopes("a.ts", scopes))
         self.assertTrue(path_in_scopes("deep/nested/x", scopes))
 
+    def test_git_path_preserves_backslash_literal(self) -> None:
+        # POSIX: backslash is a filename character, not a separator for Git paths.
+        scopes = [{"kind": "subtree", "path": "pkg"}]
+        self.assertFalse(path_in_scopes(r"pkg\evil.ts", scopes, from_git=True))
+        self.assertTrue(path_in_scopes("pkg/evil.ts", scopes, from_git=True))
+        # Operator-supplied scopes still accept Windows-style separators.
+        self.assertTrue(path_in_scopes(r"pkg\evil.ts", scopes, from_git=False))
+
 
 class ValidateContractTests(unittest.TestCase):
     def _ok(self, **overrides):
@@ -109,6 +117,29 @@ class LoadContractFileTests(unittest.TestCase):
             with self.assertRaises(GrokWrapperError) as cm:
                 load_contract_file(link)
             self.assertEqual(cm.exception.error_class, "implementation-contract-invalid")
+
+    def test_rejects_symlinked_parent_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            real_dir = pathlib.Path(tmp) / "realdir"
+            real_dir.mkdir()
+            real = real_dir / "c.json"
+            real.write_text(
+                json.dumps(
+                    {
+                        "schemaVersion": 1,
+                        "taskId": "t1",
+                        "target": ".",
+                        "writeScopes": [{"kind": "file", "path": "a.ts"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            link_dir = pathlib.Path(tmp) / "contracts"
+            os.symlink(str(real_dir), str(link_dir))
+            with self.assertRaises(GrokWrapperError) as cm:
+                load_contract_file(link_dir / "c.json")
+            self.assertEqual(cm.exception.error_class, "implementation-contract-invalid")
+            self.assertIn("symlink", str(cm.exception).lower())
 
     def test_loads_regular_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
