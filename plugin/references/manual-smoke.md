@@ -58,6 +58,54 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" preflight
 Expect one JSON envelope with `mode: "preflight"` and `status: "success"` when
 the Grok CLI is ready.
 
+## Experimental ACP peer channel (Task 5.3, optional)
+
+Gated: `export GROK_EXPERIMENTAL_ACP=1`. Hardened-only. Spec:
+`docs/specs/2026-07-17-acp-peer-channel-design.md` (Amendments supersede draft).
+
+Live smoke (start -> two prompts -> stop -> handoff), recorded 2026-07-17
+against grok 0.2.102 on a throwaway git repo (`note.txt` only):
+
+```bash
+export CLAUDE_PLUGIN_ROOT=/absolute/path/to/grok-skills/plugin
+export GROK_EXPERIMENTAL_ACP=1
+# peer-start (background resident wrapper; one running envelope)
+node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" peer start \
+  --target . --base HEAD
+# Capture runId + socketPath from the running envelope, then:
+node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" peer prompt \
+  --run-id '<runId>' --task-file - <<'GROK_TASK'
+Reply with exactly: PEER-PONG-1
+GROK_TASK
+node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" peer prompt \
+  --run-id '<runId>' --task-file - <<'GROK_TASK'
+Reply with exactly: PEER-PONG-2
+GROK_TASK
+node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" peer stop --run-id '<runId>'
+# Then dual-condition handoff when ready:
+node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" handoff --run-id '<runId>'
+```
+
+Transcript tail (2026-07-17 live, runId `20260717T110823Z-140ae8`):
+
+```text
+start: running  peer={sessionId: 019f6fc3-..., socketPath: .../gs-.../.grok/p-140ae8.sock}
+P1: success  result.stopReason=end_turn
+P2: success  result.stopReason=end_turn
+STOP: success peer-stop
+  response.peer.confinement=worktree-final-diff-only
+  response.peer.cleanup={status: clean}
+  cleanup={status: clean}
+```
+
+Expect: start `status: running` with `response.peer.sessionId` + `socketPath`;
+each prompt one redacted turn envelope; stop finalizes with
+`implementation-handoff.json` carrying `confinement: "worktree-final-diff-only"`
+(unless a scopes contract was supplied) and private home destroyed. Without
+`GROK_EXPERIMENTAL_ACP=1`, companion refuses with a one-line pointer to the
+spec. Control socket lives under the private home (short AF_UNIX path), not
+the run dir.
+
 ## Command checklist (Claude Code)
 
 - [ ] `/grok:preflight` → one readiness envelope

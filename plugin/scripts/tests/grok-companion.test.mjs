@@ -281,6 +281,10 @@ test("setup rejects non-http(s) webhook without writing prefs", () => {
 
 test("companion never maps terminal lifecycle to running (source contract)", () => {
   const src = fs.readFileSync(COMPANION, "utf8");
+  const extraCmds = fs.readFileSync(
+    path.resolve(SCRIPT_DIR, "..", "lib", "companion-extra-cmds.mjs"),
+    "utf8"
+  );
   // Guard against re-introducing envelope status "running" as notify lifecycle.
   assert.equal(
     /lifecycle\s*=\s*["']running["']/.test(src),
@@ -289,8 +293,8 @@ test("companion never maps terminal lifecycle to running (source contract)", () 
   );
   assert.match(src, /sanitizeRunId|companion-terminal-notify/);
   assert.match(src, /notifyMode/);
-  // Debate intermediate round and --no-notify must skip notify.
-  assert.match(src, /skipNotify:\s*true/);
+  // Debate intermediate round (lib) and --no-notify must skip notify.
+  assert.match(extraCmds, /skipNotify:\s*true/);
   assert.match(src, /shouldAttemptTerminalNotify/);
   assert.match(src, /--no-notify/);
   assert.match(src, /companion-setup/);

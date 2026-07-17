@@ -593,6 +593,13 @@ def list_run_ids() -> List[str]:
     return run_ids
 
 
+from groklib.peer_lease import (  # noqa: E402
+    peer_lease_keeps_home_alive as _peer_lease_keeps_home_alive,
+    peer_lease_present as _peer_lease_present,
+    write_peer_lease,
+)
+
+
 def write_home_liveness_marker(directory: pathlib.Path, pid: int) -> None:
     """Write the owning ``pid`` (plus its start-time identity token) into ``directory/owner.pid`` (0600).
 
@@ -704,7 +711,13 @@ def _is_removable_stale_home(candidate: pathlib.Path, now: float, max_age_second
     #     But once older than UNKNOWN_LEASE_HARD_REAP_AGE_SECONDS (max --timeout +
     #     margin) it cannot belong to any live run, so it is reaped as
     #     definitely-dead credential residue rather than stranded forever (r5 #5).
+    if _peer_lease_keeps_home_alive(candidate):
+        _log_stderr("_is_removable_stale_home", "skipping {} (peer lease live)".format(candidate))
+        return False
     liveness = _home_owner_liveness(candidate)
+    if _peer_lease_present(candidate) and not _peer_lease_keeps_home_alive(candidate):
+        liveness = _LIVENESS_DEAD
+        _log_stderr("_is_removable_stale_home", "peer lease stale/dead for {}".format(candidate))
     if liveness == _LIVENESS_ALIVE:
         _log_stderr("_is_removable_stale_home", "skipping {} (owner is alive)".format(candidate))
         return False

@@ -44,6 +44,9 @@ MODES: Tuple[str, ...] = (
     "status",
     "cleanup",
     "handoff",
+    "peer-start",
+    "peer-prompt",
+    "peer-stop",
 )
 
 # "running" is for status-mode inspection of an in-progress target run (no
@@ -90,6 +93,7 @@ ERROR_CLASSES: Tuple[str, ...] = (
     "artifact-integrity-failure",
     "handoff-unavailable",
     "terminal-envelope-incomplete",
+    "acp-failure",
 )
 
 _STORED_ENVELOPE_FILE_MODE = 0o600

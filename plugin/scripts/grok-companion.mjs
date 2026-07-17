@@ -59,11 +59,13 @@ import { runImplementCombo } from "./lib/implement.mjs";
 import { renderEnvelopePretty, tryParseEnvelope } from "./lib/render.mjs";
 import { terminateReviewTree } from "./lib/gate-kill.mjs";
 import {
-  buildTransferTaskBody,
-  readSessionStamp,
-  resolveTransferSource,
-  writeTransferPack,
-} from "./lib/session-stamp.mjs";
+  isPeerMode,
+  normalizePeerArgs,
+  refusePeerDirect,
+  refusePeerExperimental,
+  runPeerStartBackground,
+} from "./lib/peer-acp.mjs";
+import { cmdDebate, cmdTransfer } from "./lib/companion-extra-cmds.mjs";
 
 const PYTHON = process.env.GROK_PYTHON?.trim() || "python3";
 const WRAPPER_NOT_FOUND_EXIT = 3;
@@ -87,6 +89,9 @@ const WRAPPER_MODES = new Set([
   "status",
   "cleanup",
   "handoff",
+  "peer-start",
+  "peer-prompt",
+  "peer-stop",
 ]);
 
 function stderrLine(line) {
@@ -479,101 +484,8 @@ function cmdCancel(cwd, args) {
   return 0;
 }
 
-function cmdTransfer(cwd, args) {
-  let source = null;
-  let force = false;
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--source" && args[i + 1]) {
-      source = args[++i];
-    } else if (args[i] === "--force") {
-      force = true;
-    }
-  }
-  let sessionPath =
-    source ||
-    process.env.GROK_CLAUDE_SESSION_PATH ||
-    process.env.CLAUDE_SESSION_PATH ||
-    "";
-  if (!sessionPath) {
-    const stamp = readSessionStamp(cwd, process.env);
-    if (stamp?.transcript_path) {
-      sessionPath = stamp.transcript_path;
-    }
-  }
-  if (!sessionPath) {
-    process.stderr.write(
-      "[grok-companion] transfer needs a Claude session jsonl.\n" +
-        "Pass --source <path> or ensure SessionStart recorded a workspace stamp.\n"
-    );
-    return 1;
-  }
-  const resolved = resolveTransferSource(sessionPath, { force, env: process.env });
-  if (!resolved.ok) {
-    process.stderr.write(`[grok-companion] transfer refused: ${resolved.reason}\n`);
-    return 1;
-  }
-  let body;
-  try {
-    body = buildTransferTaskBody(resolved.path);
-  } catch (err) {
-    process.stderr.write(`[grok-companion] could not read session: ${err.message}\n`);
-    return 1;
-  }
-  const taskPath = writeTransferPack(body, process.env);
-  process.stdout.write(
-    [
-      "Transfer pack ready.",
-      `session: ${resolved.path}`,
-      `task-file: ${taskPath}`,
-      "",
-      "Continue with:",
-      `  node \"$GROK_PLUGIN_ROOT/scripts/grok-companion.mjs\" reason --task-file '${taskPath}'`,
-      "or",
-      `  node \"$GROK_PLUGIN_ROOT/scripts/grok-companion.mjs\" code --target . --base HEAD --task-file '${taskPath}'`,
-      "",
-    ].join("\n")
-  );
-  return 0;
-}
-
 function cmdSetup(cwd, args) {
   return setupCmd(cwd, args, { python: PYTHON, pluginRoot: PLUGIN_ROOT });
-}
-
-async function cmdDebate(cwd, wrapper, args, runMode) {
-  const task = extractTask(args) || "Debate the design tradeoffs in this repository.";
-  const round1 = [
-    "You are side A in a structured debate. Argue your position clearly with",
-    "concrete evidence from the repo or supplied artifacts.",
-    "",
-    task,
-  ].join("\n");
-  const inj1 = injectTaskFile(["reason"], round1);
-  const code1 = await captureAndTrack(wrapper, inj1.args, {
-    cwd, mode: "reason", kind: "debate-a", runMode, skipNotify: true,
-  });
-  inj1.cleanup();
-  if (code1 !== 0) return code1;
-  const last = getJob(cwd, null);
-  const prior = last ? readJobStdout(cwd, last.id) : "";
-  const round2 = [
-    "You are side B in a structured debate. Your job is to DISAGREE where",
-    "warranted, steelman the other side, and name residual risks.",
-    "",
-    "## Side A output",
-    prior || "(missing)",
-    "",
-    "## Original topic",
-    task,
-    "",
-    "End with: agreement points, disagreements, and a recommended resolution.",
-  ].join("\n");
-  const inj2 = injectTaskFile(["reason"], round2);
-  const code2 = await captureAndTrack(wrapper, inj2.args, {
-    cwd, mode: "reason", kind: "debate-b", runMode,
-  });
-  inj2.cleanup();
-  return code2;
 }
 
 function prepareReviewishArgs(mode, args, cwd, base) {
@@ -618,8 +530,8 @@ async function dispatch({
   cwd, stripped, pretty, runModeFlag, baseRef, resume, fresh, noNotify, staged,
 }) {
   const forwardedArgs = staged ? staged.args : stripped;
-  const mode = forwardedArgs[0];
-  const rest = forwardedArgs.slice(1);
+  let mode = forwardedArgs[0];
+  let rest = forwardedArgs.slice(1);
 
   if (!mode) {
     const wrapper = resolveWrapperPath(process.env);
@@ -628,6 +540,21 @@ async function dispatch({
       return WRAPPER_NOT_FOUND_EXIT;
     }
     return runPassthrough(wrapper, []);
+  }
+
+  // peer <start|prompt|stop> -> peer-start|peer-prompt|peer-stop
+  {
+    const normalized = normalizePeerArgs(mode, rest);
+    if (normalized.error) {
+      process.stderr.write(normalized.error);
+      return 1;
+    }
+    mode = normalized.mode;
+    rest = normalized.rest;
+  }
+
+  if (isPeerMode(mode) && process.env.GROK_EXPERIMENTAL_ACP !== "1") {
+    return refusePeerExperimental(mode);
   }
 
   if (mode === "jobs") return cmdJobs(cwd);
@@ -640,6 +567,11 @@ async function dispatch({
   // One-shot --run-mode does NOT persist; only setup may write workspace mode.
   const runMode =
     runModeFlag === "direct" || runModeFlag === "hardened" ? runModeFlag : getRunMode(cwd);
+
+  // Peer channel is hardened-only (private home + worktree + control socket).
+  if (isPeerMode(mode) && runMode === "direct") {
+    return refusePeerDirect(mode);
+  }
 
   if (mode === "reason" || mode === "code") {
     if (resume && getLastRescueJobId(cwd)) {
@@ -654,7 +586,7 @@ async function dispatch({
       process.stderr.write(`${wrapperNotFoundMessage(process.env)}\n`);
       return WRAPPER_NOT_FOUND_EXIT;
     }
-    return cmdDebate(cwd, wrapper, forwardedArgs, runMode);
+    return cmdDebate(cwd, wrapper, forwardedArgs, runMode, captureAndTrack);
   }
 
   if (mode === "implement") {
@@ -675,7 +607,8 @@ async function dispatch({
     }, { runWithLiveRelay, stderrLine });
   }
 
-  let wrapperArgs = forwardedArgs;
+  let wrapperArgs =
+    mode.startsWith("peer-") ? [mode, ...rest] : forwardedArgs;
   let extraCleanup = null;
   let wrapperMode = mode;
 
@@ -693,7 +626,11 @@ async function dispatch({
     }
   }
 
-  if (mode === "code" && baseRef && !wrapperArgs.includes("--base")) {
+  if (
+    (mode === "code" || mode === "peer-start") &&
+    baseRef &&
+    !wrapperArgs.includes("--base")
+  ) {
     wrapperArgs = [...wrapperArgs, "--base", baseRef];
   }
 
@@ -814,6 +751,16 @@ async function dispatch({
       "\nTip: /grok:status --run-id <id> for wrapper envelope; /grok:result [job-id] for stored output.\n"
     );
     return finishCleanups(0);
+  }
+
+  if (wrapperMode === "peer-start") {
+    return Promise.resolve(
+      runPeerStartBackground(PYTHON, wrapper, wrapperArgs, {
+        spawnFailedMessage,
+        signalExit: SIGNAL_EXIT,
+        spawnFailedExit: SPAWN_FAILED_EXIT,
+      })
+    ).then(finishCleanups);
   }
 
   if (STREAMING_MODES.has(mode) || STREAMING_MODES.has(wrapperMode)) {

@@ -27,7 +27,7 @@ from groklib.envelope import (
 from groklib.modes import MODES
 
 _DEFAULT_BINARY = os.path.join("~", ".grok", "bin", "grok")
-_NON_STORING_MODES = frozenset({"status", "cleanup", "handoff"})
+_NON_STORING_MODES = frozenset({"status", "cleanup", "handoff", "peer-start", "peer-prompt", "peer-stop"})
 _SIGTERM_EXIT_CODE = 143  # 128 + SIGTERM, the conventional signal-terminated code
 
 # Fail-closed upper bounds for the operator-supplied run budgets (Grok r3 #11
@@ -234,6 +234,21 @@ def _build_parser() -> _Parser:
     handoff = _sub("handoff")
     handoff.add_argument("--run-id", required=True)
 
+    # Experimental ACP peer channel (GROK_EXPERIMENTAL_ACP=1; companion-gated).
+    peer_start = _sub("peer-start")
+    peer_start.add_argument("--target", required=True)
+    peer_start.add_argument("--base", required=True)
+    peer_start.add_argument("--contract-file", default=None)
+    _add_web_flags(peer_start)
+    _add_run_opts(peer_start, timeout=900)
+
+    peer_prompt = _sub("peer-prompt")
+    peer_prompt.add_argument("--run-id", required=True)
+    _add_task_group(peer_prompt)
+
+    peer_stop = _sub("peer-stop")
+    peer_stop.add_argument("--run-id", required=True)
+
     return parser
 
 
@@ -367,6 +382,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             detail={"reason": "external-termination", "exceptionType": type(exc).__name__},
         )
         return _emit(env, None)
+
+    # peer-start already emitted its "running" envelope before serving; the
+    # returned value is the post-stop final envelope (also delivered on the
+    # control socket). Strip the internal marker before stdout emit.
+    if isinstance(env, dict) and env.pop("_peerStartAlreadyEmittedRunning", None):
+        pass
 
     # PR1 single terminal writer: modes own durable envelope.json via
     # persist_terminal_envelope. Entrypoint never O_TRUNC-stores a second copy.

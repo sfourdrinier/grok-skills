@@ -67,12 +67,14 @@ SANDBOX_PROFILE_BY_MODE: Dict[str, str] = {
     "reason": "read-only",
     "code": "workspace",
     "verify": "workspace",
+    # Experimental ACP peer channel (start parity with code).
+    "peer": "workspace",
 }
 
 # The modes whose legitimate writable roots include an external worktree.
 # review/reason never write outside the private Grok session state supplied
 # by the base profile, so their writable_roots are empty.
-_WORKTREE_MODES = frozenset({"code", "verify"})
+_WORKTREE_MODES = frozenset({"code", "verify", "peer"})
 
 # The custom sandbox profile is given a DISTINCT name (never a built-in profile
 # name) so the rendered sandbox.toml stanza EXTENDS the built-in write-
@@ -102,11 +104,13 @@ def custom_profile_name(mode: str) -> str:
 # visibility. WRITE confinement (the built-in "read-only"/"workspace"
 # profiles) remains fully enforced and is the sole security boundary
 # verify_enforcement checks.
+# peer shares code's workspace profile; secret-read denial is still unproven.
 SECRET_READ_DENIAL_PROVEN_BY_MODE: Dict[str, bool] = {
     "review": False,
     "reason": False,
     "code": False,
     "verify": False,
+    "peer": False,
 }
 
 # Real-home credential directories listed for the Grok child to be denied.

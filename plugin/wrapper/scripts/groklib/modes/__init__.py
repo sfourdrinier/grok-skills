@@ -8,7 +8,7 @@
 import argparse
 from typing import Callable, Dict
 
-from groklib.modes import cleanup, code, handoff, preflight, reason, review, status, verify
+from groklib.modes import cleanup, code, handoff, peer, preflight, reason, review, status, verify
 
 MODES: Dict[str, Callable[[argparse.Namespace], dict]] = {
     "preflight": preflight.run,
@@ -19,4 +19,7 @@ MODES: Dict[str, Callable[[argparse.Namespace], dict]] = {
     "status": status.run,
     "cleanup": cleanup.run,
     "handoff": handoff.run,
+    "peer-start": peer.run_peer_start,
+    "peer-prompt": peer.run_peer_prompt,
+    "peer-stop": peer.run_peer_stop,
 }

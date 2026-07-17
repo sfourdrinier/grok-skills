@@ -200,6 +200,7 @@ class BuildEnvelopeTests(unittest.TestCase):
                 "artifact-integrity-failure",
                 "handoff-unavailable",
                 "terminal-envelope-incomplete",
+                "acp-failure",
             ),
         )
 
