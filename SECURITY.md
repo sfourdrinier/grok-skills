@@ -58,6 +58,20 @@ over. It is **not** a complete sandbox against an adversarial model.
   evidence (owned worktree, sentinel, sandbox verification) that direct mode
   cannot attest; use hardened mode for verified handoff.
 
+### Session archives
+
+Each live Grok spawn may leave a session store under the private home at
+`~/.grok/sessions` (cwd-bucketed session dirs, per-bucket `prompt_history.jsonl`,
+and root `session_search.sqlite`). Before private-home destroy, the wrapper
+copies that whole tree into the run directory at
+`runs/<runId>/session/sessions/` (dirs `0700`, files `0600`) and writes
+`session/session-meta.json` with the argv session id. The archive holds
+**operator prompt / conversation content** (task text and related model state).
+It is run-dir private state only - never emitted on stdout - so envelope secret
+redaction does not apply to the on-disk archive. Treat the state root as
+sensitive. `cleanup --run-id --confirm` removes the entire run directory
+(including `session/`), so archived session data is deleted with the run.
+
 Full design notes: [docs/OPEN-SECURITY-DECISIONS.md](docs/OPEN-SECURITY-DECISIONS.md).
 
 ## Supported platforms

@@ -12,11 +12,10 @@
 # the real home is built (the same seam preflightfixtures uses).
 #
 # Temp-dir isolation is provided by TempHomeIsolationMixin: each test redirects
-# tempfile.tempdir into its own "gsi-" directory under the real $TMPDIR, so the
-# global "gs-*" private-home scan sees only this test's homes (deterministic
-# teardown/no-leak assertions). The isolated dir sits under the real
-# /var/folders/... root, so the leader-socket path stays realistic (~93 bytes),
-# still well under runstate.allocate_leader_socket's 100-byte AF_UNIX guard.
+# tempfile.tempdir into its own "gsi-" directory so the global "gs-*" private-home
+# scan sees only this test's homes (deterministic teardown/no-leak assertions).
+# When ambient TMPDIR is already long (nested sandboxes), the mixin falls back
+# to /tmp so leader-socket paths stay under the 100-byte AF_UNIX guard.
 
 import contextlib
 import io

@@ -32,6 +32,7 @@ from typing import Callable, List, Optional, Tuple
 from groklib import GrokWrapperError, log_stderr, runstate
 from groklib import grokcli
 from groklib import platformsupport
+from groklib import session_store
 from groklib.authhome import (
     PrivateHome,
     create_private_home,
@@ -500,6 +501,7 @@ def _execute_and_verify(
     progress: ProgressWriter,
     result_holder: Optional[List[Optional[grokcli.GrokRunResult]]] = None,
     warnings: Optional[List[str]] = None,
+    session_id_holder: Optional[List[Optional[str]]] = None,
 ) -> Tuple[grokcli.GrokRunResult, dict, str]:
     """Run Grok, enforce model family and sandbox write-confinement.
 
@@ -512,8 +514,25 @@ def _execute_and_verify(
     because Grok listed paths under change-shaped JSON keys. Those become
     informational ``warnings`` when provided. Write confinement for code/verify
     remains elsewhere (worktree escape checks).
+
+    ``session_id_holder`` receives the argv session id (``run.session_id`` or a
+    fresh uuid4) so the caller can archive the private-home session store under
+    that id even when ``GrokRunResult.session_id`` differs.
     """
     leader_socket = runstate.allocate_leader_socket(home.home_dir, run_paths.run_id)
+    # Prefer the ModeRun session id (the one continuation will re-use); mint only
+    # when the caller did not supply one. Capture BEFORE execute so archive still
+    # knows the argv id if a post-run check raises.
+    session_id = run.session_id or str(uuid.uuid4())
+    if session_id_holder is not None:
+        session_id_holder[0] = session_id
+    if run.seed_session_from_run_dir is not None:
+        seeded = session_store.seed_sessions(run.seed_session_from_run_dir, home.home_dir)
+        if not seeded:
+            note = "could not seed Grok session archive from prior run dir"
+            _log("_execute_and_verify", note)
+            if warnings is not None:
+                warnings.append(note)
     spec = GrokRunSpec(
         binary=run.binary,
         cwd=run.cwd,
@@ -528,7 +547,7 @@ def _execute_and_verify(
         max_turns=run.max_turns,
         timeout_seconds=run.timeout_seconds,
         leader_socket=leader_socket,
-        session_id=str(uuid.uuid4()),
+        session_id=session_id,
         subagents_enabled=False,
         web_access=run.web_access,
         home=home,
@@ -733,6 +752,9 @@ def _run_grok_mode_body(
     # PR968 codex #2: tracks whether the success-path repo write-check already ran, so
     # the failure-path re-run below fires ONLY when the run failed before reaching it.
     repo_write_checked = False
+    # Session id actually passed on argv (spec); preferred over result.session_id for
+    # the on-disk archive meta so continuation reuses the same id the CLI saw.
+    session_id_holder: List[Optional[str]] = [run.session_id]
 
     try:
         # Informational FS baseline for read-only modes (review). Capture soft-fails
@@ -781,12 +803,28 @@ def _run_grok_mode_body(
                 progress,
                 result_holder,
                 warnings,
+                session_id_holder,
             )
             # FS drift audit (warn-only): concurrent processes / editors may touch
             # the tree during review; never discard a completed review for that.
             _report_repo_fs_drift(run, review_fs_baseline, progress, warnings)
             repo_write_checked = True
         finally:
+            # Archive the private-home session store STRICTLY BEFORE destroy so
+            # prompt history and per-session state survive home teardown. Failure
+            # only warns - never flips a successful run (Task 2.1).
+            try:
+                archive_session_id = session_id_holder[0]
+                if archive_session_id is None:
+                    archive_session_id = str(uuid.uuid4())
+                    session_id_holder[0] = archive_session_id
+                session_store.archive_session(
+                    home.home_dir, run_paths.run_dir, archive_session_id
+                )
+            except Exception as archive_exc:
+                note = "session archive failed (run continues): {}".format(archive_exc)
+                _log("_run_grok_mode_body", note)
+                warnings.append(note)
             destroy_result = home_cleanup.destroy_once()
             progress.safe_emit(
                 "cleanup", "private home destroyed", data={"cleanupStatus": destroy_result["status"]}
