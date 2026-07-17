@@ -326,20 +326,51 @@ class PeerLifecycleTests(ProbedPlatformMixin, TempHomeIsolationMixin, unittest.T
         self.assertEqual(ctx.exception.error_class, "acp-failure")
         self.assertIn("in flight", str(ctx.exception).lower())
 
-    def test_peer_stop_labels_confinement_and_destroys_home(self) -> None:
-        source = pathlib.Path(self.tmp_root) / "grok" / ".grok"
-        source.mkdir(parents=True)
-        (source / "auth.json").write_text("{}\n", encoding="utf-8")
+    def _peer_finalize_fixture(self, *, plant_sandbox: bool = False):
+        """Shared worktree + home + peer_doc for finalize unit tests."""
+        from groklib import worktree as worktree_mod
+        from groklib import worktree_escape
+        from tests.modefixtures import _passing_sandbox_event
+        from groklib.sandbox import custom_profile_name
 
         home = self._fake_create_home()
         run_paths = runstate.create_run("peer-start")
-        from groklib import worktree as worktree_mod
-
+        # Advance lifecycle so terminalize can complete.
+        rec = runstate.load_run_record(run_paths.run_id)
+        rev = int(rec.get("recordRevision", 0))
+        if rec.get("lifecycle") == "created":
+            rec = runstate.set_lifecycle(run_paths, rev, "running")
+            rev = int(rec["recordRevision"])
         wt = worktree_mod.create_external_worktree(
             repo_root=self.repo, base=self.base, run_id=run_paths.run_id
         )
+        runstate.cas_update_run_record(
+            run_paths,
+            rev,
+            {
+                "worktreePath": str(wt.path),
+                "worktreeBranch": wt.branch,
+                "baseRevision": wt.base_revision,
+                "repository": str(self.repo),
+                "status": "running",
+            },
+        )
         sentinel = ".grok-run-" + run_paths.run_id
         (wt.path / sentinel).write_text("", encoding="utf-8")
+        private_tmp = home.home_dir / "tmp"
+        private_tmp.mkdir(exist_ok=True)
+        if plant_sandbox:
+            grants = [str(wt.path.resolve()), str(private_tmp.resolve())]
+            (home.grok_dir / "sandbox-events.jsonl").write_text(
+                json.dumps(
+                    _passing_sandbox_event(
+                        custom_profile_name("peer"), read_write_paths=grants
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        baseline = worktree_escape.capture_original_checkout_baseline(self.repo)
         sock_path = run_paths.run_dir / "peer.sock"
         peer_doc = {
             "schemaVersion": 1,
@@ -362,14 +393,11 @@ class PeerLifecycleTests(ProbedPlatformMixin, TempHomeIsolationMixin, unittest.T
             "targetRelative": "pkg",
             "sentinelName": sentinel,
             "contract": None,
-            "originalBaseline": None,
+            "originalBaseline": dict(baseline),
             "leaseExpiresAt": time.time() + 3600,
             "model": "grok-4.5",
         }
         runstate.write_json_atomic(run_paths.run_dir / "peer.json", peer_doc)
-        # Plant a control socket that answers stop with a finalize request path.
-        # Direct unit path: call finalize helper.
-        from groklib.modes import peer_finalize
 
         stage_acc = mock.Mock()
         stage_acc.commands = []
@@ -384,8 +412,23 @@ class PeerLifecycleTests(ProbedPlatformMixin, TempHomeIsolationMixin, unittest.T
         stage.acc = stage_acc
         stage.progress = mock.Mock()
         stage.progress.safe_emit = mock.Mock()
-        stage.result = mock.Mock(answer="done", session_id="sess-1", request_id=None, stop_reason="end_turn", model_usage=None, turns=1, raw_usage=None)
+        stage.result = mock.Mock(
+            answer="done",
+            session_id="sess-1",
+            request_id=None,
+            stop_reason="end_turn",
+            model_usage=None,
+            turns=1,
+            raw_usage=None,
+        )
+        return home, run_paths, wt, peer_doc, stage, baseline
 
+    def test_peer_stop_labels_confinement_and_destroys_home(self) -> None:
+        from groklib.modes import peer_finalize
+
+        home, run_paths, wt, peer_doc, stage, baseline = self._peer_finalize_fixture(
+            plant_sandbox=True
+        )
         with mock.patch.object(peer_finalize, "destroy_private_home", self._fake_destroy_home):
             result = peer_finalize.finalize_peer_session(
                 run_paths=run_paths,
@@ -393,7 +436,7 @@ class PeerLifecycleTests(ProbedPlatformMixin, TempHomeIsolationMixin, unittest.T
                 home_path=pathlib.Path(home.home_dir),
                 worktree=wt,
                 contract=None,
-                original_baseline=None,
+                original_baseline=baseline,
                 stage=stage,
             )
         manifest_path = run_paths.run_dir / "implementation-handoff.json"
@@ -401,6 +444,273 @@ class PeerLifecycleTests(ProbedPlatformMixin, TempHomeIsolationMixin, unittest.T
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         self.assertEqual(manifest.get("confinement"), "worktree-final-diff-only")
         self.assertFalse(pathlib.Path(home.home_dir).exists(), "private home must be destroyed")
+        self.assertEqual(result.get("status"), "success")
+
+    def test_peer_manifest_never_integration_ready_authoritative_false(self) -> None:
+        """Finding 1: preview never forges validation; ready always false."""
+        from groklib.modes import peer_finalize
+
+        home, run_paths, wt, peer_doc, stage, baseline = self._peer_finalize_fixture(
+            plant_sandbox=True
+        )
+        # Contract with requiredValidation must NOT be executed / forged.
+        contract = {
+            "taskId": "peer-preview-task",
+            "objective": "preview only",
+            "acceptanceCriteria": ["manual review"],
+            "writeScopes": ["pkg/"],
+            "requiredValidation": [
+                {
+                    "argv": ["false"],
+                    "cwd": ".",
+                    "purpose": "must-not-run",
+                }
+            ],
+        }
+        peer_doc["contract"] = contract
+        with mock.patch.object(peer_finalize, "destroy_private_home", self._fake_destroy_home):
+            with mock.patch.object(
+                peer_finalize,
+                "code_handoff_finalize",
+                wraps=peer_finalize.code_handoff_finalize,
+            ) as wrapped:
+                peer_finalize.finalize_peer_session(
+                    run_paths=run_paths,
+                    peer_doc=peer_doc,
+                    home_path=pathlib.Path(home.home_dir),
+                    worktree=wt,
+                    contract=contract,
+                    original_baseline=baseline,
+                    stage=stage,
+                )
+        # forensics contract must strip requiredValidation (never executed)
+        kwargs = wrapped.call_args.kwargs
+        fc = kwargs.get("contract") or {}
+        self.assertNotIn("requiredValidation", fc)
+
+        manifest = json.loads(
+            (run_paths.run_dir / "implementation-handoff.json").read_text(encoding="utf-8")
+        )
+        self.assertIs(manifest["integration"]["ready"], False)
+        blockers = manifest["integration"]["blockers"]
+        self.assertTrue(
+            any(b.get("kind") == "handoff-unavailable" for b in blockers),
+            blockers,
+        )
+        sources = manifest["validation"]["sources"]
+        self.assertIs(sources["wrapperBuildGate"]["authoritative"], False)
+        self.assertEqual(sources["wrapperBuildGate"]["reason"], "peer-preview: not executed")
+        self.assertIs(sources["contractRequiredValidation"]["authoritative"], False)
+        self.assertEqual(
+            sources["contractRequiredValidation"]["reason"], "peer-preview: not executed"
+        )
+        self.assertIs(manifest["validation"]["allPassed"], False)
+        self.assertEqual(manifest.get("confinement"), "contract-scopes")
+        # No forged exit_status in commands evidence
+        for cmd in stage.acc.commands or []:
+            self.assertNotEqual(cmd.get("exitStatus"), 0, "no forged exit_status=0")
+
+    def test_peer_start_records_worktree_on_run_json(self) -> None:
+        """Finding 4: peer-start CAS-updates worktreePath/lifecycle like code mode."""
+        source = pathlib.Path(self.tmp_root) / "grok" / ".grok"
+        source.mkdir(parents=True)
+        (source / "auth.json").write_text("{}\n", encoding="utf-8")
+
+        ns = mock.Mock(
+            target=str(self.repo / "pkg"),
+            base=self.base,
+            contract_file=None,
+            model="grok-4.5",
+            web=None,
+            timeout=60,
+            max_turns=None,
+            grok_binary=pathlib.Path("/usr/bin/true"),
+            task="hello",
+            task_file=None,
+        )
+
+        def _serve_once(session, running_env, preopened=None):
+            if preopened is not None:
+                try:
+                    preopened.close()
+                except Exception:
+                    pass
+            return envelope_mod.build_envelope(
+                run_id=session.run_id,
+                mode="peer-stop",
+                status="success",
+                response={"stopped": True},
+            )
+
+        with self._patch_spawn_and_acp():
+            with mock.patch.object(peer_mod, "_serve_control_plane", side_effect=_serve_once):
+                with mock.patch.object(peer_mod, "require_probed_platform_for_live", return_value=None):
+                    with mock.patch.object(peer_mod, "check_version", return_value="0.0.0"):
+                        env = peer_mod.run_peer_start(ns)
+        run_id = env["runId"] if env.get("runId") else None
+        # serve returns peer-stop env; running was emitted earlier - recover run id from peer.json
+        runs = list((runstate.state_root() / "runs").iterdir())
+        self.assertTrue(runs)
+        run_id = runs[0].name
+        record = runstate.load_run_record(run_id)
+        self.assertEqual(record.get("lifecycle"), "running")
+        self.assertIsNotNone(record.get("worktreePath"))
+        self.assertTrue(pathlib.Path(record["worktreePath"]).is_dir())
+        self.assertIsNotNone(record.get("worktreeBranch"))
+        self.assertIsNotNone(record.get("baseRevision"))
+        peer_doc = json.loads(
+            (runstate.state_root() / "runs" / run_id / "peer.json").read_text(encoding="utf-8")
+        )
+        self.assertIn("originalBaseline", peer_doc)
+        self.assertIsInstance(peer_doc["originalBaseline"], dict)
+
+    def test_peer_stop_terminalizes_and_cleanup_removes_worktree(self) -> None:
+        """Finding 4: peer-stop terminalize + cleanup --confirm removes worktree."""
+        from groklib.modes import peer_finalize
+        from groklib.modes import cleanup as cleanup_mod
+
+        home, run_paths, wt, peer_doc, stage, baseline = self._peer_finalize_fixture(
+            plant_sandbox=True
+        )
+        with mock.patch.object(peer_finalize, "destroy_private_home", self._fake_destroy_home):
+            peer_finalize.finalize_peer_session(
+                run_paths=run_paths,
+                peer_doc=peer_doc,
+                home_path=pathlib.Path(home.home_dir),
+                worktree=wt,
+                contract=None,
+                original_baseline=baseline,
+                stage=stage,
+            )
+        record = runstate.load_run_record(run_paths.run_id)
+        self.assertIn(record.get("lifecycle"), ("completed", "failed"))
+        self.assertTrue(wt.path.is_dir(), "worktree retained until cleanup")
+
+        ns = mock.Mock(run_id=run_paths.run_id, confirm=True)
+        out = cleanup_mod.run(ns)
+        self.assertEqual(out.get("status"), "success")
+        self.assertFalse(wt.path.exists(), "cleanup must remove peer worktree")
+        self.assertFalse(run_paths.run_dir.exists(), "cleanup must remove run dir")
+
+    def test_peer_crash_stop_uses_start_baseline_never_recapture(self) -> None:
+        """Finding 5: crash-path peer-stop loads originalBaseline; no re-capture."""
+        home, run_paths, wt, peer_doc, stage, baseline = self._peer_finalize_fixture(
+            plant_sandbox=True
+        )
+        # No control socket: forces local finalize path.
+        ns = mock.Mock(run_id=run_paths.run_id)
+        captured = {}
+
+        def _fake_finalize(**kwargs):
+            captured["baseline"] = kwargs.get("original_baseline")
+            return envelope_mod.build_envelope(
+                run_id=run_paths.run_id,
+                mode="peer-stop",
+                status="success",
+                response={"ok": True},
+            )
+
+        with mock.patch(
+            "groklib.modes.peer_finalize.finalize_peer_session", side_effect=_fake_finalize
+        ):
+            with mock.patch.object(
+                peer_mod.worktree_escape,
+                "capture_original_checkout_baseline",
+                side_effect=AssertionError("must not re-capture baseline at stop"),
+            ):
+                env = peer_mod.run_peer_stop(ns)
+        self.assertEqual(env["status"], "success")
+        self.assertEqual(captured["baseline"], baseline)
+
+    def test_wrapper_enforces_experimental_acp_flag(self) -> None:
+        """Finding 6: wrapper fails closed when GROK_EXPERIMENTAL_ACP unset."""
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GROK_EXPERIMENTAL_ACP", None)
+            for mode_fn, ns in (
+                (peer_mod.run_peer_start, mock.Mock(target="x", base="y")),
+                (peer_mod.run_peer_prompt, mock.Mock(run_id="x", task="t", task_file=None)),
+                (peer_mod.run_peer_stop, mock.Mock(run_id="x")),
+            ):
+                with self.assertRaises(GrokWrapperError) as ctx:
+                    mode_fn(ns)
+                self.assertEqual(ctx.exception.error_class, "usage-error")
+                self.assertIn("GROK_EXPERIMENTAL_ACP", str(ctx.exception))
+
+    def test_peer_start_single_stdout_envelope(self) -> None:
+        """Finding 7: resident emits only the running envelope on stdout."""
+        source = pathlib.Path(self.tmp_root) / "grok" / ".grok"
+        source.mkdir(parents=True)
+        (source / "auth.json").write_text("{}\n", encoding="utf-8")
+
+        ns = mock.Mock(
+            target=str(self.repo / "pkg"),
+            base=self.base,
+            contract_file=None,
+            model="grok-4.5",
+            web=None,
+            timeout=60,
+            max_turns=None,
+            grok_binary=pathlib.Path("/usr/bin/true"),
+            task=None,
+            task_file=None,
+        )
+        stdout_writes: List[str] = []
+        real_emit = envelope_mod.emit_envelope
+
+        def _spy_emit(env, path):
+            # Capture only actual stdout prints (not suppressed).
+            import io
+            import contextlib
+
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                real_emit(env, path)
+            text = buf.getvalue()
+            if text.strip():
+                stdout_writes.append(text)
+
+        def _serve_once(session, running_env, preopened=None):
+            if preopened is not None:
+                try:
+                    preopened.close()
+                except Exception:
+                    pass
+            return envelope_mod.build_envelope(
+                run_id=session.run_id,
+                mode="peer-stop",
+                status="success",
+                response={"stopped": True},
+            )
+
+        with self._patch_spawn_and_acp():
+            with mock.patch.object(peer_mod, "_serve_control_plane", side_effect=_serve_once):
+                with mock.patch.object(peer_mod, "require_probed_platform_for_live", return_value=None):
+                    with mock.patch.object(peer_mod, "check_version", return_value="0.0.0"):
+                        with mock.patch.object(peer_mod, "emit_envelope", side_effect=_spy_emit):
+                            with mock.patch.object(envelope_mod, "emit_envelope", side_effect=_spy_emit):
+                                final = peer_mod.run_peer_start(ns)
+                                # Simulate entrypoint post-return emit (must be suppressed).
+                                envelope_mod.emit_envelope(final, None)
+        self.assertEqual(len(stdout_writes), 1, stdout_writes)
+        first = json.loads(stdout_writes[0])
+        self.assertEqual(first["status"], "running")
+        self.assertEqual(first["mode"], "peer-start")
+
+    def test_control_socket_payload_secret_scanned(self) -> None:
+        """Finding 8: socket payloads route through assert_no_secret_material."""
+        from groklib.modes import peer_control
+
+        conn = mock.Mock()
+        with mock.patch.object(peer_control, "assert_no_secret_material") as scan:
+            peer_control.write_json_line(conn, {"type": "result", "envelope": {"ok": True}})
+            scan.assert_called()
+            conn.sendall.assert_called_once()
+            # Residual secret-shaped key that redaction renames still scanned after redact.
+            scan.reset_mock()
+            # Force the post-redact scan to reject so the fail-closed path is covered.
+            scan.side_effect = envelope_mod.SecretMaterialError("secret at $.x")
+            with self.assertRaises(envelope_mod.SecretMaterialError):
+                peer_control.write_json_line(conn, {"type": "result", "envelope": {"ok": True}})
 
     def test_reaper_skips_live_peer_home_reaps_dead(self) -> None:
         live_home = pathlib.Path(tempfile.mkdtemp(prefix=runstate.TEMP_HOME_PREFIX))

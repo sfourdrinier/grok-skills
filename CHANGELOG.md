@@ -117,18 +117,30 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 - Validation blockers and command evidence name failing tests from FULL
   stdout (`failedTests`), surviving tail truncation.
 
-### Added (Phase 5 - experimental ACP peer channel, PR11)
+### Added (Phase 5 - experimental ACP peer-preview channel, PR11)
 
-- **Experimental peer channel** behind `GROK_EXPERIMENTAL_ACP=1` (hardened
-  only): `peer start|prompt|stop` drive a long-lived `grok agent stdio` (ACP)
-  session inside the full code-mode isolation stack. A wrapper-owned 0600
-  control socket (not a FIFO), peer.json with wrapper+child pid/starttime, and
-  START PARITY enforced before the first prompt. Streamed chunks are redacted;
-  `peer stop` finalizes through the UNCHANGED `/grok:handoff` path with honest
-  confinement labeling. New `acp-failure` error class; reaper respects live
-  peer homes. Design was adversarially reviewed by Grok itself and amended
-  before build (`docs/specs/2026-07-17-acp-peer-channel-design.md`); proven
-  end to end live (`docs/checklists/2.0-live-smoke-ledger.md`).
+- **Experimental peer-preview channel** behind `GROK_EXPERIMENTAL_ACP=1`
+  (hardened only; enforced in the **wrapper** as well as the companion):
+  `peer start|prompt|stop` drive a long-lived `grok agent stdio` (ACP) session
+  with start parity (sandbox capability, tool allowlist, cwd sentinel,
+  baseline, no .env) before the first prompt. Wrapper-owned 0600 control
+  socket (not a FIFO); peer.json records wrapper+child pid/starttime and the
+  start `originalBaseline`; run.json records `worktreePath` / lifecycle so
+  `cleanup --run-id` can remove the external worktree after peer-stop
+  terminalizes. Streamed chunks and control-socket payloads are secret-scanned
+  (same guarantee as `emit_envelope`). Resident peer-start emits **exactly one**
+  stdout envelope (`running`); peer-stop emits the terminal outcome.
+- **Honest preview finalize (release-hardening):** peer-stop does **not** run
+  contract `requiredValidation` or the wrapper build gate, never forges
+  `exit_status`, and always writes `integration.ready: false` with a
+  `handoff-unavailable` blocker plus `authoritative: false` validation sources
+  (`peer-preview: not executed`). **Not eligible for `/grok:handoff`** -
+  integration is manual from the retained worktree after operator review.
+  Crash-path peer-stop reuses the start baseline (never re-captures). Optional
+  sandbox `verify_enforcement` at stop records failure honestly (no full
+  code-mode isolation claim without telemetry). New `acp-failure` error class;
+  reaper respects live peer homes. Design:
+  `docs/specs/2026-07-17-acp-peer-channel-design.md`.
 
 ### Changed (Phase 0)
 

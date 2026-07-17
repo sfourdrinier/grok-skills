@@ -1,7 +1,8 @@
 # wrapper/scripts/groklib/modes/peer_control.py
 #
 # Wrapper-owned unix control socket for the experimental ACP peer channel
-# (0600, companion-uid only). Split from peer.py for the 900-line cap.
+# (0600, companion-uid only) plus small peer lifecycle helpers shared with
+# peer.py (900-line cap).
 
 from __future__ import annotations
 
@@ -10,10 +11,10 @@ import os
 import pathlib
 import socket
 import struct
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
-from groklib import GrokWrapperError, log_stderr, platformsupport
-from groklib.envelope import redact_secret_material
+from groklib import GrokWrapperError, log_stderr, platformsupport, runstate
+from groklib.envelope import assert_no_secret_material, redact_secret_material
 
 _SOCKET_BACKLOG = 4
 _CONTROL_ACCEPT_TIMEOUT = 1.0
@@ -21,6 +22,70 @@ _CONTROL_ACCEPT_TIMEOUT = 1.0
 
 def _log(function: str, message: str) -> None:
     log_stderr("modes.peer_control", function, message)
+
+
+def require_experimental_acp() -> None:
+    """Fail closed unless GROK_EXPERIMENTAL_ACP=1 (wrapper-owned gate)."""
+    if os.environ.get("GROK_EXPERIMENTAL_ACP", "").strip() != "1":
+        raise GrokWrapperError(
+            "usage-error",
+            "peer channel is experimental; set GROK_EXPERIMENTAL_ACP=1",
+        )
+
+
+def record_peer_worktree(
+    run_paths: runstate.RunPaths,
+    *,
+    model: str,
+    repo_root: pathlib.Path,
+    target_relative: str,
+    worktree: Any,
+) -> None:
+    """Advance lifecycle + record worktree fields so cleanup can rebuild/remove."""
+    try:
+        record = runstate.load_run_record(run_paths.run_id)
+        rev = int(record.get("recordRevision", 0))
+        if record.get("lifecycle") == "created":
+            record = runstate.set_lifecycle(run_paths, rev, "running")
+            rev = int(record["recordRevision"])
+        runstate.cas_update_run_record(
+            run_paths,
+            rev,
+            {
+                "requestedModel": model,
+                "repository": str(repo_root),
+                "targetWorkspace": target_relative or ".",
+                "worktreePath": str(worktree.path),
+                "worktreeBranch": worktree.branch,
+                "baseRevision": worktree.base_revision,
+                "status": "running",
+            },
+        )
+    except GrokWrapperError:
+        raise
+    except Exception as exc:
+        raise GrokWrapperError(
+            "state-ownership-violation",
+            "could not record peer worktree ownership on run.json: {}".format(exc),
+            {"runId": run_paths.run_id, "reason": "worktree-metadata-cas-failed"},
+        ) from exc
+
+
+def load_original_baseline(peer_doc: dict) -> Dict[str, str]:
+    """Load the start-captured baseline; never re-capture at stop (escape window)."""
+    raw = peer_doc.get("originalBaseline")
+    if not isinstance(raw, dict):
+        raise GrokWrapperError(
+            "acp-failure",
+            "peer-stop missing originalBaseline from peer-start; refusing re-capture",
+            {"hint": "start-baseline-required"},
+        )
+    # Empty dict is valid when the checkout was clean at start.
+    out: Dict[str, str] = {}
+    for key, value in raw.items():
+        if isinstance(key, str) and isinstance(value, str):
+            out[key] = value
+    return out
 
 
 def assert_peer_uid(peer_uid: int) -> None:
@@ -109,7 +174,10 @@ def read_json_line(conn: socket.socket, timeout: float = 30.0) -> dict:
 
 
 def write_json_line(conn: socket.socket, obj: dict) -> None:
+    """Send one control-plane JSON line after redaction + secret scan (emit_envelope parity)."""
     safe = redact_secret_material(obj, redact_keys=True)
+    # Same fail-closed guarantee as emit_envelope: residual secret shapes never leave.
+    assert_no_secret_material(safe)
     data = (json.dumps(safe, separators=(",", ":")) + "\n").encode("utf-8")
     conn.sendall(data)
 
@@ -123,11 +191,16 @@ def connect_control(socket_path: str, payload: dict, timeout: float = 900.0) -> 
             "peer control socket missing; child may have died - reattach unsupported, run peer-stop",
             {"socketPath": socket_path, "hint": "reattach-unsupported"},
         )
+    # Scan outbound payload (task text etc.) before it hits the socket.
+    safe_payload = redact_secret_material(payload, redact_keys=True)
+    if not isinstance(safe_payload, dict):
+        raise GrokWrapperError("acp-failure", "control payload must be a JSON object")
+    assert_no_secret_material(safe_payload)
     client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:
         client.settimeout(timeout)
         client.connect(str(path))
-        client.sendall((json.dumps(payload) + "\n").encode("utf-8"))
+        client.sendall((json.dumps(safe_payload, separators=(",", ":")) + "\n").encode("utf-8"))
         buf = b""
         while b"\n" not in buf:
             chunk = client.recv(8192)
@@ -160,6 +233,8 @@ def connect_control(socket_path: str, payload: dict, timeout: float = 900.0) -> 
     env = msg.get("envelope")
     if not isinstance(env, dict):
         raise GrokWrapperError("acp-failure", "control response missing envelope")
+    # Turn envelopes returned by peer-prompt must pass the same scan as stdout.
+    assert_no_secret_material(env)
     return env
 
 

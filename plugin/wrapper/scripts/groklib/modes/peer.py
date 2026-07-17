@@ -1,9 +1,9 @@
 # wrapper/scripts/groklib/modes/peer.py
 #
 # Experimental ACP peer channel (peer-start / peer-prompt / peer-stop), gated by
-# GROK_EXPERIMENTAL_ACP. Control plane is a wrapper-owned unix socket (0600),
-# not a FIFO. Full code-mode start parity before first prompt; stop finalizes
-# through code_handoff_finalize with honest confinement labeling.
+# GROK_EXPERIMENTAL_ACP in the WRAPPER (not companion-only). Control plane is a
+# wrapper-owned unix socket (0600), not a FIFO. Start parity before first prompt;
+# stop finalizes as an honest peer-preview (never integration-ready).
 
 from __future__ import annotations
 
@@ -34,7 +34,10 @@ from groklib.authhome import (
 # Patch point for tests (mock.patch.object(peer_mod, "AcpClient", ...)).
 AcpClient = acp_mod.AcpClient
 from groklib.envelope import (
+    arm_peer_resident_stdout_suppress,
+    assert_no_secret_material,
     build_envelope,
+    clear_peer_resident_stdout_suppress,
     emit_envelope,
     failure_envelope,
     redact_secret_material,
@@ -72,6 +75,11 @@ MAX_PEER_LEASE_SECONDS = 2 * 3600
 
 def _log(function: str, message: str) -> None:
     log_stderr("modes.peer", function, message)
+
+
+_require_experimental_acp = peer_control.require_experimental_acp
+_record_peer_worktree = peer_control.record_peer_worktree
+_load_original_baseline = peer_control.load_original_baseline
 
 
 @dataclass
@@ -284,7 +292,7 @@ def _handle_prompt(session: PeerSession, task: str) -> dict:
             },
             redact_keys=True,
         )
-        return build_envelope(
+        turn_env = build_envelope(
             run_id=session.run_id,
             mode="peer-prompt",
             status="success",
@@ -299,6 +307,9 @@ def _handle_prompt(session: PeerSession, task: str) -> dict:
                 "modelUsage": None,
             },
         )
+        # Defense in depth: same scan as emit_envelope before control-plane leave.
+        assert_no_secret_material(turn_env)
+        return turn_env
     finally:
         session._prompt_in_flight = False
         try:
@@ -473,6 +484,8 @@ def _connect_control(socket_path: str, payload: dict, timeout: float = 900.0) ->
 
 def run_peer_start(args: argparse.Namespace) -> dict:
     """Create run + worktree + home + ACP child; emit running; serve control socket."""
+    _require_experimental_acp()
+    clear_peer_resident_stdout_suppress()
     require_probed_platform_for_live()
     binary = _shared.resolve_binary(args)
     check_version(binary)
@@ -512,6 +525,14 @@ def run_peer_start(args: argparse.Namespace) -> dict:
     )
     worktree_mod.verify_external_worktree(worktree)
     progress.safe_emit("worktree", "worktree ready", data={"worktree": str(worktree.path)})
+    # Record worktree ownership on run.json immediately (cleanup rebuild path).
+    _record_peer_worktree(
+        run_paths,
+        model=model,
+        repo_root=repo_root,
+        target_relative=target_relative,
+        worktree=worktree,
+    )
 
     # Capture pristine gate scripts (start parity) before any model edit.
     from groklib.modes.code import _read_committed_manifest_fields, _target_in_worktree
@@ -620,7 +641,8 @@ def run_peer_start(args: argparse.Namespace) -> dict:
         "targetRelative": target_relative,
         "sentinelName": sentinel_name,
         "contract": contract,
-        "originalBaseline": None,  # baseline object is process-local; re-capture not needed at stop
+        # Persist start baseline for crash-path peer-stop (never re-capture at stop).
+        "originalBaseline": dict(original_baseline) if original_baseline is not None else {},
         "leaseExpiresAt": time.time() + MAX_PEER_LEASE_SECONDS,
         "model": model,
         "webAccess": web_access,
@@ -700,14 +722,17 @@ def run_peer_start(args: argparse.Namespace) -> dict:
         pass
 
     final = _serve_control_plane(session_obj, running_env, preopened=control_srv)
-    # Main will emit final on process exit (after peer-stop); mark so entrypoint
-    # can skip double-emit when already written to the control client only.
+    # Resident process: exactly ONE stdout envelope (the running one above).
+    # Terminal outcome is delivered on the control socket to peer-stop and
+    # durable in the run dir; suppress the entrypoint's post-return emit.
     final = dict(final)
     final["_peerStartAlreadyEmittedRunning"] = True
+    arm_peer_resident_stdout_suppress()
     return final
 
 
 def run_peer_prompt(args: argparse.Namespace) -> dict:
+    _require_experimental_acp()
     run_id = getattr(args, "run_id", None)
     if not run_id:
         raise GrokWrapperError("usage-error", "peer-prompt requires --run-id")
@@ -758,6 +783,7 @@ def run_peer_prompt(args: argparse.Namespace) -> dict:
 
 
 def run_peer_stop(args: argparse.Namespace) -> dict:
+    _require_experimental_acp()
     run_id = getattr(args, "run_id", None)
     if not run_id:
         raise GrokWrapperError("usage-error", "peer-stop requires --run-id")
@@ -769,6 +795,7 @@ def run_peer_stop(args: argparse.Namespace) -> dict:
         except GrokWrapperError as exc:
             _log("run_peer_stop", "socket stop failed, attempting local finalize: {}".format(exc))
     # Fallback: local finalize when resident wrapper is already gone.
+    # MUST use original_baseline from peer-start (never re-capture: closes escape window).
     from groklib.modes import peer_finalize
     from groklib.worktree import ExternalWorktree
 
@@ -819,7 +846,7 @@ def run_peer_stop(args: argparse.Namespace) -> dict:
         },
     )()
     contract = doc.get("contract") if isinstance(doc.get("contract"), dict) else None
-    baseline = worktree_escape.capture_original_checkout_baseline(worktree.repo_root)
+    baseline = _load_original_baseline(doc)
     if not home_path.is_dir():
         # Home already gone; still label + finalize artifacts.
         home_path = pathlib.Path(tempfile.mkdtemp(prefix=runstate.TEMP_HOME_PREFIX))

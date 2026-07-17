@@ -1,48 +1,84 @@
 <!-- docs/specs/2026-07-17-acp-peer-channel-design.md -->
 
-# ACP peer channel (2.0.0 experimental) - design
+# ACP peer channel (2.0.0 experimental preview) - design
 
 Authority for Task 5.3 (plan: docs/superpowers/plans/2026-07-16-peer-agent-integration.md).
 Probe evidence: docs/research/2026-07-17-acp-probe.md. Gated behind
-GROK_EXPERIMENTAL_ACP=1; hardened-only; Claude and Codex identical (companion
-internal).
+`GROK_EXPERIMENTAL_ACP=1` in **both** the companion and the wrapper (fail closed
+with `usage-error` when unset). Hardened-only; Claude and Codex identical.
+
+## Status: honest experimental preview
+
+Peer-preview produces a retained worktree + an honest handoff **manifest that is
+never integration-ready** (`integration.ready` is always false with a
+`handoff-unavailable` blocker). It is **not** eligible for `/grok:handoff`
+(handoff requires a code-mode terminal envelope; peer runs are mode
+`peer-start`). Integration is **manual** from the retained worktree after
+operator review. Do not claim dual-condition handoff or code-parity readiness.
 
 ## Architecture
 
 One long-lived peer SESSION = one run id + one private home + one external
 worktree + one `grok agent stdio` child (spawned in that env, cwd worktree,
-private leader socket). The wrapper process does NOT stay resident: peer-start
-spawns the child detached (own group, same registry as live runs),
-peer-prompt/peer-stop reattach over the child's stdio via a tiny
-wrapper-owned unix socket bridge... REJECTED for v1: stdio cannot be
-reattached across processes. v1 DESIGN: the child lives as long as the
-peer-start WRAPPER process, which stays resident in the background (companion
-spawns it with run_in_background semantics); prompts are delivered through a
-run-dir FIFO protocol:
+private leader socket). v1 DESIGN: the child lives as long as the peer-start
+WRAPPER process, which stays resident (companion spawns it with
+run_in_background semantics). Control plane is a wrapper-owned unix domain
+socket (0600, companion uid only) - not a FIFO.
 
-- `runs/<id>/peer/inbox/` - prompt files (NNNN-prompt.md, atomic rename in)
-- `runs/<id>/peer/outbox/` - per-prompt result envelopes (NNNN-result.json)
-- `runs/<id>/peer.json` - {pid, sessionId, lifecycle, startedAtUtc}
-- progress.jsonl - session/update chunks relayed through the EXISTING
-  redaction pipeline (groklib.redaction) as progress events
+- `runs/<id>/peer.json` - wrapper+child pid/starttime, worktree paths, start
+  `originalBaseline`, lease, lifecycle
+- `runs/<id>/run.json` - lifecycle + `worktreePath` / `worktreeBranch` /
+  `baseRevision` (same ownership fields as code mode so `cleanup --run-id`
+  can rebuild and remove the external worktree)
+- `progress.jsonl` - session/update chunks relayed through the existing
+  redaction pipeline (per-frame; see residual risk below)
 
-peer-prompt = companion writes an inbox file and tails the outbox (bounded
-wait); peer-stop = inbox sentinel `stop`, wrapper finalizes: session/cancel,
-child teardown, THEN the standard code finalize path (scopes from an optional
-contract, forensic patch, build gate, manifest) so integration STILL goes
-through /grok:handoff dual-condition ready. No ACP bypass of the patch
-protocol, ever.
+peer-start emits **exactly one** stdout envelope (`status: "running"`) for the
+resident process lifetime. peer-prompt / peer-stop are separate invocations;
+peer-stop emits the terminal outcome. The resident does not print a second
+stdout envelope (terminal is on the control socket + durable run dir).
 
-## Confinement
+peer-stop finalizes: session/cancel, child teardown, forensic path (sentinel,
+scopes, patch, escape), optional sandbox `verify_enforcement`, honest
+not-ready manifest, private-home destroy, terminalize run record.
 
-- Same policy stack as code mode: private home, sandbox profile TOML, worktree
-  cwd, tool allowlist via session config where ACP exposes it.
-- ADDITIONAL: register the x.ai pre_tool_use blocking hook and DENY any tool
-  call whose declared paths resolve outside the worktree (defense in depth in
-  front of Seatbelt; deny is advisory-strength only - the OS sandbox remains
-  the enforcement layer; document honestly).
-- Secret redaction: every relayed chunk passes the existing pattern scan
-  before progress.jsonl; envelopes unchanged.
+## Confinement and isolation (honest parity)
+
+- Start parity (fail closed before first prompt): sandbox profile capability,
+  tool allowlist (or hard-refuse if empty), mcpServers [], web policy, cwd
+  sentinel planted, original_baseline + pristine gate scripts captured, no
+  .env copy.
+- Stop: `verify_enforcement` against the private home/policy when possible.
+  Failure adds a `sandbox-failure` blocker (integration.ready already false).
+  Do **not** claim "full code-mode isolation stack" when ACP did not produce
+  sandbox-events telemetry - record the miss honestly.
+- `pre_tool_use` deny is registered as NON-enforcement (OS sandbox enforces).
+- Secret redaction: every relayed chunk, control-socket payload, and turn
+  envelope passes the same `assert_no_secret_material` scan as
+  `emit_envelope` (after redaction).
+
+### Residual risk: per-frame progress redaction
+
+Progress-chunk redaction is **per-frame**. A secret split across ACP
+`session/update` frames may partially land in `progress.jsonl` before a full
+token shape is visible to the scanner. Honest residual risk for the preview;
+not claimed as a complete secret firewall.
+
+## Manifest honesty (peer-stop)
+
+- Do **not** run contract `requiredValidation` or the wrapper build gate.
+- Do **not** forge `exit_status` (or any other validation evidence).
+- `validation.sources.wrapperBuildGate` and
+  `validation.sources.contractRequiredValidation` are always
+  `authoritative: false` with reason `peer-preview: not executed`.
+- `integration.ready` is always false with blocker
+  `{kind: "handoff-unavailable", message: "peer-preview runs are not
+  integration-ready; apply from the worktree manually after your own review"}`.
+- `confinement` is set **before** `write_manifest` (and its secret scan); never
+  mutated on disk after the scanned write.
+- Crash-path peer-stop loads `originalBaseline` from `peer.json` (captured at
+  start). Never re-capture at stop (re-capture closes the escape window
+  fail-open).
 
 ## Failure model
 
@@ -51,48 +87,35 @@ protocol, ever.
   the worktree state).
 - Timeouts per prompt (default 900s) -> session/cancel + acp-failure.
 - Stale peer sessions: the stale-home reaper treats peer-active runs as
-  leased while pid is alive AND younger than MAX_RUN_TIMEOUT; else reaps.
-- Every error maps to existing ERROR_CLASSES + new `acp-failure`.
+  leased while pid is alive AND younger than MAX_PEER_LEASE; else reaps.
+- Every error maps to existing ERROR_CLASSES + `acp-failure`.
+- Experimental flag missing in the wrapper -> `usage-error`.
 
 ## Non-goals (v1)
 
 - No host-side ACP server; no session/load reattach (capability noted for
-  v2); no multi-session mux per child; no auto-apply; one-envelope-per-
-  invocation preserved for every companion command.
+  v2); no multi-session mux per child; no auto-apply; no dual-condition
+  handoff path for peer; one-stdout-envelope-per-invocation preserved
+  (resident: one running envelope only).
 
-## Amendments (adversarial review 2026-07-17, REQUIRED before build)
+## Amendments (adversarial review 2026-07-17, REQUIRED)
 
-The initial draft above is superseded by these on every conflict. Grok's
-self-review of this channel found the control plane, crash model, redaction
-boundary, and confinement-parity claims wrong. Build to THIS list.
+1. CONTROL PLANE: wrapper-owned unix domain socket (0600, companion uid only).
+2. CRASH/REAPER: peer.json records wrapper + child pid/starttime; MAX_PEER_LEASE
+   separate from MAX_RUN_TIMEOUT; start baseline persisted for crash-stop.
+3. START PARITY: fail closed before first prompt (sandbox capability, tools,
+   mcpServers [], web, sentinel, baseline, no .env).
+4. REDACTION: control-socket + turn envelopes scanned; multi-frame residual
+   risk documented; child stderr dropped or redacted.
+5. HANDOFF HONESTY: peer-preview is never integration-ready; not eligible for
+   `/grok:handoff`; manual apply from retained worktree only.
+6. pre_tool_use deny is NON-enforcement.
+7. Prompts serialized: one in-flight prompt per session.
+8. WRAPPER GATE: `GROK_EXPERIMENTAL_ACP=1` enforced in the wrapper, not
+   companion-only.
+9. RUN RECORD: peer-start records worktreePath/lifecycle; peer-stop
+   terminalizes so cleanup can remove the worktree.
+10. SINGLE STDOUT: resident peer-start emits only the running envelope.
 
-1. CONTROL PLANE: replace the run-dir inbox/outbox FIFO with a wrapper-owned
-   unix domain socket (0600, companion uid only). The run dir keeps only
-   durable peer.json and REDACTED progress. If a FIFO is ever used, the peer
-   dir is 0700, outbox is exclusive-create, foreign entries rejected.
-2. CRASH/REAPER: peer.json records BOTH wrapper pid+starttime and child
-   pid+starttime (or a process-group id). Wrapper death -> companion/reaper
-   kills the group. Never reap the home while the child starttime matches.
-   MAX_PEER_LEASE is separate from MAX_RUN_TIMEOUT; each prompt renews the
-   lease; pid-reuse guarded by starttime.
-3. START PARITY (fail closed if unmet, BEFORE the first prompt): same sandbox
-   profile, same tool allowlist (or hard-refuse if ACP cannot pin tools),
-   mcpServers [], same web policy, cwd sentinel planted, original_baseline +
-   pristine gate scripts captured, no .env copy - the full code-mode invariant
-   set.
-4. REDACTION: outbox/result envelopes pass the secret scan (or store only a
-   redacted summary + sha of the raw under 0700); multi-frame chunks are
-   reassembled before scanning or the residual risk is documented; child
-   stderr is dropped or redacted. Delete the "envelopes unchanged" sentence.
-5. HANDOFF HONESTY: peer-stop finalize must either require contract scopes for
-   a "confined" dual-ready result, OR label the manifest
-   confinement: "worktree-final-diff-only". Capture baseline at start,
-   quiesce the child before finalize, and do NOT claim code-equivalent
-   confinement without the sentinel + escape asserts.
-6. pre_tool_use deny is registered but documented as NON-ENFORCEMENT (the OS
-   sandbox is the enforcement layer); terminal-command policy stated explicitly.
-7. Prompts serialized: one in-flight prompt per session; stop vs in-flight
-   cancel semantics defined.
-
-Optional (v1.1+): probe session/load to drop wrapper residency; per-prompt
-escape scan.
+Optional (v1.1+): probe session/load to drop wrapper residency; reassemble
+multi-frame chunks before scanning.

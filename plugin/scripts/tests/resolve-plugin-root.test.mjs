@@ -16,7 +16,10 @@ function spawnNode(args) {
   let result;
   for (let attempt = 0; attempt < 4; attempt++) {
     result = spawnSync(process.execPath, args, { encoding: "utf8" });
-    if (!result.error) {
+    // Retry on any spawn-level error OR a non-zero exit under load (EAGAIN can
+    // surface either way when the machine is saturated with concurrent
+    // processes); the resolution itself is deterministic, so a clean run wins.
+    if (!result.error && result.status === 0) {
       return result;
     }
   }

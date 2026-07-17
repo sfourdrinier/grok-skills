@@ -57,6 +57,16 @@ over. It is **not** a complete sandbox against an adversarial model.
   handoff artifacts by design** - the artifacts' value is the isolation
   evidence (owned worktree, sentinel, sandbox verification) that direct mode
   cannot attest; use hardened mode for verified handoff.
+- **Experimental ACP peer-preview (`GROK_EXPERIMENTAL_ACP=1`):** an honest
+  preview only. Peer-stop never claims integration-ready, never forges
+  validation evidence, and is **not** eligible for `/grok:handoff`. Apply only
+  from the retained worktree after your own review. Progress-chunk redaction is
+  **per-frame**: a secret split across ACP `session/update` frames may
+  partially land in `progress.jsonl` before a full token shape is visible to
+  the scanner (residual risk for the preview; not a complete secret firewall).
+  Control-socket payloads and turn envelopes are scanned with the same
+  `assert_no_secret_material` path as stdout envelopes. The wrapper enforces
+  the experimental env gate (not companion-only).
 
 ### Session archives
 

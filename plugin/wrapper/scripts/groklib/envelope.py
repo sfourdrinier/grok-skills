@@ -596,6 +596,24 @@ def exit_code_for(envelope: dict) -> int:
     return 0 if envelope.get("status") in ("success", "running") else 1
 
 
+# peer-start resident already printed its single "running" envelope; arm this
+# so the entrypoint's post-return emit_envelope is a no-op (terminal outcome is
+# emitted by the separate peer-stop invocation, not the resident process).
+_PEER_RESIDENT_SUPPRESS_NEXT_STDOUT = False
+
+
+def arm_peer_resident_stdout_suppress() -> None:
+    """Arm a one-shot skip of the next emit_envelope stdout write."""
+    global _PEER_RESIDENT_SUPPRESS_NEXT_STDOUT
+    _PEER_RESIDENT_SUPPRESS_NEXT_STDOUT = True
+
+
+def clear_peer_resident_stdout_suppress() -> None:
+    """Disarm the peer-start stdout suppress (tests / failure paths)."""
+    global _PEER_RESIDENT_SUPPRESS_NEXT_STDOUT
+    _PEER_RESIDENT_SUPPRESS_NEXT_STDOUT = False
+
+
 def emit_envelope(envelope: dict, envelope_path: Optional[pathlib.Path]) -> None:
     """Print exactly one line-terminated JSON document for ``envelope`` to stdout.
 
@@ -606,7 +624,35 @@ def emit_envelope(envelope: dict, envelope_path: Optional[pathlib.Path]) -> None
     This function contains the single stdout write in the entire groklib package
     (Global Constraints stdout discipline: wrapper subcommands write exactly one
     JSON result envelope to stdout and nothing else).
+
+    Peer-start may arm ``arm_peer_resident_stdout_suppress`` after printing its
+    running envelope so the entrypoint's later emit is skipped (one stdout
+    envelope for the resident process lifetime).
     """
+    global _PEER_RESIDENT_SUPPRESS_NEXT_STDOUT
+    if _PEER_RESIDENT_SUPPRESS_NEXT_STDOUT:
+        _PEER_RESIDENT_SUPPRESS_NEXT_STDOUT = False
+        # Skip stdout only; peer-stop owns the terminal envelope on its process.
+        if envelope_path is None:
+            return
+        # If a store path was requested, still write the durable copy.
+        to_store = {k: v for k, v in envelope.items() if k != "doNotStore"}
+        store_serialized = json.dumps(to_store, sort_keys=True)
+        try:
+            file_descriptor = os.open(
+                str(envelope_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, _STORED_ENVELOPE_FILE_MODE
+            )
+            with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+                handle.write(store_serialized + "\n")
+            platformsupport.restrict_file_permissions(envelope_path)
+        except OSError as exc:
+            _log_stderr(
+                "emit_envelope",
+                "failed writing stored envelope copy {}: {}".format(envelope_path, exc),
+            )
+            raise
+        return
+
     serialized = json.dumps(envelope, sort_keys=True)
 
     if envelope_path is not None:
