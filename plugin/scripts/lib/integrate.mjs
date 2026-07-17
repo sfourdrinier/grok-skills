@@ -282,7 +282,17 @@ export function maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stder
   }
   const apply = git(["apply", "--binary", patchPath]);
   if (apply.status !== 0) {
-    stderrLine(`[grok-peer] git apply failed: ${(apply.stderr || apply.stdout || "").trim()}`);
+    const detail = (apply.stderr || apply.stdout || "").trim();
+    // Never leave a half-applied tree: reverse (git apply -R) like the auto path.
+    const rev = git(["apply", "-R", "--binary", patchPath]);
+    if (rev.status === 0) {
+      stderrLine(`[grok-peer] git apply failed; rolled back via -R: ${detail}`);
+    } else {
+      stderrLine(
+        `[grok-peer] git apply failed AND reverse failed; MANUAL-NEEDED ` +
+          `(inspect ${repo} for partial apply): ${detail}`
+      );
+    }
     return;
   }
   stderrLine(`[grok-peer] applied ${patchPath} to ${repo}`);

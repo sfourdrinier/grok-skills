@@ -123,9 +123,10 @@ Peer results integrate through the **same** integration modes:
 | `review` | Patch + manifest only; parent applies manually |
 
 `peer stop` runs contract `requiredValidation` and the build gate **for real**;
-`integration.ready=true` only from non-forgeable evidence. `/grok:handoff
---run-id` remains valid for observing dual-condition ready on peer-stop
-envelopes.
+`integration.ready=true` only from non-forgeable evidence. Peer-stop then applies
+its verified patch **itself** per the active integration mode (above);
+`/grok:handoff --run-id` stays **code-mode only** and refuses peer runIds
+(`handoff-unavailable`), so peer integration never routes through it.
 
 ## Mode-aware integrate rules (summary)
 

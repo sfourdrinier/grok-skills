@@ -62,16 +62,20 @@ over. It is **not** a complete sandbox against an adversarial model.
   auto-commits, merges, cherry-picks, or pushes. **runMode direct** produces no
   handoff artifacts by design - the artifacts' value is the isolation evidence
   that runMode direct cannot attest; use runMode hardened for verified handoff.
-- **Experimental ACP peer-preview (`GROK_EXPERIMENTAL_ACP=1`):** an honest
-  preview only. Peer-stop never claims integration-ready, never forges
-  validation evidence, and is **not** eligible for `/grok:handoff`. Apply only
-  from the retained worktree after your own review. Progress-chunk redaction is
-  **per-frame**: a secret split across ACP `session/update` frames may
-  partially land in `progress.jsonl` before a full token shape is visible to
-  the scanner (residual risk for the preview; not a complete secret firewall).
-  Control-socket payloads and turn envelopes are scanned with the same
-  `assert_no_secret_material` path as stdout envelopes. The wrapper enforces
-  the experimental env gate (not companion-only).
+- **ACP peer channel (default; opt out with `GROK_DISABLE_ACP=1`):** the default
+  multi-turn peer path. Peer-stop runs the contract's `requiredValidation` as
+  **real commands** and sets `integration.ready` only from authoritative,
+  non-forgeable command evidence - never a synthesized exit status or a no-op
+  build gate. Integration is applied by **peer-stop itself** per the active
+  integration mode (review retains the worktree patch; auto/direct apply after
+  `git apply --check`, reversing on failure), **not** via `/grok:handoff`, which
+  stays code-mode only and still refuses peer runIds. Progress-chunk redaction is
+  **per-frame**: a secret split across ACP `session/update` frames may partially
+  land in `progress.jsonl` before a full token shape is visible to the scanner
+  (residual risk; not a complete secret firewall). Control-socket payloads and
+  turn envelopes are scanned with the same `assert_no_secret_material` path as
+  stdout envelopes. The opt-out env gate is enforced in the wrapper (not
+  companion-only).
 
 ### Direct-default trust posture (integration=direct)
 
@@ -92,9 +96,14 @@ Honest limits (these are deliberate, not temporary gaps to paper over):
 2. **Private home does not protect the tree.** It isolates Grok credentials /
    config for the child, not your working tree, `.env`, or git objects.
 3. **Sandbox confine ≠ protect `.git` / `.env` inside the repo.** The write
-   grant is whole-root. Deny-list scan + **post-run rollback** of protected
-   paths (`.git/**`, `.env` / `.env.*`, keys, hooks) are **best-effort**, not
-   seatbelt subpath prevention.
+   grant is whole-root. A deny-list scan plus **post-run rollback** covers
+   `.env` / `.env.*`, key files (`*.pem` / `*.key` / `*.p12` / `*.p8`, SSH keys,
+   `.netrc` / `.npmrc` / `.envrc`), `.git/config`, `.git/HEAD`,
+   `.git/packed-refs`, `.git/hooks/*`, and `.git/refs/**` (a moved branch or a
+   created ref is reverted or removed). `.git/index` is **detected but not
+   restored** (git rebuilds it); loose `.git/objects` are **not tracked**
+   (content-addressed and inert until a watched ref points at them). This is
+   best-effort detection + rollback, not seatbelt subpath prevention.
 4. **Grok can still READ your files** (documented D-SECRETREAD). Write
    confinement is not a read firewall.
 5. **Consent gate:** first direct run without `setup --integration direct`

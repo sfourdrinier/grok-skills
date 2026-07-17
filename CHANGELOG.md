@@ -167,6 +167,30 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
   link the single integration-modes reference (no bare "never auto-apply"
   absolute claims). Naming disambiguates runMode direct vs integration direct.
 
+### Fixed / hardened (Phase 7 - final review remediation)
+
+- **direct-mode `.git/refs` guard + rollback:** the git-dir guard now
+  fingerprints `.git/refs/**` and the protected snapshot covers refs +
+  `.git/packed-refs`, so a direct-mode branch/tag move-to-planted-commit or a
+  created ref is detected and reverted/removed. `.git/index` stays detect-only
+  (git rebuilds it); loose `.git/objects` are untracked (content-addressed,
+  inert until a watched ref points at them) - now stated honestly in SECURITY.md
+  and the module headers instead of a blanket "`.git/**` rolled back" claim.
+- **Expanded deny-list:** `*.p8`, SSH private keys (`id_rsa`/`id_dsa`/`id_ecdsa`/
+  `id_ed25519`), `.netrc`, `.npmrc`, `.envrc` are deny-scanned and rolled back.
+- **Peer-stop apply parity:** `maybeIntegratePeerStop` now reverses (`git apply
+  -R`) on a failed apply so a peer integration never leaves a half-applied tree,
+  matching the auto path.
+- **Consent copy honesty:** direct-integration consent text lists the actual
+  covered protected set (`.git` config/HEAD/hooks/refs, `.env`, key files)
+  rather than an unqualified `.git`.
+- **ACP doc drift:** SECURITY.md and `manual-smoke.md` no longer describe the
+  peer channel as experimental/never-ready/`GROK_EXPERIMENTAL_ACP`-gated; they
+  match the shipped default (opt out with `GROK_DISABLE_ACP=1`, real validation,
+  peer-stop applies per integration mode). `integration-modes.md` no longer
+  claims `/grok:handoff` observes peer-stop ready - handoff stays code-mode only
+  and refuses peer runIds (`handoff-unavailable`).
+
 ### Changed (Phase 0)
 
 - `plugin/scripts/lib/task-file.mjs`: task-text temp staging deduplicated
@@ -179,7 +203,7 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 
 ### Suite counts (ratchet)
 
-- Wrapper: 653 -> 725. Plugin: 172 -> 238 (end of Phase 4).
+- Wrapper: 653 -> 786. Plugin: 172 -> 271 (through Phase 7 review remediation).
 
 ## [1.6.0] - 2026-07-16
 

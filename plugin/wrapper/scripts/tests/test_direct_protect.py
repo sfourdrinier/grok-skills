@@ -114,6 +114,80 @@ class DirectProtectSnapshotRestoreTests(unittest.TestCase):
         for rel in snap.entries:
             self.assertFalse(rel.startswith(".git/objects"), rel)
 
+    def test_snapshot_includes_git_refs(self) -> None:
+        ref = self.repo / ".git" / "refs" / "heads" / "main"
+        ref.parent.mkdir(parents=True)
+        ref.write_text("0" * 40 + "\n")
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        self.assertIn(".git/refs/heads/main", snap.entries)
+        self.assertTrue(snap.entries[".git/refs/heads/main"].snapshotted)
+
+    def test_restore_reverts_moved_ref(self) -> None:
+        ref = self.repo / ".git" / "refs" / "heads" / "main"
+        ref.parent.mkdir(parents=True)
+        original = "1" * 40 + "\n"
+        ref.write_text(original)
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        ref.write_text("f" * 40 + "\n")  # branch moved to a planted commit
+        result = direct_protect.restore_protected_paths(
+            self.repo, snap, offenders=[".git/refs/heads/main"]
+        )
+        self.assertEqual(ref.read_text(), original)
+        self.assertIn(".git/refs/heads/main", result.restored)
+        self.assertEqual(result.errors, [])
+
+    def test_restore_deletes_created_ref(self) -> None:
+        (self.repo / ".git" / "refs" / "heads").mkdir(parents=True)
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        evil = self.repo / ".git" / "refs" / "heads" / "evil"
+        evil.write_text("f" * 40 + "\n")
+        result = direct_protect.restore_protected_paths(
+            self.repo, snap, offenders=[".git/refs/heads/evil"]
+        )
+        self.assertFalse(evil.exists())
+        self.assertIn(".git/refs/heads/evil", result.restored)
+
+    def test_is_snapshot_scope_covers_refs_and_packed_refs(self) -> None:
+        self.assertTrue(direct_protect.is_snapshot_scope(".git/refs/heads/main"))
+        self.assertTrue(direct_protect.is_snapshot_scope(".git/packed-refs"))
+        # index/objects remain detect-only (no auto-delete on restore).
+        self.assertFalse(direct_protect.is_snapshot_scope(".git/index"))
+        self.assertFalse(direct_protect.is_snapshot_scope(".git/objects/ab/cd"))
+
+
+class DirectGitGuardAndDenyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="direct-guard-")
+        self.repo = pathlib.Path(self.tmp) / "repo"
+        (self.repo / ".git" / "refs" / "heads").mkdir(parents=True)
+        (self.repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+        (self.repo / ".git" / "refs" / "heads" / "main").write_text("1" * 40 + "\n")
+
+    def test_guard_detects_moved_ref(self) -> None:
+        from groklib.modes.direct_finalize import capture_git_dir_guard, _changed_paths
+
+        baseline = capture_git_dir_guard(self.repo)
+        (self.repo / ".git" / "refs" / "heads" / "main").write_text("f" * 40 + "\n")
+        after = capture_git_dir_guard(self.repo)
+        self.assertIn(".git/refs/heads/main", _changed_paths(baseline, after))
+
+    def test_guard_detects_created_ref(self) -> None:
+        from groklib.modes.direct_finalize import capture_git_dir_guard, _changed_paths
+
+        baseline = capture_git_dir_guard(self.repo)
+        (self.repo / ".git" / "refs" / "heads" / "evil").write_text("f" * 40 + "\n")
+        after = capture_git_dir_guard(self.repo)
+        self.assertIn(".git/refs/heads/evil", _changed_paths(baseline, after))
+
+    def test_expanded_deny_globs(self) -> None:
+        from groklib.modes.direct_finalize import path_matches_deny
+
+        for p in ("id_rsa", "id_ed25519", ".netrc", ".npmrc", ".envrc", "key.p8",
+                  "sub/dir/id_ecdsa", "deep/nested/.npmrc"):
+            self.assertTrue(path_matches_deny(p), p)
+        for p in ("src/app.py", "README.md", "package.json"):
+            self.assertFalse(path_matches_deny(p), p)
+
 
 if __name__ == "__main__":
     unittest.main()

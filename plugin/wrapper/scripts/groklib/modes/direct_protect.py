@@ -4,9 +4,12 @@
 #
 # SECURITY HONESTY:
 #   - Direct mode does NOT prevent protected writes at the sandbox layer
-#     (workspace profile is whole-root writable). This module guarantees that
-#     after a run, every protected path is rolled back to its pre-run state
-#     (byte-identical if snapshotted; removed if Grok created it).
+#     (workspace profile is whole-root writable). This module rolls back the
+#     COVERED protected set after a run (byte-identical if snapshotted; removed
+#     if Grok created it): .env/keys plus .git config/HEAD/packed-refs/hooks and
+#     .git/refs/** (a moved/created ref is reverted/removed). .git/index is
+#     detect-only (git rebuilds it); loose .git/objects are not tracked (inert
+#     until a watched ref points at them).
 #   - It does NOT protect against reads (documented D-SECRETREAD gap: Grok can
 #     still read .env / keys inside the repo).
 #   - Over-cap protected files are recorded as unsnapshottable: fail closed with
@@ -27,8 +30,10 @@ MANIFEST_NAME = "manifest.json"
 # Bound total snapshot payload so a huge .pem cannot fill the run dir.
 DEFAULT_MAX_TOTAL_BYTES = 25 * 1024 * 1024
 
-# Explicit .git paths only - never walk .git/objects.
-_GIT_SNAPSHOT_FILES: Tuple[str, ...] = ("config", "HEAD")
+# Explicit .git file names snapshotted at repo root of ``.git`` (never walk
+# .git/objects: loose objects are content-addressed and inert until a ref points
+# at them; ``.git/refs/**`` IS snapshotted below so a ref move can be rolled back).
+_GIT_SNAPSHOT_FILES: Tuple[str, ...] = ("config", "HEAD", "packed-refs")
 
 
 def _log(function: str, message: str) -> None:
@@ -99,15 +104,20 @@ def _is_regular_file(path: pathlib.Path) -> bool:
 def is_snapshot_scope(relative: str) -> bool:
     """True when a protected path is in the pre-run snapshot set if it exists.
 
-    ``.git/config``, ``.git/HEAD``, and ``.git/hooks/*`` are snapshotted.
-    Other ``.git/*`` paths (index, objects, ...) may be *detected* by the git
-    dir guard but are not auto-deleted on restore when absent from the index
-    (they likely existed pre-run without a snapshot).
+    ``.git/config``, ``.git/HEAD``, ``.git/packed-refs``, ``.git/hooks/*``, and
+    ``.git/refs/**`` are snapshotted (so a created ref is auto-deleted and a moved
+    ref is byte-restored). Other ``.git/*`` paths (index, objects, ...) may be
+    *detected* by the git dir guard but are not auto-deleted on restore when
+    absent from the index (they likely existed pre-run without a snapshot).
     """
     rel = _posix_rel(relative)
     if not rel:
         return False
-    if rel in (".git/config", ".git/HEAD") or rel.startswith(".git/hooks/"):
+    if (
+        rel in (".git/config", ".git/HEAD", ".git/packed-refs")
+        or rel.startswith(".git/hooks/")
+        or rel.startswith(".git/refs/")
+    ):
         return True
     if rel == ".git" or rel.startswith(".git/"):
         return False
@@ -140,6 +150,17 @@ def iter_existing_protected_paths(repo_root: pathlib.Path) -> Iterable[str]:
                     yield ".git/hooks/" + child.name
         except OSError as exc:
             _log("iter_existing_protected_paths", "hooks walk failed: {}".format(exc))
+    refs = git_dir / "refs"
+    if refs.is_dir():
+        try:
+            for dirpath, dirnames, filenames in os.walk(str(refs), followlinks=False):
+                dirnames.sort()
+                for fname in sorted(filenames):
+                    child = pathlib.Path(dirpath) / fname
+                    if _is_regular_file(child):
+                        yield ".git/" + _posix_rel(os.path.relpath(str(child), str(git_dir)))
+        except OSError as exc:
+            _log("iter_existing_protected_paths", "refs walk failed: {}".format(exc))
 
     for dirpath, dirnames, filenames in os.walk(str(root), topdown=True, followlinks=False):
         rel_dir = _posix_rel(os.path.relpath(dirpath, str(root)))

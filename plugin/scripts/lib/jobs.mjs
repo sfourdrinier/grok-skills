@@ -539,8 +539,9 @@ export function formatDirectIntegrationConsentMsg(opts = {}) {
     : "";
   return (
     "Direct integration lets Grok edit files in THIS working tree directly (no " +
-    "worktree isolation, no pre-apply review). Protected paths (.git/.env/keys/" +
-    "hooks) are rolled back if touched, but source edits land live." +
+    "worktree isolation, no pre-apply review). Protected paths (.git config/HEAD/" +
+    "hooks/refs, .env, and key files) are detected and rolled back if touched, but " +
+    "source edits land live." +
     targetLine +
     " To accept and make direct the default here: /grok:setup --integration direct" +
     targetFlag +

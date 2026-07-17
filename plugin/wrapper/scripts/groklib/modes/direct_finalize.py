@@ -18,12 +18,16 @@
 # other ignored byproducts from build/validation never fail those checks.
 #
 # SECURITY: direct mode does NOT prevent protected writes at the sandbox layer
-# (workspace is whole-root). The deny scan + direct_protect snapshot/restore
-# guarantee protected paths are rolled back to pre-run state (byte-identical or
-# removed-if-created). Reads of .env/keys are NOT blocked (D-SECRETREAD gap).
+# (workspace is whole-root). The deny scan + git-dir guard + direct_protect
+# snapshot/restore roll back the COVERED protected set to pre-run state
+# (byte-identical or removed-if-created): .env/keys, .git config/HEAD/packed-refs/
+# hooks/refs. .git/index is detected but not restored (git rebuilds it); loose
+# .git/objects are not tracked (content-addressed, inert until a watched ref
+# points at them). Reads of .env/keys are NOT blocked (D-SECRETREAD gap).
 # Backlog: probe seatbelt write-deny subpaths for true prevention.
 
 import fnmatch
+import os
 import pathlib
 import subprocess
 import types
@@ -49,9 +53,22 @@ DENY_WRITE_GLOBS: Tuple[str, ...] = (
     "*.pem",
     "*.key",
     "*.p12",
+    "*.p8",
     ".git/hooks/**",
     ".githooks/**",
+    # Credential/secret files that carry tokens or private keys.
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    ".netrc",
+    ".npmrc",
+    ".envrc",
 )
+
+# Cap the .git/refs fingerprint walk so a pathological ref count cannot stall
+# finalize; over-cap still detects add/remove via the count-bearing sentinel.
+_MAX_GIT_REF_FILES = 20000
 
 
 def _log(function: str, message: str) -> None:
@@ -96,9 +113,12 @@ def _stat_sig(path: pathlib.Path) -> str:
 def capture_git_dir_guard(repo_root: pathlib.Path) -> FrozenSet[Tuple[str, str]]:
     """Fingerprint sensitive paths under ``.git`` (working-tree fingerprint is blind to them).
 
-    Watches config/HEAD/index/packed-refs/COMMIT_EDITMSG and every file under
-    ``.git/hooks/``. A post-run set-difference surfaces Grok writes that the
-    sandbox cannot block (workspace profile is whole-root).
+    Watches config/HEAD/index/packed-refs/COMMIT_EDITMSG, every file under
+    ``.git/hooks/``, and every ref under ``.git/refs/**`` (so a branch/tag
+    move-to-planted-commit is detected). A post-run set-difference surfaces Grok
+    writes the sandbox cannot block (workspace profile is whole-root). Loose
+    objects under ``.git/objects`` are intentionally not fingerprinted: they are
+    content-addressed and inert until a watched ref points at them.
     """
     git_dir = pathlib.Path(repo_root) / ".git"
     pairs: Set[Tuple[str, str]] = set()
@@ -114,7 +134,35 @@ def capture_git_dir_guard(repo_root: pathlib.Path) -> FrozenSet[Tuple[str, str]]
                     pairs.add((rel, _stat_sig(child)))
         except OSError as exc:
             _log("capture_git_dir_guard", "hooks walk failed: {}".format(exc))
+    pairs |= _fingerprint_git_refs(git_dir)
     return frozenset(pairs)
+
+
+def _fingerprint_git_refs(git_dir: pathlib.Path) -> Set[Tuple[str, str]]:
+    """Fingerprint every file under ``.git/refs`` (bounded by ``_MAX_GIT_REF_FILES``).
+
+    Over-cap emits a single count-bearing sentinel so a ref add/remove past the
+    cap still flips the set-difference, rather than silently going undetected.
+    """
+    refs_dir = git_dir / "refs"
+    pairs: Set[Tuple[str, str]] = set()
+    if not refs_dir.is_dir():
+        return pairs
+    count = 0
+    try:
+        for dirpath, dirnames, filenames in os.walk(str(refs_dir), followlinks=False):
+            dirnames.sort()
+            for fname in sorted(filenames):
+                child = pathlib.Path(dirpath) / fname
+                rel = ".git/" + _posix_rel(os.path.relpath(str(child), str(git_dir)))
+                pairs.add((rel, _stat_sig(child)))
+                count += 1
+                if count >= _MAX_GIT_REF_FILES:
+                    pairs.add((".git/refs/**", "over-cap:{}".format(count)))
+                    return pairs
+    except OSError as exc:
+        _log("_fingerprint_git_refs", "refs walk failed: {}".format(exc))
+    return pairs
 
 
 def _changed_paths(
