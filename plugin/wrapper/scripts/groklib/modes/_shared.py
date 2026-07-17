@@ -524,15 +524,26 @@ def _execute_and_verify(
     # when the caller did not supply one. Capture BEFORE execute so archive still
     # knows the argv id if a post-run check raises.
     session_id = run.session_id or str(uuid.uuid4())
+    resume_session = bool(run.resume_session)
     if session_id_holder is not None:
         session_id_holder[0] = session_id
     if run.seed_session_from_run_dir is not None:
         seeded = session_store.seed_sessions(run.seed_session_from_run_dir, home.home_dir)
         if not seeded:
+            # Without a seeded store --resume fails closed; fall back to a fresh
+            # session id and --session-id (create-only path).
             note = "could not seed Grok session archive from prior run dir"
             _log("_execute_and_verify", note)
             if warnings is not None:
                 warnings.append(note)
+            if resume_session:
+                resume_session = False
+                session_id = str(uuid.uuid4())
+                if session_id_holder is not None:
+                    session_id_holder[0] = session_id
+    elif resume_session:
+        # resume without a seed source is unsafe; demote to create-only.
+        resume_session = False
     spec = GrokRunSpec(
         binary=run.binary,
         cwd=run.cwd,
@@ -551,6 +562,7 @@ def _execute_and_verify(
         subagents_enabled=False,
         web_access=run.web_access,
         home=home,
+        resume_session=resume_session,
     )
     result = grokcli.execute(spec, progress)
     # Publish the produced result IMMEDIATELY so a post-run check raising below

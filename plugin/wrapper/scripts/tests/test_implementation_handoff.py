@@ -173,6 +173,34 @@ class ValidateHandoffTests(unittest.TestCase):
             any("contractSummary" in e for e in validate_implementation_handoff(doc))
         )
 
+    def test_manifest_iteration_and_continues_fields_validated(self) -> None:
+        doc = self._doc()
+        # Both absent: ok
+        self.assertEqual(validate_implementation_handoff(doc), [])
+        doc["iteration"] = 2
+        doc["continuesRunId"] = "20260716T000000Z-abc123"
+        self.assertEqual(validate_implementation_handoff(doc), [])
+        # iteration alone is invalid
+        alone = self._doc()
+        alone["iteration"] = 2
+        self.assertTrue(
+            any("continuesRunId" in e or "iteration" in e for e in validate_implementation_handoff(alone))
+        )
+        # continuesRunId alone is invalid
+        alone2 = self._doc()
+        alone2["continuesRunId"] = "20260716T000000Z-abc123"
+        self.assertTrue(
+            any("continuesRunId" in e or "iteration" in e for e in validate_implementation_handoff(alone2))
+        )
+        # iteration must be int >= 2
+        doc["iteration"] = 0
+        self.assertTrue(any("iteration" in e for e in validate_implementation_handoff(doc)))
+        doc["iteration"] = 1
+        self.assertTrue(any("iteration" in e for e in validate_implementation_handoff(doc)))
+        doc["iteration"] = 2
+        doc["continuesRunId"] = "not-a-run-id"
+        self.assertTrue(any("continuesRunId" in e for e in validate_implementation_handoff(doc)))
+
     def test_contract_summary_objective_over_cap_rejected(self) -> None:
         # Phase 1 finding 4: mirror contract caps so a tampered manifest cannot
         # push multi-MB summary text through handoff validation.

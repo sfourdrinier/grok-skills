@@ -117,12 +117,16 @@ class ModeRun:
     # rules discovery). Seeded into the local warnings list at the start of
     # _run_grok_mode_body so they ride the success/failure envelope.
     initial_warnings: "tuple[str, ...]" = ()
-    # Optional Grok CLI session id (--session-id). When None, _execute_and_verify
-    # mints a uuid4. Continuation runs set this from a prior run's session-meta.
+    # Optional Grok CLI session id (--session-id / --resume). When None,
+    # _execute_and_verify mints a uuid4. Continuation runs set this from a prior
+    # run's session-meta.
     session_id: Optional[str] = None
     # When set, seed the archived sessions store from this prior run dir into the
     # fresh private home before grokcli.execute (continuation / --resume path).
     seed_session_from_run_dir: Optional[pathlib.Path] = None
+    # When True with a seeded archive, build_argv emits --resume instead of
+    # --session-id (docs/research/2026-07-17-session-resume-probe.md).
+    resume_session: bool = False
 
 
 def effective_tools(tools: Tuple[str, ...], web_access: bool) -> List[str]:

@@ -917,7 +917,7 @@ def _continuation_directive(prior_run_id: str, prior_iteration: int) -> str:
 
 Contract on continuation: the original `--contract-file` content is not on disk in the run dir today. Persist it: in Task 2.2 also write `runs/<runId>/contract.json` (the normalized contract, 0600) during the initial code run when a contract was provided (one `json.dumps` next to the existing artifact writes in `code_handoff_finalize.py`), and on continuation load it from the prior run dir so writeScopes/requiredValidation keep applying. No contract file -> no contract, same as today.
 
-- [ ] **Step 1: Failing tests** (representative set - write them all before implementing):
+- [x] **Step 1: Failing tests** (representative set - write them all before implementing):
 
 ```python
 # tests/test_mode_code.py
@@ -946,11 +946,11 @@ def test_manifest_iteration_and_continues_fields_validated(self):
     self.assertTrue(any("iteration" in e for e in validate_implementation_handoff(doc)))
 ```
 
-- [ ] **Step 2: Run to verify failures.**
+- [x] **Step 2: Run to verify failures.**
 
-- [ ] **Step 3: Implement in this order** (each keeping the suite green): (a) argparse flag + mutual-exclusion validation in `code.run()` head; (b) `_read_committed_manifest_fields_from_ref`; (c) contract persistence to `runs/<id>/contract.json`; (d) continuation branch in `run()` building `WorktreePrep` from the rebuilt worktree (this requires `run_worktree_mode` to accept a pre-existing worktree - add a `existing_worktree: Optional[ExternalWorktree]` parameter that skips creation but keeps every verify/finalize step; read `modes/_worktree.py:209` before deciding the exact seam); (e) session meta load + ModeRun fields; (f) run.json + manifest iteration fields.
+- [x] **Step 3: Implement in this order** (each keeping the suite green): (a) argparse flag + mutual-exclusion validation in `code.run()` head; (b) `_read_committed_manifest_fields_from_ref`; (c) contract persistence to `runs/<id>/contract.json`; (d) continuation branch in `run()` building `WorktreePrep` from the rebuilt worktree (this requires `run_worktree_mode` to accept a pre-existing worktree - add a `existing_worktree: Optional[ExternalWorktree]` parameter that skips creation but keeps every verify/finalize step; read `modes/_worktree.py:209` before deciding the exact seam); (e) session meta load + ModeRun fields; (f) run.json + manifest iteration fields.
 
-- [ ] **Step 4: Full wrapper suite green.**
+- [x] **Step 4: Full wrapper suite green.**
 
 - [ ] **Step 5: Live smoke on this repo** (hardened, macOS): initial `code` run with a trivial task, then `code --continue-run <id> --task 'Also update the comment above the function you changed.'`, then `handoff --run-id <new id>` -> ready. Record in `plugin/references/manual-smoke.md` as a new numbered scenario.
 

@@ -29,6 +29,30 @@ def _run_cleanup(run_id, confirm=False):
     return exit_code, buffer.getvalue()
 
 
+class RebuildWorktreeDelegationTests(unittest.TestCase):
+    """cleanup rebuilds via worktree.rebuild_worktree_from_record (single source)."""
+
+    def test_cleanup_rebuild_delegates_to_worktree_helper(self) -> None:
+        record = {
+            "worktreePath": "/tmp/wt",
+            "worktreeBranch": "grok/code/x",
+            "baseRevision": "a" * 40,
+            "repository": "/tmp/repo",
+        }
+        # cleanup binds rebuild_worktree_from_record at import; patch that name.
+        with mock.patch.object(
+            cleanup_mod,
+            "rebuild_worktree_from_record",
+            wraps=cleanup_mod.rebuild_worktree_from_record,
+        ) as rebuilt:
+            result = cleanup_mod._rebuild_worktree(record)
+            rebuilt.assert_called_once_with(record)
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(str(result.path), "/tmp/wt")
+            self.assertEqual(result.branch, "grok/code/x")
+
+
 class CleanupModeTests(unittest.TestCase):
     """cleanup verifies ownership, reports dry-run artifacts, and removes on --confirm."""
 

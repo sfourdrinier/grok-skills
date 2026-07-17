@@ -237,6 +237,18 @@ def validate_implementation_handoff(doc: dict) -> List[str]:
                         field_prefix="contractSummary.",
                     )
                 )
+    # Lineage (continue-run): iteration + continuesRunId both present or both absent.
+    has_iteration = "iteration" in doc
+    has_continues = "continuesRunId" in doc
+    if has_iteration != has_continues:
+        errors.append("iteration and continuesRunId must both be present or both absent")
+    elif has_iteration:
+        iteration = doc.get("iteration")
+        continues = doc.get("continuesRunId")
+        if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 2:
+            errors.append("iteration must be an integer >= 2")
+        if not isinstance(continues, str) or not _RUN_ID_RE.match(continues):
+            errors.append("continuesRunId must be a runId-shaped string")
     return errors
 
 

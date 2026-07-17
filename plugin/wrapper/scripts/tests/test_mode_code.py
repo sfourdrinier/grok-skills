@@ -885,7 +885,3 @@ class ContractDirectiveTests(unittest.TestCase):
         # Newlines from operator fields must not create extra prompt structure.
         self.assertNotIn("\npaginator\n", text)
         self.assertNotIn("\nof a 21-item\n", text)
-
-
-if __name__ == "__main__":
-    unittest.main()

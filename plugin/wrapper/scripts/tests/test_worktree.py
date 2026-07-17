@@ -27,6 +27,28 @@ from groklib.worktree_escape import (
 from tests.worktree_test_base import WorktreeTestBase, _git
 
 
+class RebuildWorktreeFromRecordTests(WorktreeTestBase):
+    def test_rebuild_worktree_from_record_roundtrip(self) -> None:
+        from groklib.worktree import rebuild_worktree_from_record
+
+        wt = self._create()
+        record = {
+            "worktreePath": str(wt.path),
+            "worktreeBranch": wt.branch,
+            "baseRevision": wt.base_revision,
+            "repository": str(wt.repo_root),
+        }
+        rebuilt = rebuild_worktree_from_record(record)
+        self.assertIsNotNone(rebuilt)
+        assert rebuilt is not None
+        self.assertEqual(rebuilt.path, wt.path)
+        self.assertEqual(rebuilt.branch, wt.branch)
+        self.assertEqual(rebuilt.base_revision, wt.base_revision)
+        self.assertEqual(rebuilt.repo_root, wt.repo_root)
+        self.assertIsNone(rebuild_worktree_from_record({"worktreePath": "/x"}))
+        self.assertIsNone(rebuild_worktree_from_record({}))
+
+
 class CreateWorktreeTests(WorktreeTestBase):
     def test_create_places_worktree_under_state_root_not_repo(self) -> None:
         wt = self._create()

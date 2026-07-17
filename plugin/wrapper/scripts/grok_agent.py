@@ -199,8 +199,17 @@ def _build_parser() -> _Parser:
     _add_run_opts(reason, timeout=900)
 
     code = _sub("code")
-    code.add_argument("--target", required=True)
-    code.add_argument("--base", required=True)
+    # --target/--base are optional at parse time so --continue-run can omit them;
+    # code.run() enforces presence-or-continue with clean usage-errors.
+    code.add_argument("--target", default=None)
+    code.add_argument("--base", default=None)
+    code.add_argument(
+        "--continue-run",
+        default=None,
+        metavar="RUN_ID",
+        help="resume a prior terminal code run (reuses retained worktree + session); "
+        "mutually exclusive with --target/--base/--contract-file",
+    )
     _add_task_group(code)
     _add_web_flags(code)
     _add_run_opts(code, timeout=3600)

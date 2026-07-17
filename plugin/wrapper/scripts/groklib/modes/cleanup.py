@@ -18,7 +18,7 @@ from typing import List, Optional
 
 from groklib import GrokWrapperError, log_stderr, runstate
 from groklib import envelope as envelope_mod
-from groklib.worktree import ExternalWorktree, remove_external_worktree
+from groklib.worktree import ExternalWorktree, rebuild_worktree_from_record, remove_external_worktree
 
 # Design §14.17 - factual only; do not say "unacknowledged."
 # Manifest-ready is write-time only (not dual-condition /grok:handoff ready).
@@ -76,15 +76,8 @@ def _fail(run_id: str, exc: GrokWrapperError, worktree: Optional[ExternalWorktre
 
 
 def _rebuild_worktree(record: dict) -> Optional[ExternalWorktree]:
-    path = record.get("worktreePath")
-    branch = record.get("worktreeBranch")
-    base = record.get("baseRevision")
-    repository = record.get("repository")
-    if not (isinstance(path, str) and isinstance(branch, str) and isinstance(base, str) and isinstance(repository, str)):
-        return None
-    return ExternalWorktree(
-        path=pathlib.Path(path), branch=branch, base_revision=base, repo_root=pathlib.Path(repository)
-    )
+    """Delegate to worktree.rebuild_worktree_from_record (single source)."""
+    return rebuild_worktree_from_record(record)
 
 
 _TERMINAL_LIFECYCLES = frozenset({"completed", "failed", "canceled"})

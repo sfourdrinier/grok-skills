@@ -135,9 +135,14 @@ Return envelopes **verbatim**. Do not commit, push, or chain other modes.
 3. **Required before integrate:** `node "$AGENT_RUN" handoff --run-id '<runId>'`.
 4. Integrate only when handoff status is success and `response.integration.ready`.
 5. Completion **notify** is not ready - always call handoff.
-6. Parent apply is **manual** (`git apply --check --binary` then explicit apply). Never auto-apply.
-7. Prefer deriving a contract by default (section above); pass
-   `--contract-file` on every non-exploratory code run.
+6. On not-ready handoff: summarize `integration.blockers`, then prefer
+   `code --continue-run '<runId>'` with the blockers as the follow-up task
+   (same retained worktree; do not pass `--target`/`--base`/`--contract-file`).
+   Re-handoff the **new** run id. Give up after 2 continuations and report.
+7. Parent apply is **manual** (`git apply --check --binary` then explicit apply). Never auto-apply.
+8. Prefer deriving a contract by default (section above); pass
+   `--contract-file` on every non-exploratory **fresh** code run (not with
+   `--continue-run`).
 
 See `skills/handoff/SKILL.md` and `references/implementation-handoff.md`.
 On failure: return stderr/envelope; never return nothing.

@@ -111,6 +111,8 @@ def code_handoff_finalize(
     assert_cwd_sentinel: Callable[..., None],
     run_recorded_command: Callable[..., dict],
     step_log: Optional[List[str]] = None,
+    continues_run_id: Optional[str] = None,
+    iteration: Optional[int] = None,
 ) -> HandoffBuildResult:
     """Execute design §14.6 order on the FinalizeStage path. Writes handoff before return/raise.
 
@@ -631,6 +633,10 @@ def code_handoff_finalize(
         },
         "createdAtUtc": _now_utc(),
     }
+    # Lineage from code --continue-run (both present or both absent; validator).
+    if continues_run_id is not None and iteration is not None:
+        doc["continuesRunId"] = continues_run_id
+        doc["iteration"] = iteration
 
     # 12. write handoff JSON
     steps.append("write-manifest")

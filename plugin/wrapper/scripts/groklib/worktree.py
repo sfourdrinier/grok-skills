@@ -41,6 +41,31 @@ class ExternalWorktree:
     repo_root: pathlib.Path
 
 
+def rebuild_worktree_from_record(record: dict) -> Optional[ExternalWorktree]:
+    """Rebuild an ExternalWorktree from a C2 run.json record, or None when fields are incomplete.
+
+    Single source for cleanup and ``code --continue-run``: requires worktreePath,
+    worktreeBranch, baseRevision, and repository as strings.
+    """
+    path = record.get("worktreePath")
+    branch = record.get("worktreeBranch")
+    base = record.get("baseRevision")
+    repository = record.get("repository")
+    if not (
+        isinstance(path, str)
+        and isinstance(branch, str)
+        and isinstance(base, str)
+        and isinstance(repository, str)
+    ):
+        return None
+    return ExternalWorktree(
+        path=pathlib.Path(path),
+        branch=branch,
+        base_revision=base,
+        repo_root=pathlib.Path(repository),
+    )
+
+
 def _log(function: str, message: str) -> None:
     """Delegate to the shared groklib.log_stderr, pre-binding the "worktree" component prefix."""
     log_stderr("worktree", function, message)

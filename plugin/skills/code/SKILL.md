@@ -1,7 +1,7 @@
 ---
 name: "code"
 description: "Have Grok implement code in an isolated external worktree (nothing is committed or pushed)"
-argument-hint: "--target <path> --base <revision> (--task <text> | --task-file <path>) [--contract-file <path>] [--web] [--model <id>] [--timeout <s>] [--max-turns <n>]"
+argument-hint: "(--target <path> --base <revision> | --continue-run <runId>) (--task <text> | --task-file <path>) [--contract-file <path>] [--web] [--model <id>] [--timeout <s>] [--max-turns <n>]"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
 
@@ -41,10 +41,13 @@ Raw slash-command arguments:
 `$ARGUMENTS`
 
 Required wrapper flags (copy exactly, substitute only placeholder values):
-- `--target <workspace-relative-path>` is required.
-- `--base <committed-revision>` is required (the wrapper builds the worktree
-  from a committed revision; if the task depends on uncommitted changes, the run
-  fails closed - the user must commit what the task needs first).
+- Fresh run: `--target <workspace-relative-path>` and `--base <committed-revision>`
+  are required (the wrapper builds the worktree from a committed revision; if
+  the task depends on uncommitted changes, the run fails closed - the user must
+  commit what the task needs first).
+- Continuation: `--continue-run <runId>` instead of `--target`/`--base` (reuses
+  the prior retained worktree; mutually exclusive with `--target`, `--base`, and
+  `--contract-file`).
 - Exactly one of `--task <text>` or `--task-file <path>` is required. Prefer
   `--task-file` for a multi-paragraph spec.
 - Preserve the user's arguments exactly. Do not strip, add, or reorder flags.
@@ -143,3 +146,22 @@ On success or classified failure after hardened Grok, the wrapper writes:
 must call `/grok:handoff --run-id <runId from the code envelope>` and require
 dual-condition ready before any apply. See `skills/handoff/SKILL.md` and
 `references/implementation-handoff.md`. Never auto-apply.
+
+## Iterating on a run (2.0.0+)
+
+When handoff is not ready (or the operator wants a follow-up in the same
+worktree), continue instead of starting a fresh run:
+
+```bash
+node "$SKILL_BASE/run.mjs" code --continue-run '<runId>' --task-file - <<'GROK_TASK'
+<follow-up instructions; e.g. fix the handoff blockers>
+GROK_TASK
+```
+
+- Do **not** pass `--target`, `--base`, or `--contract-file` with
+  `--continue-run` (usage-error). Target, base, and the prior contract are
+  derived from the prior run.
+- `--model` / `--timeout` / `--max-turns` / `--web` remain allowed.
+- Each continuation is a **new** run id with `continuesRunId` + `iteration` on
+  `run.json` and the handoff manifest. Handoff the **new** run id before integrate.
+- Prefer at most two continuations, then report blockers rather than looping.

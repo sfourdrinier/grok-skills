@@ -111,6 +111,8 @@ ALL_BUILTIN_TOOLS = (
 # --permission-mode auto, and C6 does not list it in the baseline, so
 # GrokRunSpec.allow_rules is recorded on the spec for the envelope's policy
 # surface but never placed in the child argv (no silent additions, C6).
+# --resume: continuation only (docs/research/2026-07-17-session-resume-probe.md);
+# --session-id is create-only when the id already exists in the session store.
 C6_BASELINE_FLAGS = frozenset(
     {
         "--prompt-file",
@@ -129,6 +131,7 @@ C6_BASELINE_FLAGS = frozenset(
         "--sandbox",
         "--max-turns",
         "--session-id",
+        "--resume",
         "--leader-socket",
     }
 )
@@ -245,6 +248,9 @@ class GrokRunSpec:
     # a missing or invalid verdict (spec 5.5). Mutually exclusive with
     # output_schema (which both elicits AND validates).
     elicit_schema: "dict|None" = None
+    # When True, build_argv emits --resume <session_id> instead of --session-id
+    # (continuation after session_store.seed_sessions; see session-resume probe).
+    resume_session: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -341,7 +347,12 @@ def build_argv(spec: GrokRunSpec) -> List[str]:
     # Default is unlimited (no flag) so long reviews are not artificial-capped.
     if spec.max_turns is not None:
         argv.extend(["--max-turns", str(spec.max_turns)])
-    argv.extend(["--session-id", spec.session_id])
+    # Continuation resumes an archived session (--resume); fresh runs mint via
+    # --session-id. Never both (probe: --session-id fails when id already exists).
+    if spec.resume_session:
+        argv.extend(["--resume", spec.session_id])
+    else:
+        argv.extend(["--session-id", spec.session_id])
     argv.extend(["--leader-socket", str(spec.leader_socket)])
 
     return argv

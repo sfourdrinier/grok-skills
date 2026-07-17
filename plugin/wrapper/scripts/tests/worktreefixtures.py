@@ -143,9 +143,40 @@ class WorktreeModeHarness(ModeHarness):
         real_create = _worktree.create_private_home
         preexisting_worktrees = self._worktree_dirs()
         # verify adopts an existing worktree (passed via --worktree) and creates
-        # none; code creates a fresh one. The plant target is the adopted path
-        # for verify, else the worktree this code run just created.
+        # none; code creates a fresh one; continue-run reuses a retained worktree.
+        # The plant target is the adopted/continued path when set, else the worktree
+        # this code run just created. plant(run_id) must be the NEW run id (sentinel).
         adopted_worktree = self.flag_value(argv, "--worktree")
+        continue_run_id = self.flag_value(argv, "--continue-run")
+
+        def _plant_run_id(worktree_path: pathlib.Path) -> str:
+            """Resolve the run id whose sentinel plant must create.
+
+            Fresh code runs name the worktree after the run id. Continuation reuses
+            the prior worktree path, so the path name is the prior id; plant must
+            use the NEW run id (the only non-prior run currently in 'running').
+            """
+            if continue_run_id is None:
+                return worktree_path.name
+            runs_root = runstate.state_root() / "runs"
+            for child in sorted(runs_root.iterdir(), reverse=True):
+                if not child.is_dir() or child.name == continue_run_id:
+                    continue
+                try:
+                    rec = runstate.load_run_record(child.name)
+                except Exception:
+                    continue
+                if rec.get("mode") == "code" and rec.get("lifecycle") in (
+                    "running",
+                    "created",
+                    "finalizing",
+                ):
+                    return child.name
+            raise AssertionError(
+                "could not resolve new run id for --continue-run plant (prior={})".format(
+                    continue_run_id
+                )
+            )
 
         def _patched_create(**kwargs):
             home = real_create(**kwargs)
@@ -161,6 +192,9 @@ class WorktreeModeHarness(ModeHarness):
             # worktree exists at this seam (prepare created/adopted it before the home).
             if adopted_worktree is not None:
                 worktree_path = pathlib.Path(adopted_worktree)
+            elif continue_run_id is not None:
+                prior = runstate.load_run_record(continue_run_id)
+                worktree_path = pathlib.Path(prior["worktreePath"])
             else:
                 worktree_path = self._new_worktree(preexisting_worktrees)
             private_tmp = home.home_dir / "tmp"
@@ -170,7 +204,7 @@ class WorktreeModeHarness(ModeHarness):
                 encoding="utf-8",
             )
             if plant is not None:
-                plant(worktree_path, worktree_path.name)
+                plant(worktree_path, _plant_run_id(worktree_path))
             return home
 
         patchers = [

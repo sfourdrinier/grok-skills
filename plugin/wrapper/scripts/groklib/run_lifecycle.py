@@ -52,6 +52,9 @@ _CAS_ALLOWED_KEYS: Set[str] = frozenset(
         "status",
         "progressStreamPath",
         "envelopePath",
+        # code --continue-run lineage (both present or both absent on the record)
+        "continuesRunId",
+        "iteration",
     }
 )
 _PRESERVE_ON_MERGE: Set[str] = frozenset({"runId", "createdAtUtc", "lifecycle", "recordRevision"})
