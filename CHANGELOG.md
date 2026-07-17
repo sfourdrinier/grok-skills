@@ -32,6 +32,28 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 - `docs/checklists/2.0-live-smoke-ledger.md`: append-only live-behavior
   evidence for the 2.0 work.
 
+### Added (Phase 1 - delegation, PR7)
+
+- **`/grok:implement`**: one-call delegate cycle - `code` in an isolated
+  worktree, then automatic `/grok:handoff` verification on the resulting
+  runId; both envelopes relayed in order; exit 0 only on dual-condition
+  ready. Handoff runs even after failed code (with a runId) so blockers
+  surface. Never applies; parent apply stays manual. Hardened-only; direct
+  mode refuses fail-closed.
+- Contract steering: `--contract-file` objective, acceptance criteria, write
+  scopes, and validation commands are injected into Grok's prompt
+  (single-line fenced, data-not-instructions framing); a display-only
+  `contractSummary` (size-capped, display-redacted) rides the handoff
+  manifest and response so parents can check criteria before applying.
+- Agents derive a contract by default (`grok-engineer-coder`, both hosts),
+  with live-lesson guardrails: shell-free `requiredValidation` argv, targeted
+  test modules, no checkout mutation while a run is in flight, secret-fixture
+  patch limitation.
+- Unified ids: `result`/`status`/`cancel` accept a job id or a runId (exact
+  job-id match wins; `status` translates a known job id to its recorded
+  runId). Direct-mode runs join the job surface; `handoff`/`status` refuse
+  `direct-*` ids with one actionable message.
+
 ### Changed (Phase 0)
 
 - `plugin/scripts/lib/task-file.mjs`: task-text temp staging deduplicated
@@ -44,7 +66,7 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 
 ### Suite counts (ratchet)
 
-- Wrapper: 653 -> 677. Plugin: 172 -> 179.
+- Wrapper: 653 -> 693. Plugin: 172 -> 203 (end of Phase 1).
 
 ## [1.6.0] - 2026-07-16
 
