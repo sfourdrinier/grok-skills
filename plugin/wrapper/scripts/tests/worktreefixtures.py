@@ -136,6 +136,18 @@ class WorktreeModeHarness(ModeHarness):
         test simulates the files Grok would have written (cwd sentinel, artifact
         dir, source edit) inside the worktree or the original checkout.
         """
+        # Worktree-mode tests still exercise the isolated-worktree path. When the
+        # suite omits --integration, inject worktree so the new direct default
+        # does not re-route every pre-existing code test onto hardened-direct.
+        argv = list(argv)
+        if (
+            argv
+            and argv[0] == "code"
+            and "--integration" not in argv
+            and "--continue-run" not in argv
+        ):
+            argv = [argv[0], "--integration", "worktree"] + argv[1:]
+
         # Match the DISTINCT custom profile policy_for_mode now resolves
         # (grok-skills-<mode>, Grok dogfood-2 #6) so verify_enforcement passes.
         if sandbox_profile is None:

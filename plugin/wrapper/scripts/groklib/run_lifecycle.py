@@ -55,6 +55,8 @@ _CAS_ALLOWED_KEYS: Set[str] = frozenset(
         # code --continue-run lineage (both present or both absent on the record)
         "continuesRunId",
         "iteration",
+        # code --integration direct|worktree (running-record merge)
+        "integration",
     }
 )
 _PRESERVE_ON_MERGE: Set[str] = frozenset({"runId", "createdAtUtc", "lifecycle", "recordRevision"})

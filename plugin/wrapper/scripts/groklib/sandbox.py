@@ -69,12 +69,19 @@ SANDBOX_PROFILE_BY_MODE: Dict[str, str] = {
     "verify": "workspace",
     # Experimental ACP peer channel (start parity with code).
     "peer": "workspace",
+    # Hardened-direct: Grok edits the operator repo root (no worktree).
+    "direct": "workspace",
 }
 
 # The modes whose legitimate writable roots include an external worktree.
 # review/reason never write outside the private Grok session state supplied
 # by the base profile, so their writable_roots are empty.
+# direct is intentionally NOT here: its writable root is the repo root itself.
 _WORKTREE_MODES = frozenset({"code", "verify", "peer"})
+
+# Modes that confine writes to the operator repository root (+ private tmp)
+# rather than an external worktree. direct is the sole member today.
+_REPO_ROOT_WRITE_MODES = frozenset({"direct"})
 
 # The custom sandbox profile is given a DISTINCT name (never a built-in profile
 # name) so the rendered sandbox.toml stanza EXTENDS the built-in write-
@@ -111,6 +118,7 @@ SECRET_READ_DENIAL_PROVEN_BY_MODE: Dict[str, bool] = {
     "code": False,
     "verify": False,
     "peer": False,
+    "direct": False,
 }
 
 # Real-home credential directories listed for the Grok child to be denied.
@@ -181,7 +189,13 @@ def _require_absolute_dir_arg(function: str, name: str, value: object) -> pathli
     return value
 
 
-def policy_for_mode(mode: str, *, worktree: "pathlib.Path|None", private_tmp: pathlib.Path) -> SandboxPolicy:
+def policy_for_mode(
+    mode: str,
+    *,
+    worktree: "pathlib.Path|None",
+    private_tmp: pathlib.Path,
+    repo_root: "pathlib.Path|None" = None,
+) -> SandboxPolicy:
     """Resolve the write-confinement SandboxPolicy for ``mode``.
 
     Per user decision D-SECRETREAD (2026-07-14): the Task 6 Step 5 live
@@ -194,17 +208,19 @@ def policy_for_mode(mode: str, *, worktree: "pathlib.Path|None", private_tmp: pa
     Order of checks (each fails closed before the next):
       1. ``mode`` must be a known mode; an unknown mode is a usage error.
       2. ``private_tmp`` must be a pathlib.Path.
-      3. For code/verify the ``worktree`` must be provided; there are no
-         legitimate writable roots for a write-capable mode without it, so a
-         missing worktree is a usage error.
+      3. For direct, ``repo_root`` must be an absolute directory (writable root).
+      4. For code/verify/peer the ``worktree`` must be provided; there are no
+         legitimate writable roots for a worktree write-capable mode without it,
+         so a missing worktree is a usage error.
 
     Returns a SandboxPolicy for every valid mode: review/reason resolve to the
     custom ``grok-skills-review``/``grok-skills-reason`` profile (extending the base
-    ``read-only`` built-in) with no writable roots (they never write); code/verify
-    resolve to the custom ``grok-skills-code``/``grok-skills-verify`` profile (extending
-    the base ``workspace`` built-in) with the resolved worktree and private tmp as
-    the legitimate writable roots. The distinct name avoids shadowing the built-in
-    (Grok dogfood-2 #6).
+    ``read-only`` built-in) with no writable roots (they never write); direct
+    resolves to ``grok-skills-direct`` (extending workspace) with the repo root and
+    private tmp; code/verify/peer resolve to the custom ``grok-skills-<mode>``
+    profile (extending the base ``workspace`` built-in) with the resolved worktree
+    and private tmp as the legitimate writable roots. The distinct name avoids
+    shadowing the built-in (Grok dogfood-2 #6).
     ``secret_read_denial_proven`` is recorded honestly as False for every
     mode (the read gap is accepted, never proven closed) and is purely
     INFORMATIONAL: it never gates this function's success. Network egress is
@@ -220,7 +236,20 @@ def policy_for_mode(mode: str, *, worktree: "pathlib.Path|None", private_tmp: pa
 
     private_tmp = _require_absolute_dir_arg("policy_for_mode", "private_tmp", private_tmp)
 
-    if mode in _WORKTREE_MODES:
+    if mode in _REPO_ROOT_WRITE_MODES:
+        if repo_root is None:
+            _log("policy_for_mode", "mode {} requires a repo_root but none was provided".format(mode))
+            raise GrokWrapperError(
+                "usage-error",
+                "sandbox mode {} requires a repo_root".format(mode),
+                {"mode": mode},
+            )
+        repo_root = _require_absolute_dir_arg("policy_for_mode", "repo_root", repo_root)
+        writable_roots: Tuple[str, ...] = (
+            str(repo_root.resolve()),
+            str(private_tmp.resolve()),
+        )
+    elif mode in _WORKTREE_MODES:
         if worktree is None:
             _log("policy_for_mode", "mode {} requires a worktree but none was provided".format(mode))
             raise GrokWrapperError(
@@ -229,7 +258,7 @@ def policy_for_mode(mode: str, *, worktree: "pathlib.Path|None", private_tmp: pa
                 {"mode": mode},
             )
         worktree = _require_absolute_dir_arg("policy_for_mode", "worktree", worktree)
-        writable_roots: Tuple[str, ...] = (
+        writable_roots = (
             str(worktree.resolve()),
             str(private_tmp.resolve()),
         )

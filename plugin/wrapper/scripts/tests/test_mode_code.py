@@ -604,6 +604,8 @@ class CodeModeTests(WorktreeModeHarness):
             web=None,
             contract_file="",
             grok_binary="/bin/true",
+            integration="worktree",
+            force=False,
         )
         with mock.patch.object(code_mod._shared, "resolve_binary", return_value=pathlib.Path("/bin/true")):
             with mock.patch.object(code_mod._shared, "resolve_task_text", return_value="task"):

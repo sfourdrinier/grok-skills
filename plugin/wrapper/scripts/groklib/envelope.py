@@ -40,6 +40,7 @@ MODES: Tuple[str, ...] = (
     "review",
     "reason",
     "code",
+    "direct",
     "verify",
     "status",
     "cleanup",
@@ -94,6 +95,9 @@ ERROR_CLASSES: Tuple[str, ...] = (
     "handoff-unavailable",
     "terminal-envelope-incomplete",
     "acp-failure",
+    # Hardened-direct post-run guards (Task 7.1)
+    "protected-path-write",
+    "dirty-path-conflict",
 )
 
 _STORED_ENVELOPE_FILE_MODE = 0o600

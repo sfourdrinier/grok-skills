@@ -3,7 +3,8 @@
 # Mode registry: maps each C8 subcommand name to its run(args) handler. Every
 # handler takes the parsed argparse.Namespace and returns a validated C4
 # envelope dict (never printing anything itself; the entrypoint is the sole
-# stdout writer). Task 11 extends MODES further with code/verify.
+# stdout writer). Hardened-direct is NOT a subcommand: it is reached via
+# `code --integration direct` (default) inside modes.code.run.
 
 import argparse
 from typing import Callable, Dict

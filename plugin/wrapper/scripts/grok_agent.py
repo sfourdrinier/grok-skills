@@ -218,6 +218,20 @@ def _build_parser() -> _Parser:
         default=None,
         help="optional operator-trusted implementation contract JSON (writeScopes + requiredValidation)",
     )
+    code.add_argument(
+        "--integration",
+        choices=("direct", "worktree"),
+        default="direct",
+        help="direct (default): edit the real repo under sandbox + post-run guards; "
+        "worktree: isolated external worktree (prior default posture)",
+    )
+    code.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="direct mode only: allow Grok to modify paths that were already dirty "
+        "in the operator checkout at run start",
+    )
 
     verify = _sub("verify")
     verify.add_argument("--worktree", required=True)

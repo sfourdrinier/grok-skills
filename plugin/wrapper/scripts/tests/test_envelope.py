@@ -201,6 +201,8 @@ class BuildEnvelopeTests(unittest.TestCase):
                 "handoff-unavailable",
                 "terminal-envelope-incomplete",
                 "acp-failure",
+                "protected-path-write",
+                "dirty-path-conflict",
             ),
         )
 

@@ -608,8 +608,25 @@ def _validate_code_cli_shape(args: argparse.Namespace) -> Optional[str]:
 
 
 def run(args: argparse.Namespace) -> dict:
-    """Resolve the target/base (or continue a prior run), then drive the worktree lifecycle."""
+    """Resolve the target/base (or continue a prior run), then drive the lifecycle.
+
+    ``--integration`` defaults to ``direct`` (hardened-direct: edit the real tree).
+    ``worktree`` keeps the prior isolated-worktree posture. ``--continue-run``
+    always uses the worktree lineage (continuation reuses a retained worktree).
+    """
     continue_id = _validate_code_cli_shape(args)
+    integration = getattr(args, "integration", None) or "direct"
+    if continue_id is None and integration == "direct":
+        from groklib.modes.direct import run as run_direct
+
+        return run_direct(args)
+    if continue_id is None and integration not in ("direct", "worktree"):
+        raise GrokWrapperError(
+            "usage-error",
+            "code --integration must be 'direct' or 'worktree', got {!r}".format(integration),
+            {"integration": integration},
+        )
+    # worktree path (fresh --integration worktree, or any --continue-run)
     binary = _shared.resolve_binary(args)
     task_text = _shared.resolve_task_text(args)
     from groklib.web_defaults import resolve_web_access
