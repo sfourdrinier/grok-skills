@@ -341,3 +341,26 @@ class Phase1SecretScanTests(unittest.TestCase):
             scan_patch_bytes_for_secrets(blob)
         # UTF-8 replace path is weaker; latin-1 path is what production uses.
         scan_patch_bytes_for_secrets(b"hello without credentials")
+
+
+class TapFailureLinesTests(unittest.TestCase):
+    """tap_failure_lines surfaces failing test names from validation stdout tails."""
+
+    def test_extracts_not_ok_lines_capped_and_redacted(self) -> None:
+        from groklib.code_handoff_finalize import tap_failure_lines
+
+        text = "\n".join(
+            ["ok 1 - fine"]
+            + ["not ok {} - failing test {}".format(i, i) for i in range(2, 10)]
+            + ["# fail 8"]
+        )
+        lines = tap_failure_lines(text)
+        self.assertEqual(len(lines), 5)
+        self.assertTrue(all(line.startswith("not ok") for line in lines))
+        self.assertIn("failing test 2", lines[0])
+
+    def test_empty_and_clean_text_yield_no_lines(self) -> None:
+        from groklib.code_handoff_finalize import tap_failure_lines
+
+        self.assertEqual(tap_failure_lines(""), [])
+        self.assertEqual(tap_failure_lines("ok 1 - all good\n# pass 1"), [])

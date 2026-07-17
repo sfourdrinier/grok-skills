@@ -28,6 +28,31 @@ from groklib.implementation_handoff import (
 )
 
 
+_TAP_FAILURE_LIMIT = 5
+
+
+def tap_failure_lines(text: str, limit: int = _TAP_FAILURE_LIMIT) -> List[str]:
+    """Extract up to ``limit`` TAP "not ok" lines from a validation stdout tail.
+
+    Evidence tails are size-capped, so a mid-output failing test name can be
+    lost from the raw tail; surfacing the "not ok" lines in the blocker detail
+    lets a failed requiredValidation name its tests. Lines pass through
+    redact_secret_value_text so a secret-shaped test name never reaches a
+    manifest or envelope.
+    """
+    if not text:
+        return []
+    out: List[str] = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("not ok"):
+            out.append(redact_secret_value_text(stripped[:300]))
+            if len(out) >= limit:
+                break
+    return out
+
+
+
 def _redact_argv(argv: list) -> list:
     return [redact_secret_value_text(str(a)) for a in argv]
 
@@ -376,11 +401,17 @@ def code_handoff_finalize(
                 )
             if int(rec.get("exitStatus", 1)) != 0:
                 validation_ok = False
+                detail = {"argv": safe_argv, "exitStatus": rec.get("exitStatus")}
+                failed = tap_failure_lines(
+                    ((rec.get("stdoutTail") or {}).get("text") or "")
+                )
+                if failed:
+                    detail["failedTests"] = failed
                 blockers.append(
                     HandoffBlocker(
                         "validation-failure",
                         "requiredValidation command failed",
-                        {"argv": safe_argv, "exitStatus": rec.get("exitStatus")},
+                        detail,
                     )
                 )
     else:
