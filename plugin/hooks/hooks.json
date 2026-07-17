@@ -1,5 +1,5 @@
 {
-  "description": "SessionStart: Codex agent ensure + transfer stamp; SessionEnd stamp; optional stop-time Grok review gate.",
+  "description": "SessionStart: Codex agent ensure + transfer stamp; SessionEnd stamp; optional stop-time Grok review gate; SubagentStop handoff nudge.",
   "hooks": {
     "SessionStart": [
       {
@@ -32,6 +32,18 @@
             "command": "node \"${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT}}/scripts/stop-review-gate-hook.mjs\"",
             "timeout": 900,
             "statusMessage": "Grok stop-review gate"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT}}/scripts/subagent-stop-hook.mjs\"",
+            "timeout": 5,
+            "statusMessage": "Grok handoff reminder"
           }
         ]
       }

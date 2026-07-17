@@ -1,0 +1,184 @@
+// plugin/scripts/tests/subagent-stop-hook.test.mjs
+//
+// SubagentStop handoff-nudge hook: matching grok-engineer-coder + unconsumed
+// code runId emits additionalContext; garbage / non-match is silent exit 0.
+// Run with: node --test (cwd plugin/scripts)
+
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { test } from "node:test";
+
+import { createJob, updateJob } from "../lib/jobs.mjs";
+import { runsDirFor } from "../progress-relay.mjs";
+
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+const HOOK = path.resolve(SCRIPT_DIR, "..", "subagent-stop-hook.mjs");
+const HOOKS_JSON = path.resolve(SCRIPT_DIR, "..", "..", "hooks", "hooks.json");
+
+const VALID_RUN_ID = "20260717T120000Z-abcdef";
+const VALID_RUN_ID_OLDER = "20260717T110000Z-fedcba";
+
+function makeWorkspace() {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-subagent-stop-"));
+  fs.mkdirSync(path.join(cwd, ".git"));
+  return cwd;
+}
+
+function seedEnv(cwd) {
+  const stateHome = fs.mkdtempSync(path.join(os.tmpdir(), "grok-subagent-xdg-"));
+  const pluginData = path.join(cwd, "pdata");
+  return {
+    ...process.env,
+    CLAUDE_PLUGIN_DATA: pluginData,
+    XDG_STATE_HOME: stateHome,
+  };
+}
+
+function seedCodeJob(cwd, env, runId, { kind = "code", sleepMs = 0 } = {}) {
+  if (sleepMs > 0) {
+    // Ensure updatedAt ordering is distinct across rapid creates.
+    const end = Date.now() + sleepMs;
+    while (Date.now() < end) {
+      /* busy wait for ms-level timestamp separation */
+    }
+  }
+  const job = createJob(cwd, { kind, mode: kind, runMode: "hardened" }, env);
+  updateJob(cwd, job.id, { runId, status: "success", summary: "ok" }, env);
+  return job;
+}
+
+function seedRunDir(env, runId, { consumed = false } = {}) {
+  const runDir = path.join(runsDirFor(env), runId);
+  fs.mkdirSync(runDir, { recursive: true });
+  if (consumed) {
+    fs.writeFileSync(path.join(runDir, "handoff-consumed.json"), "{}\n", "utf8");
+  }
+  return runDir;
+}
+
+function runHook(input, env, { rawStdin } = {}) {
+  return spawnSync(process.execPath, [HOOK], {
+    input: rawStdin !== undefined ? rawStdin : JSON.stringify(input),
+    encoding: "utf8",
+    env,
+    cwd: typeof input === "object" && input && input.cwd ? input.cwd : process.cwd(),
+  });
+}
+
+function subagentStopPayload(cwd, agentType = "grok:grok-engineer-coder") {
+  return {
+    last_assistant_message: "code run finished",
+    agent_id: "agent-abc",
+    agent_type: agentType,
+    session_id: "session-1",
+    transcript_path: path.join(cwd, "transcript.jsonl"),
+    cwd,
+    hook_event_name: "SubagentStop",
+  };
+}
+
+test("matching agent_type + unconsumed code runId emits handoff additionalContext", () => {
+  const cwd = makeWorkspace();
+  const env = seedEnv(cwd);
+  seedCodeJob(cwd, env, VALID_RUN_ID);
+  seedRunDir(env, VALID_RUN_ID);
+
+  const res = runHook(subagentStopPayload(cwd), env);
+  assert.equal(res.status, 0, `expected exit 0, got ${res.status}; stderr=${res.stderr}`);
+  const out = JSON.parse(res.stdout.trim());
+  assert.equal(typeof out.hookSpecificOutput?.additionalContext, "string");
+  assert.match(
+    out.hookSpecificOutput.additionalContext,
+    new RegExp(`Grok code run ${VALID_RUN_ID} finished`)
+  );
+  assert.match(out.hookSpecificOutput.additionalContext, /handoff --run-id /);
+  assert.match(out.hookSpecificOutput.additionalContext, new RegExp(VALID_RUN_ID));
+  assert.match(out.hookSpecificOutput.additionalContext, /dual-condition ready/);
+  assert.match(out.hookSpecificOutput.additionalContext, /never auto-apply/);
+});
+
+test("plugin-scoped agent_type suffix :grok-engineer-coder also matches", () => {
+  const cwd = makeWorkspace();
+  const env = seedEnv(cwd);
+  seedCodeJob(cwd, env, VALID_RUN_ID);
+  seedRunDir(env, VALID_RUN_ID);
+
+  const res = runHook(subagentStopPayload(cwd, "my-org:grok-engineer-coder"), env);
+  assert.equal(res.status, 0);
+  assert.match(res.stdout, new RegExp(VALID_RUN_ID));
+  assert.match(res.stdout, /hookSpecificOutput/);
+});
+
+test("newest unconsumed code runId wins when multiple exist", () => {
+  const cwd = makeWorkspace();
+  const env = seedEnv(cwd);
+  seedCodeJob(cwd, env, VALID_RUN_ID_OLDER);
+  seedRunDir(env, VALID_RUN_ID_OLDER);
+  seedCodeJob(cwd, env, VALID_RUN_ID, { sleepMs: 5 });
+  seedRunDir(env, VALID_RUN_ID);
+
+  const res = runHook(subagentStopPayload(cwd), env);
+  assert.equal(res.status, 0);
+  const out = JSON.parse(res.stdout.trim());
+  assert.match(out.hookSpecificOutput.additionalContext, new RegExp(VALID_RUN_ID));
+  assert.doesNotMatch(
+    out.hookSpecificOutput.additionalContext,
+    new RegExp(VALID_RUN_ID_OLDER)
+  );
+});
+
+test("consumed handoff marker skips that run; silent if none left", () => {
+  const cwd = makeWorkspace();
+  const env = seedEnv(cwd);
+  seedCodeJob(cwd, env, VALID_RUN_ID);
+  seedRunDir(env, VALID_RUN_ID, { consumed: true });
+
+  const res = runHook(subagentStopPayload(cwd), env);
+  assert.equal(res.status, 0);
+  assert.equal(res.stdout.trim(), "");
+});
+
+test("non-grok agent_type is silent exit 0", () => {
+  const cwd = makeWorkspace();
+  const env = seedEnv(cwd);
+  seedCodeJob(cwd, env, VALID_RUN_ID);
+  seedRunDir(env, VALID_RUN_ID);
+
+  const res = runHook(subagentStopPayload(cwd, "Explore"), env);
+  assert.equal(res.status, 0);
+  assert.equal(res.stdout.trim(), "");
+});
+
+test("garbage stdin is silent exit 0", () => {
+  const cwd = makeWorkspace();
+  const env = seedEnv(cwd);
+  const res = runHook(null, env, { rawStdin: "not-json{{{" });
+  assert.equal(res.status, 0);
+  assert.equal(res.stdout.trim(), "");
+});
+
+test("missing run dir is silent exit 0", () => {
+  const cwd = makeWorkspace();
+  const env = seedEnv(cwd);
+  seedCodeJob(cwd, env, VALID_RUN_ID);
+  // intentionally no seedRunDir
+
+  const res = runHook(subagentStopPayload(cwd), env);
+  assert.equal(res.status, 0);
+  assert.equal(res.stdout.trim(), "");
+});
+
+test("hooks.json registers SubagentStop with timeout 5 and handoff statusMessage", () => {
+  const hooksJson = JSON.parse(fs.readFileSync(HOOKS_JSON, "utf8"));
+  const group = hooksJson.hooks?.SubagentStop;
+  assert.ok(Array.isArray(group) && group.length > 0, "SubagentStop must be registered");
+  const cmd = group[0].hooks[0];
+  assert.equal(cmd.type, "command");
+  assert.match(cmd.command, /subagent-stop-hook\.mjs/);
+  assert.equal(cmd.timeout, 5);
+  assert.equal(cmd.statusMessage, "Grok handoff reminder");
+});

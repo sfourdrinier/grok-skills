@@ -69,7 +69,7 @@ skill names on Codex for later job output.
 | Skills | Slash commands **or** Skill tool: `/grok:review`, `/grok:code`, ... (model invocation enabled) | Skill picker / Skill tool - same skill **names** (`review`, `code`, `setup`, `dual-lens`, ...) |
 | Subagents | Auto-loaded from plugin: `grok-engineer-coder`, `grok-rescue` | Auto-installed on SessionStart into `~/.codex/agents/` (absolute `agents/run.mjs`) |
 | Implement with Grok | Spawn **grok-engineer-coder**, or `/grok:code` | Spawn **grok-engineer-coder**, or run **code** skill |
-| Stop gate hooks | Claude hooks | Same hooks; may require **trust** via `/hooks` |
+| Stop / SubagentStop hooks | Claude hooks (stop gate + handoff nudge) | Same hooks; may require **trust** via `/hooks` |
 
 Same engine either way: Node companion → hardened Python wrapper → one JSON envelope.
 
@@ -228,6 +228,13 @@ Two postures, same skills:
 |------|-----|----------------|-------------------|
 | **hardened** (default) | omit, or `/grok:setup` with `--run-mode hardened` | Private Grok home, sandbox verification, worktree isolation, secret redaction. | **Yes** - verified patch + handoff manifest under the run dir. |
 | **direct** | `GROK_SKILLS_MODE=direct` or companion `setup --run-mode direct` | Uses your **installed Grok CLI** and normal `~/.grok` auth - same idea as OpenAI's plugin using your installed Codex. Faster, less isolation. Direct mode does **not** push completion notify in 1.5.0 (job still tracked). Job surface (`result`/`cancel`) accepts `direct-<timestamp>` ids; `handoff`/`status --run-id`/`implement` refuse with an honest message. | **No** - by design: handoff artifacts' value is the isolation evidence (worktree, sentinel, sandbox verification) that direct mode cannot attest. |
+
+On Claude Code, plugin `userConfig` (Settings) can also set the default run mode
+and notification prefs. The host exports them as `CLAUDE_PLUGIN_OPTION_*` env
+vars. Precedence: `/grok:setup` workspace prefs > `userConfig` env > built-in
+defaults (invalid env values are ignored). Job state prefers absolute
+`CLAUDE_PLUGIN_DATA` when the host provides it. Details:
+[plugin/references/README.md](plugin/references/README.md).
 
 ```bash
 # Prefer skill runner after Skill tool load:
