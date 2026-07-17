@@ -91,16 +91,16 @@ test("matching agent_type + unconsumed code runId emits handoff additionalContex
   assert.equal(res.status, 0, `expected exit 0, got ${res.status}; stderr=${res.stderr}`);
   const out = JSON.parse(res.stdout.trim());
   assert.equal(typeof out.hookSpecificOutput?.additionalContext, "string");
+  // No runId in last_assistant_message -> fallback wording (newest unconsumed).
   assert.match(
     out.hookSpecificOutput.additionalContext,
-    new RegExp(`Grok code run ${VALID_RUN_ID} finished`)
+    new RegExp(`most recent code run in this workspace: ${VALID_RUN_ID}`)
   );
   assert.match(out.hookSpecificOutput.additionalContext, /handoff --run-id /);
   assert.match(out.hookSpecificOutput.additionalContext, new RegExp(VALID_RUN_ID));
   assert.match(out.hookSpecificOutput.additionalContext, /dual-condition ready/);
   assert.match(out.hookSpecificOutput.additionalContext, /never auto-apply/);
 });
-
 test("plugin-scoped agent_type suffix :grok-engineer-coder also matches", () => {
   const cwd = makeWorkspace();
   const env = seedEnv(cwd);
@@ -113,6 +113,68 @@ test("plugin-scoped agent_type suffix :grok-engineer-coder also matches", () => 
   assert.match(res.stdout, /hookSpecificOutput/);
 });
 
+test("bare agent_type grok-engineer-coder also matches", () => {
+  const cwd = makeWorkspace();
+  const env = seedEnv(cwd);
+  seedCodeJob(cwd, env, VALID_RUN_ID);
+  seedRunDir(env, VALID_RUN_ID);
+
+  const res = runHook(subagentStopPayload(cwd, "grok-engineer-coder"), env);
+  assert.equal(res.status, 0);
+  assert.match(res.stdout, new RegExp(VALID_RUN_ID));
+  assert.match(res.stdout, /hookSpecificOutput/);
+});
+
+test("message-embedded runId wins over a newer unrelated code job", () => {
+  const cwd = makeWorkspace();
+  const env = seedEnv(cwd);
+  // Older job whose runId is cited in last_assistant_message.
+  seedCodeJob(cwd, env, VALID_RUN_ID_OLDER);
+  seedRunDir(env, VALID_RUN_ID_OLDER);
+  // Newer unrelated code job (would win under newest-unconsumed fallback alone).
+  seedCodeJob(cwd, env, VALID_RUN_ID, { sleepMs: 5 });
+  seedRunDir(env, VALID_RUN_ID);
+
+  const payload = subagentStopPayload(cwd);
+  payload.last_assistant_message =
+    `Implementation done. Envelope runId ${VALID_RUN_ID_OLDER} ready for handoff.`;
+  const res = runHook(payload, env);
+  assert.equal(res.status, 0, `stderr=${res.stderr}`);
+  const out = JSON.parse(res.stdout.trim());
+  assert.match(out.hookSpecificOutput.additionalContext, new RegExp(VALID_RUN_ID_OLDER));
+  assert.doesNotMatch(
+    out.hookSpecificOutput.additionalContext,
+    new RegExp(VALID_RUN_ID)
+  );
+  // Direct association keeps the specific-run wording (not the softened fallback).
+  assert.match(
+    out.hookSpecificOutput.additionalContext,
+    new RegExp(`Grok code run ${VALID_RUN_ID_OLDER} finished`)
+  );
+  assert.doesNotMatch(
+    out.hookSpecificOutput.additionalContext,
+    /most recent code run in this workspace/
+  );
+});
+
+test("fallback wording softens when no message runId matches", () => {
+  const cwd = makeWorkspace();
+  const env = seedEnv(cwd);
+  seedCodeJob(cwd, env, VALID_RUN_ID);
+  seedRunDir(env, VALID_RUN_ID);
+
+  const payload = subagentStopPayload(cwd);
+  payload.last_assistant_message = "done with the work, no run id here";
+  const res = runHook(payload, env);
+  assert.equal(res.status, 0);
+  const out = JSON.parse(res.stdout.trim());
+  assert.match(
+    out.hookSpecificOutput.additionalContext,
+    new RegExp(`most recent code run in this workspace: ${VALID_RUN_ID}`)
+  );
+  assert.match(out.hookSpecificOutput.additionalContext, /handoff --run-id /);
+  assert.match(out.hookSpecificOutput.additionalContext, new RegExp(VALID_RUN_ID));
+});
 test("newest unconsumed code runId wins when multiple exist", () => {
   const cwd = makeWorkspace();
   const env = seedEnv(cwd);

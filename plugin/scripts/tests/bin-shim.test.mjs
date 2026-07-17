@@ -6,10 +6,10 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-
 import { createJob } from "../lib/jobs.mjs";
 import { companionIsolation, makeFakeWrapper } from "./helpers/fake-wrapper.mjs";
 
@@ -84,5 +84,35 @@ test("bin/grok-skills propagates nonzero exit for unknown wrapper mode", () => {
     }
   } finally {
     cleanup();
+  }
+});
+
+test("bin/grok-skills missing companion exits 3 with actionable stderr", () => {
+  assert.ok(fs.existsSync(SHIM), `shim missing at ${SHIM}`);
+  const tree = fs.mkdtempSync(path.join(os.tmpdir(), "grok-shim-missing-"));
+  try {
+    const binDir = path.join(tree, "bin");
+    fs.mkdirSync(binDir, { recursive: true });
+    // scripts/ present but companion intentionally absent.
+    fs.mkdirSync(path.join(tree, "scripts"), { recursive: true });
+    const shimCopy = path.join(binDir, "grok-skills");
+    fs.copyFileSync(SHIM, shimCopy);
+    fs.chmodSync(shimCopy, 0o755);
+
+    const result = spawnSync(process.execPath, [shimCopy, "jobs"], {
+      encoding: "utf8",
+      env: process.env,
+    });
+    const code = typeof result.status === "number" ? result.status : 1;
+    assert.equal(code, 3, `expected exit 3, got ${code}\nstderr: ${result.stderr}`);
+    assert.match(
+      result.stderr,
+      /missing scripts\/grok-companion\.mjs/,
+      `actionable companion-missing message required:\n${result.stderr}`
+    );
+    // Must not surface a raw Node spawn/ENOENT traceback as the only signal.
+    assert.doesNotMatch(result.stderr, /ENOENT/);
+  } finally {
+    fs.rmSync(tree, { recursive: true, force: true });
   }
 });

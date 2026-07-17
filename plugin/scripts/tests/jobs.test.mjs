@@ -16,13 +16,14 @@ import {
   jobsDir,
   listJobs,
   NOTIFICATION_MODES,
+  readJobStdout,
   resolveJobByIdOrRunId,
   setNotificationConfig,
   setRunMode,
   storeJobStdout,
   updateJob,
 } from "../lib/jobs.mjs";
-import { runDirectGrok } from "../lib/direct-grok.mjs";
+import { readGateConfig, resolveStateDir, writeGateConfig } from "../lib/gate-state.mjs";import { runDirectGrok } from "../lib/direct-grok.mjs";
 import { renderEnvelopePretty, tryParseEnvelope } from "../lib/render.mjs";
 import { buildAdversarialTask } from "../lib/git-context.mjs";
 import { makeFakeWrapper, runCompanion } from "./helpers/fake-wrapper.mjs";
@@ -106,11 +107,124 @@ test("stateRoot one-time migrates legacy index+prefs into CLAUDE_PLUGIN_DATA", (
   const newRoot = path.dirname(jobsDir(cwd, env));
   assert.ok(fs.existsSync(path.join(newRoot, "jobs-index.json")));
   assert.ok(newRoot.startsWith(path.join(pluginData, "state")));
-  // Legacy left in place (best-effort copy, not move).
+  // Legacy left in place (best-effort copy, not move) - frozen snapshot.
   assert.ok(fs.existsSync(path.join(legacyRoot, "jobs-index.json")));
 });
 
-// --- Task 3.4: userConfig env defaults (CLAUDE_PLUGIN_OPTION_*) ---
+// --- Phase 3 review findings 1-3: migration complete-marker + job bodies ---
+
+test("migration retries when new dir exists without jobs-index.json", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-state-mig-retry-"));
+  setRunMode(cwd, "direct", {});
+  const legacyRoot = path.dirname(jobsDir(cwd, {}));
+  const pluginData = path.join(cwd, "pdata");
+  const env = { CLAUDE_PLUGIN_DATA: pluginData };
+
+  // Pre-create new dir WITHOUT index (partial prior attempt).
+  const newRoot = path.dirname(jobsDir(cwd, env));
+  // jobsDir may have already migrated; wipe the index to simulate incomplete.
+  const indexFile = path.join(newRoot, "jobs-index.json");
+  if (fs.existsSync(indexFile)) {
+    fs.unlinkSync(indexFile);
+  }
+  fs.mkdirSync(newRoot, { recursive: true });
+  assert.ok(fs.existsSync(newRoot));
+  assert.ok(!fs.existsSync(indexFile));
+
+  // Re-seed legacy (migration may have emptied nothing; ensure index still there).
+  assert.ok(fs.existsSync(path.join(legacyRoot, "jobs-index.json")));
+
+  // Next touch must re-attempt and complete (index present after).
+  assert.equal(getRunMode(cwd, env), "direct");
+  assert.ok(fs.existsSync(indexFile), "complete marker is jobs-index.json presence");
+});
+
+test("partial migration without index is retried on next call", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-state-mig-partial-"));
+  setRunMode(cwd, "direct", {});
+  const legacyRoot = path.dirname(jobsDir(cwd, {}));
+  const legacyIndex = path.join(legacyRoot, "jobs-index.json");
+  assert.ok(fs.existsSync(legacyIndex));
+
+  const pluginData = path.join(cwd, "pdata");
+  const env = { CLAUDE_PLUGIN_DATA: pluginData };
+  // Compute new root path without triggering full migration success path:
+  // create empty dir shell that looks like a failed mid-copy.
+  const segment = path.basename(legacyRoot);
+  const newRoot = path.join(pluginData, "state", segment);
+  fs.mkdirSync(newRoot, { recursive: true });
+  // No jobs-index.json -> incomplete; must still migrate.
+  assert.ok(!fs.existsSync(path.join(newRoot, "jobs-index.json")));
+
+  assert.equal(getRunMode(cwd, env), "direct");
+  assert.ok(
+    fs.existsSync(path.join(newRoot, "jobs-index.json")),
+    "retry after partial must write jobs-index.json"
+  );
+  // Legacy remains a frozen snapshot (copy, not move).
+  assert.ok(fs.existsSync(legacyIndex));
+});
+
+test("migration copies job bodies so stdout is readable under the new root", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-state-mig-bodies-"));
+  // Seed a job + stdout under the legacy root (no CLAUDE_PLUGIN_DATA).
+  const job = createJob(cwd, { kind: "code", mode: "code", runMode: "hardened" }, {});
+  const payload = JSON.stringify({
+    status: "success",
+    mode: "code",
+    response: { text: "migrated-stdout-body" },
+  });
+  storeJobStdout(cwd, job.id, `${payload}\n`, {});
+  const legacyStdout = path.join(jobsDir(cwd, {}), job.id, "stdout.json");
+  assert.ok(fs.existsSync(legacyStdout));
+
+  const pluginData = path.join(cwd, "pdata");
+  const env = { CLAUDE_PLUGIN_DATA: pluginData };
+  // Touch under new root triggers migration of index + job bodies.
+  const listed = listJobs(cwd, env);
+  assert.equal(listed[0]?.id, job.id);
+  const body = readJobStdout(cwd, job.id, env);
+  assert.ok(body, "stdout must be readable through the new root after migration");
+  assert.match(body, /migrated-stdout-body/);
+  // Legacy body left in place (copy not move).
+  assert.ok(fs.existsSync(legacyStdout));
+});
+
+test("gate-state migrates enabled stop gate into CLAUDE_PLUGIN_DATA root", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-gate-mig-"));
+  fs.mkdirSync(path.join(cwd, ".git"));
+  // Enable gate under legacy tmp root (no CLAUDE_PLUGIN_DATA).
+  writeGateConfig(cwd, true, {});
+  assert.equal(readGateConfig(cwd, {}).stopReviewGate, true);
+  const legacyDir = resolveStateDir(cwd, {});
+  assert.ok(fs.existsSync(path.join(legacyDir, "gate-state.json")));
+
+  const pluginData = path.join(cwd, "pdata");
+  const env = { CLAUDE_PLUGIN_DATA: pluginData };
+  // Enabling under tmp must not be lost when CLAUDE_PLUGIN_DATA appears.
+  assert.equal(readGateConfig(cwd, env).stopReviewGate, true);
+  const newDir = resolveStateDir(cwd, env);
+  assert.ok(newDir.startsWith(path.join(pluginData, "state")));
+  assert.ok(fs.existsSync(path.join(newDir, "gate-state.json")));
+  // Legacy frozen snapshot (copy not move).
+  assert.ok(fs.existsSync(path.join(legacyDir, "gate-state.json")));
+});
+
+test("gate-state migration retries when new dir exists without gate-state.json", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-gate-mig-retry-"));
+  fs.mkdirSync(path.join(cwd, ".git"));
+  writeGateConfig(cwd, true, {});
+  const legacyDir = resolveStateDir(cwd, {});
+  const pluginData = path.join(cwd, "pdata");
+  const env = { CLAUDE_PLUGIN_DATA: pluginData };
+  const segment = path.basename(legacyDir);
+  const newDir = path.join(pluginData, "state", segment);
+  fs.mkdirSync(newDir, { recursive: true });
+  assert.ok(!fs.existsSync(path.join(newDir, "gate-state.json")));
+
+  assert.equal(readGateConfig(cwd, env).stopReviewGate, true);
+  assert.ok(fs.existsSync(path.join(newDir, "gate-state.json")));
+});// --- Task 3.4: userConfig env defaults (CLAUDE_PLUGIN_OPTION_*) ---
 
 test("getRunMode precedence: setup > CLAUDE_PLUGIN_OPTION_RUNMODE > default", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-opt-run-"));

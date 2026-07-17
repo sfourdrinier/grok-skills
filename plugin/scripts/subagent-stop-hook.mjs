@@ -5,15 +5,21 @@
 //
 // Host contract (Claude Code hooks, July 2026):
 //   stdin JSON fields include: last_assistant_message, agent_id, agent_type
-//   (plugin-scoped, e.g. "grok:grok-engineer-coder"), session_id,
-//   transcript_path, cwd, hook_event_name.
+//   (plugin-scoped, e.g. "grok:grok-engineer-coder", or bare
+//   "grok-engineer-coder"), session_id, transcript_path, cwd, hook_event_name.
 //   stdout JSON {"hookSpecificOutput": {"additionalContext": "..."}} with
 //   exit 0 adds context without blocking. Exit 2 would block - never used here.
 //
-// Behavior: when agent_type is grok-engineer-coder (exact plugin-scoped form
-// or any string ending in ":grok-engineer-coder"), scan listJobs(cwd) for the
-// newest kind "code" job whose runId has an existing run dir and no
-// handoff-consumed.json marker; emit a dual-condition handoff reminder.
+// agent_type and last_assistant_message are host-supplied. This hook only ever
+// emits advisory context with shape-validated runIds (safeRunIdForRunsDir);
+// it never trusts raw message text as a path component.
+//
+// Behavior: when agent_type is grok-engineer-coder (exact plugin-scoped form,
+// bare name, or any string ending in ":grok-engineer-coder"):
+//   1. Prefer a runId from last_assistant_message: scan ALL RUN_ID_RE-shaped
+//      tokens; use the LAST one whose run dir exists under runs/.
+//   2. Else fall back to newest kind "code" job with an unconsumed run dir,
+//      and soften the reminder text to "most recent code run in this workspace".
 // Garbage input / no match / any error: silent exit 0. Does not write markers.
 
 import fs from "node:fs";
@@ -22,19 +28,60 @@ import process from "node:process";
 
 import { listJobs } from "./lib/jobs.mjs";
 import { readAllStdinSync } from "./lib/read-stdin.mjs";
-import { runsDirFor, safeRunIdForRunsDir } from "./progress-relay.mjs";
+import { RUN_ID_RE, runsDirFor, safeRunIdForRunsDir } from "./progress-relay.mjs";
 
 const HANDOFF_MARKER = "handoff-consumed.json";
 const ENGINEER_SUFFIX = ":grok-engineer-coder";
 const ENGINEER_SCOPED = "grok:grok-engineer-coder";
+const ENGINEER_BARE = "grok-engineer-coder";
 
+// Global scan for RUN_ID_RE-shaped tokens inside free text (strip ^/$ anchors).
+const RUN_ID_TOKEN_RE = new RegExp(
+  RUN_ID_RE.source.replace(/^\^/, "").replace(/\$$/, ""),
+  "g"
+);
 /**
  * @param {unknown} agentType
  * @returns {boolean}
  */
 export function isGrokEngineerCoder(agentType) {
   if (typeof agentType !== "string" || !agentType) return false;
-  return agentType === ENGINEER_SCOPED || agentType.endsWith(ENGINEER_SUFFIX);
+  return (
+    agentType === ENGINEER_SCOPED ||
+    agentType === ENGINEER_BARE ||
+    agentType.endsWith(ENGINEER_SUFFIX)
+  );
+}
+
+/**
+ * Scan last_assistant_message for RUN_ID_RE tokens; return the LAST one that
+ * has an existing run dir under runs/ (shape-validated via safeRunIdForRunsDir).
+ *
+ * @param {unknown} message
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string|null}
+ */
+export function findValidatedRunIdFromMessage(message, env = process.env) {
+  if (typeof message !== "string" || !message) return null;
+  const runsDir = runsDirFor(env);
+  const tokens = message.match(RUN_ID_TOKEN_RE);
+  if (!tokens || tokens.length === 0) return null;
+  // Prefer the last shape-valid token whose run dir exists.
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    const runId = safeRunIdForRunsDir(tokens[i], runsDir);
+    if (!runId) continue;
+    const runDir = path.join(runsDir, runId);
+    let st;
+    try {
+      st = fs.statSync(runDir);
+    } catch {
+      continue;
+    }
+    if (st.isDirectory()) {
+      return runId;
+    }
+  }
+  return null;
 }
 
 /**
@@ -68,11 +115,19 @@ export function findNewestUnconsumedCodeRunId(cwd, env = process.env) {
 
 /**
  * @param {string} runId
+ * @param {{ fromMessage?: boolean }} [opts]
  * @returns {string}
  */
-export function handoffReminderContext(runId) {
+export function handoffReminderContext(runId, opts = {}) {
+  if (opts.fromMessage) {
+    return (
+      `Grok code run ${runId} finished. Before integrating, run handoff --run-id ${runId} ` +
+      "and require dual-condition ready (never auto-apply)."
+    );
+  }
   return (
-    `Grok code run ${runId} finished. Before integrating, run handoff --run-id ${runId} ` +
+    `Grok code run finished (most recent code run in this workspace: ${runId}). ` +
+    `Before integrating, run handoff --run-id ${runId} ` +
     "and require dual-condition ready (never auto-apply)."
   );
 }
@@ -104,9 +159,16 @@ function main() {
       ? input.cwd
       : process.env.CLAUDE_PROJECT_DIR || process.cwd();
 
-  let runId;
+  let runId = null;
+  let fromMessage = false;
   try {
-    runId = findNewestUnconsumedCodeRunId(cwd, process.env);
+    const fromMsg = findValidatedRunIdFromMessage(input.last_assistant_message, process.env);
+    if (fromMsg) {
+      runId = fromMsg;
+      fromMessage = true;
+    } else {
+      runId = findNewestUnconsumedCodeRunId(cwd, process.env);
+    }
   } catch {
     process.exit(0);
   }
@@ -118,7 +180,7 @@ function main() {
   process.stdout.write(
     `${JSON.stringify({
       hookSpecificOutput: {
-        additionalContext: handoffReminderContext(runId),
+        additionalContext: handoffReminderContext(runId, { fromMessage }),
       },
     })}\n`
   );

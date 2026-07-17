@@ -180,12 +180,69 @@ function resolvePluginDataDir(env = process.env) {
 }
 
 /**
- * Best-effort one-time copy of jobs-index.json (index + prefs) from the legacy
- * tmp root into CLAUDE_PLUGIN_DATA/state. Never throws; notes on stderr.
+ * Atomic file copy via temp + rename (same filesystem). Destination path is
+ * the complete-marker for migration: only written after body copy attempts.
+ */
+function atomicCopyFile(src, dest) {
+  const dir = path.dirname(dest);
+  mkdirPrivate(dir);
+  const tmp = path.join(
+    dir,
+    `.${path.basename(dest)}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`
+  );
+  try {
+    fs.copyFileSync(src, tmp);
+    try {
+      fs.chmodSync(tmp, FILE_MODE);
+    } catch {
+      /* best-effort */
+    }
+    fs.renameSync(tmp, dest);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* best-effort cleanup */
+    }
+    throw err;
+  }
+}
+
+/**
+ * Best-effort recursive copy of a job body directory (copy, never move).
+ * Per-entry failures are noted on stderr; caller decides completeness.
+ */
+function copyJobBodyTree(srcDir, destDir) {
+  mkdirPrivate(destDir);
+  const entries = fs.readdirSync(srcDir, { withFileTypes: true });
+  for (const entry of entries) {
+    const from = path.join(srcDir, entry.name);
+    const to = path.join(destDir, entry.name);
+    if (entry.isDirectory()) {
+      copyJobBodyTree(from, to);
+    } else if (entry.isFile()) {
+      fs.copyFileSync(from, to);
+      try {
+        fs.chmodSync(to, FILE_MODE);
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+}
+
+/**
+ * Best-effort migration of jobs-index.json + jobs/<id>/ bodies from the legacy
+ * tmp root into CLAUDE_PLUGIN_DATA/state. Complete only when the new
+ * jobs-index.json exists (dir-exists alone is not enough - retry partials).
+ * Index is written last via temp+rename so interrupted copies stay retryable.
+ * Legacy is left in place as a frozen snapshot (copy, not move). Never throws.
  */
 function maybeMigrateLegacyState(legacyDir, newDir) {
   try {
-    if (fs.existsSync(newDir)) {
+    const newIndex = path.join(newDir, "jobs-index.json");
+    // Complete-marker: index presence. Dir-without-index is retryable.
+    if (fs.existsSync(newIndex)) {
       return;
     }
     if (!fs.existsSync(legacyDir)) {
@@ -196,12 +253,50 @@ function maybeMigrateLegacyState(legacyDir, newDir) {
       return;
     }
     mkdirPrivate(newDir);
-    fs.copyFileSync(legacyIndex, path.join(newDir, "jobs-index.json"));
-    try {
-      fs.chmodSync(path.join(newDir, "jobs-index.json"), FILE_MODE);
-    } catch {
-      /* best-effort */
+
+    // Job bodies first (best-effort per entry). Partial bodies still allow the
+    // index write; individual entry failures are noted but do not abort.
+    const legacyJobs = path.join(legacyDir, "jobs");
+    const newJobs = path.join(newDir, "jobs");
+    if (fs.existsSync(legacyJobs)) {
+      mkdirPrivate(newJobs);
+      let entries = [];
+      try {
+        entries = fs.readdirSync(legacyJobs, { withFileTypes: true });
+      } catch (err) {
+        process.stderr.write(
+          `[grok-jobs] job body migration partial (list): ${err?.message ?? err}\n`
+        );
+        entries = [];
+      }
+      for (const entry of entries) {
+        try {
+          const from = path.join(legacyJobs, entry.name);
+          const to = path.join(newJobs, entry.name);
+          if (entry.isDirectory()) {
+            copyJobBodyTree(from, to);
+          } else if (entry.isFile()) {
+            fs.copyFileSync(from, to);
+            try {
+              fs.chmodSync(to, FILE_MODE);
+            } catch {
+              /* best-effort */
+            }
+          }
+        } catch (err) {
+          try {
+            process.stderr.write(
+              `[grok-jobs] job body migration partial for ${entry.name}: ${err?.message ?? err}\n`
+            );
+          } catch {
+            /* best-effort */
+          }
+        }
+      }
     }
+
+    // Index last = complete marker. Atomic rename keeps partials retryable.
+    atomicCopyFile(legacyIndex, newIndex);
     process.stderr.write(
       `[grok-jobs] migrated workspace state from ${legacyDir} to ${newDir}\n`
     );
@@ -215,7 +310,6 @@ function maybeMigrateLegacyState(legacyDir, newDir) {
     }
   }
 }
-
 function stateRoot(cwd, env = process.env) {
   const segment = workspaceStateSegment(cwd);
   const legacyDir = path.join(FALLBACK, segment);

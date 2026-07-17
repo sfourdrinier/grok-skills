@@ -133,7 +133,8 @@ Off by default. Enable with `/grok:setup --enable-review-gate`. See
 
 ## Companion state layout (CLAUDE_PLUGIN_DATA)
 
-Job registry and workspace prefs live under a per-workspace state dir:
+Job registry, workspace prefs, and the opt-in stop-review gate live under a
+per-workspace state dir:
 
 - When `CLAUDE_PLUGIN_DATA` is set to an **absolute** path (Claude Code host
   fact: `~/.claude/plugins/data/<plugin-id>/`), state is:
@@ -143,10 +144,20 @@ Job registry and workspace prefs live under a per-workspace state dir:
 - Workspace keying is identical in both layouts (basename slug + sha256 of the
   canonical workspace root, first 16 hex chars). Relative `CLAUDE_PLUGIN_DATA`
   values are ignored (fail open to the legacy root).
-- One-time best-effort migration: if the legacy dir has `jobs-index.json` and
-  the new dir does not exist yet, the companion copies the index (jobs list +
-  prefs) forward and notes the move on stderr. Never throws on migration
-  failure.
+- Best-effort migration (copy, not move): when the legacy dir has
+  `jobs-index.json` and the new root does **not** yet have `jobs-index.json`,
+  the companion copies the index (jobs list + prefs) and the `jobs/<id>/` body
+  tree forward, writing the new index last via temp + rename (atomic on the
+  same filesystem). Dir-exists alone is **not** completion - a partial copy
+  without the index is retried on the next call. Job-body copy is best-effort
+  per entry (stderr note on partial). Legacy stays as a **frozen snapshot**
+  after migration. The same complete-marker pattern migrates `gate-state.json`
+  for the stop-review gate. Never throws on migration failure.
+- **Dual-path flicker:** the state root follows `CLAUDE_PLUGIN_DATA` when the
+  host exports it. Mixed host versions (or sessions where the env is set
+  sometimes and unset other times) may see two roots; companion-side code
+  cannot fully collapse that. Explicit `/grok:setup` re-runs re-establish
+  prefs on the root the current process resolves.
 
 `jobs-index.json` holds `config` (run mode, notification prefs, last rescue id)
 and a short jobs list. Per-job artifacts sit under `jobs/<jobId>/`.

@@ -1183,6 +1183,8 @@ memory: project
 
 Rationale to record in the body: the agent is a thin relay (shell out, relay envelopes verbatim) - a small fast model is correct and cheap; `maxTurns: 40` bounds runaway relay loops; `memory: project` lets it remember per-repo quirks (package manager, prior runIds, build-gate config). grok-rescue keeps `model` inherit (it summarizes diagnoses - keep the smarter default) but gains `memory: project`.
 
+review reversal: model inherit (agent is an orchestrator)
+
 - [ ] **Step 2: Teams smoke checklist** (`docs/checklists/agent-teams-smoke.md`): with `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, spawn a teammate from `grok:grok-engineer-coder`, delegate one tiny implement cycle, confirm SendMessage follow-up reaches it and the handoff protocol holds. Record results + Claude Code version. This is a checklist, not CI.
 - [ ] **Step 3: Validate + commit.**
 

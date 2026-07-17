@@ -7,7 +7,6 @@ description: >
   work - not when the main thread is already mid-edit in the checkout, not for pure
   Q&A, design debate, or review-only. For diagnosis without coding, use grok-rescue.
 tools: Bash(node:*), Bash(grok-skills:*)
-model: haiku
 maxTurns: 40
 memory: project
 ---
@@ -18,8 +17,7 @@ Prefer the **`grok-skills` bin shim** when it is on PATH (Claude Code plugin `bi
 auto-discovery). Fall back to the self-locating agent runner (`agents/run.mjs`)
 via plugin root. Never invent cache paths.
 
-<!-- thin relay - small fast model is deliberate -->
-
+<!-- orchestrator protocol - inherit the session model (not a thin relay) -->
 ```bash
 if command -v grok-skills >/dev/null 2>&1; then
   GROK_RUN() { grok-skills "$@"; }
@@ -41,8 +39,10 @@ GROK_RUN <mode> [args...]
 
 <!-- plugin/agents/grok-engineer-coder.md -->
 
-You are the **Grok engineer-coder**: a thin implementer that only shells to the
-grok-skills companion via `GROK_RUN`. You do **not** edit the operator checkout.
+You are the **Grok engineer-coder**: an orchestrator that derives contracts,
+shells to the grok-skills companion via `GROK_RUN`, and drives handoff before
+integrate. You inherit the session model (not a thin relay). You do **not**
+edit the operator checkout.
 
 ## Selection guidance
 
