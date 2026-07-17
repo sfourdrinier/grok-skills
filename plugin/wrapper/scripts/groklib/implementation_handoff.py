@@ -30,6 +30,7 @@ from groklib.envelope import (
     SecretMaterialError,
 )
 from groklib.implementation_contract import (
+    normalize_git_repo_path,
     normalize_repo_relative,
     path_in_scopes,
     trust_model,
@@ -189,6 +190,11 @@ def validate_implementation_handoff(doc: dict) -> List[str]:
             if not isinstance(p, str) or not p:
                 errors.append("changedFiles[{}].path must be non-empty string".format(i))
                 changed_ok = False
+            elif not _is_confined_git_repo_path(p):
+                errors.append(
+                    "changedFiles[{}].path must be repository-relative (no absolute or '..')".format(i)
+                )
+                changed_ok = False
             st = item.get("status")
             if st not in _ALLOWED_CHANGE_STATUS:
                 errors.append(
@@ -201,12 +207,30 @@ def validate_implementation_handoff(doc: dict) -> List[str]:
             if old is not None and not isinstance(old, str):
                 errors.append("changedFiles[{}].oldPath must be string or null".format(i))
                 changed_ok = False
+            elif isinstance(old, str) and old and not _is_confined_git_repo_path(old):
+                errors.append(
+                    "changedFiles[{}].oldPath must be repository-relative (no absolute or '..')".format(
+                        i
+                    )
+                )
+                changed_ok = False
             if st == "renamed" and (not isinstance(old, str) or not old):
                 errors.append("changedFiles[{}].oldPath required for renamed".format(i))
                 changed_ok = False
     validation = doc.get("validation")
+    validation_shape_ok = True
     if not isinstance(validation, dict):
         errors.append("validation must be object")
+        validation_shape_ok = False
+    else:
+        for vkey in ("requiredCommandsPassed", "buildGatePassed", "allPassed"):
+            if vkey not in validation:
+                # Allow older forensic manifests missing keys when not ready;
+                # when ready=true these are required true below.
+                continue
+            if not isinstance(validation.get(vkey), bool):
+                errors.append("validation.{} must be bool when present".format(vkey))
+                validation_shape_ok = False
     integration = doc.get("integration")
     if not isinstance(integration, dict):
         errors.append("integration must be object")
@@ -218,16 +242,31 @@ def validate_implementation_handoff(doc: dict) -> List[str]:
         if not isinstance(blockers, list):
             errors.append("integration.blockers must be array")
         else:
-            # ready=true is only valid with empty blockers and at least one change.
+            # ready=true is only valid with empty blockers, changes, and passed gates.
             if ready is True:
                 if blockers:
                     errors.append("integration.ready true requires empty blockers")
                 if changed_ok and isinstance(changed, list) and len(changed) < 1:
                     errors.append("integration.ready true requires non-empty changedFiles")
+                if validation_shape_ok and isinstance(validation, dict):
+                    for vkey in ("requiredCommandsPassed", "buildGatePassed", "allPassed"):
+                        if validation.get(vkey) is not True:
+                            errors.append(
+                                "integration.ready true requires validation.{} true".format(vkey)
+                            )
     worktree = doc.get("worktree")
     if not isinstance(worktree, dict):
         errors.append("worktree must be object")
     return errors
+
+
+def _is_confined_git_repo_path(path: str) -> bool:
+    """True when path is a safe repo-relative Git path (no absolute / '..' / NUL)."""
+    try:
+        normalize_git_repo_path(path)
+        return True
+    except GrokWrapperError:
+        return False
 
 
 def redact_handoff_blocker(blocker: dict) -> dict:
@@ -316,6 +355,34 @@ def dual_condition_ready(
         return False, blockers
     if envelope.get("runId") != manifest.get("runId"):
         blockers.append({"kind": "handoff-unavailable", "message": "runId mismatch"})
+        return False, blockers
+    # Dual-condition ready requires the terminal *code* envelope, not any success
+    # envelope that merely reuses the same runId (corrupt/replaced artifact).
+    if envelope.get("mode") != "code":
+        blockers.append(
+            {
+                "kind": "terminal-envelope-incomplete",
+                "message": "integration-ready handoff requires a success envelope with mode code",
+                "detail": {"envelopeMode": envelope.get("mode")},
+            }
+        )
+        return False, blockers
+    env_base = envelope.get("baseRevision")
+    man_base = manifest.get("baseRevision")
+    if (
+        isinstance(env_base, str)
+        and env_base
+        and isinstance(man_base, str)
+        and man_base
+        and env_base != man_base
+    ):
+        blockers.append(
+            {
+                "kind": "artifact-integrity-failure",
+                "message": "envelope baseRevision does not match handoff manifest",
+                "detail": {"envelopeBase": env_base, "manifestBase": man_base},
+            }
+        )
         return False, blockers
     rel = manifest.get("patch", {}).get("relativePath")
     expected = manifest.get("patch", {}).get("sha256")

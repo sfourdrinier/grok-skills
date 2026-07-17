@@ -110,6 +110,12 @@ class ValidateContractTests(unittest.TestCase):
         )
         self.assertEqual(c2["requiredValidation"], [])
 
+    def test_argv_nul_bytes_rejected(self) -> None:
+        with self.assertRaises(GrokWrapperError) as cm:
+            self._ok(requiredValidation=[{"argv": ["true", "bad\x00arg"], "cwd": "."}])
+        self.assertEqual(cm.exception.error_class, "implementation-contract-invalid")
+        self.assertIn("NUL", str(cm.exception))
+
     def test_trust_model_constant(self) -> None:
         self.assertEqual(trust_model(), "operator-contract-trusted-no-os-sandbox")
         c = self._ok()
@@ -186,6 +192,15 @@ class LoadContractFileTests(unittest.TestCase):
             c = load_contract_file(path)
             self.assertEqual(c["taskId"], "t1")
             self.assertEqual(c["requiredValidation"][0]["argv"], ["true"])
+
+    def test_rejects_invalid_utf8_contract_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "bad.json"
+            path.write_bytes(b"\xff\xfe{not utf8")
+            with self.assertRaises(GrokWrapperError) as cm:
+                load_contract_file(path)
+            self.assertEqual(cm.exception.error_class, "implementation-contract-invalid")
+            self.assertIn("UTF-8", str(cm.exception))
 
 
 if __name__ == "__main__":

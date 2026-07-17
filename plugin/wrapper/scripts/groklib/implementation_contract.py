@@ -191,6 +191,13 @@ def load_contract_file(path: pathlib.Path) -> dict:
     safe = _assert_no_symlink_components(p)
     try:
         text = safe.read_text(encoding="utf-8")
+    except UnicodeError as exc:
+        # Malformed contracts must classify as implementation-contract-invalid
+        # (not top-level unexpected cli-failure).
+        raise _contract_error(
+            "contract file is not valid UTF-8: {}".format(exc),
+            {"path": str(safe)},
+        ) from exc
     except OSError as exc:
         raise _contract_error("cannot read contract file: {}".format(exc), {"path": str(safe)}) from exc
     try:
@@ -264,9 +271,18 @@ def validate_contract(data: dict) -> dict:
             raise _contract_error(
                 "requiredValidation[{}].argv must be a non-empty string array".format(i)
             )
+        # subprocess.run rejects embedded NUL with ValueError; fail closed at contract load.
+        for j, token in enumerate(argv):
+            if "\x00" in token:
+                raise _contract_error(
+                    "requiredValidation[{}].argv[{}] must not contain NUL bytes".format(i, j),
+                    {"index": j},
+                )
         cwd = entry.get("cwd", ".")
         if not isinstance(cwd, str):
             raise _contract_error("requiredValidation[{}].cwd must be a string".format(i))
+        if "\x00" in cwd:
+            raise _contract_error("requiredValidation[{}].cwd must not contain NUL bytes".format(i))
         if cwd.strip() in (".", "./", ""):
             cwd_norm = "."
         else:
@@ -274,6 +290,10 @@ def validate_contract(data: dict) -> dict:
         purpose = entry.get("purpose") or ""
         if purpose is not None and not isinstance(purpose, str):
             raise _contract_error("requiredValidation[{}].purpose must be a string".format(i))
+        if isinstance(purpose, str) and "\x00" in purpose:
+            raise _contract_error(
+                "requiredValidation[{}].purpose must not contain NUL bytes".format(i)
+            )
         req_out.append({"argv": list(argv), "cwd": cwd_norm, "purpose": purpose or ""})
 
     if "acceptanceCriteria" not in data or data.get("acceptanceCriteria") is None:

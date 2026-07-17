@@ -115,6 +115,70 @@ class ValidateHandoffTests(unittest.TestCase):
         doc["integration"] = {"ready": False, "blockers": [{"kind": "no-changes", "message": "x"}]}
         self.assertEqual(validate_implementation_handoff(doc), [])
 
+    def test_ready_true_rejects_escaping_changed_paths(self) -> None:
+        doc = self._doc()
+        doc["changedFiles"] = [{"path": "../escape.ts", "status": "modified", "oldPath": None}]
+        errs = validate_implementation_handoff(doc)
+        self.assertTrue(any("path" in e and "repository-relative" in e for e in errs), errs)
+        doc = self._doc()
+        doc["changedFiles"] = [{"path": "/etc/passwd", "status": "modified", "oldPath": None}]
+        errs = validate_implementation_handoff(doc)
+        self.assertTrue(any("repository-relative" in e for e in errs), errs)
+        doc = self._doc()
+        doc["changedFiles"] = [
+            {"path": "pkg/a.ts", "status": "renamed", "oldPath": "../../out.ts"}
+        ]
+        errs = validate_implementation_handoff(doc)
+        self.assertTrue(any("oldPath" in e for e in errs), errs)
+
+    def test_ready_true_rejects_failed_validation_flags(self) -> None:
+        doc = self._doc()
+        doc["validation"] = {
+            "requiredCommandsPassed": False,
+            "buildGatePassed": True,
+            "allPassed": False,
+            "sources": {},
+        }
+        errs = validate_implementation_handoff(doc)
+        self.assertTrue(any("requiredCommandsPassed" in e for e in errs), errs)
+
+    def test_dual_condition_requires_code_envelope_mode(self) -> None:
+        import tempfile
+
+        doc = self._doc()
+        patch_bytes = b"p"
+        with tempfile.TemporaryDirectory() as tmp:
+            p = pathlib.Path(tmp) / "implementation.patch"
+            p.write_bytes(patch_bytes)
+            doc["patch"]["sha256"] = hashlib.sha256(patch_bytes).hexdigest()
+            doc["patch"]["bytes"] = len(patch_bytes)
+            ready, blockers = dual_condition_ready(
+                manifest=doc,
+                envelope={
+                    "status": "success",
+                    "runId": doc["runId"],
+                    "mode": "status",
+                    "baseRevision": doc["baseRevision"],
+                },
+                patch_abs=p,
+            )
+            self.assertFalse(ready)
+            self.assertTrue(
+                any(b.get("kind") == "terminal-envelope-incomplete" for b in blockers),
+                blockers,
+            )
+            ready2, _ = dual_condition_ready(
+                manifest=doc,
+                envelope={
+                    "status": "success",
+                    "runId": doc["runId"],
+                    "mode": "code",
+                    "baseRevision": doc["baseRevision"],
+                },
+                patch_abs=p,
+            )
+            self.assertTrue(ready2)
+
 
 class CommandEvidenceTests(unittest.TestCase):
     def test_tails_and_hashes(self) -> None:
@@ -371,7 +435,12 @@ class ReadyAndDualConditionTests(unittest.TestCase):
             )
             ready2, _ = dual_condition_ready(
                 manifest=doc,
-                envelope={"status": "success", "runId": doc["runId"]},
+                envelope={
+                    "status": "success",
+                    "runId": doc["runId"],
+                    "mode": "code",
+                    "baseRevision": doc["baseRevision"],
+                },
                 patch_abs=p,
             )
             self.assertTrue(ready2)
