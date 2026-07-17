@@ -41,6 +41,7 @@ import {
   withExplicitIntegration,
 } from "./lib/jobs.mjs";
 import { shouldAttemptTerminalNotify, wrapperChildEnv } from "./lib/notify.mjs";
+import { writeHandoffConsumedMarker } from "./subagent-stop-hook.mjs";
 import {
   maybeNotifyAfterTerminal,
   resolveRunIdFromJobAndStdout,
@@ -413,7 +414,21 @@ function runStatus(wrapper, args) {
   return runPassthrough(wrapper, args);
 }
 function runHandoff(wrapper, args) {
-  return runPassthrough(wrapper, args);
+  const code = runPassthrough(wrapper, args);
+  // On a ready handoff (exit 0), stamp the consumed marker so the SubagentStop
+  // fallback stops re-suggesting this run (the marker had no writer before).
+  if (code === 0) {
+    const i = args.indexOf("--run-id");
+    const runId = i >= 0 ? args[i + 1] : undefined;
+    if (runId) {
+      try {
+        writeHandoffConsumedMarker(runId);
+      } catch {
+        /* best-effort: never fail the handoff over the advisory marker */
+      }
+    }
+  }
+  return code;
 }
 function cmdJobs(cwd) {
   process.stdout.write(formatJobsTable(listJobs(cwd)));

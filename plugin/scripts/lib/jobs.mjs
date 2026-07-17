@@ -94,12 +94,19 @@ function normalizeConfig(raw, opts = {}) {
   if (raw?.prefsSources && typeof raw.prefsSources === "object") {
     prefsSources = { ...raw.prefsSources };
   } else if (opts.legacySetup) {
-    // Pre-userConfig indexes: any persisted value was operator setup / prior use.
-    prefsSources = {
-      runMode: "setup",
-      notificationMode: "setup",
-      notificationWebhookUrl: "setup",
-    };
+    // Pre-userConfig indexes: saveIndex persists config on EVERY job, so a
+    // workspace that merely ran a job (never setup) carries default values.
+    // Only pin a field as setup-authored when its stored value is NON-default
+    // (evidence of a deliberate setup); otherwise leave it unset so post-upgrade
+    // CLAUDE_PLUGIN_OPTION_* userConfig still applies.
+    const defaultNotificationMode = normalizeNotificationMode(undefined);
+    if (raw?.runMode === "direct") prefsSources.runMode = "setup";
+    if (normalizeNotificationMode(raw?.notificationMode) !== defaultNotificationMode) {
+      prefsSources.notificationMode = "setup";
+    }
+    if (normalizeWebhookUrl(raw?.notificationWebhookUrl)) {
+      prefsSources.notificationWebhookUrl = "setup";
+    }
   }
   return {
     runMode: raw?.runMode === "direct" ? "direct" : "hardened",
@@ -588,6 +595,14 @@ export function withExplicitIntegration(args, mode) {
  */
 export function gateIntegrationForCodeish(mode, rest, integrationFlag, cwd, env = process.env) {
   if (mode !== "code" && mode !== "implement") {
+    return { ok: true, rest, effective: null };
+  }
+  // continue-run is worktree-only in the wrapper (it loads the retained
+  // worktree lineage and forbids --target/--base/--contract-file), so it never
+  // does a live direct edit - exempt it from direct-integration consent, which
+  // would otherwise refuse the documented continuation command in a fresh
+  // workspace where the default mode resolves to direct.
+  if (rest.includes("--continue-run")) {
     return { ok: true, rest, effective: null };
   }
   // SECURITY: key consent on the repo being edited, not process.cwd().

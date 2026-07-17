@@ -18,7 +18,7 @@ import json
 import os
 import pathlib
 import shutil
-from typing import Optional
+from typing import List, Optional
 
 from groklib import log_stderr
 
@@ -98,7 +98,14 @@ def archive_session(
                 "archive target already exists at {}; refusing overwrite".format(dest),
             )
             return None
-        shutil.copytree(str(src), str(dest))
+        # Drop symlinks: a model/CLI process can plant a symlink under the
+        # writable private HOME/.grok/sessions pointing at an operator key or
+        # dotfile outside the sandbox; copytree's default follows links and would
+        # copy the TARGET into the retained run dir. Skip any symlinked entry.
+        def _ignore_symlinks(directory: str, names: List[str]) -> List[str]:
+            return [n for n in names if os.path.islink(os.path.join(directory, n))]
+
+        shutil.copytree(str(src), str(dest), ignore=_ignore_symlinks)
         _apply_private_modes(session_root)
         meta = {
             "schemaVersion": _SCHEMA_VERSION,

@@ -57,6 +57,64 @@ function git(cwd, args) {
   };
 }
 
+/** Strip git's double-quoted path quoting (special-char paths). */
+function unquoteGitPath(p) {
+  const s = String(p).trim();
+  if (s.startsWith('"') && s.endsWith('"')) {
+    try {
+      return JSON.parse(s);
+    } catch {
+      return s.slice(1, -1);
+    }
+  }
+  return s;
+}
+
+/** Resolve a numstat rename form ("old => new", "{a => b}/f") to the new path. */
+function normalizeRenamePath(p) {
+  let out = String(p).replace(/\{[^}]*? => ([^}]*?)\}/g, "$1");
+  const idx = out.indexOf(" => ");
+  if (idx >= 0) out = out.slice(idx + 4);
+  return out.replace(/\/{2,}/g, "/");
+}
+
+/**
+ * Repo-relative paths that are dirty per `git status --short --untracked-files=all`.
+ * @param {string} statusOutput
+ * @returns {Set<string>}
+ */
+export function parseDirtyStatusPaths(statusOutput) {
+  const set = new Set();
+  for (const raw of String(statusOutput || "").split("\n")) {
+    if (!raw.trim()) continue;
+    const line = raw.slice(3); // 2 status columns + 1 space
+    const arrow = line.indexOf(" -> ");
+    if (arrow >= 0) {
+      set.add(unquoteGitPath(line.slice(0, arrow)));
+      set.add(unquoteGitPath(line.slice(arrow + 4)));
+    } else {
+      set.add(unquoteGitPath(line));
+    }
+  }
+  return set;
+}
+
+/**
+ * Repo-relative paths a patch touches, from `git apply --numstat --binary`.
+ * @param {string} numstatOutput
+ * @returns {string[]}
+ */
+export function parseNumstatPaths(numstatOutput) {
+  const paths = [];
+  for (const raw of String(numstatOutput || "").split("\n")) {
+    if (!raw.trim()) continue;
+    const parts = raw.split("\t"); // "<added>\t<deleted>\t<path>"
+    if (parts.length < 3) continue;
+    paths.push(unquoteGitPath(normalizeRenamePath(parts.slice(2).join("\t"))));
+  }
+  return paths;
+}
+
 /**
  * Apply-time revalidation + git apply to the operator target tree.
  * Caller supplies runHandoff (typically runHandoffCaptured) to avoid import cycles.
@@ -142,6 +200,31 @@ export function applyVerifiedPatch({
 
   const patchSha = sha256File(patchPath);
   const preStatus = git(targetRepo, ["status", "--short", "--untracked-files=all"]);
+
+  // 3a. Dirty-overlap guard: git apply --check can PASS even when the patch
+  // touches a file the operator is actively editing (non-conflicting hunks).
+  // Auto-apply to the live tree must NOT entangle Grok's changes into a dirty
+  // file - block before apply (operator commits/stashes, then re-runs).
+  const dirtyPaths = parseDirtyStatusPaths(preStatus.stdout);
+  const numstat = git(targetRepo, ["apply", "--numstat", "--binary", patchPath]);
+  const patchPaths = numstat.code === 0 ? parseNumstatPaths(numstat.stdout) : [];
+  const overlap = patchPaths.filter((p) => dirtyPaths.has(p)).sort();
+  if (overlap.length > 0) {
+    stderrLine(
+      `[grok-auto] BLOCKED: patch overlaps already-dirty path(s): ${overlap.join(", ")}. ` +
+        `Commit or stash them, then re-run. No apply attempted.`
+    );
+    return {
+      ok: false,
+      outcome: "blocked-dirty-overlap",
+      reason: "patch touches paths already dirty in the operator checkout",
+      runId,
+      patchPath,
+      patchSha,
+      overlap,
+      preStatus: preStatus.stdout,
+    };
+  }
 
   // 3. Precondition: git apply --check --binary (tree may have moved since run).
   const check = git(targetRepo, ["apply", "--check", "--binary", patchPath]);

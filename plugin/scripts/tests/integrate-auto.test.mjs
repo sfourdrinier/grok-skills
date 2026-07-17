@@ -14,7 +14,7 @@ import {
   companionIntegrationToWrapper,
   restForWrapperIntegration,
 } from "../lib/implement.mjs";
-import { locateImplementationPatch } from "../lib/integrate.mjs";
+import { applyVerifiedPatch, locateImplementationPatch } from "../lib/integrate.mjs";
 import { makeFakeWrapper, readCalls, runCompanion } from "./helpers/fake-wrapper.mjs";
 
 const RUN_ID = "20260717T120000Z-a1b2c3";
@@ -274,6 +274,36 @@ test("auto apply-time revalidation: tree mutation blocks half-apply; exit 1", ()
     assert.deepEqual(readCalls(callsPath), ["code", "handoff", "handoff"]);
   } finally {
     cleanup();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("auto dirty-overlap: blocks apply when a patch path is already dirty", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-auto-dirty-"));
+  const repo = initTargetRepo(path.join(root, "repo"));
+  const xdg = path.join(root, "xdg");
+  stagePatch(xdg, RUN_ID, capturePatchAndRestore(repo));
+  // Operator is actively editing the same file the patch touches.
+  fs.appendFileSync(path.join(repo, "foo.txt"), "operator work in progress\n");
+  const before = fs.readFileSync(path.join(repo, "foo.txt"), "utf8");
+  try {
+    const res = applyVerifiedPatch({
+      wrapper: "unused",
+      runId: RUN_ID,
+      targetRepo: repo,
+      runHandoff: () => ({ code: 0, envelope: { response: { integration: { ready: true } } } }),
+      stderrLine: () => {},
+      env: { XDG_STATE_HOME: xdg },
+    });
+    assert.equal(res.ok, false);
+    assert.equal(res.outcome, "blocked-dirty-overlap");
+    assert.deepEqual(res.overlap, ["foo.txt"]);
+    assert.equal(
+      fs.readFileSync(path.join(repo, "foo.txt"), "utf8"),
+      before,
+      "target must be untouched when dirty-overlap blocks"
+    );
+  } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });

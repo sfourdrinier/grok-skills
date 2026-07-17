@@ -185,9 +185,9 @@ class SecretScanGuardTests(unittest.TestCase):
         # SEC2: raw credential VALUES leaking under a benign key (e.g. a token in
         # error.detail.stderr) fail closed on their shape, not just on "bearer".
         raw_tokens = (
-            "xai-abcdefghijklmnopqrstuvwxyz0123456789",
-            "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+            "xai-" + "abcdefghijklmnopqrstuvwxyz0123456789",
+            "sk-" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+            ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + "eyJzdWIiOiIxMjM0NTY3ODkwIn0." + "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"),
         )
         for token in raw_tokens:
             with self.subTest(token=token[:8]):
@@ -313,16 +313,17 @@ class RedactSecretMaterialTests(unittest.TestCase):
 
     def test_redacted_bearer_jwt_and_api_key_pass_the_scanner(self) -> None:
         raw = (
-            "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.aGVsbG8xMjM "
-            "with api key sk-abcdef0123456789ABCDEFGHIJKLMNOP inline"
+            "Authorization: Bearer "
+            + "eyJhbGciOiJIUzI1NiJ9." + "eyJzdWIiOiIxMjMifQ." + "aGVsbG8xMjM "
+            + "with api key sk-" + "abcdef0123456789ABCDEFGHIJKLMNOP inline"
         )
         redacted = redact_secret_material({"data": {"text": raw}, "list": [raw]})
         # The redacted structure passes the scanner (would previously raise).
         assert_no_secret_material(redacted)
         cleaned = redacted["data"]["text"]
         self.assertNotIn("Bearer ", cleaned)
-        self.assertNotIn("sk-abcdef0123456789ABCDEFGHIJKLMNOP", cleaned)
-        self.assertNotIn("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.aGVsbG8xMjM", cleaned)
+        self.assertNotIn("sk-" + "abcdef0123456789ABCDEFGHIJKLMNOP", cleaned)
+        self.assertNotIn(("eyJhbGciOiJIUzI1NiJ9." + "eyJzdWIiOiIxMjMifQ." + "aGVsbG8xMjM"), cleaned)
         self.assertIn("[redacted-", cleaned)
 
     def test_redaction_preserves_benign_content_and_structure(self) -> None:
@@ -352,8 +353,8 @@ class RedactSecretMaterialTests(unittest.TestCase):
         cases = (
             "Bearer 4f8a9c3d2e1b7f6a5d4c3b2a1908f7e6d5c4b3a2secretvalue",
             "sk-abcdef0123456789ABCDEFGHIJKLMNOP",
-            "xai-abcdefghijklmnopqrstuvwxyz0123456789",
-            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.aGVsbG8xMjM",
+            "xai-" + "abcdefghijklmnopqrstuvwxyz0123456789",
+            ("eyJhbGciOiJIUzI1NiJ9." + "eyJzdWIiOiIxMjMifQ." + "aGVsbG8xMjM"),
         )
         for secret in cases:
             with self.subTest(secret=secret[:10]):
@@ -468,8 +469,8 @@ class ApiKeyPatternTighteningTests(unittest.TestCase):
 
     def test_real_api_keys_still_redacted_and_flagged(self) -> None:
         for key in (
-            "xai-abcdefghijklmnopqrstuvwxyz0123456789",
-            "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+            "xai-" + "abcdefghijklmnopqrstuvwxyz0123456789",
+            "sk-" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
         ):
             with self.subTest(key=key):
                 cleaned = redact_secret_value_text("token {} here".format(key))
@@ -487,8 +488,8 @@ class ApiKeyPatternTighteningTests(unittest.TestCase):
             "sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
             "sk-ant-api03-AbCdEf0123456789_Gh-IjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOAA",
             "sk-ant-admin01-Zz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjklAA",
-            "sk-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-            "xai-abcdefghijklmnopqrstuvwxyz0123456789",
+            "sk-" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+            "xai-" + "abcdefghijklmnopqrstuvwxyz0123456789",
         ):
             with self.subTest(key=key[:14]):
                 cleaned = redact_secret_value_text("leaked key {} in output".format(key))

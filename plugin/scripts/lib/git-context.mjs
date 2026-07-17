@@ -28,19 +28,21 @@ export function isGitRepo(cwd) {
  */
 export function parseTargetFlag(args) {
   if (!Array.isArray(args)) return ".";
+  // Last-wins, matching the wrapper's argparse single-value --target: a command
+  // with duplicate --target must gate consent/target on the SAME repo the
+  // wrapper actually edits (review: first-vs-last mismatch).
+  let found = null;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--target" && args[i + 1] !== undefined) {
       const v = String(args[i + 1]);
-      if (v.startsWith("-")) return ".";
-      return v;
-    }
-    if (typeof a === "string" && a.startsWith("--target=")) {
+      found = v.startsWith("-") ? "." : v;
+    } else if (typeof a === "string" && a.startsWith("--target=")) {
       const v = a.slice("--target=".length);
-      return v || ".";
+      found = v || ".";
     }
   }
-  return ".";
+  return found === null ? "." : found;
 }
 
 /**

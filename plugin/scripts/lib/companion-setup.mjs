@@ -80,7 +80,20 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
         const a = args[i];
         if (a !== "direct" && a !== "hardened") continue;
         const prev = args[i - 1];
-        if (prev === "--integration" || prev === "--run-mode") continue;
+        // Skip any value-bearing flag's argument: a --target/notification value
+        // literally named "direct"/"hardened" must not be read as the bare
+        // `setup direct` convenience (review: --target value misread as run mode).
+        if (
+          [
+            "--integration",
+            "--run-mode",
+            "--target",
+            "--notification-mode",
+            "--notification-webhook-url",
+            "--codex-agents-scope",
+          ].includes(prev)
+        )
+          continue;
         mode = a;
         break;
       }

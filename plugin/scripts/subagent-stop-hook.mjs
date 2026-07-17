@@ -25,6 +25,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 
 import { listJobs } from "./lib/jobs.mjs";
 import { readAllStdinSync } from "./lib/read-stdin.mjs";
@@ -114,6 +115,32 @@ export function findNewestUnconsumedCodeRunId(cwd, env = process.env) {
 }
 
 /**
+ * Mark a code run's handoff as consumed so the SubagentStop fallback stops
+ * re-suggesting it (the marker previously had no production writer, so every
+ * checked run stayed "unconsumed" forever). Called from the companion after a
+ * ready `/grok:handoff`. Best-effort: never throws.
+ * @param {string} runId
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {boolean} true when the marker was written
+ */
+export function writeHandoffConsumedMarker(runId, env = process.env) {
+  const runsDir = runsDirFor(env);
+  const safe = safeRunIdForRunsDir(runId, runsDir);
+  if (!safe) return false;
+  const runDir = path.join(runsDir, safe);
+  try {
+    if (!fs.statSync(runDir).isDirectory()) return false;
+    fs.writeFileSync(
+      path.join(runDir, HANDOFF_MARKER),
+      JSON.stringify({ handoffRunId: safe }) + "\n"
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * @param {string} runId
  * @param {{ fromMessage?: boolean }} [opts]
  * @returns {string}
@@ -187,9 +214,13 @@ function main() {
   process.exit(0);
 }
 
-try {
-  main();
-} catch {
-  // Never block SubagentStop: any unexpected failure is silent exit 0.
-  process.exit(0);
+// Only run the hook when executed as a script; importing (e.g. the companion
+// reusing writeHandoffConsumedMarker) must not read stdin or exit.
+if (import.meta.url === pathToFileURL(process.argv[1] || "").href) {
+  try {
+    main();
+  } catch {
+    // Never block SubagentStop: any unexpected failure is silent exit 0.
+    process.exit(0);
+  }
 }
