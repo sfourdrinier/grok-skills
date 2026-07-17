@@ -1,0 +1,17 @@
+#!/usr/bin/env node
+// plugin/bin/grok-skills
+//
+// PATH shim for Claude Code plugin bin/ support: forwards argv to the
+// companion in THIS install tree (self-locating; never trusts env roots).
+// Codex has no plugin bin support - skills keep using $SKILL_BASE/run.mjs.
+import { spawnSync } from "node:child_process";
+import path from "node:path";
+import process from "node:process";
+import { fileURLToPath } from "node:url";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const companion = path.join(here, "..", "scripts", "grok-companion.mjs");
+const result = spawnSync(process.execPath, [companion, ...process.argv.slice(2)], {
+  stdio: "inherit",
+});
+process.exit(typeof result.status === "number" ? result.status : 1);

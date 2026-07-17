@@ -13,7 +13,25 @@ slash when the harness injects env. They largely avoid Skill-tool → bare Bash.
 
 ## How grok-skills does it (Skill-tool first)
 
-### Transparent path (preferred)
+### Entrypoints (priority)
+
+1. **Claude Code `bin/` shim (entrypoint #1 on Claude Code):** while the plugin is
+   enabled, Claude Code auto-discovers `plugin/bin/*` and puts bare commands on the
+   Bash tool PATH. Prefer:
+
+```bash
+grok-skills <mode> [args...]
+```
+
+   The shim (`plugin/bin/grok-skills`) self-locates `scripts/grok-companion.mjs` from
+   its own path and forwards argv with exit-code passthrough. No manifest field is
+   required for `bin/` discovery.
+
+2. **`$SKILL_BASE/run.mjs` everywhere else** (Skill tool, Codex, any host without
+   plugin `bin/` support). Codex has **no** plugin `bin/` support - skills and
+   Codex agents must keep using self-locating `run.mjs` / `agents/run.mjs`.
+
+### Transparent path (preferred for skills)
 
 1. Skill tool loads a skill and shows **Base directory for this skill**  
    (absolute path to `…/skills/<name>/`).
@@ -44,23 +62,31 @@ node "${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}/scripts/grok-companion.mjs" <mode> ...
 ```
 
 Prefer `$SKILL_BASE/run.mjs` whenever the Skill tool loaded the skill (it wins
-over a stale env).
+over a stale env). On Claude Code with the plugin enabled, prefer bare
+`grok-skills` when `command -v grok-skills` succeeds.
 
 ### Claude plugin agents (aligned)
 
-Shared self-locating entry: `agents/run.mjs` (plugin root = parent of `agents/`).
+Shim-first (Claude Code PATH), then self-locating `agents/run.mjs` (plugin root =
+parent of `agents/`):
 
 ```bash
-PLUGIN_INSTALL="${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}"
-node "$PLUGIN_INSTALL/agents/run.mjs" code ...
+if command -v grok-skills >/dev/null 2>&1; then
+  GROK_RUN() { grok-skills "$@"; }
+else
+  PLUGIN_INSTALL="${CLAUDE_PLUGIN_ROOT:-$PLUGIN_ROOT}"
+  GROK_RUN() { node "$PLUGIN_INSTALL/agents/run.mjs" "$@"; }
+fi
+GROK_RUN code ...
 ```
 
 `agents/run.mjs` locates the companion from its own path (same family as skills).
 
 After a marketplace upgrade, reopen the session so the host reinjects the new
-plugin root into agent shells. Skills avoid that via Skill-tool base paths;
-Claude agents still need a fresh host env to *find* `agents/run.mjs` (once
-running, entry-forcing keeps the tree consistent).
+plugin root into agent shells (and reloads `bin/` on PATH). Skills avoid that via
+Skill-tool base paths; Claude agents still need a fresh host env to *find*
+`agents/run.mjs` when the shim is not on PATH (once running, entry-forcing keeps
+the tree consistent).
 
 ### Codex custom agents
 
@@ -71,11 +97,13 @@ SessionStart installs managed TOML with absolute **`GROK_AGENT_RUN=…/agents/ru
 node "$GROK_AGENT_RUN" code ...
 ```
 
+Codex has no plugin `bin/` support - do not rely on a bare `grok-skills` command.
+
 ### Never invent
 
 Do **not** construct versioned cache paths by guessing a plugin version.
-Do **use** Skill base + `run.mjs`, host env, or managed `GROK_AGENT_RUN` /
-`agents/run.mjs` paths.
+Do **use** Skill base + `run.mjs`, host env, bare `grok-skills` (Claude Code),
+or managed `GROK_AGENT_RUN` / `agents/run.mjs` paths.
 
 ### Uninstall managed Codex agents
 
