@@ -128,7 +128,7 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 
 ### Suite counts (ratchet)
 
-- Wrapper: 653 -> 727. Plugin: 172 -> 238 (end of Phase 4).
+- Wrapper: 653 -> 725. Plugin: 172 -> 238 (end of Phase 4).
 
 ## [1.6.0] - 2026-07-16
 
