@@ -139,6 +139,34 @@ class HandoffModeTests(ModeHarness):
         self.assertEqual(env["status"], "success")
         self.assertEqual(env["response"]["contractSummary"], summary)
 
+    def test_handoff_response_redacts_bearer_in_contract_summary(self) -> None:
+        # Phase 1 finding 4: echo path runs redact_secret_value_text over
+        # objective/criteria. Split secret-shaped fixture per repo rule 8.
+        run_id = self._seed_code_run(ready_manifest=True, write_envelope=True)
+        paths_dir = runstate.state_root() / "runs" / run_id
+        manifest = json.loads(
+            (paths_dir / "implementation-handoff.json").read_text(encoding="utf-8")
+        )
+        bearer_body = "4f8a9b2c1d0e3f5a6b7c8d9e0f1a2b3c"
+        bearer_secret = "Bearer " + bearer_body
+        summary = {
+            "taskId": "T-1",
+            "objective": "objective clean",
+            "acceptanceCriteria": ["must pass with " + bearer_secret],
+        }
+        manifest["contractSummary"] = summary
+        (paths_dir / "implementation-handoff.json").write_text(
+            json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
+        )
+        code, out = self.drive(["handoff", "--run-id", run_id])
+        env = json.loads(out)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(env["status"], "success")
+        echoed = env["response"]["contractSummary"]
+        self.assertNotIn(bearer_body, json.dumps(echoed))
+        self.assertIn("[redacted-bearer-token]", echoed["acceptanceCriteria"][0])
+        self.assertEqual(echoed["objective"], "objective clean")
+
     def test_handoff_not_ready_without_envelope(self) -> None:
         run_id = self._seed_code_run(ready_manifest=True, write_envelope=False)
         code, out = self.drive(["handoff", "--run-id", run_id])

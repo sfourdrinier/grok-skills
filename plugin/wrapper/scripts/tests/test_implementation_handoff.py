@@ -173,6 +173,61 @@ class ValidateHandoffTests(unittest.TestCase):
             any("contractSummary" in e for e in validate_implementation_handoff(doc))
         )
 
+    def test_contract_summary_objective_over_cap_rejected(self) -> None:
+        # Phase 1 finding 4: mirror contract caps so a tampered manifest cannot
+        # push multi-MB summary text through handoff validation.
+        doc = self._doc()
+        doc["contractSummary"] = {
+            "taskId": "T-1",
+            "objective": "x" * 2001,
+            "acceptanceCriteria": ["ok"],
+        }
+        errs = validate_implementation_handoff(doc)
+        self.assertTrue(any("objective" in e for e in errs), errs)
+
+    def test_contract_summary_criteria_over_cap_rejected(self) -> None:
+        doc = self._doc()
+        doc["contractSummary"] = {
+            "taskId": "T-1",
+            "objective": "ok",
+            "acceptanceCriteria": ["c{}".format(i) for i in range(33)],
+        }
+        errs = validate_implementation_handoff(doc)
+        self.assertTrue(any("acceptanceCriteria" in e for e in errs), errs)
+
+        doc["contractSummary"] = {
+            "taskId": "T-1",
+            "objective": "ok",
+            "acceptanceCriteria": ["z" * 501],
+        }
+        errs = validate_implementation_handoff(doc)
+        self.assertTrue(any("acceptanceCriteria" in e for e in errs), errs)
+
+    def test_write_manifest_redacts_contract_summary_fields(self) -> None:
+        # Phase 1 finding 4: write-side redaction lives in write_manifest (single
+        # place). Split secret-shaped fixture per repo rule 8.
+        bearer_secret = "Bearer " + "4f8a9b2c1d0e3f5a6b7c8d9e0f1a2b3c"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "implementation-handoff.json"
+            doc = self._doc()
+            doc["integration"] = {"ready": False, "blockers": []}
+            doc["changedFiles"] = []
+            doc["patch"] = dict(doc["patch"], bytes=0)
+            doc["contractSummary"] = {
+                "taskId": "T-1",
+                "objective": "ship with " + bearer_secret,
+                "acceptanceCriteria": ["must not echo " + bearer_secret],
+            }
+            write_manifest(path, doc)
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("4f8a9b2c1d0e3f5a6b7c8d9e0f1a2b3c", text)
+            self.assertIn("[redacted-bearer-token]", text)
+            loaded = json.loads(text)
+            self.assertIn(
+                "[redacted-bearer-token]",
+                loaded["contractSummary"]["acceptanceCriteria"][0],
+            )
+
     def test_dual_condition_requires_code_envelope_mode(self) -> None:
         import tempfile
 

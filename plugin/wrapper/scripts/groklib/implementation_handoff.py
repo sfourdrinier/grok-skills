@@ -24,6 +24,7 @@ from groklib.envelope import (
 )
 from groklib.implementation_contract import (
     normalize_git_repo_path,
+    objective_criteria_bound_errors,
 )
 
 _log = lambda fn, msg: log_stderr("implementation_handoff", fn, msg)
@@ -226,7 +227,41 @@ def validate_implementation_handoff(doc: dict) -> List[str]:
             ac = summary.get("acceptanceCriteria")
             if not isinstance(ac, list) or not all(isinstance(c, str) for c in ac):
                 errors.append("contractSummary.acceptanceCriteria must be string array")
+            else:
+                # Mirror contract load caps so a tampered on-disk manifest cannot
+                # push multi-MB summary fields through the handoff response.
+                errors.extend(
+                    objective_criteria_bound_errors(
+                        summary.get("objective"),
+                        ac,
+                        field_prefix="contractSummary.",
+                    )
+                )
     return errors
+
+
+def redact_contract_summary(summary: Optional[dict]) -> Optional[dict]:
+    """Defense-in-depth: redact secret-shaped text in display summary fields.
+
+    Write-side single place is ``write_manifest``; the handoff echo path also
+    calls this so a tampered on-disk summary cannot leak known patterns into
+    the parent response. Known-pattern secrets already fail envelopes closed;
+    this neutralizes display fields cheaply when they still carry a match.
+    """
+    if summary is None:
+        return None
+    if not isinstance(summary, dict):
+        return summary
+    out: Dict[str, Any] = dict(summary)
+    obj = out.get("objective")
+    if isinstance(obj, str):
+        out["objective"] = redact_secret_value_text(obj)
+    ac = out.get("acceptanceCriteria")
+    if isinstance(ac, list):
+        out["acceptanceCriteria"] = [
+            redact_secret_value_text(c) if isinstance(c, str) else c for c in ac
+        ]
+    return out
 
 
 def _is_confined_git_repo_path(path: str) -> bool:
@@ -523,7 +558,11 @@ def dual_condition_ready(
 
 
 def write_manifest(path: pathlib.Path, doc: dict) -> None:
-    """Validate, secret-redact blockers, and write implementation-handoff.json (mode 0600)."""
+    """Validate, secret-redact blockers + contractSummary, write JSON (mode 0600).
+
+    Write-side redaction for contractSummary lives HERE only (not also in
+    code_handoff_finalize): one place for objective/criteria display fields.
+    """
     # Never persist raw secret-shaped argv/details from operator validation failures.
     if isinstance(doc, dict):
         doc = dict(doc)
@@ -532,6 +571,9 @@ def write_manifest(path: pathlib.Path, doc: dict) -> None:
             integration = dict(integration)
             integration["blockers"] = redact_handoff_blockers(integration["blockers"])
             doc["integration"] = integration
+        # Defense-in-depth for display fields (Phase 1 finding 4).
+        if "contractSummary" in doc:
+            doc["contractSummary"] = redact_contract_summary(doc.get("contractSummary"))
     errs = validate_implementation_handoff(doc)
     if errs:
         raise GrokWrapperError(

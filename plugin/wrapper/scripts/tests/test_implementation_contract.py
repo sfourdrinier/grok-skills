@@ -169,6 +169,42 @@ class ValidateContractTests(unittest.TestCase):
         with self.assertRaises(GrokWrapperError):
             assert_target_matches(c, "other")
 
+    def test_objective_over_cap_rejected(self) -> None:
+        # Phase 1 finding 4: objective must be <= 2000 chars (fail closed at load).
+        with self.assertRaises(GrokWrapperError) as cm:
+            self._ok(objective="x" * 2001)
+        self.assertEqual(cm.exception.error_class, "implementation-contract-invalid")
+        self.assertIn("objective", str(cm.exception).lower())
+        # Boundary: exactly 2000 is accepted.
+        c = self._ok(objective="y" * 2000)
+        self.assertEqual(len(c["objective"]), 2000)
+
+    def test_acceptance_criteria_over_cap_rejected(self) -> None:
+        # Phase 1 finding 4: <= 32 items, each string <= 500 chars after strip.
+        with self.assertRaises(GrokWrapperError) as cm:
+            self._ok(acceptanceCriteria=["c{}".format(i) for i in range(33)])
+        self.assertEqual(cm.exception.error_class, "implementation-contract-invalid")
+        self.assertIn("acceptanceCriteria", str(cm.exception))
+
+        with self.assertRaises(GrokWrapperError) as cm:
+            self._ok(acceptanceCriteria=["z" * 501])
+        self.assertEqual(cm.exception.error_class, "implementation-contract-invalid")
+        self.assertIn("acceptanceCriteria", str(cm.exception))
+
+        # Strip before measuring: leading/trailing space must not hide over-cap body.
+        with self.assertRaises(GrokWrapperError) as cm:
+            self._ok(acceptanceCriteria=["  " + ("w" * 501) + "  "])
+        self.assertEqual(cm.exception.error_class, "implementation-contract-invalid")
+
+        # Non-string criteria rejected (fail closed).
+        with self.assertRaises(GrokWrapperError) as cm:
+            self._ok(acceptanceCriteria=[123])
+        self.assertEqual(cm.exception.error_class, "implementation-contract-invalid")
+
+        # Boundary: 32 items of 500 chars after strip are accepted.
+        c = self._ok(acceptanceCriteria=["  " + ("a" * 500) + "  "] * 32)
+        self.assertEqual(len(c["acceptanceCriteria"]), 32)
+
 
 class LoadContractFileTests(unittest.TestCase):
     def test_rejects_symlink(self) -> None:

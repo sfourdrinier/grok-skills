@@ -14,7 +14,11 @@ from typing import Any, Dict, List, Optional, Tuple  # Tuple used by load helper
 
 from groklib import GrokWrapperError, log_stderr, runstate
 from groklib import envelope as envelope_mod
-from groklib.implementation_handoff import dual_condition_ready, validate_implementation_handoff
+from groklib.implementation_handoff import (
+    dual_condition_ready,
+    redact_contract_summary,
+    validate_implementation_handoff,
+)
 
 
 def _log(function: str, message: str) -> None:
@@ -222,7 +226,8 @@ def run(args: argparse.Namespace) -> dict:
             "manifestPath": str(manifest_path),
             "patchPath": str(patch_path),
         },
-        "contractSummary": manifest.get("contractSummary"),
+        # Echo path: redact display fields (Phase 1 finding 4 defense-in-depth).
+        "contractSummary": redact_contract_summary(manifest.get("contractSummary")),
         "parentProtocol": {
             "autoApply": False,
             "note": (
