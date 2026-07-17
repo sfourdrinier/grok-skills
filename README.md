@@ -190,10 +190,10 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 | `/grok:handoff` | **Read-only** verified implementation handoff by **`runId` only** (1.6.0+). Dual-condition ready: ready manifest + success envelope + patch rehash. Never applies. Notify is not ready. |
 | `/grok:verify` | Pass/fail/inconclusive check on an existing worktree. No `--web`. |
 | `/grok:debate` | Two opposing Grok reason passes + synthesis on a topic. |
-| `/grok:status` | Jobs table, or read-only wrapper status with `--run-id` (lifecycle projection; exit 1 can mean a failed target). |
+| `/grok:status` | Jobs table, or read-only wrapper status with `--run-id` (or a bare runId - the companion translates; lifecycle projection; exit 1 can mean a failed target). |
 | `/grok:jobs` | List recent companion-tracked jobs. |
-| `/grok:result` | Stored job output (`--pretty` for Markdown). |
-| `/grok:cancel` | Cancel a running job by id. |
+| `/grok:result` | Stored job output (`--pretty` for Markdown). Accepts a job id or a runId - the companion translates. |
+| `/grok:cancel` | Cancel a running job. Accepts a job id or a runId - the companion translates. |
 | `/grok:transfer` | Package Claude session context into a Grok task pack. |
 | `/grok:cleanup` | Dry-run by default; `--confirm` removes owned run state / worktree. |
 

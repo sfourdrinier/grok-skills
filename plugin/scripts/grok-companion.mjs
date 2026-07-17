@@ -19,6 +19,7 @@ import {
   parseRunIdArg,
   parseRunIdMarker,
   renderRunProgress,
+  RUN_ID_RE,
   runsDirFor,
   snapshotRunIds,
 } from "./progress-relay.mjs";
@@ -31,6 +32,7 @@ import {
   getRunMode,
   listJobs,
   readJobStdout,
+  resolveJobByIdOrRunId,
   storeJobStdout,
   updateJob,
 } from "./lib/jobs.mjs";
@@ -423,7 +425,7 @@ function cmdJobs(cwd) {
 
 function cmdResult(cwd, args, pretty) {
   const jobId = args.find((a) => !a.startsWith("--")) || null;
-  const job = getJob(cwd, jobId);
+  const job = resolveJobByIdOrRunId(cwd, jobId);
   if (!job) {
     process.stderr.write("[grok-companion] no job found. Run a review/code first or pass a job id.\n");
     return 1;
@@ -445,7 +447,7 @@ function cmdResult(cwd, args, pretty) {
 
 function cmdCancel(cwd, args) {
   const jobId = args.find((a) => !a.startsWith("--")) || null;
-  const job = getJob(cwd, jobId);
+  const job = resolveJobByIdOrRunId(cwd, jobId);
   if (!job) {
     process.stderr.write("[grok-companion] no job to cancel.\n");
     return 1;
@@ -785,6 +787,23 @@ async function dispatch({
   if (!wrapper) {
     process.stderr.write(`${wrapperNotFoundMessage(process.env)}\n`);
     return finishCleanups(WRAPPER_NOT_FOUND_EXIT);
+  }
+
+  // status <bare-runId>: rewrite to --run-id before wrapper / jobs-table dispatch
+  if (wrapperMode === "status" && !parseRunIdArg(wrapperArgs)) {
+    const bareIdx = wrapperArgs.findIndex(
+      (a, i) => i > 0 && typeof a === "string" && !a.startsWith("-") && RUN_ID_RE.test(a)
+    );
+    if (bareIdx >= 0) {
+      const id = wrapperArgs[bareIdx];
+      wrapperArgs = [
+        wrapperArgs[0],
+        "--run-id",
+        id,
+        ...wrapperArgs.slice(1, bareIdx),
+        ...wrapperArgs.slice(bareIdx + 1),
+      ];
+    }
   }
 
   // status without --run-id: show jobs table first, then wrapper if id present

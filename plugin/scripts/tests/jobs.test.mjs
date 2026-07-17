@@ -7,6 +7,7 @@ import { test } from "node:test";
 import {
   createJob,
   DEFAULT_JOBS_CONFIG,
+  findJobByRunId,
   formatJobsTable,
   getJob,
   getNotificationConfig,
@@ -22,6 +23,7 @@ import {
 import { runDirectGrok } from "../lib/direct-grok.mjs";
 import { renderEnvelopePretty, tryParseEnvelope } from "../lib/render.mjs";
 import { buildAdversarialTask } from "../lib/git-context.mjs";
+import { makeFakeWrapper, runCompanion } from "./helpers/fake-wrapper.mjs";
 
 test("job registry creates, lists, and updates", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-jobs-"));
@@ -103,4 +105,70 @@ test("pretty render shows status and response text", () => {
   const md = renderEnvelopePretty(env);
   assert.match(md, /Looks fine/);
   assert.match(md, /success/);
+});
+
+test("findJobByRunId resolves the newest job carrying that runId", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-jobs-runid-"));
+  const env = { CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata") };
+  const runId = "20260716T000000Z-abc123";
+  // Older job also tagged with the same runId later updated - newest wins via index order.
+  const older = createJob(cwd, { kind: "review", mode: "review", runMode: "hardened" }, env);
+  updateJob(cwd, older.id, { runId, status: "success", summary: "older" }, env);
+  const newer = createJob(cwd, { kind: "code", mode: "code", runMode: "hardened" }, env);
+  updateJob(cwd, newer.id, { runId, status: "success", summary: "newer" }, env);
+
+  const found = findJobByRunId(cwd, runId, env);
+  assert.ok(found, "expected a job for known runId");
+  assert.equal(found.id, newer.id);
+  assert.equal(found.summary, "newer");
+  assert.equal(findJobByRunId(cwd, "20990101T000000Z-ffffff", env), null);
+  assert.equal(findJobByRunId(cwd, "", env), null);
+  assert.equal(findJobByRunId(cwd, null, env), null);
+});
+
+test("result <runId> returns stored stdout via companion", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-result-runid-"));
+  const pluginData = path.join(cwd, "pdata");
+  const envBase = { CLAUDE_PLUGIN_DATA: pluginData };
+  const runId = "20260716T120000Z-deadbe";
+  const job = createJob(cwd, { kind: "review", mode: "review", runMode: "hardened" }, envBase);
+  updateJob(cwd, job.id, { runId, status: "success" }, envBase);
+  const payload = JSON.stringify({
+    status: "success",
+    mode: "review",
+    runId,
+    response: { text: "stored-by-runId" },
+  });
+  storeJobStdout(cwd, job.id, `${payload}\n`, envBase);
+
+  const { env: fakeEnv, cleanup } = makeFakeWrapper({});
+  try {
+    const res = runCompanion(["result", runId], {
+      cwd,
+      env: { ...fakeEnv, CLAUDE_PLUGIN_DATA: pluginData },
+    });
+    assert.equal(res.code, 0, `stderr: ${res.stderr}`);
+    assert.match(res.stdout, /stored-by-runId/);
+    assert.match(res.stdout, new RegExp(runId));
+  } finally {
+    cleanup();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("status bare runId positional rewrites to --run-id before wrapper", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-status-bare-"));
+  const runId = "20260716T000000Z-abc123";
+  const envelope = JSON.stringify({ status: "success", runId, mode: "status" });
+  const { env, cleanup } = makeFakeWrapper({
+    status: { stdout: envelope, exitCode: 0 },
+  });
+  try {
+    const res = runCompanion(["status", runId], { env, cwd });
+    assert.equal(res.code, 0, `stderr: ${res.stderr}`);
+    assert.ok(res.stdout.includes(envelope), `stdout missing envelope: ${res.stdout}`);
+  } finally {
+    cleanup();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
 });

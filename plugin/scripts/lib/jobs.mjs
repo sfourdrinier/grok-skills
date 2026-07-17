@@ -309,6 +309,30 @@ export function getJob(cwd, jobId, env = process.env) {
   return listJobs(cwd, env).find((j) => j.id === jobId) ?? null;
 }
 
+/**
+ * Resolve a job by its stored wrapper/direct runId (newest-first index order).
+ * @returns {object|null}
+ */
+export function findJobByRunId(cwd, runId, env = process.env) {
+  if (!runId) return null;
+  const jobs = listJobs(cwd, env); // newest-first ordering already used by the table
+  return jobs.find((j) => j.runId === runId) || null;
+}
+
+/**
+ * Resolve a job from a positional that may be a job id or a runId.
+ * Same id shape (JOB_ID_RE / RUN_ID_RE); prefer runId lookup, then job id.
+ * @returns {object|null}
+ */
+export function resolveJobByIdOrRunId(cwd, idOrRunId, env = process.env) {
+  let job = null;
+  if (idOrRunId && isValidJobId(idOrRunId)) {
+    job = findJobByRunId(cwd, idOrRunId, env);
+  }
+  if (!job) job = getJob(cwd, idOrRunId, env);
+  return job;
+}
+
 export function readJobStdout(cwd, jobId, env = process.env) {
   const paths = jobPaths(cwd, jobId, env);
   if (!fs.existsSync(paths.stdout)) {

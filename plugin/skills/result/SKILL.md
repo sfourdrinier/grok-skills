@@ -1,7 +1,7 @@
 ---
 name: "result"
 description: "Show stored output for a finished Grok job"
-argument-hint: "[job-id] [--pretty]"
+argument-hint: "[job-id|runId] [--pretty]"
 allowed-tools: "Bash(node:*)"
 ---
 
@@ -33,4 +33,5 @@ use `--task-file -` with a single-quoted heredoc.
 node "$SKILL_BASE/run.mjs" result "$ARGUMENTS"
 ```
 
-Prefer `--pretty` when the user wants a readable report.
+Accepts a **job id** or a **runId** - the companion translates. Prefer
+`--pretty` when the user wants a readable report.

@@ -1,7 +1,7 @@
 ---
 name: "status"
 description: "Read a Grok run by id: finished envelope, or running progress if still in progress (read-only)"
-argument-hint: "[--run-id <run-id>]"
+argument-hint: "[--run-id <run-id> | <run-id>]"
 allowed-tools: "Bash(node:*)"
 ---
 
@@ -74,5 +74,7 @@ message instead of an envelope, tell the user to run `/grok:setup`.
 
 Without `--run-id`, the companion prints the local **jobs table** for this workspace
 (recent companion-tracked runs). With `--run-id`, it returns the wrapper status envelope.
+A bare positional matching the runId shape is accepted as well - the companion
+translates it to `--run-id <id>` before the wrapper runs.
 
 Also: `/grok:jobs`, `/grok:result`, `/grok:cancel`.
