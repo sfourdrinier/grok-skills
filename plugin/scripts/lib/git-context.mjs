@@ -5,6 +5,8 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+import { resolveWorkspaceRoot } from "./gate-state.mjs";
+
 function git(cwd, args) {
   const result = spawnSync("git", args, { cwd, encoding: "utf8" });
   return {
@@ -16,6 +18,63 @@ function git(cwd, args) {
 
 export function isGitRepo(cwd) {
   return git(cwd, ["rev-parse", "--is-inside-work-tree"]).out === "true";
+}
+
+/**
+ * Absolute path of the first --target value in argv (supports --target=).
+ * Defaults to "." when absent.
+ * @param {string[]} args
+ * @returns {string}
+ */
+export function parseTargetFlag(args) {
+  if (!Array.isArray(args)) return ".";
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--target" && args[i + 1] !== undefined) {
+      const v = String(args[i + 1]);
+      if (v.startsWith("-")) return ".";
+      return v;
+    }
+    if (typeof a === "string" && a.startsWith("--target=")) {
+      const v = a.slice("--target=".length);
+      return v || ".";
+    }
+  }
+  return ".";
+}
+
+/**
+ * Resolve the workspace key for a code/setup --target.
+ *
+ * Absolute target path relative to companion cwd, then git toplevel when the
+ * target sits in a repo (via resolveWorkspaceRoot / .git walk, same keying as
+ * jobs state). Non-git targets fall back to the absolute target dir itself so
+ * consent stays per-target and never silently uses companion cwd.
+ *
+ * @param {string} cwd companion process cwd
+ * @param {string} [target="."] --target value (relative or absolute)
+ * @returns {string} absolute workspace root used for prefs/consent keying
+ */
+export function resolveTargetWorkspaceRoot(cwd, target = ".") {
+  const raw = target == null || String(target).trim() === "" ? "." : String(target);
+  const absTarget = path.isAbsolute(raw)
+    ? path.resolve(raw)
+    : path.resolve(cwd || process.cwd(), raw);
+  // Prefer git rev-parse when available (handles worktrees); fall back to the
+  // .git walk used by jobs state so keying stays aligned either way.
+  let probe = absTarget;
+  while (!fs.existsSync(probe)) {
+    const parent = path.dirname(probe);
+    if (parent === probe) break;
+    probe = parent;
+  }
+  if (fs.existsSync(probe)) {
+    const top = git(probe, ["rev-parse", "--show-toplevel"]);
+    if (top.code === 0 && top.out) {
+      return path.resolve(top.out);
+    }
+  }
+  return resolveWorkspaceRoot(absTarget);
 }
 
 export function shortstat(cwd, range = null) {

@@ -22,9 +22,10 @@ function spawnNode(args) {
     if (!result.error && result.status === 0) {
       return result;
     }
-    // small backoff so a transient resource shortage can clear
-    const until = Date.now() + 25 * (attempt + 1);
-    while (Date.now() < until) { /* spin briefly */ }
+    // small backoff that YIELDS the CPU (a busy-spin would worsen the very
+    // resource pressure we are backing off from). Atomics.wait blocks without
+    // burning a core.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25 * (attempt + 1));
   }
   return result;
 }

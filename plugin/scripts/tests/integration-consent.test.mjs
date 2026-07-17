@@ -4,6 +4,7 @@
 // Orthogonal to runMode (hardened|direct security posture).
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -263,5 +264,273 @@ test("companionIsolation fresh workspace has no consent", () => {
     assert.equal(getIntegrationMode(iso.cwd, iso.env), "direct");
   } finally {
     iso.cleanup();
+  }
+});
+
+// --- Task 7.2b: consent keys on TARGET repo, not companion cwd ---
+
+function initGitRepo(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  const r = spawnSync("git", ["init"], { cwd: dir, encoding: "utf8" });
+  assert.equal(r.status, 0, `git init failed: ${r.stderr}`);
+  // Distinct content so two repos never share a path accidentally.
+  fs.writeFileSync(path.join(dir, "README.md"), `repo ${path.basename(dir)}\n`);
+  spawnSync("git", ["config", "user.email", "test@example.com"], { cwd: dir });
+  spawnSync("git", ["config", "user.name", "Test"], { cwd: dir });
+  spawnSync("git", ["add", "README.md"], { cwd: dir });
+  spawnSync("git", ["commit", "-m", "init", "--allow-empty"], { cwd: dir });
+  return dir;
+}
+
+test("CROSS-REPO RED: consent for workspace A does not authorize direct against B", () => {
+  // LIVE FINDING: consent recorded while companion cwd = A authorized
+  // code --target B --integration direct. Consent must key on TARGET.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-cross-repo-"));
+  const repoA = initGitRepo(path.join(root, "repo-a"));
+  const repoB = initGitRepo(path.join(root, "repo-b"));
+  const pluginData = path.join(root, "pdata");
+  const envBase = { CLAUDE_PLUGIN_DATA: pluginData };
+
+  // Consent only for A (setup while cwd = A, no --target => A).
+  const setupRes = runCompanion(
+    ["setup", "--integration", "direct", "--skip-codex-agents"],
+    { cwd: repoA, env: envBase }
+  );
+  assert.ok(setupRes.code === 0 || setupRes.code === 1, setupRes.stderr);
+  assert.equal(getIntegrationConsent(repoA, envBase), true, "A must have consent");
+  assert.equal(getIntegrationConsent(repoB, envBase), false, "B must NOT have consent");
+
+  const callsPath = path.join(root, "calls-cross.log");
+  const { env, cleanup } = makeFakeWrapper({
+    code: { stdout: `${codeEnvelope()}\n`, exitCode: 0 },
+  });
+  try {
+    // cwd stays A; --target is B; no consent for B => MUST refuse.
+    const res = runCompanion(
+      [
+        "code",
+        "--integration",
+        "direct",
+        "--target",
+        repoB,
+        "--base",
+        "HEAD",
+        "--task",
+        "x",
+      ],
+      {
+        cwd: repoA,
+        env: { ...env, ...envBase, FAKE_WRAPPER_CALLS: callsPath },
+      }
+    );
+    assert.notEqual(
+      res.code,
+      0,
+      `cross-repo direct without B consent must refuse; got code=${res.code} stderr=${res.stderr}`
+    );
+    assert.match(res.stderr, TRUST_SUMMARY_RE);
+    // Accept command should name the target when target != cwd.
+    assert.match(
+      res.stderr,
+      /setup --integration direct --target/,
+      `refuse message must include setup --target for cross-repo; got: ${res.stderr}`
+    );
+    assert.deepEqual(
+      readCalls(callsPath),
+      [],
+      "wrapper must not spawn when B has no consent"
+    );
+  } finally {
+    cleanup();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("setup --integration direct --target B consents B only; C still refused", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-target-consent-"));
+  const repoA = initGitRepo(path.join(root, "repo-a"));
+  const repoB = initGitRepo(path.join(root, "repo-b"));
+  const repoC = initGitRepo(path.join(root, "repo-c"));
+  const pluginData = path.join(root, "pdata");
+  const envBase = { CLAUDE_PLUGIN_DATA: pluginData };
+
+  // From cwd A, consent for B via --target.
+  const setupRes = runCompanion(
+    [
+      "setup",
+      "--integration",
+      "direct",
+      "--target",
+      repoB,
+      "--skip-codex-agents",
+    ],
+    { cwd: repoA, env: envBase }
+  );
+  assert.ok(setupRes.code === 0 || setupRes.code === 1, setupRes.stderr);
+  assert.equal(getIntegrationConsent(repoA, envBase), false, "A must not gain consent");
+  assert.equal(getIntegrationConsent(repoB, envBase), true, "B must have consent");
+  assert.equal(getIntegrationConsent(repoC, envBase), false, "C must not have consent");
+
+  const callsB = path.join(root, "calls-b.log");
+  const callsC = path.join(root, "calls-c.log");
+  const { env, cleanup } = makeFakeWrapper({
+    code: { echoTask: true },
+  });
+  try {
+    // Direct against B proceeds.
+    const resB = runCompanion(
+      [
+        "code",
+        "--integration",
+        "direct",
+        "--target",
+        repoB,
+        "--base",
+        "HEAD",
+        "--task",
+        "x",
+      ],
+      {
+        cwd: repoA,
+        env: { ...env, ...envBase, FAKE_WRAPPER_CALLS: callsB },
+      }
+    );
+    assert.equal(resB.code, 0, resB.stderr);
+    assert.deepEqual(readCalls(callsB), ["code"]);
+
+    // Direct against C still refused.
+    const resC = runCompanion(
+      [
+        "code",
+        "--integration",
+        "direct",
+        "--target",
+        repoC,
+        "--base",
+        "HEAD",
+        "--task",
+        "x",
+      ],
+      {
+        cwd: repoA,
+        env: { ...env, ...envBase, FAKE_WRAPPER_CALLS: callsC },
+      }
+    );
+    assert.notEqual(resC.code, 0, "C without consent must refuse");
+    assert.match(resC.stderr, TRUST_SUMMARY_RE);
+    assert.deepEqual(readCalls(callsC), []);
+  } finally {
+    cleanup();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("normal case: cwd==target with consent proceeds (unchanged)", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-same-target-"));
+  const repo = initGitRepo(path.join(root, "repo"));
+  const pluginData = path.join(root, "pdata");
+  const envBase = { CLAUDE_PLUGIN_DATA: pluginData };
+
+  const setupRes = runCompanion(
+    ["setup", "--integration", "direct", "--skip-codex-agents"],
+    { cwd: repo, env: envBase }
+  );
+  assert.ok(setupRes.code === 0 || setupRes.code === 1, setupRes.stderr);
+  assert.equal(getIntegrationConsent(repo, envBase), true);
+
+  const callsPath = path.join(root, "calls-same.log");
+  const { env, cleanup } = makeFakeWrapper({
+    code: { echoTask: true },
+  });
+  try {
+    const res = runCompanion(
+      ["code", "--target", ".", "--base", "HEAD", "--task", "x"],
+      {
+        cwd: repo,
+        env: { ...env, ...envBase, FAKE_WRAPPER_CALLS: callsPath },
+      }
+    );
+    assert.equal(res.code, 0, res.stderr);
+    assert.deepEqual(readCalls(callsPath), ["code"]);
+  } finally {
+    cleanup();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("non-git target: consent keyed on absolute target dir (per-target)", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-nongit-"));
+  const dirA = path.join(root, "plain-a");
+  const dirB = path.join(root, "plain-b");
+  fs.mkdirSync(dirA, { recursive: true });
+  fs.mkdirSync(dirB, { recursive: true });
+  const pluginData = path.join(root, "pdata");
+  const envBase = { CLAUDE_PLUGIN_DATA: pluginData };
+
+  // Consent for non-git dir A only.
+  const setupRes = runCompanion(
+    [
+      "setup",
+      "--integration",
+      "direct",
+      "--target",
+      dirA,
+      "--skip-codex-agents",
+    ],
+    { cwd: root, env: envBase }
+  );
+  assert.ok(setupRes.code === 0 || setupRes.code === 1, setupRes.stderr);
+  assert.equal(getIntegrationConsent(dirA, envBase), true);
+  assert.equal(getIntegrationConsent(dirB, envBase), false);
+
+  const callsA = path.join(root, "calls-na.log");
+  const callsB = path.join(root, "calls-nb.log");
+  const { env, cleanup } = makeFakeWrapper({
+    code: { echoTask: true },
+  });
+  try {
+    const resA = runCompanion(
+      [
+        "code",
+        "--integration",
+        "direct",
+        "--target",
+        dirA,
+        "--base",
+        "HEAD",
+        "--task",
+        "x",
+      ],
+      {
+        cwd: root,
+        env: { ...env, ...envBase, FAKE_WRAPPER_CALLS: callsA },
+      }
+    );
+    assert.equal(resA.code, 0, resA.stderr);
+    assert.deepEqual(readCalls(callsA), ["code"]);
+
+    const resB = runCompanion(
+      [
+        "code",
+        "--integration",
+        "direct",
+        "--target",
+        dirB,
+        "--base",
+        "HEAD",
+        "--task",
+        "x",
+      ],
+      {
+        cwd: root,
+        env: { ...env, ...envBase, FAKE_WRAPPER_CALLS: callsB },
+      }
+    );
+    assert.notEqual(resB.code, 0, "different non-git dir must not inherit consent");
+    assert.match(resB.stderr, TRUST_SUMMARY_RE);
+    assert.deepEqual(readCalls(callsB), []);
+  } finally {
+    cleanup();
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });

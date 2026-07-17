@@ -4,6 +4,7 @@
 // preflight report). Extracted from grok-companion.mjs for the 900-line cap.
 
 import { spawnSync } from "node:child_process";
+import path from "node:path";
 import process from "node:process";
 
 import {
@@ -15,6 +16,10 @@ import {
 } from "./codex-agents.mjs";
 import { grokBinaryAvailable } from "./direct-grok.mjs";
 import { readGateConfig, writeGateConfig } from "./gate-state.mjs";
+import {
+  parseTargetFlag,
+  resolveTargetWorkspaceRoot,
+} from "./git-context.mjs";
 import {
   getIntegrationConsent,
   getIntegrationMode,
@@ -85,6 +90,13 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
     }
   }
   // Integration mode (how edits land) - orthogonal to runMode security posture.
+  // SECURITY: consent + integrationMode are target-scoped (resolved --target git
+  // toplevel, default '.'), so the operator consents for the repo they will edit.
+  // Other setup prefs (runMode, notifications, gate) stay companion-cwd scoped.
+  const integrationTargetWorkspace = resolveTargetWorkspaceRoot(
+    cwd,
+    parseTargetFlag(args)
+  );
   let invalidIntegrationMode = null;
   const integrationIdx = args.indexOf("--integration");
   if (integrationIdx >= 0) {
@@ -96,7 +108,7 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
       if (!parsedIntegration) {
         invalidIntegrationMode = String(rawIntegration).trim() || rawIntegration;
       } else {
-        setIntegrationMode(cwd, parsedIntegration);
+        setIntegrationMode(integrationTargetWorkspace, parsedIntegration);
       }
     }
   }
@@ -148,8 +160,8 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
 
   const gate = readGateConfig(cwd);
   const runMode = getRunMode(cwd);
-  const integrationMode = getIntegrationMode(cwd);
-  const integrationConsent = getIntegrationConsent(cwd);
+  const integrationMode = getIntegrationMode(integrationTargetWorkspace);
+  const integrationConsent = getIntegrationConsent(integrationTargetWorkspace);
   const notifyPrefs = getNotificationConfig(cwd);
   const codexAgentsScope = invalidCodexAgentsScope
     ? priorCodexAgentsScope
@@ -240,8 +252,13 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
       `Valid --integration values: ${INTEGRATION_MODES.join(" | ")}. Integration prefs were not changed.`
     );
   } else if (integrationMode === "direct" && !integrationConsent) {
+    const targetHint =
+      path.resolve(integrationTargetWorkspace) ===
+      path.resolve(resolveTargetWorkspaceRoot(cwd, "."))
+        ? "setup --integration direct"
+        : `setup --integration direct --target ${integrationTargetWorkspace}`;
     hints.push(
-      "Direct integration is the default but needs one-time consent: setup --integration direct (or use --integration worktree for isolation)."
+      `Direct integration is the default but needs one-time consent: ${targetHint} (or use --integration worktree for isolation).`
     );
   }
   if (invalidNotificationMode) {

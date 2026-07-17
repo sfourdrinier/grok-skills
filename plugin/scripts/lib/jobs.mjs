@@ -11,6 +11,10 @@ import path from "node:path";
 
 import { resolveWorkspaceRoot } from "./gate-state.mjs";
 import {
+  parseTargetFlag,
+  resolveTargetWorkspaceRoot,
+} from "./git-context.mjs";
+import {
   isNotificationMode,
   NOTIFICATION_MODES,
   parseNotificationMode,
@@ -503,14 +507,51 @@ export function setIntegrationMode(cwd, mode, env = process.env) {
   return parsed;
 }
 
-/** One-screen refuse when effective integration is direct without setup consent. */
-export const DIRECT_INTEGRATION_CONSENT_MSG =
-  "Direct integration lets Grok edit files in THIS working tree directly (no " +
-  "worktree isolation, no pre-apply review). Protected paths (.git/.env/keys/" +
-  "hooks) are rolled back if touched, but source edits land live. To accept and " +
-  "make direct the default here: /grok:setup --integration direct (or: " +
-  "companion setup --integration direct). Or run this once with " +
-  "--integration worktree (isolated) or --integration review.";
+/**
+ * One-screen refuse when effective integration is direct without setup consent.
+ * When the resolved target workspace differs from companion cwd, the accept
+ * command includes `--target <workspace>` so consent is recorded for the repo
+ * that will be edited (not the companion cwd).
+ *
+ * @param {{ targetWorkspace?: string, companionCwd?: string }} [opts]
+ * @returns {string}
+ */
+export function formatDirectIntegrationConsentMsg(opts = {}) {
+  const targetWorkspace =
+    opts.targetWorkspace != null && String(opts.targetWorkspace).trim() !== ""
+      ? path.resolve(String(opts.targetWorkspace))
+      : null;
+  const companionCwd =
+    opts.companionCwd != null && String(opts.companionCwd).trim() !== ""
+      ? path.resolve(String(opts.companionCwd))
+      : null;
+  let targetFlag = "";
+  if (targetWorkspace && companionCwd) {
+    const cwdWorkspace = resolveTargetWorkspaceRoot(companionCwd, ".");
+    if (path.resolve(targetWorkspace) !== path.resolve(cwdWorkspace)) {
+      targetFlag = ` --target ${targetWorkspace}`;
+    }
+  } else if (targetWorkspace && !companionCwd) {
+    targetFlag = ` --target ${targetWorkspace}`;
+  }
+  const targetLine = targetWorkspace
+    ? ` Target workspace: ${targetWorkspace}.`
+    : "";
+  return (
+    "Direct integration lets Grok edit files in THIS working tree directly (no " +
+    "worktree isolation, no pre-apply review). Protected paths (.git/.env/keys/" +
+    "hooks) are rolled back if touched, but source edits land live." +
+    targetLine +
+    " To accept and make direct the default here: /grok:setup --integration direct" +
+    targetFlag +
+    " (or: companion setup --integration direct" +
+    targetFlag +
+    "). Or run this once with --integration worktree (isolated) or --integration review."
+  );
+}
+
+/** Default (cwd-scoped) refuse copy; prefer formatDirectIntegrationConsentMsg for gates. */
+export const DIRECT_INTEGRATION_CONSENT_MSG = formatDirectIntegrationConsentMsg();
 
 /**
  * Drop any existing --integration flag(s) then append the resolved effective mode.
@@ -538,13 +579,19 @@ export function withExplicitIntegration(args, mode) {
 
 /**
  * Resolve effective integration for code/implement and enforce the one-time
- * direct consent gate. worktree|auto|review need no consent; direct needs setup.
+ * direct consent gate. Consent and integrationMode are keyed on the resolved
+ * TARGET repo root (git toplevel of --target, defaulting to '.'), not companion
+ * cwd - so consent for repo A never authorizes a direct run against repo B.
+ * worktree|auto|review need no consent; direct needs setup for that target.
  * @returns {{ ok: true, effective: string|null, rest: string[] } | { ok: false, code: number, message: string }}
  */
 export function gateIntegrationForCodeish(mode, rest, integrationFlag, cwd, env = process.env) {
   if (mode !== "code" && mode !== "implement") {
     return { ok: true, rest, effective: null };
   }
+  // SECURITY: key consent on the repo being edited, not process.cwd().
+  const targetArg = parseTargetFlag(rest);
+  const targetWorkspace = resolveTargetWorkspaceRoot(cwd, targetArg);
   let effective;
   if (integrationFlag != null && String(integrationFlag).trim() !== "") {
     const parsed = parseIntegrationMode(integrationFlag);
@@ -559,11 +606,19 @@ export function gateIntegrationForCodeish(mode, rest, integrationFlag, cwd, env 
     }
     effective = parsed;
   } else {
-    effective = getIntegrationMode(cwd, env);
+    effective = getIntegrationMode(targetWorkspace, env);
   }
   // auto/review: treat like worktree for gating (no live unverified tree writes).
-  if (effective === "direct" && !getIntegrationConsent(cwd, env)) {
-    return { ok: false, code: 1, message: `${DIRECT_INTEGRATION_CONSENT_MSG}\n` };
+  if (effective === "direct" && !getIntegrationConsent(targetWorkspace, env)) {
+    return {
+      ok: false,
+      code: 1,
+      message:
+        formatDirectIntegrationConsentMsg({
+          targetWorkspace,
+          companionCwd: cwd,
+        }) + "\n",
+    };
   }
   return {
     ok: true,
