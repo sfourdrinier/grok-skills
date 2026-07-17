@@ -15,5 +15,26 @@
     "agent",
     "sandbox"
   ],
-  "displayName": "Grok Skills"
+  "displayName": "Grok Skills",
+  "userConfig": {
+    "runMode": {
+      "type": "string",
+      "title": "Run mode",
+      "description": "Security posture for live Grok runs: hardened (private home, sandbox, worktrees) or direct (your installed CLI)",
+      "default": "hardened"
+    },
+    "notificationMode": {
+      "type": "string",
+      "title": "Completion notifications",
+      "description": "off, auto (background runs only), native, or webhook",
+      "default": "off"
+    },
+    "notificationWebhookUrl": {
+      "type": "string",
+      "title": "Webhook URL",
+      "description": "HTTPS endpoint for webhook notifications",
+      "sensitive": true,
+      "default": ""
+    }
+  }
 }

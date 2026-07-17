@@ -131,6 +131,45 @@ polish; Windows toast stays out until a smoke-test host exists.
 Off by default. Enable with `/grok:setup --enable-review-gate`. See
 `hooks/hooks.json` and `scripts/stop-review-gate-hook.mjs`.
 
+## Companion state layout (CLAUDE_PLUGIN_DATA)
+
+Job registry and workspace prefs live under a per-workspace state dir:
+
+- When `CLAUDE_PLUGIN_DATA` is set to an **absolute** path (Claude Code host
+  fact: `~/.claude/plugins/data/<plugin-id>/`), state is:
+  `$CLAUDE_PLUGIN_DATA/state/<workspace-slug>-<hash16>/`
+- Otherwise the companion keeps the legacy location:
+  `$TMPDIR/grok-companion/<workspace-slug>-<hash16>/`
+- Workspace keying is identical in both layouts (basename slug + sha256 of the
+  canonical workspace root, first 16 hex chars). Relative `CLAUDE_PLUGIN_DATA`
+  values are ignored (fail open to the legacy root).
+- One-time best-effort migration: if the legacy dir has `jobs-index.json` and
+  the new dir does not exist yet, the companion copies the index (jobs list +
+  prefs) forward and notes the move on stderr. Never throws on migration
+  failure.
+
+`jobs-index.json` holds `config` (run mode, notification prefs, last rescue id)
+and a short jobs list. Per-job artifacts sit under `jobs/<jobId>/`.
+
+## userConfig defaults (Claude Code)
+
+`plugin/.claude-plugin/plugin.json` declares `userConfig` for `runMode`,
+`notificationMode`, and `notificationWebhookUrl`. Claude exports values to
+hook/subprocess env as `CLAUDE_PLUGIN_OPTION_<KEY>` with the schema key
+uppercased (`runMode` -> `CLAUDE_PLUGIN_OPTION_RUNMODE`). The companion reads
+those env vars directly (`${user_config.*}` is rejected in shell-form hook
+commands, so no hooks.json substitution is used).
+
+Effective prefs precedence (per field):
+
+1. Explicit workspace prefs from `/grok:setup` (stored in `jobs-index.json`)
+2. `CLAUDE_PLUGIN_OPTION_*` env (invalid values ignored with a stderr note)
+3. Built-in defaults (`hardened` / `off` / no webhook)
+
+`GROK_SKILLS_MODE` remains a process-level override above setup for scripts and
+the stop-review gate. There is no enum support in the host schema - the
+companion validates `hardened|direct` and the notification mode set itself.
+
 ## Manual smoke
 
 See `manual-smoke.md`.

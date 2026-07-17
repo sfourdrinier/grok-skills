@@ -13,6 +13,7 @@ import {
   getNotificationConfig,
   getRunMode,
   isNotificationMode,
+  jobsDir,
   listJobs,
   NOTIFICATION_MODES,
   resolveJobByIdOrRunId,
@@ -56,6 +57,169 @@ test("notification prefs default off and persist", () => {
   assert.equal(DEFAULT_JOBS_CONFIG.notificationMode, "off");
   setNotificationConfig(cwd, { notificationMode: "auto" }, env);
   assert.equal(getNotificationConfig(cwd, env).notificationMode, "auto");
+});
+
+// --- Task 3.2: CLAUDE_PLUGIN_DATA state root ---
+
+test("stateRoot prefers absolute CLAUDE_PLUGIN_DATA with same workspace keying", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-state-abs-"));
+  const pluginData = path.join(cwd, "pdata");
+  const env = { CLAUDE_PLUGIN_DATA: pluginData };
+  const withData = jobsDir(cwd, env);
+  assert.ok(
+    withData.startsWith(path.join(pluginData, "state") + path.sep),
+    `expected jobs under CLAUDE_PLUGIN_DATA/state, got ${withData}`
+  );
+  // Workspace segment (slug-hash) must match the legacy layout's trailing segment.
+  const legacy = jobsDir(cwd, {});
+  const segmentWith = path.basename(path.dirname(withData));
+  const segmentLegacy = path.basename(path.dirname(legacy));
+  assert.equal(segmentWith, segmentLegacy, "workspace keying must be identical");
+  assert.ok(legacy.startsWith(path.join(os.tmpdir(), "grok-companion") + path.sep));
+});
+
+test("stateRoot ignores non-absolute CLAUDE_PLUGIN_DATA (fallback unchanged)", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-state-rel-"));
+  const env = { CLAUDE_PLUGIN_DATA: "relative-plugin-data" };
+  const dir = jobsDir(cwd, env);
+  assert.ok(
+    dir.startsWith(path.join(os.tmpdir(), "grok-companion") + path.sep),
+    `relative CLAUDE_PLUGIN_DATA must fall back to tmp; got ${dir}`
+  );
+  assert.ok(!dir.includes("relative-plugin-data"));
+});
+
+test("stateRoot one-time migrates legacy index+prefs into CLAUDE_PLUGIN_DATA", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-state-mig-"));
+  // Seed prefs in the legacy (no CLAUDE_PLUGIN_DATA) location.
+  setRunMode(cwd, "direct", {});
+  setNotificationConfig(cwd, { notificationMode: "auto" }, {});
+  const legacyJobs = jobsDir(cwd, {});
+  const legacyRoot = path.dirname(legacyJobs);
+  assert.ok(fs.existsSync(path.join(legacyRoot, "jobs-index.json")));
+
+  const pluginData = path.join(cwd, "pdata");
+  const env = { CLAUDE_PLUGIN_DATA: pluginData };
+  // First touch under new root should migrate and honor setup prefs.
+  assert.equal(getRunMode(cwd, env), "direct");
+  assert.equal(getNotificationConfig(cwd, env).notificationMode, "auto");
+  const newRoot = path.dirname(jobsDir(cwd, env));
+  assert.ok(fs.existsSync(path.join(newRoot, "jobs-index.json")));
+  assert.ok(newRoot.startsWith(path.join(pluginData, "state")));
+  // Legacy left in place (best-effort copy, not move).
+  assert.ok(fs.existsSync(path.join(legacyRoot, "jobs-index.json")));
+});
+
+// --- Task 3.4: userConfig env defaults (CLAUDE_PLUGIN_OPTION_*) ---
+
+test("getRunMode precedence: setup > CLAUDE_PLUGIN_OPTION_RUNMODE > default", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-opt-run-"));
+  const pluginData = path.join(cwd, "pdata");
+
+  // Default when neither setup nor option is set.
+  assert.equal(getRunMode(cwd, { CLAUDE_PLUGIN_DATA: pluginData }), "hardened");
+
+  // userConfig env alone (key uppercased: runMode -> RUNMODE).
+  assert.equal(
+    getRunMode(cwd, {
+      CLAUDE_PLUGIN_DATA: pluginData,
+      CLAUDE_PLUGIN_OPTION_RUNMODE: "direct",
+    }),
+    "direct"
+  );
+
+  // Underscore form also accepted (host/docs ambiguity; trivially cheap).
+  assert.equal(
+    getRunMode(cwd, {
+      CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata2"),
+      CLAUDE_PLUGIN_OPTION_RUN_MODE: "direct",
+    }),
+    "direct"
+  );
+
+  // Setup wins over CLAUDE_PLUGIN_OPTION_*.
+  const env = {
+    CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata3"),
+    CLAUDE_PLUGIN_OPTION_RUNMODE: "hardened",
+  };
+  setRunMode(cwd, "direct", env);
+  assert.equal(getRunMode(cwd, env), "direct");
+});
+
+test("getRunMode ignores invalid CLAUDE_PLUGIN_OPTION_RUNMODE with stderr note", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-opt-bad-"));
+  const env = {
+    CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata"),
+    CLAUDE_PLUGIN_OPTION_RUNMODE: "turbo",
+  };
+  const prevErr = process.stderr.write;
+  let err = "";
+  process.stderr.write = (chunk, ...rest) => {
+    err += String(chunk);
+    return prevErr.call(process.stderr, chunk, ...rest);
+  };
+  try {
+    assert.equal(getRunMode(cwd, env), "hardened");
+    assert.match(err, /CLAUDE_PLUGIN_OPTION_RUNMODE|ignoring invalid/i);
+  } finally {
+    process.stderr.write = prevErr;
+  }
+});
+
+test("getNotificationConfig precedence: setup > CLAUDE_PLUGIN_OPTION_* > default", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-opt-notify-"));
+  const pluginData = path.join(cwd, "pdata");
+
+  assert.equal(
+    getNotificationConfig(cwd, { CLAUDE_PLUGIN_DATA: pluginData }).notificationMode,
+    "off"
+  );
+
+  const fromEnv = getNotificationConfig(cwd, {
+    CLAUDE_PLUGIN_DATA: pluginData,
+    CLAUDE_PLUGIN_OPTION_NOTIFICATIONMODE: "webhook",
+    CLAUDE_PLUGIN_OPTION_NOTIFICATIONWEBHOOKURL: "https://hooks.example.com/x",
+  });
+  assert.equal(fromEnv.notificationMode, "webhook");
+  assert.equal(fromEnv.notificationWebhookUrl, "https://hooks.example.com/x");
+
+  // Setup wins.
+  const env = {
+    CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata2"),
+    CLAUDE_PLUGIN_OPTION_NOTIFICATIONMODE: "native",
+    CLAUDE_PLUGIN_OPTION_NOTIFICATIONWEBHOOKURL: "https://hooks.example.com/y",
+  };
+  setNotificationConfig(
+    cwd,
+    { notificationMode: "auto", notificationWebhookUrl: "https://hooks.example.com/setup" },
+    env
+  );
+  const afterSetup = getNotificationConfig(cwd, env);
+  assert.equal(afterSetup.notificationMode, "auto");
+  assert.equal(afterSetup.notificationWebhookUrl, "https://hooks.example.com/setup");
+});
+
+test("getNotificationConfig ignores invalid CLAUDE_PLUGIN_OPTION values with note", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-opt-nbad-"));
+  const env = {
+    CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata"),
+    CLAUDE_PLUGIN_OPTION_NOTIFICATIONMODE: "telepathy",
+    CLAUDE_PLUGIN_OPTION_NOTIFICATIONWEBHOOKURL: "not-a-url",
+  };
+  const prevErr = process.stderr.write;
+  let err = "";
+  process.stderr.write = (chunk, ...rest) => {
+    err += String(chunk);
+    return prevErr.call(process.stderr, chunk, ...rest);
+  };
+  try {
+    const cfg = getNotificationConfig(cwd, env);
+    assert.equal(cfg.notificationMode, "off");
+    assert.equal(cfg.notificationWebhookUrl, null);
+    assert.match(err, /ignoring invalid/i);
+  } finally {
+    process.stderr.write = prevErr;
+  }
 });
 
 test("NOTIFICATION_MODES re-exports the shared product set", () => {

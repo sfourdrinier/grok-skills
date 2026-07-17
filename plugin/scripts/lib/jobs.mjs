@@ -34,6 +34,18 @@ export const DEFAULT_JOBS_CONFIG = Object.freeze({
   lastRescueJobId: null,
 });
 
+/**
+ * Claude Code exports userConfig values as CLAUDE_PLUGIN_OPTION_<KEY> with the
+ * schema key uppercased (runMode -> RUNMODE). Also accept underscore forms
+ * (RUN_MODE) when trivially cheap - host docs are ambiguous on camelCase keys.
+ */
+const PLUGIN_OPTION_RUNMODE_KEYS = ["RUNMODE", "RUN_MODE"];
+const PLUGIN_OPTION_NOTIFICATIONMODE_KEYS = ["NOTIFICATIONMODE", "NOTIFICATION_MODE"];
+const PLUGIN_OPTION_WEBHOOK_KEYS = [
+  "NOTIFICATIONWEBHOOKURL",
+  "NOTIFICATION_WEBHOOK_URL",
+];
+
 /** Normalize stored/corrupt config values to a known mode (default off). */
 function normalizeNotificationMode(value) {
   return parseNotificationMode(value) ?? DEFAULT_JOBS_CONFIG.notificationMode;
@@ -45,13 +57,60 @@ function normalizeWebhookUrl(value) {
   return parsed.ok ? parsed.url : null;
 }
 
-function normalizeConfig(raw) {
+/**
+ * @param {unknown} raw
+ * @param {{ legacySetup?: boolean }} [opts]
+ *   legacySetup: index file pre-dates prefsSources; treat stored prefs as setup.
+ */
+function normalizeConfig(raw, opts = {}) {
+  let prefsSources = {};
+  if (raw?.prefsSources && typeof raw.prefsSources === "object") {
+    prefsSources = { ...raw.prefsSources };
+  } else if (opts.legacySetup) {
+    // Pre-userConfig indexes: any persisted value was operator setup / prior use.
+    prefsSources = {
+      runMode: "setup",
+      notificationMode: "setup",
+      notificationWebhookUrl: "setup",
+    };
+  }
   return {
     runMode: raw?.runMode === "direct" ? "direct" : "hardened",
     notificationMode: normalizeNotificationMode(raw?.notificationMode),
     notificationWebhookUrl: normalizeWebhookUrl(raw?.notificationWebhookUrl),
     lastRescueJobId: raw?.lastRescueJobId ?? null,
+    prefsSources,
   };
+}
+
+function isSetupAuthored(config, key) {
+  return config?.prefsSources?.[key] === "setup";
+}
+
+/**
+ * First non-empty CLAUDE_PLUGIN_OPTION_<suffix> among candidate suffixes.
+ * @returns {{ name: string, value: string } | null}
+ */
+function readPluginOption(env, suffixes) {
+  for (const suffix of suffixes) {
+    const name = `CLAUDE_PLUGIN_OPTION_${suffix}`;
+    const raw = env?.[name];
+    if (raw == null) continue;
+    const value = String(raw).trim();
+    if (!value) continue;
+    return { name, value };
+  }
+  return null;
+}
+
+function noteInvalidPluginOption(name, value) {
+  try {
+    process.stderr.write(
+      `[grok-jobs] ignoring invalid ${name}=${JSON.stringify(value)}; using setup prefs or default\n`
+    );
+  } catch {
+    /* best-effort */
+  }
 }
 
 export function isValidJobId(jobId) {
@@ -87,7 +146,12 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-function stateRoot(cwd, env = process.env) {
+/**
+ * Per-workspace state segment: `<basename-slug>-<sha256(canonical)[0:16]>`.
+ * Kept identical for legacy tmp and CLAUDE_PLUGIN_DATA layouts so migration
+ * and dual-path lookups share one key.
+ */
+function workspaceStateSegment(cwd) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   let canonical = workspaceRoot;
   try {
@@ -100,9 +164,68 @@ function stateRoot(cwd, env = process.env) {
       .replace(/[^a-zA-Z0-9._-]+/g, "-")
       .replace(/^-+|-+$/g, "") || "workspace";
   const hash = createHash("sha256").update(canonical).digest("hex").slice(0, 16);
-  const pluginData = (env[PLUGIN_DATA_ENV] ?? env.PLUGIN_DATA ?? "").trim();
-  const root = pluginData ? path.join(pluginData, "state") : FALLBACK;
-  return path.join(root, `${slug}-${hash}`);
+  return `${slug}-${hash}`;
+}
+
+/**
+ * Absolute CLAUDE_PLUGIN_DATA (or PLUGIN_DATA) only. Relative / empty -> null.
+ * Host fact: Claude exports ~/.claude/plugins/data/<id>/ as an absolute path.
+ */
+function resolvePluginDataDir(env = process.env) {
+  const raw = (env[PLUGIN_DATA_ENV] ?? env.PLUGIN_DATA ?? "").trim();
+  if (!raw || !path.isAbsolute(raw)) {
+    return null;
+  }
+  return raw;
+}
+
+/**
+ * Best-effort one-time copy of jobs-index.json (index + prefs) from the legacy
+ * tmp root into CLAUDE_PLUGIN_DATA/state. Never throws; notes on stderr.
+ */
+function maybeMigrateLegacyState(legacyDir, newDir) {
+  try {
+    if (fs.existsSync(newDir)) {
+      return;
+    }
+    if (!fs.existsSync(legacyDir)) {
+      return;
+    }
+    const legacyIndex = path.join(legacyDir, "jobs-index.json");
+    if (!fs.existsSync(legacyIndex)) {
+      return;
+    }
+    mkdirPrivate(newDir);
+    fs.copyFileSync(legacyIndex, path.join(newDir, "jobs-index.json"));
+    try {
+      fs.chmodSync(path.join(newDir, "jobs-index.json"), FILE_MODE);
+    } catch {
+      /* best-effort */
+    }
+    process.stderr.write(
+      `[grok-jobs] migrated workspace state from ${legacyDir} to ${newDir}\n`
+    );
+  } catch (err) {
+    try {
+      process.stderr.write(
+        `[grok-jobs] state migration skipped: ${err?.message ?? err}\n`
+      );
+    } catch {
+      /* best-effort */
+    }
+  }
+}
+
+function stateRoot(cwd, env = process.env) {
+  const segment = workspaceStateSegment(cwd);
+  const legacyDir = path.join(FALLBACK, segment);
+  const pluginData = resolvePluginDataDir(env);
+  if (pluginData) {
+    const newDir = path.join(pluginData, "state", segment);
+    maybeMigrateLegacyState(legacyDir, newDir);
+    return newDir;
+  }
+  return legacyDir;
 }
 
 export function jobsDir(cwd, env = process.env) {
@@ -118,21 +241,28 @@ function ensure(cwd, env = process.env) {
   mkdirPrivate(jobsDir(cwd, env));
 }
 
+function emptyConfig() {
+  return normalizeConfig({ ...DEFAULT_JOBS_CONFIG, prefsSources: {} });
+}
+
 function loadIndex(cwd, env = process.env) {
   ensure(cwd, env);
   const file = indexPath(cwd, env);
   if (!fs.existsSync(file)) {
-    return { version: 1, jobs: [], config: { ...DEFAULT_JOBS_CONFIG } };
+    return { version: 1, jobs: [], config: emptyConfig() };
   }
   try {
     const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    const legacySetup =
+      parsed?.config != null &&
+      (parsed.config.prefsSources === undefined || parsed.config.prefsSources === null);
     return {
       version: 1,
       jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [],
-      config: normalizeConfig(parsed.config),
+      config: normalizeConfig(parsed.config, { legacySetup }),
     };
   } catch {
-    return { version: 1, jobs: [], config: { ...DEFAULT_JOBS_CONFIG } };
+    return { version: 1, jobs: [], config: emptyConfig() };
   }
 }
 
@@ -142,6 +272,8 @@ function saveIndex(cwd, index, env = process.env) {
     .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")))
     .slice(0, MAX_JOBS);
   const config = normalizeConfig(index.config);
+  // Always persist prefsSources (possibly {}) so new indexes are not mistaken
+  // for pre-userConfig legacy files on the next load.
   const payload = {
     version: 1,
     config: {
@@ -149,6 +281,7 @@ function saveIndex(cwd, index, env = process.env) {
       notificationMode: config.notificationMode,
       notificationWebhookUrl: config.notificationWebhookUrl,
       lastRescueJobId: config.lastRescueJobId,
+      prefsSources: config.prefsSources ?? {},
     },
     jobs,
   };
@@ -156,30 +289,78 @@ function saveIndex(cwd, index, env = process.env) {
   return payload;
 }
 
+/**
+ * Effective run mode.
+ * Precedence: GROK_SKILLS_MODE (process override) > setup prefs >
+ * CLAUDE_PLUGIN_OPTION_RUNMODE env > built-in default.
+ */
 export function getRunMode(cwd, env = process.env) {
   const fromEnv = (env.GROK_SKILLS_MODE ?? "").trim().toLowerCase();
   if (fromEnv === "direct" || fromEnv === "hardened") {
     return fromEnv;
   }
-  return loadIndex(cwd, env).config.runMode === "direct" ? "direct" : "hardened";
+  const config = loadIndex(cwd, env).config;
+  if (isSetupAuthored(config, "runMode")) {
+    return config.runMode === "direct" ? "direct" : "hardened";
+  }
+  const opt = readPluginOption(env, PLUGIN_OPTION_RUNMODE_KEYS);
+  if (opt) {
+    const mode = opt.value.toLowerCase();
+    if (mode === "direct" || mode === "hardened") {
+      return mode;
+    }
+    noteInvalidPluginOption(opt.name, opt.value);
+  }
+  return DEFAULT_JOBS_CONFIG.runMode;
 }
 
 export function setRunMode(cwd, mode, env = process.env) {
   const index = loadIndex(cwd, env);
   index.config.runMode = mode === "direct" ? "direct" : "hardened";
+  index.config.prefsSources = { ...(index.config.prefsSources ?? {}), runMode: "setup" };
   saveIndex(cwd, index, env);
   return index.config.runMode;
 }
 
 /**
+ * Effective notification prefs.
+ * Precedence per field: setup > CLAUDE_PLUGIN_OPTION_* env > built-in default.
  * @returns {{ notificationMode: string, notificationWebhookUrl: string|null }}
  */
 export function getNotificationConfig(cwd, env = process.env) {
   const config = loadIndex(cwd, env).config;
-  return {
-    notificationMode: config.notificationMode,
-    notificationWebhookUrl: config.notificationWebhookUrl,
-  };
+
+  let notificationMode = DEFAULT_JOBS_CONFIG.notificationMode;
+  if (isSetupAuthored(config, "notificationMode")) {
+    notificationMode = config.notificationMode;
+  } else {
+    const opt = readPluginOption(env, PLUGIN_OPTION_NOTIFICATIONMODE_KEYS);
+    if (opt) {
+      const mode = parseNotificationMode(opt.value);
+      if (mode) {
+        notificationMode = mode;
+      } else {
+        noteInvalidPluginOption(opt.name, opt.value);
+      }
+    }
+  }
+
+  let notificationWebhookUrl = DEFAULT_JOBS_CONFIG.notificationWebhookUrl;
+  if (isSetupAuthored(config, "notificationWebhookUrl")) {
+    notificationWebhookUrl = config.notificationWebhookUrl;
+  } else {
+    const opt = readPluginOption(env, PLUGIN_OPTION_WEBHOOK_KEYS);
+    if (opt) {
+      const parsed = parseWebhookUrl(opt.value);
+      if (parsed.ok) {
+        notificationWebhookUrl = parsed.url;
+      } else {
+        noteInvalidPluginOption(opt.name, opt.value);
+      }
+    }
+  }
+
+  return { notificationMode, notificationWebhookUrl };
 }
 
 /**
@@ -188,11 +369,15 @@ export function getNotificationConfig(cwd, env = process.env) {
  */
 export function setNotificationConfig(cwd, patch, env = process.env) {
   const index = loadIndex(cwd, env);
+  if (!index.config.prefsSources || typeof index.config.prefsSources !== "object") {
+    index.config.prefsSources = {};
+  }
   if (patch.notificationMode !== undefined) {
     // Invalid modes leave prior prefs unchanged (never clobber auto -> off).
     const mode = parseNotificationMode(patch.notificationMode);
     if (mode) {
       index.config.notificationMode = mode;
+      index.config.prefsSources.notificationMode = "setup";
     }
   }
   if (patch.notificationWebhookUrl !== undefined) {
@@ -200,6 +385,7 @@ export function setNotificationConfig(cwd, patch, env = process.env) {
     const parsed = parseWebhookUrl(patch.notificationWebhookUrl);
     if (parsed.ok) {
       index.config.notificationWebhookUrl = parsed.url;
+      index.config.prefsSources.notificationWebhookUrl = "setup";
     }
   }
   saveIndex(cwd, index, env);
