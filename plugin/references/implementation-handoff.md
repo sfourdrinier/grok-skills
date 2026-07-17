@@ -61,6 +61,9 @@ runs/<runId>/
 3. Completed **success** terminal envelope for same `runId` with `mode: "code"`
 4. Envelope `baseRevision` is non-empty and equals the manifest base
 5. Patch file exists, size matches `patch.bytes` (> 0), and sha256 re-hash matches
+6. Manifest `changedFiles` path set equals paths derived from patch
+   `diff --git` headers; when the envelope lists `changedFiles`, those
+   destination paths must match the manifest destinations
 
 Git-reported `changedFiles` paths keep colons and backslashes as filename
 characters; only operator-supplied contract paths reject Windows drive forms.

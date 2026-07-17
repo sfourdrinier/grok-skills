@@ -16,7 +16,19 @@ from tests.modefixtures import ModeHarness
 _RUN_ID = "20260716T120000Z-abcdef"
 
 
-def _valid_manifest(run_id: str, patch_sha: str, ready: bool = True) -> dict:
+def _mini_patch(path: str = "pkg/a.ts") -> bytes:
+    return (
+        "diff --git a/{0} b/{0}\n"
+        "index 1111111..2222222 100644\n"
+        "--- a/{0}\n"
+        "+++ b/{0}\n"
+        "@@ -1 +1 @@\n"
+        "-old\n"
+        "+new\n".format(path)
+    ).encode("utf-8")
+
+
+def _valid_manifest(run_id: str, patch_sha: str, ready: bool = True, patch_bytes: int = 0) -> dict:
     changed = (
         [{"path": "pkg/a.ts", "status": "modified", "oldPath": None}]
         if ready
@@ -34,7 +46,7 @@ def _valid_manifest(run_id: str, patch_sha: str, ready: bool = True) -> dict:
             "format": "git-binary-full-index-v1",
             "relativePath": "artifacts/implementation.patch",
             "sha256": patch_sha,
-            "bytes": 4,
+            "bytes": patch_bytes if patch_bytes else (10 if ready else 0),
         },
         "validation": {
             "requiredCommandsPassed": True,
@@ -73,10 +85,12 @@ class HandoffModeTests(ModeHarness):
         rev = int(rec["recordRevision"])
         artifacts = paths.run_dir / "artifacts"
         artifacts.mkdir(parents=True, exist_ok=True)
-        patch_bytes = b"diff"
+        patch_bytes = _mini_patch("pkg/a.ts")
         (artifacts / "implementation.patch").write_bytes(patch_bytes)
         sha = "0" * 64 if tamper_patch else hashlib.sha256(patch_bytes).hexdigest()
-        manifest = _valid_manifest(run_id, sha, ready=ready_manifest)
+        manifest = _valid_manifest(
+            run_id, sha, ready=ready_manifest, patch_bytes=len(patch_bytes)
+        )
         (paths.run_dir / "implementation-handoff.json").write_text(
             json.dumps(manifest, indent=2) + "\n", encoding="utf-8"
         )
@@ -87,6 +101,7 @@ class HandoffModeTests(ModeHarness):
                 status="success",
                 repository="/tmp/repo",
                 baseRevision="a" * 40,
+                changedFiles=["pkg/a.ts"] if ready_manifest else [],
                 progressStreamPath=None,
                 cleanup={"status": "retained", "detail": str(paths.run_dir)},
             )

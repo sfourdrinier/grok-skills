@@ -280,13 +280,78 @@ def compute_integration_ready(
     return True
 
 
+# git-binary-full-index-v1 (and plain unified) path headers.
+_DIFF_GIT_A_B = re.compile(
+    rb"^diff --git a/(.+?) b/(.+?)\s*$",
+    re.MULTILINE,
+)
+
+
+def _unquote_git_path(raw: str) -> str:
+    """Strip optional surrounding double quotes from a git path token."""
+    if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
+        return raw[1:-1]
+    return raw
+
+
+def paths_from_git_patch(patch_bytes: bytes) -> set:
+    """Extract repo-relative paths named by ``diff --git a/... b/...`` headers."""
+    found: set = set()
+    for match in _DIFF_GIT_A_B.finditer(patch_bytes):
+        for group in (match.group(1), match.group(2)):
+            try:
+                text = group.decode("utf-8", errors="surrogateescape")
+            except Exception:
+                continue
+            path = _unquote_git_path(text)
+            if path and path != "/dev/null":
+                found.add(path)
+    return found
+
+
+def paths_from_manifest_changed(changed: object) -> set:
+    """Destination + rename source paths from manifest changedFiles entries."""
+    found: set = set()
+    if not isinstance(changed, list):
+        return found
+    for item in changed:
+        if not isinstance(item, dict):
+            continue
+        p = item.get("path")
+        if isinstance(p, str) and p:
+            found.add(p)
+        old = item.get("oldPath")
+        if isinstance(old, str) and old:
+            found.add(old)
+    return found
+
+
+def destination_paths_from_manifest_changed(changed: object) -> set:
+    """Destination paths only (matches code envelope changedFiles list)."""
+    found: set = set()
+    if not isinstance(changed, list):
+        return found
+    for item in changed:
+        if not isinstance(item, dict):
+            continue
+        p = item.get("path")
+        if isinstance(p, str) and p:
+            found.add(p)
+    return found
+
+
 def dual_condition_ready(
     *,
     manifest: Optional[dict],
     envelope: Optional[dict],
     patch_abs: Optional[pathlib.Path],
 ) -> Tuple[bool, List[dict]]:
-    """Observed ready for /grok:handoff: valid ready manifest + success envelope + rehash."""
+    """Observed ready for /grok:handoff: valid ready manifest + success envelope + rehash.
+
+    Also cross-checks manifest ``changedFiles`` against paths derived from the
+    patch headers and (when present) the code envelope's ``changedFiles`` list so
+    a corrupted ready manifest cannot point parents at the wrong dirty-overlap set.
+    """
     blockers: List[dict] = []
     if not manifest:
         blockers.append({"kind": "handoff-unavailable", "message": "no handoff manifest"})
@@ -378,7 +443,12 @@ def dual_condition_ready(
             }
         )
         return False, blockers
-    actual = _sha256_file(patch_abs)
+    try:
+        patch_bytes = patch_abs.read_bytes()
+    except OSError:
+        blockers.append({"kind": "artifact-integrity-failure", "message": "patch file unreadable"})
+        return False, blockers
+    actual = hashlib.sha256(patch_bytes).hexdigest()
     if actual != expected:
         blockers.append(
             {
@@ -388,6 +458,55 @@ def dual_condition_ready(
             }
         )
         return False, blockers
+
+    # Cross-check path sets: corrupted ready manifests must not pass dual-condition
+    # when changedFiles names different files than the hashed patch (or envelope).
+    man_all = paths_from_manifest_changed(manifest.get("changedFiles"))
+    man_dest = destination_paths_from_manifest_changed(manifest.get("changedFiles"))
+    patch_paths = paths_from_git_patch(patch_bytes)
+    if not man_all:
+        blockers.append(
+            {
+                "kind": "artifact-integrity-failure",
+                "message": "ready handoff requires parseable changedFiles paths",
+            }
+        )
+        return False, blockers
+    if not patch_paths:
+        blockers.append(
+            {
+                "kind": "artifact-integrity-failure",
+                "message": "could not derive changed paths from implementation patch headers",
+            }
+        )
+        return False, blockers
+    if man_all != patch_paths:
+        blockers.append(
+            {
+                "kind": "artifact-integrity-failure",
+                "message": "manifest changedFiles does not match paths in implementation patch",
+                "detail": {
+                    "manifestPaths": sorted(man_all),
+                    "patchPaths": sorted(patch_paths),
+                },
+            }
+        )
+        return False, blockers
+    env_cf = envelope.get("changedFiles")
+    if isinstance(env_cf, list) and env_cf:
+        env_paths = {p for p in env_cf if isinstance(p, str) and p}
+        if env_paths != man_dest:
+            blockers.append(
+                {
+                    "kind": "artifact-integrity-failure",
+                    "message": "envelope changedFiles does not match handoff manifest destinations",
+                    "detail": {
+                        "envelopePaths": sorted(env_paths),
+                        "manifestDestinations": sorted(man_dest),
+                    },
+                }
+            )
+            return False, blockers
     return True, []
 
 

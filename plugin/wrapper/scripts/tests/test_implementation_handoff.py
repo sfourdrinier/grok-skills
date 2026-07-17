@@ -25,6 +25,24 @@ from groklib.implementation_handoff import (
 from tests import gitfixtures
 
 
+def _mini_patch(*paths: str) -> bytes:
+    """Minimal unified patch with ``diff --git`` headers for dual-condition path cross-check."""
+    if not paths:
+        paths = ("a.ts",)
+    parts = []
+    for path in paths:
+        parts.append(
+            "diff --git a/{0} b/{0}\n"
+            "index 1111111..2222222 100644\n"
+            "--- a/{0}\n"
+            "+++ b/{0}\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n".format(path)
+        )
+    return "".join(parts).encode("utf-8")
+
+
 def _git(repo: pathlib.Path, *args: str) -> None:
     subprocess.run(
         ["git", "-C", str(repo)] + list(args),
@@ -160,7 +178,7 @@ class ValidateHandoffTests(unittest.TestCase):
         import tempfile
 
         doc = self._doc()
-        patch_bytes = b"p"
+        patch_bytes = _mini_patch("a.ts")
         with tempfile.TemporaryDirectory() as tmp:
             p = pathlib.Path(tmp) / "implementation.patch"
             p.write_bytes(patch_bytes)
@@ -173,6 +191,7 @@ class ValidateHandoffTests(unittest.TestCase):
                     "runId": doc["runId"],
                     "mode": "status",
                     "baseRevision": doc["baseRevision"],
+                    "changedFiles": ["a.ts"],
                 },
                 patch_abs=p,
             )
@@ -188,6 +207,7 @@ class ValidateHandoffTests(unittest.TestCase):
                     "runId": doc["runId"],
                     "mode": "code",
                     "baseRevision": doc["baseRevision"],
+                    "changedFiles": ["a.ts"],
                 },
                 patch_abs=p,
             )
@@ -197,7 +217,7 @@ class ValidateHandoffTests(unittest.TestCase):
         import tempfile
 
         doc = self._doc()
-        patch_bytes = b"patch-body"
+        patch_bytes = _mini_patch("a.ts")
         with tempfile.TemporaryDirectory() as tmp:
             p = pathlib.Path(tmp) / "implementation.patch"
             p.write_bytes(patch_bytes)
@@ -210,6 +230,7 @@ class ValidateHandoffTests(unittest.TestCase):
                     "runId": doc["runId"],
                     "mode": "code",
                     "baseRevision": None,
+                    "changedFiles": ["a.ts"],
                 },
                 patch_abs=p,
             )
@@ -225,6 +246,7 @@ class ValidateHandoffTests(unittest.TestCase):
                     "runId": doc["runId"],
                     "mode": "code",
                     "baseRevision": "",
+                    "changedFiles": ["a.ts"],
                 },
                 patch_abs=p,
             )
@@ -232,6 +254,69 @@ class ValidateHandoffTests(unittest.TestCase):
             self.assertTrue(
                 any(b.get("kind") == "terminal-envelope-incomplete" for b in blockers_empty),
                 blockers_empty,
+            )
+
+    def test_dual_condition_rejects_changed_files_mismatch_with_patch(self) -> None:
+        import tempfile
+
+        doc = self._doc()
+        # Manifest claims a.ts; patch only touches b.ts
+        patch_bytes = _mini_patch("b.ts")
+        with tempfile.TemporaryDirectory() as tmp:
+            p = pathlib.Path(tmp) / "implementation.patch"
+            p.write_bytes(patch_bytes)
+            doc["patch"]["sha256"] = hashlib.sha256(patch_bytes).hexdigest()
+            doc["patch"]["bytes"] = len(patch_bytes)
+            ready, blockers = dual_condition_ready(
+                manifest=doc,
+                envelope={
+                    "status": "success",
+                    "runId": doc["runId"],
+                    "mode": "code",
+                    "baseRevision": doc["baseRevision"],
+                    "changedFiles": ["a.ts"],
+                },
+                patch_abs=p,
+            )
+            self.assertFalse(ready)
+            self.assertTrue(
+                any(
+                    b.get("kind") == "artifact-integrity-failure"
+                    and "changedFiles" in (b.get("message") or "")
+                    for b in blockers
+                ),
+                blockers,
+            )
+
+    def test_dual_condition_rejects_envelope_changed_files_mismatch(self) -> None:
+        import tempfile
+
+        doc = self._doc()
+        patch_bytes = _mini_patch("a.ts")
+        with tempfile.TemporaryDirectory() as tmp:
+            p = pathlib.Path(tmp) / "implementation.patch"
+            p.write_bytes(patch_bytes)
+            doc["patch"]["sha256"] = hashlib.sha256(patch_bytes).hexdigest()
+            doc["patch"]["bytes"] = len(patch_bytes)
+            ready, blockers = dual_condition_ready(
+                manifest=doc,
+                envelope={
+                    "status": "success",
+                    "runId": doc["runId"],
+                    "mode": "code",
+                    "baseRevision": doc["baseRevision"],
+                    "changedFiles": ["other.ts"],
+                },
+                patch_abs=p,
+            )
+            self.assertFalse(ready)
+            self.assertTrue(
+                any(
+                    b.get("kind") == "artifact-integrity-failure"
+                    and "envelope changedFiles" in (b.get("message") or "")
+                    for b in blockers
+                ),
+                blockers,
             )
 
     def test_dual_condition_rejects_empty_patch_bytes_even_if_hash_matches(self) -> None:
@@ -493,6 +578,7 @@ class ReadyAndDualConditionTests(unittest.TestCase):
         )
 
     def test_dual_condition_needs_envelope(self) -> None:
+        patch_bytes = _mini_patch("a.ts")
         doc = {
             "schemaVersion": 1,
             "runId": "20260716T020408Z-a82843",
@@ -504,8 +590,8 @@ class ReadyAndDualConditionTests(unittest.TestCase):
             "patch": {
                 "format": "git-binary-full-index-v1",
                 "relativePath": "artifacts/implementation.patch",
-                "sha256": hashlib.sha256(b"p").hexdigest(),
-                "bytes": 1,
+                "sha256": hashlib.sha256(patch_bytes).hexdigest(),
+                "bytes": len(patch_bytes),
             },
             "validation": {"requiredCommandsPassed": True, "buildGatePassed": True, "allPassed": True, "sources": {}},
             "integration": {"ready": True, "blockers": []},
@@ -513,7 +599,7 @@ class ReadyAndDualConditionTests(unittest.TestCase):
         }
         with tempfile.TemporaryDirectory() as tmp:
             p = pathlib.Path(tmp) / "implementation.patch"
-            p.write_bytes(b"p")
+            p.write_bytes(patch_bytes)
             ready, blockers = dual_condition_ready(
                 manifest=doc, envelope=None, patch_abs=p
             )
@@ -528,6 +614,7 @@ class ReadyAndDualConditionTests(unittest.TestCase):
                     "runId": doc["runId"],
                     "mode": "code",
                     "baseRevision": doc["baseRevision"],
+                    "changedFiles": ["a.ts"],
                 },
                 patch_abs=p,
             )

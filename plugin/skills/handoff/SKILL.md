@@ -51,9 +51,12 @@ do not reimplement a weaker check):
 3. Envelope `baseRevision` is non-empty and **equals** the manifest base
 4. Patch file exists under the run dir, size matches `patch.bytes` (> 0), and
    sha256 re-hashes to the manifest
+5. Manifest `changedFiles` matches paths in the patch headers (and envelope
+   `changedFiles` destinations when that list is present)
 
-Missing/wrong-mode envelope → `terminal-envelope-incomplete`. Null base or
-size/hash mismatch → integrity failure. No artifacts → `handoff-unavailable`.
+Missing/wrong-mode envelope → `terminal-envelope-incomplete`. Null base,
+size/hash mismatch, or path-set mismatch → integrity failure. No artifacts →
+`handoff-unavailable`.
 
 ## Hardened only
 
