@@ -240,6 +240,11 @@ def finalize_peer_session(
     label = _confinement_label(contract)
     run_build_gate = _build_gate_runner(stage, peer_doc=peer_doc, worktree=worktree)
 
+    # Enforce the cwd sentinel only if Grok handled at least one prompt: the
+    # wrapper no longer plants it (Grok creates it on the first prompt), so a
+    # zero-prompt session legitimately has none and must not raise a spurious
+    # wrong-working-directory blocker.
+    require_sentinel = int(peer_doc.get("promptsHandled", 0) or 0) > 0
     try:
         handoff = code_handoff_finalize(
             stage=stage,
@@ -252,6 +257,7 @@ def finalize_peer_session(
             assert_original_checkout_unmodified=worktree_escape.assert_original_checkout_unmodified,
             assert_cwd_sentinel=code_mod._assert_cwd_sentinel,
             run_recorded_command=code_mod._run_recorded_command,
+            require_sentinel=require_sentinel,
         )
     except GrokWrapperError as exc:
         handoff = None

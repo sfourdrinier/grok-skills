@@ -280,6 +280,7 @@ class PeerLifecycleTests(PeerTestBase):
         session = peer_mod.PeerSession.__new__(peer_mod.PeerSession)
         session._prompt_lock = threading.Lock()
         session._prompt_in_flight = False
+        session.sentinel_name = ".grok-run-test"
         session.run_id = run_paths.run_id
         session.session_id = "s1"
         session.acp = self.fake_acp
@@ -297,6 +298,39 @@ class PeerLifecycleTests(PeerTestBase):
         dumped = json.dumps(env)
         self.assertNotIn(secret, dumped)
         self.assertEqual(env["status"], "success")
+
+    def test_first_prompt_prepends_cwd_sentinel_directive(self) -> None:
+        # B5: the wrapper no longer plants the sentinel; Grok creates it as its
+        # mandatory first action, driven by a directive prepended to the FIRST
+        # prompt only. This makes the stop-time proof genuine.
+        from groklib.progress import ProgressWriter
+
+        run_paths = runstate.create_run("peer-start")
+        progress = ProgressWriter(run_paths.run_id, run_paths.progress_path)
+        session = peer_mod.PeerSession.__new__(peer_mod.PeerSession)
+        session._prompt_lock = threading.Lock()
+        session._prompt_in_flight = False
+        session.sentinel_name = ".grok-run-" + run_paths.run_id
+        session.run_id = run_paths.run_id
+        session.session_id = "s"
+        session.progress = progress
+        session.run_paths = run_paths
+        session.model = "grok-4.5"
+        session.child = self.fake_child
+        session.peer_doc = {"lifecycle": "running", "child": {"pid": os.getpid()}}
+        session.renew_lease = mock.Mock()
+        sent = []
+        session.acp = mock.Mock()
+        session.acp.session_prompt = mock.Mock(
+            side_effect=lambda session_id, text, on_update: sent.append(text)
+            or {"stopReason": "end_turn", "usage": {}}
+        )
+        peer_mod._handle_prompt(session, "do the task")
+        peer_mod._handle_prompt(session, "second turn")
+        self.assertIn(session.sentinel_name, sent[0])
+        self.assertTrue(sent[0].endswith("do the task"))
+        self.assertEqual(sent[1], "second turn")  # no directive on later turns
+        self.assertEqual(session.peer_doc["promptsHandled"], 2)
 
     def test_control_socket_mode_0600_foreign_refused(self) -> None:
         if not platformsupport.is_posix():
@@ -317,6 +351,7 @@ class PeerLifecycleTests(PeerTestBase):
         session._stop_requested = False
         session._prompt_lock = threading.Lock()
         session._prompt_in_flight = False
+        session.sentinel_name = ".grok-run-test"
         session.acp = self.fake_acp
         session.progress = mock.Mock()
         session.progress.safe_emit = mock.Mock()

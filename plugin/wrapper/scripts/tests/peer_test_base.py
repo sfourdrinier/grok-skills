@@ -279,6 +279,9 @@ class PeerTestBase(ProbedPlatformMixin, TempHomeIsolationMixin, unittest.TestCas
             "originalBaseline": dict(baseline),
             "leaseExpiresAt": time.time() + 3600,
             "model": "grok-4.5",
+            # Fixture plants the sentinel (above), i.e. Grok created it after a
+            # prompt; promptsHandled>0 so peer-stop enforces it (require_sentinel).
+            "promptsHandled": 1,
         }
         runstate.write_json_atomic(run_paths.run_dir / "peer.json", peer_doc)
 

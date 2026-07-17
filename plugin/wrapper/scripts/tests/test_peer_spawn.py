@@ -11,7 +11,9 @@ import types
 import unittest
 from unittest import mock
 
+from groklib import GrokWrapperError
 from groklib.modes import peer as peer_mod
+from groklib.modes import peer_process
 
 
 class _FakeProc:
@@ -121,6 +123,72 @@ class KillRecordedChildSafetyTests(unittest.TestCase):
         ):
             peer_mod._kill_recorded_child(self._doc(12345, "mine"))
             m["kill_process_tree_by_pid"].assert_called_once_with(12345)
+
+
+class AbortPeerStartTests(unittest.TestCase):
+    """abort_peer_start tears down every start-time resource, best-effort."""
+
+    def _run_paths(self):
+        d = tempfile.mkdtemp(prefix="abort-peer-")
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        return mock.Mock(
+            run_id="20260101T000000Z-abc123",
+            run_dir=pathlib.Path(d),
+            progress_path=pathlib.Path(d) / "progress.jsonl",
+        )
+
+    def test_abort_tears_down_all_resources(self):
+        res = peer_process.StartResources()
+        res.acp = mock.Mock()
+        res.child = mock.Mock()
+        res.home = mock.Mock()
+        res.worktree = mock.Mock()
+        with mock.patch.object(peer_process.platformsupport, "kill_process_tree") as kill, \
+             mock.patch.object(peer_process, "destroy_private_home") as dph, \
+             mock.patch.object(peer_process.worktree_mod, "remove_external_worktree") as rmwt, \
+             mock.patch("groklib.modes.peer_finalize._terminalize_peer_run") as term:
+            peer_process.abort_peer_start(
+                run_paths=self._run_paths(),
+                progress=mock.Mock(),
+                res=res,
+                error=GrokWrapperError("sandbox-failure", "start parity failed"),
+            )
+        res.acp.close.assert_called_once()
+        kill.assert_called_once_with(res.child)
+        dph.assert_called_once_with(res.home)
+        rmwt.assert_called_once()
+        self.assertEqual(rmwt.call_args.kwargs.get("expected_run_id"), "20260101T000000Z-abc123")
+        term.assert_called_once()
+
+    def test_abort_is_best_effort_when_a_step_raises(self):
+        res = peer_process.StartResources()
+        res.home = mock.Mock()
+        res.worktree = mock.Mock()
+        with mock.patch.object(
+            peer_process, "destroy_private_home", side_effect=OSError("boom")
+        ) as dph, mock.patch.object(
+            peer_process.worktree_mod, "remove_external_worktree"
+        ) as rmwt, mock.patch("groklib.modes.peer_finalize._terminalize_peer_run"):
+            # Must not raise even though home destroy fails; later steps still run.
+            peer_process.abort_peer_start(
+                run_paths=self._run_paths(), progress=mock.Mock(), res=res, error=None
+            )
+        dph.assert_called_once()
+        rmwt.assert_called_once()
+
+    def test_abort_skips_uncreated_resources(self):
+        res = peer_process.StartResources()  # nothing created
+        with mock.patch.object(peer_process.platformsupport, "kill_process_tree") as kill, \
+             mock.patch.object(peer_process, "destroy_private_home") as dph, \
+             mock.patch.object(peer_process.worktree_mod, "remove_external_worktree") as rmwt, \
+             mock.patch("groklib.modes.peer_finalize._terminalize_peer_run") as term:
+            peer_process.abort_peer_start(
+                run_paths=self._run_paths(), progress=mock.Mock(), res=res, error=None
+            )
+        kill.assert_not_called()
+        dph.assert_not_called()
+        rmwt.assert_not_called()
+        term.assert_called_once()  # run is still terminalized
 
 
 if __name__ == "__main__":

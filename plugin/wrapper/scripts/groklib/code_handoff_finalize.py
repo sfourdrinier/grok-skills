@@ -141,6 +141,7 @@ def code_handoff_finalize(
     step_log: Optional[List[str]] = None,
     continues_run_id: Optional[str] = None,
     iteration: Optional[int] = None,
+    require_sentinel: bool = True,
 ) -> HandoffBuildResult:
     """Execute design §14.6 order on the FinalizeStage path. Writes handoff before return/raise.
 
@@ -172,23 +173,27 @@ def code_handoff_finalize(
     changed: List[dict] = []
     validation_evidence: List[dict] = []
 
-    # 1. verify sentinel - policy failure continues forensics when worktree readable
+    # 1. verify sentinel - policy failure continues forensics when worktree readable.
+    # require_sentinel=False (a peer session that handled ZERO prompts) skips this:
+    # Grok never ran, so there is no sentinel to prove and no missing-sentinel
+    # blocker to raise. Code mode always requires it (default True).
     steps.append("verify-sentinel")
-    try:
-        assert_cwd_sentinel(worktree, sentinel_name)
-    except GrokWrapperError as exc:
-        sentinel_ok = False
-        blockers.append(
-            HandoffBlocker(
-                "wrong-working-directory",
-                str(exc),
-                dict(exc.detail or {}, errorClass=exc.error_class),
+    if require_sentinel:
+        try:
+            assert_cwd_sentinel(worktree, sentinel_name)
+        except GrokWrapperError as exc:
+            sentinel_ok = False
+            blockers.append(
+                HandoffBlocker(
+                    "wrong-working-directory",
+                    str(exc),
+                    dict(exc.detail or {}, errorClass=exc.error_class),
+                )
             )
-        )
 
-    # 2. remove exact sentinel only (skip when sentinel was never valid)
+    # 2. remove exact sentinel only (skip when sentinel was never valid / not required)
     steps.append("remove-sentinel")
-    if sentinel_ok:
+    if require_sentinel and sentinel_ok:
         try:
             _remove_exact_sentinel(worktree.path, sentinel_name)
         except GrokWrapperError as exc:

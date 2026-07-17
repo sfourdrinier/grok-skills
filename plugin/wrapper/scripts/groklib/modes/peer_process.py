@@ -16,7 +16,7 @@ from groklib import GrokWrapperError, log_stderr
 from groklib import grokcli
 from groklib import platformsupport
 from groklib import worktree as worktree_mod
-from groklib.authhome import PrivateHome
+from groklib.authhome import PrivateHome, destroy_private_home
 
 
 def _log(function: str, message: str) -> None:
@@ -111,3 +111,65 @@ def kill_recorded_child(doc: dict) -> None:
         platformsupport.kill_process_tree_by_pid(child_pid)
     except Exception as exc:
         _log("kill_recorded_child", "could not kill child {}: {}".format(child_pid, exc))
+
+
+class StartResources:
+    """Tracks resources created during peer-start so an abort can tear them down."""
+
+    def __init__(self) -> None:
+        self.worktree = None
+        self.home = None
+        self.child = None
+        self.acp = None
+
+
+def abort_peer_start(*, run_paths, progress, res, error) -> None:
+    """Tear down a peer-start that failed BEFORE it began serving.
+
+    Closes the ACP client, kills the child, destroys the private home, removes
+    the external worktree + branch, and terminalizes the run under its OWN id
+    (mirrors the shared worktree lifecycle) so a start-time failure leaves no
+    orphaned credential home / worktree / grok-agent process. Best-effort; each
+    step is independent and never raises.
+    """
+    if res.acp is not None:
+        try:
+            res.acp.close()
+        except Exception as exc:
+            _log("abort_peer_start", "acp close failed: {}".format(exc))
+    if res.child is not None:
+        try:
+            platformsupport.kill_process_tree(res.child)
+        except Exception as exc:
+            _log("abort_peer_start", "kill child failed: {}".format(exc))
+    if res.home is not None:
+        try:
+            destroy_private_home(res.home)
+        except Exception as exc:
+            _log("abort_peer_start", "destroy home failed: {}".format(exc))
+    if res.worktree is not None:
+        try:
+            worktree_mod.remove_external_worktree(
+                res.worktree, confirmed=True, expected_run_id=run_paths.run_id
+            )
+        except Exception as exc:
+            _log("abort_peer_start", "remove worktree failed: {}".format(exc))
+    try:
+        from groklib.envelope import failure_envelope
+        from groklib.modes import peer_finalize
+
+        env = failure_envelope(
+            run_id=run_paths.run_id,
+            mode="peer-start",
+            error_class=getattr(error, "error_class", None) or "acp-failure",
+            message=str(error) if error is not None else "peer-start aborted before serving",
+            detail=getattr(error, "detail", None) or None,
+            progressStreamPath=str(run_paths.progress_path),
+        )
+        peer_finalize._terminalize_peer_run(run_paths, env)
+    except Exception as exc:
+        _log("abort_peer_start", "terminalize failed: {}".format(exc))
+    try:
+        progress.safe_emit("cleanup", "peer-start aborted; resources torn down")
+    except Exception:
+        pass

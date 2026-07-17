@@ -48,6 +48,32 @@ class PeerFinalizeTests(PeerTestBase):
         self.assertFalse(pathlib.Path(home.home_dir).exists(), "private home must be destroyed")
         self.assertEqual(result.get("status"), "success")
 
+    def test_zero_prompt_stop_skips_sentinel_blocker(self) -> None:
+        """B5: a session that handled no prompts has no sentinel; peer-stop must
+        NOT raise a spurious wrong-working-directory blocker (require_sentinel)."""
+        from groklib.modes import peer_finalize
+
+        home, run_paths, wt, peer_doc, stage, baseline = self._peer_finalize_fixture(
+            plant_sandbox=True
+        )
+        peer_doc["promptsHandled"] = 0
+        (wt.path / peer_doc["sentinelName"]).unlink()  # Grok never created it
+        with mock.patch.object(peer_finalize, "destroy_private_home", self._fake_destroy_home):
+            result = peer_finalize.finalize_peer_session(
+                run_paths=run_paths,
+                peer_doc=peer_doc,
+                home_path=pathlib.Path(home.home_dir),
+                worktree=wt,
+                contract=None,
+                original_baseline=baseline,
+                stage=stage,
+            )
+        self.assertEqual(result.get("status"), "success")
+        manifest_text = (run_paths.run_dir / "implementation-handoff.json").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("wrong-working-directory", manifest_text)
+
     def test_peer_required_validation_fail_not_ready(self) -> None:
         """requiredValidation that FAILS -> not ready with validation-failure evidence."""
         from groklib.modes import peer_finalize

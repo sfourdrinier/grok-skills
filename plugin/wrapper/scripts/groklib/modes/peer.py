@@ -49,6 +49,8 @@ from groklib.implementation_contract import assert_target_matches, load_contract
 from groklib.modes import _shared
 from groklib.modes import peer_control
 from groklib.modes.peer_process import (
+    StartResources as _StartResources,
+    abort_peer_start as _abort_peer_start,
     kill_recorded_child as _kill_recorded_child,
     spawn_acp_child as _spawn_acp_child,
 )
@@ -131,7 +133,6 @@ def _assert_start_parity(
     home: PrivateHome,
     tools: Tuple[str, ...],
     web_access: bool,
-    sentinel_name: str,
     policy: Any,
 ) -> None:
     """Fail closed before first prompt if code-mode start invariants are unmet."""
@@ -145,23 +146,11 @@ def _assert_start_parity(
             "tool-unavailable",
             "start parity: tool allowlist is empty; refusing unpinned peer session",
         )
-    # Plant cwd sentinel (wrapper-owned at start; Grok must keep operating here).
-    sentinel_path = worktree.path / sentinel_name
-    try:
-        sentinel_path.write_text("", encoding="utf-8")
-        platformsupport.restrict_file_permissions(sentinel_path)
-    except OSError as exc:
-        raise GrokWrapperError(
-            "wrong-working-directory",
-            "start parity: could not plant cwd sentinel: {}".format(exc),
-            {"sentinel": sentinel_name},
-        ) from exc
-    if not sentinel_path.is_file():
-        raise GrokWrapperError(
-            "wrong-working-directory",
-            "start parity: cwd sentinel missing after plant",
-            {"sentinel": sentinel_name},
-        )
+    # The cwd sentinel is NOT planted by the wrapper: a wrapper-planted sentinel
+    # makes the stop-time proof vacuous (it passes even if Grok never operated in
+    # the worktree). Instead Grok is instructed to create it as its mandatory
+    # first action on the first peer-prompt (see _handle_prompt), matching code
+    # mode, so the stop-time check is genuine evidence Grok ran in the worktree.
     # No .env in the worktree (code-mode invariant).
     for env_name in (".env", ".env.local"):
         env_path = worktree.path / env_name
@@ -233,11 +222,23 @@ def _handle_prompt(session: PeerSession, task: str) -> dict:
                 data={"text": redacted, "sessionUpdate": True},
             )
 
+        # Grok creates the cwd sentinel as its mandatory first action (the wrapper
+        # no longer plants it, so the stop-time check is genuine proof Grok
+        # operated in the isolated worktree). Prepend the directive on the FIRST
+        # prompt only; peer-stop enforces the sentinel iff a prompt was handled.
+        from groklib.modes.code import _sentinel_directive
+
+        prompts_handled = int(session.peer_doc.get("promptsHandled", 0) or 0)
+        prompt_text = task
+        if prompts_handled == 0:
+            prompt_text = _sentinel_directive(session.sentinel_name) + task
+
         result = session.acp.session_prompt(
             session_id=session.session_id,
-            text=task,
+            text=prompt_text,
             on_update=_on_update,
         )
+        session.peer_doc["promptsHandled"] = prompts_handled + 1
         session.renew_lease()
         combined = "".join(texts)
         redacted_result = redact_secret_material(
@@ -474,213 +475,221 @@ def run_peer_start(args: argparse.Namespace) -> dict:
     progress = ProgressWriter(run_paths.run_id, run_paths.progress_path)
     progress.safe_emit("start", "peer-start run created")
 
-    required_paths: Tuple[str, ...] = (target_relative,) if target_relative else ()
-    worktree_mod.assert_committed_base_sufficient(repo_root, base, required_paths)
-    worktree = worktree_mod.create_external_worktree(
-        repo_root=repo_root, base=base, run_id=run_paths.run_id
-    )
-    worktree_mod.verify_external_worktree(worktree)
-    progress.safe_emit("worktree", "worktree ready", data={"worktree": str(worktree.path)})
-    # Record worktree ownership on run.json immediately (cleanup rebuild path).
-    _record_peer_worktree(
-        run_paths,
-        model=model,
-        repo_root=repo_root,
-        target_relative=target_relative,
-        worktree=worktree,
-    )
-
-    # Capture pristine gate scripts (start parity) before any model edit.
-    from groklib.modes.code import _read_committed_manifest_fields, _target_in_worktree
-
-    _pristine_name, pristine_scripts = _read_committed_manifest_fields(
-        _target_in_worktree(worktree.path, target_relative)
-    )
-    del _pristine_name  # captured for parity; gate runs at stop via finalize
-
-    # Two-phase policy (mirrors _direct.py): render sandbox.toml from an os-temp
-    # placeholder (a superset of <home>/tmp, which does not exist until the home
-    # is created), create the home, then rebuild the policy with the real
-    # <home>/tmp. This makes the child's TMPDIR (grokcli minimal env), the
-    # enforced sandbox profile, and the stop-time verify_enforcement all agree on
-    # <home>/tmp - and that tmp dies with the private home instead of leaking
-    # (was: a standalone gs-peer-tmp mkdtemp granted as a sandbox root but never
-    # recorded in peer.json nor removed on stop).
-    real_home = source_grok_dir().parent
-    os_temp = pathlib.Path(tempfile.gettempdir()).resolve()
-    placeholder_policy = policy_for_mode(
-        "peer", worktree=worktree.path, private_tmp=os_temp
-    )
-    sandbox_toml = render_sandbox_toml(placeholder_policy, real_home=real_home)
-    config_toml = render_config_toml(mode="peer")
-    home = create_private_home(
-        source_grok_dir=source_grok_dir(),
-        auth_file_names=_shared.AUTH_FILE_NAMES,
-        config_toml=config_toml,
-        sandbox_toml=sandbox_toml,
-    )
-    private_tmp = grokcli.private_tmp_dir(home)
-    grokcli._ensure_private_tmp(private_tmp)
-    policy = policy_for_mode(
-        "peer", worktree=worktree.path, private_tmp=private_tmp.resolve()
-    )
-    leader_socket = runstate.allocate_leader_socket(home.home_dir, run_paths.run_id)
-    sentinel_name = _SENTINEL_PREFIX + run_paths.run_id
-
-    # START PARITY fail closed BEFORE spawn (amendment 3).
-    _assert_start_parity(
-        worktree=worktree,
-        home=home,
-        tools=_TOOLS,
-        web_access=web_access,
-        sentinel_name=sentinel_name,
-        policy=policy,
-    )
-    progress.safe_emit("sandbox", "start parity ok", data={"profile": policy.profile})
-
-    child = _spawn_acp_child(
-        binary=binary,
-        home=home,
-        worktree=worktree,
-        leader_socket=leader_socket,
-        model=model,
-        policy=policy,
-    )
-    acp = AcpClient(child, timeout_seconds=timeout)
+    res = _StartResources()
     try:
-        init = acp.initialize()
-        # Register pre_tool_use deny hook (amendment 6: NON-enforcement; OS sandbox enforces).
-        hooks = ((init.get("_meta") or {}).get("x.ai/hooks") or {})
-        if "pre_tool_use" in (hooks.get("blockingEvents") or []):
-            progress.safe_emit(
-                "sandbox",
-                "pre_tool_use deny hook registered (documented NON-enforcement; "
-                "OS sandbox is the enforcement layer; terminal-command policy: "
-                "allowlisted only inside worktree write confinement)",
-                data={"enforcement": "non-enforcement-advisory"},
-            )
-        session = acp.session_new(cwd=str(worktree.path), mcp_servers=[])
-        session_id = session.get("sessionId")
-        if not isinstance(session_id, str) or not session_id:
-            raise GrokWrapperError("acp-failure", "session/new returned no sessionId")
-    except Exception:
-        try:
-            acp.close()
-        except Exception:
-            pass
-        try:
-            destroy_private_home(home)
-        except Exception:
-            pass
-        raise
-
-    # Control socket under the private home (short path) - run-dir paths under a
-    # nested XDG_STATE_HOME often exceed the AF_UNIX ~104-byte limit.
-    socket_path = home.home_dir / ".grok" / "p-{}.sock".format(
-        run_paths.run_id.rsplit("-", 1)[-1]
-    )
-    encoded_len = len(str(socket_path).encode("utf-8"))
-    if encoded_len >= 100:
-        raise GrokWrapperError(
-            "acp-failure",
-            "peer control socket path exceeds 100-byte AF_UNIX guard",
-            {"path": str(socket_path), "bytes": encoded_len},
+        required_paths: Tuple[str, ...] = (target_relative,) if target_relative else ()
+        worktree_mod.assert_committed_base_sufficient(repo_root, base, required_paths)
+        worktree = worktree_mod.create_external_worktree(
+            repo_root=repo_root, base=base, run_id=run_paths.run_id
         )
-    wrapper_pid = os.getpid()
-    child_pid = int(child.pid)
-    peer_doc = {
-        "schemaVersion": 1,
-        "lifecycle": "running",
-        "sessionId": session_id,
-        "socketPath": str(socket_path),
-        "wrapper": {
-            "pid": wrapper_pid,
-            "startToken": platformsupport.process_start_token(wrapper_pid),
-        },
-        "child": {
-            "pid": child_pid,
-            "startToken": platformsupport.process_start_token(child_pid),
-        },
-        "homePath": str(home.home_dir),
-        "worktreePath": str(worktree.path),
-        "worktreeBranch": worktree.branch,
-        "baseRevision": worktree.base_revision,
-        "repoRoot": str(repo_root),
-        "targetRelative": target_relative,
-        "sentinelName": sentinel_name,
-        "contract": contract,
-        # Persist start baseline for crash-path peer-stop (never re-capture at stop).
-        "originalBaseline": dict(original_baseline) if original_baseline is not None else {},
-        "leaseExpiresAt": time.time() + MAX_PEER_LEASE_SECONDS,
-        "model": model,
-        "webAccess": web_access,
-        "pristineScriptsCaptured": pristine_scripts is not None,
-        "projectPackageManager": project_config.package_manager,
-    }
-    runstate.write_json_atomic(run_paths.run_dir / "peer.json", peer_doc)
-    runstate.write_peer_lease(
-        home.home_dir,
-        child_pid=child_pid,
-        child_start_token=peer_doc["child"].get("startToken"),
-        lease_seconds=MAX_PEER_LEASE_SECONDS,
-    )
+        worktree_mod.verify_external_worktree(worktree)
+        res.worktree = worktree
+        progress.safe_emit("worktree", "worktree ready", data={"worktree": str(worktree.path)})
+        # Record worktree ownership on run.json immediately (cleanup rebuild path).
+        _record_peer_worktree(
+            run_paths,
+            model=model,
+            repo_root=repo_root,
+            target_relative=target_relative,
+            worktree=worktree,
+        )
 
-    # Persist baseline snapshot as JSON-friendly dict for stop (paths only).
-    # original_baseline stays in-process for the resident wrapper.
-    if contract is not None:
-        from groklib.modes.code_continue import write_contract_json
+        # Capture pristine gate scripts (start parity) before any model edit.
+        from groklib.modes.code import _read_committed_manifest_fields, _target_in_worktree
 
-        write_contract_json(run_paths.run_dir, contract)
+        _pristine_name, pristine_scripts = _read_committed_manifest_fields(
+            _target_in_worktree(worktree.path, target_relative)
+        )
+        del _pristine_name  # captured for parity; gate runs at stop via finalize
 
-    running_env = build_envelope(
-        run_id=run_paths.run_id,
-        mode="peer-start",
-        status="running",
-        requestedModel=model,
-        effectiveModel=model,
-        repository=str(repo_root),
-        targetWorkspace=target_relative or ".",
-        effectiveWorkingDirectory=str(worktree.path),
-        worktreePath=str(worktree.path),
-        worktreeBranch=worktree.branch,
-        baseRevision=worktree.base_revision,
-        progressStreamPath=str(run_paths.progress_path),
-        policy={
-            "tools": list(_TOOLS),
-            "permissionMode": "auto",
-            "subagents": False,
+        # Two-phase policy (mirrors _direct.py): render sandbox.toml from an os-temp
+        # placeholder (a superset of <home>/tmp, which does not exist until the home
+        # is created), create the home, then rebuild the policy with the real
+        # <home>/tmp. This makes the child's TMPDIR (grokcli minimal env), the
+        # enforced sandbox profile, and the stop-time verify_enforcement all agree on
+        # <home>/tmp - and that tmp dies with the private home instead of leaking
+        # (was: a standalone gs-peer-tmp mkdtemp granted as a sandbox root but never
+        # recorded in peer.json nor removed on stop).
+        real_home = source_grok_dir().parent
+        os_temp = pathlib.Path(tempfile.gettempdir()).resolve()
+        placeholder_policy = policy_for_mode(
+            "peer", worktree=worktree.path, private_tmp=os_temp
+        )
+        sandbox_toml = render_sandbox_toml(placeholder_policy, real_home=real_home)
+        config_toml = render_config_toml(mode="peer")
+        home = create_private_home(
+            source_grok_dir=source_grok_dir(),
+            auth_file_names=_shared.AUTH_FILE_NAMES,
+            config_toml=config_toml,
+            sandbox_toml=sandbox_toml,
+        )
+        private_tmp = grokcli.private_tmp_dir(home)
+        res.home = home
+        grokcli._ensure_private_tmp(private_tmp)
+        policy = policy_for_mode(
+            "peer", worktree=worktree.path, private_tmp=private_tmp.resolve()
+        )
+        leader_socket = runstate.allocate_leader_socket(home.home_dir, run_paths.run_id)
+        sentinel_name = _SENTINEL_PREFIX + run_paths.run_id
+
+        # START PARITY fail closed BEFORE spawn (amendment 3).
+        _assert_start_parity(
+            worktree=worktree,
+            home=home,
+            tools=_TOOLS,
+            web_access=web_access,
+            policy=policy,
+        )
+        progress.safe_emit("sandbox", "start parity ok", data={"profile": policy.profile})
+
+        child = _spawn_acp_child(
+            binary=binary,
+            home=home,
+            worktree=worktree,
+            leader_socket=leader_socket,
+            model=model,
+            policy=policy,
+        )
+        res.child = child
+        acp = AcpClient(child, timeout_seconds=timeout)
+        res.acp = acp
+        try:
+            init = acp.initialize()
+            # Register pre_tool_use deny hook (amendment 6: NON-enforcement; OS sandbox enforces).
+            hooks = ((init.get("_meta") or {}).get("x.ai/hooks") or {})
+            if "pre_tool_use" in (hooks.get("blockingEvents") or []):
+                progress.safe_emit(
+                    "sandbox",
+                    "pre_tool_use deny hook registered (documented NON-enforcement; "
+                    "OS sandbox is the enforcement layer; terminal-command policy: "
+                    "allowlisted only inside worktree write confinement)",
+                    data={"enforcement": "non-enforcement-advisory"},
+                )
+            session = acp.session_new(cwd=str(worktree.path), mcp_servers=[])
+            session_id = session.get("sessionId")
+            if not isinstance(session_id, str) or not session_id:
+                raise GrokWrapperError("acp-failure", "session/new returned no sessionId")
+        except Exception:
+            try:
+                acp.close()
+            except Exception:
+                pass
+            try:
+                destroy_private_home(home)
+            except Exception:
+                pass
+            raise
+
+        # Control socket under the private home (short path) - run-dir paths under a
+        # nested XDG_STATE_HOME often exceed the AF_UNIX ~104-byte limit.
+        socket_path = home.home_dir / ".grok" / "p-{}.sock".format(
+            run_paths.run_id.rsplit("-", 1)[-1]
+        )
+        encoded_len = len(str(socket_path).encode("utf-8"))
+        if encoded_len >= 100:
+            raise GrokWrapperError(
+                "acp-failure",
+                "peer control socket path exceeds 100-byte AF_UNIX guard",
+                {"path": str(socket_path), "bytes": encoded_len},
+            )
+        wrapper_pid = os.getpid()
+        child_pid = int(child.pid)
+        peer_doc = {
+            "schemaVersion": 1,
+            "lifecycle": "running",
+            "sessionId": session_id,
+            "socketPath": str(socket_path),
+            "wrapper": {
+                "pid": wrapper_pid,
+                "startToken": platformsupport.process_start_token(wrapper_pid),
+            },
+            "child": {
+                "pid": child_pid,
+                "startToken": platformsupport.process_start_token(child_pid),
+            },
+            "homePath": str(home.home_dir),
+            "worktreePath": str(worktree.path),
+            "worktreeBranch": worktree.branch,
+            "baseRevision": worktree.base_revision,
+            "repoRoot": str(repo_root),
+            "targetRelative": target_relative,
+            "sentinelName": sentinel_name,
+            "contract": contract,
+            # Persist start baseline for crash-path peer-stop (never re-capture at stop).
+            "originalBaseline": dict(original_baseline) if original_baseline is not None else {},
+            "leaseExpiresAt": time.time() + MAX_PEER_LEASE_SECONDS,
+            "model": model,
             "webAccess": web_access,
-            "memory": False,
-        },
-        response={
-            "peer": {
-                "sessionId": session_id,
-                "socketPath": str(socket_path),
-            }
-        },
-        cleanup={"status": "retained", "detail": str(worktree.path)},
-    )
+            "pristineScriptsCaptured": pristine_scripts is not None,
+            "projectPackageManager": project_config.package_manager,
+        }
+        runstate.write_json_atomic(run_paths.run_dir / "peer.json", peer_doc)
+        runstate.write_peer_lease(
+            home.home_dir,
+            child_pid=child_pid,
+            child_start_token=peer_doc["child"].get("startToken"),
+            lease_seconds=MAX_PEER_LEASE_SECONDS,
+        )
 
-    session_obj = PeerSession(
-        run_id=run_paths.run_id,
-        run_paths=run_paths,
-        session_id=session_id,
-        socket_path=socket_path,
-        acp=acp,
-        child=child,
-        home=home,
-        worktree=worktree,
-        progress=progress,
-        peer_doc=peer_doc,
-        contract=contract,
-        original_baseline=original_baseline,
-        model=model,
-        sentinel_name=sentinel_name,
-    )
+        # Persist baseline snapshot as JSON-friendly dict for stop (paths only).
+        # original_baseline stays in-process for the resident wrapper.
+        if contract is not None:
+            from groklib.modes.code_continue import write_contract_json
 
-    # Open the control socket BEFORE emitting the running envelope so a
-    # companion that immediately peer-prompts cannot race a missing socket.
-    control_srv = _open_control_socket(session_obj.socket_path)
+            write_contract_json(run_paths.run_dir, contract)
+
+        running_env = build_envelope(
+            run_id=run_paths.run_id,
+            mode="peer-start",
+            status="running",
+            requestedModel=model,
+            effectiveModel=model,
+            repository=str(repo_root),
+            targetWorkspace=target_relative or ".",
+            effectiveWorkingDirectory=str(worktree.path),
+            worktreePath=str(worktree.path),
+            worktreeBranch=worktree.branch,
+            baseRevision=worktree.base_revision,
+            progressStreamPath=str(run_paths.progress_path),
+            policy={
+                "tools": list(_TOOLS),
+                "permissionMode": "auto",
+                "subagents": False,
+                "webAccess": web_access,
+                "memory": False,
+            },
+            response={
+                "peer": {
+                    "sessionId": session_id,
+                    "socketPath": str(socket_path),
+                }
+            },
+            cleanup={"status": "retained", "detail": str(worktree.path)},
+        )
+
+        session_obj = PeerSession(
+            run_id=run_paths.run_id,
+            run_paths=run_paths,
+            session_id=session_id,
+            socket_path=socket_path,
+            acp=acp,
+            child=child,
+            home=home,
+            worktree=worktree,
+            progress=progress,
+            peer_doc=peer_doc,
+            contract=contract,
+            original_baseline=original_baseline,
+            model=model,
+            sentinel_name=sentinel_name,
+        )
+
+        # Open the control socket BEFORE emitting the running envelope so a
+        # companion that immediately peer-prompts cannot race a missing socket.
+        control_srv = _open_control_socket(session_obj.socket_path)
+    except BaseException as _start_exc:
+        _abort_peer_start(run_paths=run_paths, progress=progress, res=res, error=_start_exc)
+        raise
     emit_envelope(running_env, None)
     try:
         import sys
