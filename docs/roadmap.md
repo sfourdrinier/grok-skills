@@ -106,7 +106,8 @@ plugin's own contract -> code -> handoff pipeline.
 | 2 (PR8) | Iteration loop: session archive + `code --continue-run` | **done 2026-07-17** |
 | 3 (PR9) | Claude Code native surface (bin/, plugin data dir, SubagentStop, userConfig, agent frontmatter) | **done 2026-07-17** |
 | 4 (PR10) | Codex parity polish | **done 2026-07-17** |
-| 5+6 (PR11) | ACP probe/spec/experimental peer channel; manifest polish; release | planned |
+| 5 (PR11) | ACP probe + spec + experimental peer channel (GROK_EXPERIMENTAL_ACP) | **done 2026-07-17** |
+| 6 (PR11) | Manifest polish + drift guard + release 2.0.0 | in progress |
 
 ## Recommended next order (after Wave 1 polish)
 

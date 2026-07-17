@@ -116,6 +116,19 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 - Validation blockers and command evidence name failing tests from FULL
   stdout (`failedTests`), surviving tail truncation.
 
+### Added (Phase 5 - experimental ACP peer channel, PR11)
+
+- **Experimental peer channel** behind `GROK_EXPERIMENTAL_ACP=1` (hardened
+  only): `peer start|prompt|stop` drive a long-lived `grok agent stdio` (ACP)
+  session inside the full code-mode isolation stack. A wrapper-owned 0600
+  control socket (not a FIFO), peer.json with wrapper+child pid/starttime, and
+  START PARITY enforced before the first prompt. Streamed chunks are redacted;
+  `peer stop` finalizes through the UNCHANGED `/grok:handoff` path with honest
+  confinement labeling. New `acp-failure` error class; reaper respects live
+  peer homes. Design was adversarially reviewed by Grok itself and amended
+  before build (`docs/specs/2026-07-17-acp-peer-channel-design.md`); proven
+  end to end live (`docs/checklists/2.0-live-smoke-ledger.md`).
+
 ### Changed (Phase 0)
 
 - `plugin/scripts/lib/task-file.mjs`: task-text temp staging deduplicated
