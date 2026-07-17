@@ -44,20 +44,11 @@ Required wrapper flags (copy exactly, substitute only placeholder values):
 - Exactly one of `--task <text>` or `--task-file <path>` is required.
 - Preserve the user's arguments exactly. Do not strip, add, or reorder flags.
   Do not invent a flag that is not in the argument-hint.
-- Shell-injection safety for `--task <text>`: the task is free text you must NEVER
-  place in a shell-evaluated position. `$(...)`/backticks inside a double-quoted
-  `--task "..."` run locally BEFORE the wrapper validates them. When the arguments
-  carry a `--task <text>`, deliver that text on STDIN with `--task-file -` and a
-  SINGLE-QUOTED heredoc so the shell passes it byte-for-byte; the companion stages
-  it into a temp file for the wrapper.
-- Shell-injection safety for flag VALUES (`--worktree`, a `--task-file <path>`,
-  `--model`, `--timeout`, `--max-turns`, and EVERY other value you substitute from
-  `$ARGUMENTS`): wrap each substituted value in SINGLE quotes, for example
-  `--worktree '<absolute-path>'`. Single quotes stop the shell from evaluating
-  `$(...)`/backticks, so a hostile value reaches the companion as one literal argv
-  token and the wrapper validates it (worktree path resolution + escape guards).
-  An unquoted OR double-quoted value would be command-substituted locally BEFORE
-  the wrapper ever sees it -- the same injection class as an unsafe `--task "..."`.
+- Injection safety (canonical rationale: `plugin/references/argv-safety.md`):
+  task text is NEVER placed in a shell-evaluated position - deliver it with
+  `--task-file -` and a SINGLE-QUOTED heredoc. Wrap every substituted flag
+  VALUE in single quotes (`--target '<path>'`). Bare flags (`--web`) carry no
+  value to quote.
 
 NO web access:
 - `verify` NEVER accepts `--web` - independent verification stays hermetic by

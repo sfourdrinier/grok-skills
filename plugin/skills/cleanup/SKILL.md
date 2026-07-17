@@ -54,13 +54,12 @@ Required wrapper flags (copy exactly, substitute only placeholder values):
 - Preserve the user's arguments exactly. Do not strip, add, or reorder flags.
   Do not invent a flag that is not in the argument-hint.
 
-Run it as one Bash call and relay the result. SINGLE-QUOTE the run id so it
-reaches the companion as one literal argv element; NEVER embed the raw argument
-inside a position the shell would evaluate. An unquoted OR double-quoted value
-containing `$(...)`/backticks is command-substituted locally BEFORE the wrapper
-ever validates it. Single quotes pass the bytes verbatim; the wrapper then
-rejects any run id that is not the strict `YYYYMMDDThhmmssZ-xxxxxx` run-id shape
-and binds the destructive removal to the requested run id:
+Run it as one Bash call and relay the result.
+- Injection safety (canonical rationale: `plugin/references/argv-safety.md`):
+  Wrap every substituted flag VALUE in single quotes (`--run-id '<run-id>'`).
+  Bare flags (`--web`) carry no value to quote. The wrapper then rejects any run
+  id that is not the strict `YYYYMMDDThhmmssZ-xxxxxx` run-id shape and binds the
+  destructive removal to the requested run id:
 ```bash
 node "$SKILL_BASE/run.mjs" cleanup --run-id '<run-id from $ARGUMENTS>' [--confirm]
 ```
