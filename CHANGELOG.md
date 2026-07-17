@@ -54,6 +54,30 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
   runId). Direct-mode runs join the job surface; `handoff`/`status` refuse
   `direct-*` ids with one actionable message.
 
+### Added (Phase 2 - iteration loop, PR8)
+
+- **`code --continue-run <runId>`**: iterate on a completed code run instead
+  of starting over. Reuses the retained worktree, resumes the archived Grok
+  session (`--resume`, probe-verified), re-applies the persisted contract,
+  and mints a NEW run with `iteration`/`continuesRunId` lineage in run.json
+  and the handoff manifest. `--target/--base/--contract-file` are derived
+  from the prior run and refused alongside `--continue-run`.
+- Per-run session archive: the private home's Grok session store is copied
+  into the run dir before teardown (0700/0600; contains prompt history; see
+  SECURITY.md "Session archives"); seeded back on continuation. Archive
+  failure warns, never flips a run.
+- Continuation hardening: single-lineage chains (`continuedByRunId` CAS
+  guard forbids forked siblings and concurrent writers), persisted-contract
+  integrity pinned to the prior `contractSha256` (missing or tampered fails
+  closed), prior base verified at entry, `MAX_CONTINUATION_ITERATION` = 20.
+- Cleanup semantics for chains: a continuation cleans its own run state and
+  defers the shared worktree to its owning run (note, not failure); missing
+  worktree is a note for continuations; foreign ownership mismatches still
+  fail closed.
+- Live end-to-end evidence (ledger): seed run wrote `alpha`; continuation
+  recalled the prior turn, appended `beta` in the same worktree, and its
+  handoff was dual-condition ready.
+
 ### Changed (Phase 0)
 
 - `plugin/scripts/lib/task-file.mjs`: task-text temp staging deduplicated
@@ -66,7 +90,7 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 
 ### Suite counts (ratchet)
 
-- Wrapper: 653 -> 693. Plugin: 172 -> 203 (end of Phase 1).
+- Wrapper: 653 -> 721. Plugin: 172 -> 203 (end of Phase 2).
 
 ## [1.6.0] - 2026-07-16
 

@@ -101,8 +101,9 @@ plugin's own contract -> code -> handoff pipeline.
 | Phase | Content | Status |
 |-------|---------|--------|
 | 0 (PR6) | Hygiene: verify/checks gate + CI, task-file DRY, argv-safety reference, divergence warning, test splits, review fixes | **done 2026-07-17** |
-| 1 (PR7) | Acceptance criteria wired, `implement` combo, unified IDs, direct-mode parity | next |
-| 2 (PR8) | Iteration loop: session archive + `code --continue-run` | planned |
+| 1 (PR7) | Acceptance criteria wired, `implement` combo, unified IDs, direct-mode parity | **done 2026-07-17** |
+| - | Phase 1 adversarial review: 6 findings fixed (exit contract, id collision, summary caps, fencing) | done |
+| 2 (PR8) | Iteration loop: session archive + `code --continue-run` | **done 2026-07-17** |
 | 3 (PR9) | Claude Code native surface (bin/, plugin data dir, SubagentStop, userConfig, agent frontmatter) | planned |
 | 4 (PR10) | Codex parity polish | planned |
 | 5+6 (PR11) | ACP probe/spec/experimental peer channel; manifest polish; release | planned |
