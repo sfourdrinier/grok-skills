@@ -69,7 +69,7 @@ class CleanupModeTests(unittest.TestCase):
         self.repo_root = gitfixtures.make_repo(repo_parent)
         self.base = gitfixtures.head_revision(self.repo_root)
 
-    def _write_record(self, paths, worktree=None):
+    def _write_record(self, paths, worktree=None, continues_run_id=None, iteration=None):
         record = {
             "schemaVersion": 1,
             "runId": paths.run_id,
@@ -91,7 +91,32 @@ class CleanupModeTests(unittest.TestCase):
         if rec.get("lifecycle") == "created":
             rec = runstate.set_lifecycle(paths, rev, "running")
             rev = int(rec["recordRevision"])
-        runstate.cas_update_run_record(paths, rev, {"status": "running", "requestedModel": record.get("requestedModel"), "worktreePath": record.get("worktreePath"), "worktreeBranch": record.get("worktreeBranch"), "baseRevision": record.get("baseRevision"), "repository": record.get("repository")})
+        patch = {
+            "status": "running",
+            "requestedModel": record.get("requestedModel"),
+            "worktreePath": record.get("worktreePath"),
+            "worktreeBranch": record.get("worktreeBranch"),
+            "baseRevision": record.get("baseRevision"),
+            "repository": record.get("repository"),
+        }
+        if continues_run_id is not None:
+            patch["continuesRunId"] = continues_run_id
+        if iteration is not None:
+            patch["iteration"] = iteration
+        runstate.cas_update_run_record(paths, rev, patch)
+
+    def _seed_continuation_sharing_worktree(self, seed_paths, worktree, terminal=True):
+        """Continuation run.json that reuses the seed's worktree (marker still names seed)."""
+        cont_paths = runstate.create_run("code")
+        self._write_record(
+            cont_paths,
+            worktree=worktree,
+            continues_run_id=seed_paths.run_id,
+            iteration=2,
+        )
+        if terminal:
+            self._terminalize(cont_paths)
+        return cont_paths
 
 
     def _terminalize(self, paths, status="success"):
@@ -446,6 +471,94 @@ class CleanupModeTests(unittest.TestCase):
         self.assertTrue(envelope["response"]["runDirRemoved"])
         self.assertFalse(worktree.path.exists())
         self.assertFalse(paths.run_dir.exists())
+
+    def test_continuation_cleanup_succeeds_with_owner_note_while_worktree_survives(self) -> None:
+        # Live-smoke (iteration-loop): cleanup --run-id <continuation> --confirm must
+        # remove the continuation run dir only. The shared worktree marker still names
+        # the SEED; that is not a state-ownership-violation for a continuation -- the
+        # success envelope notes the owner and the worktree survives for the seed.
+        seed_paths, worktree = self._seed_run_with_worktree()
+        cont_paths = self._seed_continuation_sharing_worktree(seed_paths, worktree)
+
+        exit_code, out = _run_cleanup(cont_paths.run_id, confirm=True)
+        envelope = json.loads(out)
+
+        self.assertEqual(exit_code, 0, out)
+        self.assertEqual(envelope["status"], "success")
+        self.assertFalse(cont_paths.run_dir.exists(), "continuation run dir must be removed")
+        self.assertTrue(worktree.path.exists(), "shared worktree must survive continuation cleanup")
+        self.assertTrue(
+            pathlib.Path(str(worktree.path) + ".owner.json").exists(),
+            "seed ownership marker must survive",
+        )
+        self.assertTrue(seed_paths.run_dir.exists(), "seed run dir must survive")
+        self.assertFalse(envelope["response"].get("worktreeRemoved", False))
+        self.assertTrue(envelope["response"]["runDirRemoved"])
+        note = envelope["response"].get("worktreeNote") or envelope.get("cleanup", {}).get("detail") or ""
+        warnings = envelope.get("warnings") or []
+        note_blob = " ".join([note] + list(warnings))
+        self.assertIn(seed_paths.run_id, note_blob)
+        self.assertRegex(
+            note_blob.lower(),
+            r"worktree owned by run|owned by run",
+        )
+        self.assertRegex(note_blob.lower(), r"clean that run")
+
+    def test_seed_cleanup_removes_shared_worktree_after_continuation(self) -> None:
+        # Seed cleanup is unchanged: remove worktree + seed run dir even when a
+        # continuation run dir still references the same worktreePath.
+        seed_paths, worktree = self._seed_run_with_worktree()
+        cont_paths = self._seed_continuation_sharing_worktree(seed_paths, worktree)
+
+        exit_code, out = _run_cleanup(seed_paths.run_id, confirm=True)
+        envelope = json.loads(out)
+
+        self.assertEqual(exit_code, 0, out)
+        self.assertEqual(envelope["status"], "success")
+        self.assertFalse(seed_paths.run_dir.exists())
+        self.assertFalse(worktree.path.exists(), "seed cleanup removes the shared worktree")
+        self.assertTrue(cont_paths.run_dir.exists(), "continuation run dir is not seed cleanup's job")
+
+    def test_continuation_cleanup_after_seed_removal_notes_missing_worktree(self) -> None:
+        # After the seed is cleaned (worktree gone), continuation cleanup must still
+        # succeed: missing worktree is a note, not state-ownership-violation, and
+        # only the continuation run dir is reaped.
+        seed_paths, worktree = self._seed_run_with_worktree()
+        cont_paths = self._seed_continuation_sharing_worktree(seed_paths, worktree)
+
+        seed_code, seed_out = _run_cleanup(seed_paths.run_id, confirm=True)
+        self.assertEqual(seed_code, 0, seed_out)
+        self.assertFalse(worktree.path.exists())
+
+        exit_code, out = _run_cleanup(cont_paths.run_id, confirm=True)
+        envelope = json.loads(out)
+
+        self.assertEqual(exit_code, 0, out)
+        self.assertEqual(envelope["status"], "success")
+        self.assertFalse(cont_paths.run_dir.exists())
+        self.assertFalse(envelope["response"].get("worktreeRemoved", False))
+        self.assertTrue(envelope["response"]["runDirRemoved"])
+        note = envelope["response"].get("worktreeNote") or envelope.get("cleanup", {}).get("detail") or ""
+        warnings = envelope.get("warnings") or []
+        note_blob = " ".join([note] + list(warnings)).lower()
+        self.assertRegex(note_blob, r"missing worktree|worktree missing|no worktree")
+
+    def test_foreign_non_continuation_worktree_still_fails_closed(self) -> None:
+        # Genuinely foreign case: a NON-continuation run whose recorded worktreePath
+        # carries someone else's marker still fails state-ownership-violation.
+        # (Same shape as test_cleanup_refuses_when_record_points_at_another_runs_worktree;
+        # kept here as the iteration-chain acceptance criterion.)
+        paths_b, worktree_b = self._seed_run_with_worktree()
+        paths_a = runstate.create_run("code")
+        self._write_record(paths_a, worktree=worktree_b)
+        self._terminalize(paths_a)
+
+        exit_code, out = _run_cleanup(paths_a.run_id, confirm=True)
+        envelope = json.loads(out)
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(envelope["error"]["class"], "state-ownership-violation")
+        self.assertTrue(worktree_b.path.exists())
+        self.assertTrue(paths_a.run_dir.exists())
 
 
 if __name__ == "__main__":

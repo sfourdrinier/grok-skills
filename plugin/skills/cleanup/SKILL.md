@@ -51,6 +51,16 @@ Required wrapper flags (copy exactly, substitute only placeholder values):
     is removed whether it is clean OR dirty (`code` mode intentionally leaves its
     worktree dirty), so a dirty owner-marked worktree owned by the requested run
     is removed, never refused.
+  - **Iteration chains** (`code --continue-run`): a continuation's `run.json`
+    records the seed's `worktreePath` while the sibling marker still names the
+    seed. Cleaning a continuation removes only that continuation's run dir
+    (envelope, artifacts, session archive) and **defers** the shared worktree:
+    success with a note like `worktree owned by run <seed>; clean that run to
+    remove it` (not `state-ownership-violation`). Cleaning the seed removes the
+    worktree as usual even if continuation run dirs still reference it; a later
+    continuation cleanup then succeeds with a missing-worktree note. A
+    **non-continuation** run whose record points at someone else's worktree still
+    fails closed (`state-ownership-violation`).
 - Preserve the user's arguments exactly. Do not strip, add, or reorder flags.
   Do not invent a flag that is not in the argument-hint.
 

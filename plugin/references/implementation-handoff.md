@@ -104,3 +104,16 @@ from the retained worktree instead: verify the work in the worktree (test
 counts, suite, caps), generate the diff yourself (`git -C <worktree> add -A &&
 git -C <worktree> diff --cached --binary`), and apply with operator intent.
 Live evidence: docs/checklists/2.0-live-smoke-ledger.md (Task 0.6, cycle 4).
+
+## Cleanup semantics for iteration chains
+
+`code --continue-run` keeps one shared external worktree: the seed owns the
+sibling marker and directory name; each continuation's `run.json` records the
+same `worktreePath` plus `continuesRunId`. Cleanup of a continuation therefore
+removes only that run's directory (stored envelope, artifacts, session archive)
+and leaves the shared worktree for its owner, with a success note naming the
+owner run - not a `state-ownership-violation`. Cleanup of the seed removes the
+worktree as usual even when continuation run dirs still reference it; later
+continuation cleanups treat a missing worktree as a note and still reap their
+run dirs. A non-continuation run whose record points at a foreign worktree
+still fails closed.
