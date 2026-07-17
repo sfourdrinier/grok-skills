@@ -21,9 +21,10 @@
 # (workspace is whole-root). The deny scan + git-dir guard + direct_protect
 # snapshot/restore roll back the COVERED protected set to pre-run state
 # (byte-identical or removed-if-created): .env/keys, .git config/HEAD/packed-refs/
-# hooks/refs. .git/index is detected but not restored (git rebuilds it); loose
-# .git/objects are not tracked (content-addressed, inert until a watched ref
-# points at them). Reads of .env/keys are NOT blocked (D-SECRETREAD gap).
+# hooks/refs. .git/index and .git/COMMIT_EDITMSG are NOT guarded (benign working
+# state git rewrites on ordinary reads like `git status`); loose .git/objects are
+# not tracked (content-addressed, inert until a watched ref points at them).
+# Reads of .env/keys are NOT blocked (D-SECRETREAD gap).
 # Backlog: probe seatbelt write-deny subpaths for true prevention.
 
 import fnmatch
@@ -111,18 +112,22 @@ def _stat_sig(path: pathlib.Path) -> str:
 
 
 def capture_git_dir_guard(repo_root: pathlib.Path) -> FrozenSet[Tuple[str, str]]:
-    """Fingerprint sensitive paths under ``.git`` (working-tree fingerprint is blind to them).
+    """Fingerprint security-relevant paths under ``.git`` (working-tree fingerprint is blind to them).
 
-    Watches config/HEAD/index/packed-refs/COMMIT_EDITMSG, every file under
-    ``.git/hooks/``, and every ref under ``.git/refs/**`` (so a branch/tag
-    move-to-planted-commit is detected). A post-run set-difference surfaces Grok
-    writes the sandbox cannot block (workspace profile is whole-root). Loose
-    objects under ``.git/objects`` are intentionally not fingerprinted: they are
+    Watches config/HEAD/packed-refs, every file under ``.git/hooks/``, and every
+    ref under ``.git/refs/**`` (so a branch/tag move-to-planted-commit or a hook
+    plant is detected). A post-run set-difference surfaces Grok writes the sandbox
+    cannot block (workspace profile is whole-root).
+
+    Deliberately NOT watched (benign working state git rewrites on ordinary reads
+    like ``git status``, which would otherwise false-positive every real run):
+    ``.git/index`` (staging area; changes show in ``git status``) and
+    ``.git/COMMIT_EDITMSG``. Loose ``.git/objects`` are also not fingerprinted:
     content-addressed and inert until a watched ref points at them.
     """
     git_dir = pathlib.Path(repo_root) / ".git"
     pairs: Set[Tuple[str, str]] = set()
-    for name in ("config", "HEAD", "index", "packed-refs", "COMMIT_EDITMSG"):
+    for name in ("config", "HEAD", "packed-refs"):
         rel = ".git/" + name
         pairs.add((rel, _stat_sig(git_dir / name)))
     hooks = git_dir / "hooks"

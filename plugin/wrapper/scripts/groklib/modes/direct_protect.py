@@ -7,9 +7,10 @@
 #     (workspace profile is whole-root writable). This module rolls back the
 #     COVERED protected set after a run (byte-identical if snapshotted; removed
 #     if Grok created it): .env/keys plus .git config/HEAD/packed-refs/hooks and
-#     .git/refs/** (a moved/created ref is reverted/removed). .git/index is
-#     detect-only (git rebuilds it); loose .git/objects are not tracked (inert
-#     until a watched ref points at them).
+#     .git/refs/** (a moved/created ref is reverted/removed). .git/index and
+#     .git/COMMIT_EDITMSG are NOT guarded (benign working state git rewrites on
+#     ordinary reads); loose .git/objects are not tracked (inert until a watched
+#     ref points at them).
 #   - It does NOT protect against reads (documented D-SECRETREAD gap: Grok can
 #     still read .env / keys inside the repo).
 #   - Over-cap protected files are recorded as unsnapshottable: fail closed with
@@ -106,9 +107,10 @@ def is_snapshot_scope(relative: str) -> bool:
 
     ``.git/config``, ``.git/HEAD``, ``.git/packed-refs``, ``.git/hooks/*``, and
     ``.git/refs/**`` are snapshotted (so a created ref is auto-deleted and a moved
-    ref is byte-restored). Other ``.git/*`` paths (index, objects, ...) may be
-    *detected* by the git dir guard but are not auto-deleted on restore when
-    absent from the index (they likely existed pre-run without a snapshot).
+    ref is byte-restored). ``.git/index`` / ``.git/COMMIT_EDITMSG`` are not guarded
+    (benign working state); loose ``.git/objects`` are not tracked. Any other
+    ``.git/*`` offender is not auto-deleted on restore when absent from the
+    snapshot (it likely existed pre-run without a snapshot).
     """
     rel = _posix_rel(relative)
     if not rel:

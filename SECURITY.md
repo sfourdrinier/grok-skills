@@ -100,10 +100,11 @@ Honest limits (these are deliberate, not temporary gaps to paper over):
    `.env` / `.env.*`, key files (`*.pem` / `*.key` / `*.p12` / `*.p8`, SSH keys,
    `.netrc` / `.npmrc` / `.envrc`), `.git/config`, `.git/HEAD`,
    `.git/packed-refs`, `.git/hooks/*`, and `.git/refs/**` (a moved branch or a
-   created ref is reverted or removed). `.git/index` is **detected but not
-   restored** (git rebuilds it); loose `.git/objects` are **not tracked**
-   (content-addressed and inert until a watched ref points at them). This is
-   best-effort detection + rollback, not seatbelt subpath prevention.
+   created ref is reverted or removed). `.git/index` and `.git/COMMIT_EDITMSG`
+   are **not guarded** (benign working state git rewrites on ordinary reads like
+   `git status`; changes show in `git status`); loose `.git/objects` are **not
+   tracked** (content-addressed and inert until a watched ref points at them).
+   This is best-effort detection + rollback, not seatbelt subpath prevention.
 4. **Grok can still READ your files** (documented D-SECRETREAD). Write
    confinement is not a read firewall.
 5. **Consent gate:** first direct run without `setup --integration direct`

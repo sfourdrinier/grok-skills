@@ -169,6 +169,13 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 
 ### Fixed / hardened (Phase 7 - final review remediation)
 
+- **direct-mode `.git/index` false-positive (dogfood-caught):** the git-dir
+  guard no longer treats `.git/index` / `.git/COMMIT_EDITMSG` as protected-path
+  writes. git rewrites the index on ordinary reads (`git status`), so guarding
+  it failed essentially every real direct run at finalize (a live
+  `grok-engineer-coder` subagent dogfood hit this: Grok's `src/` edits + passing
+  tests were discarded because a `git status` had touched the index). Only the
+  security-relevant `.git` set (config/HEAD/packed-refs/hooks/refs) is guarded.
 - **direct-mode `.git/refs` guard + rollback:** the git-dir guard now
   fingerprints `.git/refs/**` and the protected snapshot covers refs +
   `.git/packed-refs`, so a direct-mode branch/tag move-to-planted-commit or a
@@ -203,7 +210,7 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 
 ### Suite counts (ratchet)
 
-- Wrapper: 653 -> 786. Plugin: 172 -> 271 (through Phase 7 review remediation).
+- Wrapper: 653 -> 787. Plugin: 172 -> 271 (through Phase 7 review remediation).
 
 ## [1.6.0] - 2026-07-16
 

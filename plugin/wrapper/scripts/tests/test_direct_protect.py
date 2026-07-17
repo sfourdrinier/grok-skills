@@ -179,6 +179,17 @@ class DirectGitGuardAndDenyTests(unittest.TestCase):
         after = capture_git_dir_guard(self.repo)
         self.assertIn(".git/refs/heads/evil", _changed_paths(baseline, after))
 
+    def test_guard_ignores_benign_index_and_commit_editmsg(self) -> None:
+        # Regression: git rewrites .git/index on ordinary reads (git status),
+        # which must NOT be a fatal protected-path-write in direct mode.
+        from groklib.modes.direct_finalize import capture_git_dir_guard, _changed_paths
+
+        baseline = capture_git_dir_guard(self.repo)
+        (self.repo / ".git" / "index").write_bytes(b"DIRC-fake-index\n")
+        (self.repo / ".git" / "COMMIT_EDITMSG").write_text("wip\n")
+        after = capture_git_dir_guard(self.repo)
+        self.assertEqual(_changed_paths(baseline, after), set())
+
     def test_expanded_deny_globs(self) -> None:
         from groklib.modes.direct_finalize import path_matches_deny
 
