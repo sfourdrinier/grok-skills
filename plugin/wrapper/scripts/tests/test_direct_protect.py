@@ -4,6 +4,7 @@
 # Integration disk-state tests live in test_mode_direct.DirectProtectedPathRollbackTests.
 
 import pathlib
+import subprocess
 import tempfile
 import unittest
 
@@ -194,10 +195,86 @@ class DirectGitGuardAndDenyTests(unittest.TestCase):
         from groklib.modes.direct_finalize import path_matches_deny
 
         for p in ("id_rsa", "id_ed25519", ".netrc", ".npmrc", ".envrc", "key.p8",
-                  "sub/dir/id_ecdsa", "deep/nested/.npmrc"):
+                  "sub/dir/id_ecdsa", "deep/nested/.npmrc", ".env/production",
+                  ".env/staging.local"):
             self.assertTrue(path_matches_deny(p), p)
         for p in ("src/app.py", "README.md", "package.json"):
             self.assertFalse(path_matches_deny(p), p)
+
+
+class DirectAbortSweepTests(unittest.TestCase):
+    """restore_protected_on_abort: rollback on abnormal exit (reviews 2/3/5)."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="direct-abort-")
+        self.repo = pathlib.Path(self.tmp) / "repo"
+        self.run_dir = pathlib.Path(self.tmp) / "run"
+        self.repo.mkdir()
+        self.run_dir.mkdir()
+        self._git("init")
+        self._git("config", "user.email", "t@t.t")
+        self._git("config", "user.name", "t")
+        (self.repo / "src").mkdir()
+        (self.repo / "src" / "app.py").write_text("print('ok')\n")
+        self._git("add", "-A")
+        self._git("commit", "-m", "seed")
+
+    def _git(self, *args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(self.repo), *args], check=True, capture_output=True
+        )
+
+    def _baseline(self):
+        from groklib import worktree_escape
+        from groklib.modes.direct_finalize import capture_git_dir_guard
+
+        return (
+            worktree_escape.repo_change_fingerprint(self.repo),
+            capture_git_dir_guard(self.repo),
+        )
+
+    def test_sweep_deletes_created_env_after_abort(self) -> None:
+        from groklib.modes.direct_finalize import restore_protected_on_abort
+
+        base_fp, base_git = self._baseline()
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        (self.repo / ".env").write_text("SECRET=leak\n")  # Grok wrote then aborted
+        res = restore_protected_on_abort(self.repo, base_fp, base_git, snap)
+        self.assertFalse((self.repo / ".env").exists())
+        self.assertIn(".env", res["restored"])
+
+    def test_sweep_restores_modified_env_after_abort(self) -> None:
+        from groklib.modes.direct_finalize import restore_protected_on_abort
+
+        (self.repo / ".env").write_text("KEEP=1\n")
+        base_fp, base_git = self._baseline()
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        (self.repo / ".env").write_text("KEEP=1\nLEAK=2\n")
+        res = restore_protected_on_abort(self.repo, base_fp, base_git, snap)
+        self.assertEqual((self.repo / ".env").read_text(), "KEEP=1\n")
+        self.assertIn(".env", res["restored"])
+
+    def test_sweep_restores_moved_ref_after_abort(self) -> None:
+        from groklib.modes.direct_finalize import restore_protected_on_abort
+
+        base_fp, base_git = self._baseline()
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        ref = self.repo / ".git" / "refs" / "heads" / "main"
+        original = ref.read_text()
+        ref.write_text("f" * 40 + "\n")  # branch moved to a planted commit
+        res = restore_protected_on_abort(self.repo, base_fp, base_git, snap)
+        self.assertEqual(ref.read_text(), original)
+        self.assertIn(".git/refs/heads/main", res["restored"])
+
+    def test_sweep_noop_when_only_source_changed(self) -> None:
+        from groklib.modes.direct_finalize import restore_protected_on_abort
+
+        base_fp, base_git = self._baseline()
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        (self.repo / "src" / "app.py").write_text("print('edited')\n")
+        res = restore_protected_on_abort(self.repo, base_fp, base_git, snap)
+        self.assertEqual(res["restored"], [])
+        self.assertEqual((self.repo / "src" / "app.py").read_text(), "print('edited')\n")
 
 
 if __name__ == "__main__":

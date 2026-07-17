@@ -51,6 +51,7 @@ DENY_WRITE_GLOBS: Tuple[str, ...] = (
     ".git/**",
     ".env",
     ".env.*",
+    ".env/**",
     "*.pem",
     "*.key",
     "*.p12",
@@ -426,12 +427,16 @@ def finalize_direct(
     changed = _changed_paths(baseline_fp, after_fp)
     protect_snapshot = getattr(stage, "protect_snapshot", None)
 
-    _assert_realpath_under_repo(repo_root, changed)
-    # Deny keeps the FULL changed-set (incl. gitignored .env); scope uses source only.
+    # Protected rollback runs BEFORE the realpath-escape check: a protected path
+    # (.env / *.pem) replaced with a symlink that resolves outside the repo must
+    # be restored from snapshot first, else _assert_realpath_under_repo raises
+    # sandbox-failure and skips the rollback (review 5). Deny keeps the FULL
+    # changed-set (incl. gitignored .env); scope uses source only.
     _assert_deny_globs(changed, repo_root=repo_root, protect_snapshot=protect_snapshot)
     _assert_git_dir_untouched(
         stage.baseline_git_fp, repo_root, protect_snapshot=protect_snapshot
     )
+    _assert_realpath_under_repo(repo_root, changed)
     source_changed = _source_changed_paths(repo_root, changed)
     _assert_write_scopes(source_changed, contract)
 
@@ -454,11 +459,11 @@ def finalize_direct(
     # Re-diff: build/validation may have written further paths.
     after_fp = worktree_escape.repo_change_fingerprint(repo_root)
     changed = _changed_paths(baseline_fp, after_fp)
-    _assert_realpath_under_repo(repo_root, changed)
     _assert_deny_globs(changed, repo_root=repo_root, protect_snapshot=protect_snapshot)
     _assert_git_dir_untouched(
         stage.baseline_git_fp, repo_root, protect_snapshot=protect_snapshot
     )
+    _assert_realpath_under_repo(repo_root, changed)
     source_changed = _source_changed_paths(repo_root, changed)
     _assert_write_scopes(source_changed, contract)
 
@@ -487,6 +492,54 @@ def finalize_direct(
         "direct finalize complete",
         data={"changedFiles": list(stage.acc.changed_files)},
     )
+
+
+def restore_protected_on_abort(
+    repo_root: pathlib.Path,
+    baseline_fp: FrozenSet[Tuple[str, str]],
+    baseline_git_fp: FrozenSet[Tuple[str, str]],
+    protect_snapshot: Optional["direct_protect.ProtectedSnapshot"],
+) -> Dict[str, List[str]]:
+    """Best-effort protected-path rollback for ABNORMAL direct exits (reviews 2/3/5).
+
+    ``finalize_direct``'s ordered rollback only runs on the normal path. When
+    Grok times out / cancels / exits nonzero (finalize never runs), or a
+    build-gate / requiredValidation command writes a protected path then fails,
+    the credential/.git writes would be left live. This re-diffs the tree + the
+    .git guard and restores every protected offender from the pre-run snapshot.
+    Idempotent: after a protected-path-write already restored, the re-diff finds
+    nothing to restore. Never raises (returns a summary; logs failures).
+    """
+    offenders: Set[str] = set()
+    try:
+        after_fp = worktree_escape.repo_change_fingerprint(repo_root)
+        offenders |= {p for p in _changed_paths(baseline_fp, after_fp) if path_matches_deny(p)}
+    except Exception as exc:
+        _log("restore_protected_on_abort", "changed-set re-diff failed: {}".format(exc))
+    try:
+        after_git = capture_git_dir_guard(repo_root)
+        offenders |= set(_changed_paths(baseline_git_fp, after_git))
+    except Exception as exc:
+        _log("restore_protected_on_abort", "git-dir guard re-scan failed: {}".format(exc))
+
+    ordered = sorted(offenders)
+    if not ordered:
+        return {"restored": [], "unrestored": [], "errors": []}
+    if protect_snapshot is None:
+        _log("restore_protected_on_abort", "no snapshot; cannot restore {}".format(ordered))
+        return {"restored": [], "unrestored": ordered, "errors": []}
+    restore = direct_protect.restore_protected_paths(repo_root, protect_snapshot, ordered)
+    _log(
+        "restore_protected_on_abort",
+        "abnormal-exit rollback restored={} unrestored={}".format(
+            restore.restored, restore.unrestored
+        ),
+    )
+    return {
+        "restored": list(restore.restored),
+        "unrestored": list(restore.unrestored),
+        "errors": [e.get("path", "") for e in restore.errors],
+    }
 
 
 def capture_pristine_manifest(

@@ -314,6 +314,7 @@ def _run_direct_mode_body(
     sandbox_obj: Optional[dict] = None
     effective_model: Optional[str] = None
     outcome_error: Optional[GrokWrapperError] = None
+    protect_snapshot: Optional["direct_protect.ProtectedSnapshot"] = None
 
     try:
         grokcli.check_version(binary)
@@ -429,6 +430,38 @@ def _run_direct_mode_body(
     except GrokWrapperError as exc:
         outcome_error = exc
         _log("run_direct_mode", "direct failed: {} ({})".format(exc.error_class, exc))
+        # Safety net (reviews 2/3/5): protected-path rollback must also run on an
+        # abnormal Grok exit (timeout/cancel/nonzero -> finalize never ran) or a
+        # gate/validation/realpath failure inside finalize. protected-path-write
+        # already restored, so skip it there to avoid double work.
+        if (
+            exc.error_class != "protected-path-write"
+            and prep is not None
+            and protect_snapshot is not None
+        ):
+            try:
+                from groklib.modes import direct_finalize as _direct_finalize
+                sweep = _direct_finalize.restore_protected_on_abort(
+                    repo_root.resolve(),
+                    prep.baseline_fp,
+                    prep.baseline_git_fp,
+                    protect_snapshot,
+                )
+                if sweep["restored"]:
+                    warnings.append(
+                        "protected paths rolled back after abnormal exit: {}".format(
+                            sweep["restored"]
+                        )
+                    )
+                if sweep["unrestored"]:
+                    warnings.append(
+                        "protected paths NOT rolled back (restore them yourself): {}".format(
+                            sweep["unrestored"]
+                        )
+                    )
+            except Exception as sweep_exc:
+                _log("_run_direct_mode_body", "protected abort-sweep failed: {}".format(sweep_exc))
+                warnings.append("protected-path abort-sweep failed: {}".format(sweep_exc))
 
     if home_cleanup is not None and home_cleanup.result.get("status") == "failed":
         home_cleanup.retry_if_failed()

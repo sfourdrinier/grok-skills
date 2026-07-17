@@ -342,12 +342,23 @@ def resolve_continuation(
         ) from exc
 
     if record.get("mode") != "code":
+        prior_mode = record.get("mode")
+        if prior_mode == "direct":
+            # Continuation needs the retained worktree lineage, which direct mode
+            # (default) never creates. Point the operator at the worktree path.
+            hint = (
+                "direct-integration runs are not continuable (no retained "
+                "worktree); re-run the original with --integration worktree for a "
+                "continuable run"
+            )
+        else:
+            hint = "only 'code' runs are continuable"
         raise GrokWrapperError(
             "invalid-target",
-            "cannot continue run {}: prior mode is {!r}, expected 'code'".format(
-                prior_id, record.get("mode")
+            "cannot continue run {}: prior mode is {!r} - {}".format(
+                prior_id, prior_mode, hint
             ),
-            {"runId": prior_id, "mode": record.get("mode")},
+            {"runId": prior_id, "mode": prior_mode, "hint": hint},
         )
 
     lifecycle = record.get("lifecycle")
