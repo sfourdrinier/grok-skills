@@ -432,3 +432,100 @@ class DirectDenyHelperUnitTests(ModeHarness):
         self.assertTrue(path_matches_deny(".githooks/pre-push"))
         self.assertFalse(path_matches_deny("pkg/mod.txt"))
         self.assertFalse(path_matches_deny("README.md"))
+
+
+class DirectProtectedPathRollbackTests(DirectModeHarness):
+    """Disk-state guarantees: protected writes are rolled back, not only detected.
+
+    Detection-only guards assert the error class while leaving the write on disk.
+    These tests read the file after the run and require pre-run identity (or
+    removal for created protected files).
+    """
+
+    def test_env_write_rolled_back_to_pre_run_bytes(self) -> None:
+        """Pre-existing .env must be byte-identical after a protected-path-write fail."""
+        repo = self.make_code_repo()
+        original = b"DEBUG=false\nAPI_KEY=pre-run-value\n"
+        env_path = repo / ".env"
+        env_path.write_bytes(original)
+
+        def _plant(repo_root: pathlib.Path, _run_id: str) -> None:
+            # Simulate Grok appending to the operator .env (the live-test gap).
+            with (repo_root / ".env").open("ab") as handle:
+                handle.write(b"DEBUG=true\n")
+
+        exit_code, out = self.drive_direct(self._direct_argv(), repo_root=repo, plant=_plant)
+        env = json.loads(out)
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(env["status"], "failure")
+        self.assertEqual(env["error"]["class"], "protected-path-write")
+        # THE missing assertion: disk state, not just error class.
+        self.assertEqual(
+            env_path.read_bytes(),
+            original,
+            "protected .env must be restored to pre-run bytes after direct run",
+        )
+        detail = env["error"].get("detail") or {}
+        restored = detail.get("restored") or []
+        self.assertIn(".env", restored)
+
+    def test_created_protected_pem_is_removed(self) -> None:
+        """A protected file Grok creates must be deleted on protected-path-write."""
+        repo = self.make_code_repo()
+        pem_path = repo / "leaked.pem"
+        self.assertFalse(pem_path.exists())
+
+        def _plant(repo_root: pathlib.Path, _run_id: str) -> None:
+            (repo_root / "leaked.pem").write_text(
+                "-----BEGIN FAKE-----\nsecret\n", encoding="utf-8"
+            )
+            # Legitimate non-protected edit in the same run must survive restore.
+            (repo_root / "pkg" / "mod.txt").write_text(
+                "module still edited\n", encoding="utf-8"
+            )
+
+        exit_code, out = self.drive_direct(self._direct_argv(), repo_root=repo, plant=_plant)
+        env = json.loads(out)
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(env["error"]["class"], "protected-path-write")
+        self.assertFalse(
+            pem_path.exists(),
+            "Grok-created protected file must be removed after the run",
+        )
+        # Restore must not touch non-protected paths.
+        self.assertEqual(
+            (repo / "pkg" / "mod.txt").read_text(encoding="utf-8"),
+            "module still edited\n",
+        )
+
+    def test_unsnapshottable_protected_change_fails_honestly(self) -> None:
+        """Over-cap protected file: fail closed without claiming restore succeeded."""
+        from groklib.modes import direct_protect
+
+        repo = self.make_code_repo()
+        # Small file that exceeds a patched tiny snapshot budget.
+        original = b"X" * 64
+        env_path = repo / ".env"
+        env_path.write_bytes(original)
+
+        def _plant(repo_root: pathlib.Path, _run_id: str) -> None:
+            (repo_root / ".env").write_bytes(original + b"TAMPERED\n")
+
+        with mock.patch.object(direct_protect, "DEFAULT_MAX_TOTAL_BYTES", 16):
+            exit_code, out = self.drive_direct(
+                self._direct_argv(), repo_root=repo, plant=_plant
+            )
+        env = json.loads(out)
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(env["error"]["class"], "protected-path-write")
+        message = env["error"].get("message") or ""
+        detail_blob = json.dumps(env["error"])
+        self.assertIn("too large to roll back", message + detail_blob)
+        # Must not falsely claim restore of the over-cap path.
+        detail = env["error"].get("detail") or {}
+        restored = detail.get("restored") or []
+        unrestored = detail.get("unrestored") or []
+        self.assertNotIn(".env", restored)
+        self.assertIn(".env", unrestored)
+        # File may still be tampered (honest: we could not roll it back).
+        self.assertEqual(env_path.read_bytes(), original + b"TAMPERED\n")

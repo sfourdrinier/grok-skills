@@ -5,16 +5,18 @@
 #
 #   1. changed-set fingerprint diff (baseline vs after)
 #   2. realpath-under-repo per changed path
-#   3. deny-glob scan -> protected-path-write
+#   3. deny-glob scan -> protected-path-write (+ ROLLBACK via direct_protect)
 #   4. contract writeScopes scan -> write-scope-violation
 #   5. D1(b) gate-script integrity + build gate (reuse code helpers)
 #   6. contract requiredValidation (reuse code._run_recorded_command)
 #   7. re-diff (build/validation may have written)
 #   8. dirty-overlap -> dirty-path-conflict unless --force
 #
-# SECURITY: deny-list is POST-RUN and best-effort. The sandbox does not stop
-# writes to .git/.env inside the writable repo root; this scan only detects them
-# after the fact. See modes/_direct.py header for the full honesty statement.
+# SECURITY: direct mode does NOT prevent protected writes at the sandbox layer
+# (workspace is whole-root). The deny scan + direct_protect snapshot/restore
+# guarantee protected paths are rolled back to pre-run state (byte-identical or
+# removed-if-created). Reads of .env/keys are NOT blocked (D-SECRETREAD gap).
+# Backlog: probe seatbelt write-deny subpaths for true prevention.
 
 import fnmatch
 import pathlib
@@ -27,6 +29,7 @@ from groklib import worktree_escape
 from groklib.implementation_contract import normalize_repo_relative, path_in_scopes
 from groklib.modes import code as code_mode
 from groklib.modes import code_continue
+from groklib.modes import direct_protect
 from groklib.modes._direct import DirectFinalizeStage
 
 # Paths Grok must never write in direct mode (operator's real .git/.env/keys/hooks
@@ -133,32 +136,65 @@ def _assert_realpath_under_repo(repo_root: pathlib.Path, changed: Set[str]) -> N
         )
 
 
-def _assert_deny_globs(changed: Set[str]) -> None:
-    """Fail closed as protected-path-write when any changed path hits DENY_WRITE_GLOBS."""
+def _rollback_and_raise_protected(
+    offenders: List[str],
+    *,
+    repo_root: pathlib.Path,
+    protect_snapshot: Optional["direct_protect.ProtectedSnapshot"],
+) -> None:
+    """Restore protected offenders from the pre-run snapshot, then raise."""
+    if protect_snapshot is None:
+        # Fail closed without claiming restore when snapshot was never taken.
+        _log("_rollback_and_raise_protected", "no snapshot; cannot restore: {}".format(offenders))
+        raise GrokWrapperError(
+            "protected-path-write",
+            "Grok wrote to a protected path inside the repository: {}".format(
+                ", ".join(offenders)
+            ),
+            {
+                "protectedPaths": offenders,
+                "restored": [],
+                "unrestored": list(offenders),
+                "restoreErrors": [
+                    {"path": p, "error": "no pre-run protected snapshot available"}
+                    for p in offenders
+                ],
+            },
+        )
+    restore = direct_protect.restore_protected_paths(repo_root, protect_snapshot, offenders)
+    direct_protect.raise_protected_path_write(offenders, restore)
+
+
+def _assert_deny_globs(
+    changed: Set[str],
+    *,
+    repo_root: pathlib.Path,
+    protect_snapshot: Optional["direct_protect.ProtectedSnapshot"],
+) -> None:
+    """Fail closed as protected-path-write; restore protected paths before raising."""
     offenders = sorted(p for p in changed if path_matches_deny(p))
     if not offenders:
         return
     _log("_assert_deny_globs", "protected-path-write: {}".format(offenders))
-    raise GrokWrapperError(
-        "protected-path-write",
-        "Grok wrote to a protected path inside the repository: {}".format(", ".join(offenders)),
-        {"protectedPaths": offenders},
+    _rollback_and_raise_protected(
+        offenders, repo_root=repo_root, protect_snapshot=protect_snapshot
     )
 
 
 def _assert_git_dir_untouched(
-    baseline_git_fp: FrozenSet[Tuple[str, str]], repo_root: pathlib.Path
+    baseline_git_fp: FrozenSet[Tuple[str, str]],
+    repo_root: pathlib.Path,
+    *,
+    protect_snapshot: Optional["direct_protect.ProtectedSnapshot"],
 ) -> None:
-    """Fail closed when any watched ``.git/*`` path changed during the run."""
+    """Fail closed when any watched ``.git/*`` path changed; restore then raise."""
     after = capture_git_dir_guard(repo_root)
     git_changed = sorted(_changed_paths(baseline_git_fp, after))
     if not git_changed:
         return
     _log("_assert_git_dir_untouched", "protected-path-write under .git: {}".format(git_changed))
-    raise GrokWrapperError(
-        "protected-path-write",
-        "Grok wrote to a protected path inside the repository: {}".format(", ".join(git_changed)),
-        {"protectedPaths": git_changed},
+    _rollback_and_raise_protected(
+        git_changed, repo_root=repo_root, protect_snapshot=protect_snapshot
     )
 
 
@@ -266,10 +302,13 @@ def finalize_direct(
 
     after_fp = worktree_escape.repo_change_fingerprint(repo_root)
     changed = _changed_paths(baseline_fp, after_fp)
+    protect_snapshot = getattr(stage, "protect_snapshot", None)
 
     _assert_realpath_under_repo(repo_root, changed)
-    _assert_deny_globs(changed)
-    _assert_git_dir_untouched(stage.baseline_git_fp, repo_root)
+    _assert_deny_globs(changed, repo_root=repo_root, protect_snapshot=protect_snapshot)
+    _assert_git_dir_untouched(
+        stage.baseline_git_fp, repo_root, protect_snapshot=protect_snapshot
+    )
     _assert_write_scopes(changed, contract)
 
     # D1(b): pristine scripts from HEAD (already captured at prepare); refuse
@@ -292,8 +331,10 @@ def finalize_direct(
     after_fp = worktree_escape.repo_change_fingerprint(repo_root)
     changed = _changed_paths(baseline_fp, after_fp)
     _assert_realpath_under_repo(repo_root, changed)
-    _assert_deny_globs(changed)
-    _assert_git_dir_untouched(stage.baseline_git_fp, repo_root)
+    _assert_deny_globs(changed, repo_root=repo_root, protect_snapshot=protect_snapshot)
+    _assert_git_dir_untouched(
+        stage.baseline_git_fp, repo_root, protect_snapshot=protect_snapshot
+    )
     _assert_write_scopes(changed, contract)
 
     overlap = sorted(changed & dirty_paths)

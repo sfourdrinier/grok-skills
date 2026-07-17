@@ -6,16 +6,17 @@
 # tmp, with secret redaction on output.
 #
 # SECURITY HONESTY (read before changing this module):
-#   - direct mode has NO worktree isolation and NO rollback. Edits land live in
+#   - direct mode has NO worktree isolation. Non-protected edits land live in
 #     the operator checkout; the operator's git history is the record.
 #   - The sandbox confines writes to the repo root (+ private tmp) but does NOT
-#     protect .git / .env / keys / hooks INSIDE that root (workspace profile is
-#     whole-root; deny_read_globs are unenforced on current Grok CLI). Those
-#     paths are guarded by a POST-RUN deny-list scan only (best-effort: it runs
-#     after the write, not before).
+#     PREVENT writes to .git / .env / keys / hooks INSIDE that root (workspace
+#     profile is whole-root). Those paths are snapshotted pre-run and ROLLED
+#     BACK post-run on protected-path-write (direct_protect) - detection alone
+#     is not enough. Reads of secrets are NOT blocked (D-SECRETREAD gap).
 #   - Do NOT claim the sandbox keeps the tree "safe". verify_enforcement proves
-#     grant coverage of the writable roots; the deny scan + write-scope + dirty
-#     overlap guards are the remaining post-run policy layers.
+#     grant coverage of the writable roots; snapshot/restore + deny scan +
+#     write-scope + dirty overlap are the remaining policy layers.
+#   - Backlog: probe seatbelt write-deny subpaths for true prevention.
 #
 # Intentionally does NOT reuse run_grok_mode (no finalize hook; read-only single
 # phase) and does NOT generalize run_worktree_mode (worktree baked in). Mirrors
@@ -51,6 +52,7 @@ from groklib.modes._shared import (
     terminalize_unexpected_failure,
 )
 from groklib.modes._worktree import WorktreeAccumulator
+from groklib.modes import direct_protect
 
 
 def _log(function: str, message: str) -> None:
@@ -98,6 +100,8 @@ class DirectFinalizeStage:
     dirty_paths: "frozenset"
     baseline_git_fp: "frozenset"
     force: bool
+    # Pre-run protected-path snapshot (bytes under run_dir/protected-snapshot/).
+    protect_snapshot: Optional["direct_protect.ProtectedSnapshot"] = None
 
 
 class DirectHolder:
@@ -318,6 +322,12 @@ def _run_direct_mode_body(
             run_id=run_paths.run_id, run_paths=run_paths, progress=progress, acc=acc
         )
         prep = prepare(stage)
+        # Snapshot protected paths BEFORE Grok can write (plant/execute).
+        # Workspace sandbox cannot deny .env/.git inside the writable root;
+        # finalize restores from this snapshot on protected-path-write.
+        protect_snapshot = direct_protect.snapshot_protected_paths(
+            repo_root.resolve(), run_paths.run_dir
+        )
         progress.safe_emit(
             "worktree",
             "direct mode: operating on real repository tree (no worktree)",
@@ -394,6 +404,7 @@ def _run_direct_mode_body(
                     dirty_paths=prep.dirty_paths,
                     baseline_git_fp=prep.baseline_git_fp,
                     force=force,
+                    protect_snapshot=protect_snapshot,
                 )
             )
         finally:
