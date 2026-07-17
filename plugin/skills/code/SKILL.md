@@ -106,11 +106,29 @@ message instead of an envelope, tell the user to run `/grok:setup`.
 
 ## Implementation contract + handoff (1.6.0+)
 
-Optional `--contract-file <path>` points at operator-trusted JSON (writeScopes +
-`requiredValidation` argv arrays). Bad contracts fail closed **before** Grok
-with `implementation-contract-invalid`. Trust model:
+**Derive a contract by default** before a non-exploratory `code` run (host
+agents: `agents/grok-engineer-coder.md`, Codex
+`codex-agents/grok-engineer-coder.toml`). Stage operator-trusted JSON and pass
+`--contract-file <path>` (writeScopes + `requiredValidation` argv arrays). Skip
+only for exploratory tasks, or when outcomes are not crisp (ask once, or
+proceed without a contract and say so). Bad contracts fail closed **before**
+Grok with `implementation-contract-invalid`. Trust model:
 `operator-contract-trusted-no-os-sandbox` (no OS filesystem sandbox claim for
 validation commands).
+
+`requiredValidation` argv is **shell-free** (canonical:
+`plugin/references/argv-safety.md`): no globs, no directory shorthands, no
+`$VARS`. Prefer **targeted** test modules over a heavy or environment-sensitive
+full suite; the workspace build gate still runs. Model examples:
+`["node", "--test"]` with `cwd`, and
+`["python3", "-m", "unittest", "discover", "-s", "tests", "-q"]`.
+
+While a hardened code run is in flight, do **not** commit or edit the target
+checkout (original-checkout guard cannot attribute mid-run divergence);
+integrate in a quiet window after the terminal envelope. Changes that add or
+move secret-shaped test fixtures cannot produce a handoff patch artifact
+(fail-closed scan); expect retained-worktree manual integration
+(`references/implementation-handoff.md`).
 
 **Direct run-mode refuses `--contract-file`** (companion fail-closed). Verified
 handoff artifacts (`implementation.patch` + `implementation-handoff.json`) are

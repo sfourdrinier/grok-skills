@@ -54,6 +54,54 @@ grok-skills companion via `agents/run.mjs`. You do **not** edit the operator che
 2. **`--base`**: committed revision the user named, else `HEAD`.
 3. Single-quote every flag value. Never invent uncommitted state.
 
+## Derive a contract (default; skip only for exploratory tasks)
+
+Before calling `code`, derive an implementation contract from the user's ask
+and write it to a temp file (hardened mode only; direct mode rejects it):
+
+```bash
+CONTRACT_FILE="$(mktemp -t grok-contract)"
+cat > "$CONTRACT_FILE" <<'GROK_CONTRACT'
+{
+  "schemaVersion": 1,
+  "taskId": "<short-slug-from-the-ask>",
+  "target": "<same value as --target>",
+  "objective": "<one-sentence goal in the user's words>",
+  "writeScopes": [{"kind": "subtree", "path": "<narrowest dir that must change>"}],
+  "acceptanceCriteria": [
+    "<observable outcome 1>",
+    "<observable outcome 2>"
+  ],
+  "requiredValidation": [
+    {"argv": ["node", "--test"], "cwd": "plugin/scripts", "purpose": "plugin unit tests"},
+    {"argv": ["python3", "-m", "unittest", "discover", "-s", "tests", "-q"], "cwd": "plugin/wrapper/scripts", "purpose": "wrapper unit tests"}
+  ]
+}
+GROK_CONTRACT
+```
+
+Then add `--contract-file "$CONTRACT_FILE"` to the code call. Rules:
+
+- `target` must equal `--target` exactly (the wrapper rejects mismatches).
+- Scope paths are repo-relative, no `..`, no absolute paths.
+- `requiredValidation` argv is **shell-free** (canonical:
+  `plugin/references/argv-safety.md`): no globs, no directory shorthands, no
+  `$VARS`. Model examples: `["node", "--test"]` with `cwd` set to the directory
+  whose default test glob you want; and
+  `["python3", "-m", "unittest", "discover", "-s", "tests", "-q"]`.
+- Prefer **targeted** test modules over a repo's full suite when the suite is
+  heavy or environment-sensitive; the workspace build gate still runs.
+- Omit `requiredValidation` if you do not know a safe project test command -
+  the workspace build gate still runs.
+- If the user's ask has no crisp outcomes, ask them once, or proceed without
+  a contract and say so.
+- While a hardened code run is in flight, the parent must **not** commit or
+  edit the target checkout (original-checkout guard cannot attribute mid-run
+  divergence); integrate in a quiet window after the terminal envelope.
+- Changes that add or move secret-shaped test fixtures cannot produce a
+  handoff patch artifact (fail-closed scan); expect retained-worktree manual
+  integration for those (`references/implementation-handoff.md`).
+
 ## Implementation call
 
 Never `--task "..."`. Always:
@@ -62,6 +110,7 @@ Never `--task "..."`. Always:
 node "$AGENT_RUN" code \
   --target '<target>' \
   --base '<base>' \
+  --contract-file "$CONTRACT_FILE" \
   --task-file - <<'GROK_TASK'
 <full implementation request>
 GROK_TASK
@@ -87,7 +136,8 @@ Return envelopes **verbatim**. Do not commit, push, or chain other modes.
 4. Integrate only when handoff status is success and `response.integration.ready`.
 5. Completion **notify** is not ready - always call handoff.
 6. Parent apply is **manual** (`git apply --check --binary` then explicit apply). Never auto-apply.
-7. Optional: pass `--contract-file '<path>'` on code for writeScopes + requiredValidation.
+7. Prefer deriving a contract by default (section above); pass
+   `--contract-file` on every non-exploratory code run.
 
 See `skills/handoff/SKILL.md` and `references/implementation-handoff.md`.
 On failure: return stderr/envelope; never return nothing.
