@@ -221,8 +221,17 @@ three batches. Two release-blockers were real.
   values; session archive skips symlinks; contiguous secret-shaped test literals
   split (AGENTS.md #8); handoff-consumed marker now written; auto-apply blocks
   dirty-overlap; legacy prefs pinned as setup only when non-default.
-- Deferred (tracked): implement/auto job+notify finalize after handoff; peer
-  start-abort home/worktree cleanup guard; model-created cwd sentinel.
+- **Peer start-abort cleanup + model-created sentinel:** a peer-start that fails
+  after creating the worktree/home/child now tears all of them down and
+  terminalizes the run (no orphaned credential home / worktree / process); the
+  cwd sentinel is created by Grok on its first prompt (not planted by the
+  wrapper), making the stop-time proof genuine, with a zero-prompt session
+  exempted from the sentinel check.
+- **implement/auto job + notification** are finalized after handoff/apply, so a
+  not-ready implement no longer reports a premature success job or notification.
+
+Every applicable review finding was fixed (no deferrals). Comments that were
+already resolved or stale after the re-architecture are noted as such above.
 
 ### Changed (Phase 0)
 
@@ -236,7 +245,7 @@ three batches. Two release-blockers were real.
 
 ### Suite counts (ratchet)
 
-- Wrapper: 653 -> 799. Plugin: 172 -> 280 (through PR #5 code-review remediation).
+- Wrapper: 653 -> 804. Plugin: 172 -> 281 (through PR #5 code-review remediation, all findings fixed).
 
 ## [1.6.0] - 2026-07-16
 
