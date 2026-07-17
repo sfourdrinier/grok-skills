@@ -187,6 +187,7 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 | `/grok:dual-lens` | Adversarial pass, then ordinary review on the same target. |
 | `/grok:reason` | Cold second opinion on files you name. No automatic repo crawl. Web off by default. |
 | `/grok:code` | Implements in an **external git worktree** off a committed `--base`. Does not commit or push. Optional `--contract-file` (writeScopes + requiredValidation; hardened only). Writes handoff artifacts under the run dir. |
+| `/grok:implement` | **One-call delegate:** `code` then auto-`handoff` on the resulting runId. Relays both envelopes. Exit 0 only when code ok AND handoff dual-condition ready. Hardened only (direct refused). Never applies. |
 | `/grok:handoff` | **Read-only** verified implementation handoff by **`runId` only** (1.6.0+). Dual-condition ready: ready manifest + success envelope + patch rehash. Never applies. Notify is not ready. |
 | `/grok:verify` | Pass/fail/inconclusive check on an existing worktree. No `--web`. |
 | `/grok:debate` | Two opposing Grok reason passes + synthesis on a topic. |
@@ -223,10 +224,10 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 
 Two postures, same skills:
 
-| Mode | How | What you get |
-|------|-----|----------------|
-| **hardened** (default) | omit, or `/grok:setup` with `--run-mode hardened` | Private Grok home, sandbox verification, worktree isolation, secret redaction. |
-| **direct** | `GROK_SKILLS_MODE=direct` or companion `setup --run-mode direct` | Uses your **installed Grok CLI** and normal `~/.grok` auth - same idea as OpenAI's plugin using your installed Codex. Faster, less isolation. Direct mode does **not** push completion notify in 1.5.0 (job still tracked). |
+| Mode | How | What you get | Handoff artifacts |
+|------|-----|----------------|-------------------|
+| **hardened** (default) | omit, or `/grok:setup` with `--run-mode hardened` | Private Grok home, sandbox verification, worktree isolation, secret redaction. | **Yes** - verified patch + handoff manifest under the run dir. |
+| **direct** | `GROK_SKILLS_MODE=direct` or companion `setup --run-mode direct` | Uses your **installed Grok CLI** and normal `~/.grok` auth - same idea as OpenAI's plugin using your installed Codex. Faster, less isolation. Direct mode does **not** push completion notify in 1.5.0 (job still tracked). Job surface (`result`/`cancel`) accepts `direct-<timestamp>` ids; `handoff`/`status --run-id`/`implement` refuse with an honest message. | **No** - by design: handoff artifacts' value is the isolation evidence (worktree, sentinel, sandbox verification) that direct mode cannot attest. |
 
 ```bash
 # Prefer skill runner after Skill tool load:

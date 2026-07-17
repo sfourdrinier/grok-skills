@@ -18,7 +18,6 @@ import {
   LiveRelay,
   parseRunIdArg,
   parseRunIdMarker,
-  renderRunProgress,
   RUN_ID_RE,
   runsDirFor,
   snapshotRunIds,
@@ -26,6 +25,7 @@ import {
 import {
   appendJobLog,
   createJob,
+  findJobByRunId,
   formatJobsTable,
   getJob,
   getLastRescueJobId,
@@ -48,11 +48,16 @@ import {
   buildBranchReviewTask,
   buildWorkingTreeReviewTask,
   defaultReviewTarget,
-  shortstat,
 } from "./lib/git-context.mjs";
-import { runDirectGrok } from "./lib/direct-grok.mjs";
+import {
+  isDirectHandoffRequest,
+  isDirectRunId,
+  runDirectGrok,
+  runImplementCombo,
+  writeDirectNoHandoffRefuse,
+} from "./lib/direct-grok.mjs";
 import { renderEnvelopePretty, tryParseEnvelope } from "./lib/render.mjs";
-import { resolveSpawnedGroupPid, terminateReviewTree } from "./lib/gate-kill.mjs";
+import { terminateReviewTree } from "./lib/gate-kill.mjs";
 import {
   buildTransferTaskBody,
   readSessionStamp,
@@ -186,9 +191,12 @@ function captureAndTrack(wrapper, args, { cwd, mode, kind, runMode, notifyMode, 
   if (runMode === "direct") {
     const direct = runDirectGrok({ mode, args, cwd, env: process.env });
     storeJobStdout(cwd, job.id, direct.envelopeText);
+    const directEnv = tryParseEnvelope(direct.envelopeText);
+    const directRunId = isDirectRunId(directEnv?.runId) ? directEnv.runId : null;
     updateJob(cwd, job.id, {
       status: direct.code === 0 ? "success" : "failure",
       summary: direct.code === 0 ? "direct grok finished" : "direct grok failed",
+      ...(directRunId ? { runId: directRunId } : {}),
     });
     process.stdout.write(direct.envelopeText);
     // Direct has no durable runs/<id> for notified.json; skip push notify.
@@ -315,8 +323,10 @@ function runWithLiveRelay(wrapper, args, track) {
           summary: code === 0 ? "completed" : `exit ${code}`,
         });
       }
+      // captureStdout: implement needs the code envelope buffer; others get a number.
+      const resolveValue = track?.captureStdout ? { code, stdout: stdoutBuf } : code;
       if (!shouldAttemptTerminalNotify({ skipNotify: track?.skipNotify })) {
-        resolve(code);
+        resolve(resolveValue);
         return;
       }
       const runId = resolveRunIdFromJobAndStdout(cwd, jobAfter, stdoutBuf);
@@ -328,7 +338,7 @@ function runWithLiveRelay(wrapper, args, track) {
         startedAtMs,
         stdoutText: stdoutBuf,
         stderrLine,
-      }).finally(() => resolve(code));
+      }).finally(() => resolve(resolveValue));
     };
 
     let child;
@@ -405,16 +415,11 @@ function runWithLiveRelay(wrapper, args, track) {
   });
 }
 
+// status/handoff: one stdout envelope only (no progress re-dump on stderr).
 function runStatus(wrapper, args) {
-  // One stdout envelope only. Do NOT re-dump progress to stderr after status:
-  // hosts that merge stdout/stderr (Codex terminal) would glue [grok] lines onto
-  // the JSON. Progress already lives in response.events / response.target.
   return runPassthrough(wrapper, args);
 }
-
 function runHandoff(wrapper, args) {
-  // Read-only like status: no job, no live relay, no notify, no Grok spawn.
-  // Dual-condition ready is computed inside the wrapper handoff mode.
   return runPassthrough(wrapper, args);
 }
 
@@ -423,9 +428,16 @@ function cmdJobs(cwd) {
   return 0;
 }
 
-function cmdResult(cwd, args, pretty) {
+function resolveJobArg(cwd, args) {
   const jobId = args.find((a) => !a.startsWith("--")) || null;
-  const job = resolveJobByIdOrRunId(cwd, jobId);
+  // Direct ids resolve via job index only (never forwarded to the wrapper).
+  let job = isDirectRunId(jobId) ? findJobByRunId(cwd, jobId) : null;
+  if (!job) job = resolveJobByIdOrRunId(cwd, jobId);
+  return { jobId, job };
+}
+
+function cmdResult(cwd, args, pretty) {
+  const { job } = resolveJobArg(cwd, args);
   if (!job) {
     process.stderr.write("[grok-companion] no job found. Run a review/code first or pass a job id.\n");
     return 1;
@@ -446,8 +458,7 @@ function cmdResult(cwd, args, pretty) {
 }
 
 function cmdCancel(cwd, args) {
-  const jobId = args.find((a) => !a.startsWith("--")) || null;
-  const job = resolveJobByIdOrRunId(cwd, jobId);
+  const { job } = resolveJobArg(cwd, args);
   if (!job) {
     process.stderr.write("[grok-companion] no job to cancel.\n");
     return 1;
@@ -541,14 +552,11 @@ function cmdTransfer(cwd, args) {
   return 0;
 }
 
-
 function cmdSetup(cwd, args) {
   return setupCmd(cwd, args, { python: PYTHON, pluginRoot: PLUGIN_ROOT });
 }
 
-
 async function cmdDebate(cwd, wrapper, args, runMode) {
-  // Bounded two-pass: Grok reason, then a second reason that critiques the first.
   const task = extractTask(args) || "Debate the design tradeoffs in this repository.";
   const round1 = [
     "You are side A in a structured debate. Argue your position clearly with",
@@ -557,18 +565,11 @@ async function cmdDebate(cwd, wrapper, args, runMode) {
     task,
   ].join("\n");
   const inj1 = injectTaskFile(["reason"], round1);
-  // Intermediate debate round: no completion notify (final round only).
   const code1 = await captureAndTrack(wrapper, inj1.args, {
-    cwd,
-    mode: "reason",
-    kind: "debate-a",
-    runMode,
-    skipNotify: true,
+    cwd, mode: "reason", kind: "debate-a", runMode, skipNotify: true,
   });
   inj1.cleanup();
-  if (code1 !== 0) {
-    return code1;
-  }
+  if (code1 !== 0) return code1;
   const last = getJob(cwd, null);
   const prior = last ? readJobStdout(cwd, last.id) : "";
   const round2 = [
@@ -585,10 +586,7 @@ async function cmdDebate(cwd, wrapper, args, runMode) {
   ].join("\n");
   const inj2 = injectTaskFile(["reason"], round2);
   const code2 = await captureAndTrack(wrapper, inj2.args, {
-    cwd,
-    mode: "reason",
-    kind: "debate-b",
-    runMode,
+    cwd, mode: "reason", kind: "debate-b", runMode,
   });
   inj2.cleanup();
   return code2;
@@ -631,26 +629,14 @@ function hasFlag(args, name) {
   return args.includes(name);
 }
 
-/**
- * Post-staging dispatch: every mode path. Staged stdin cleanup is owned by
- * main()'s finally - finishCleanups here only releases injectTaskFile temps.
- */
+// Post-staging dispatch. Staged stdin cleanup is owned by main()'s finally.
 async function dispatch({
-  cwd,
-  stripped,
-  pretty,
-  runModeFlag,
-  baseRef,
-  resume,
-  fresh,
-  noNotify,
-  staged,
+  cwd, stripped, pretty, runModeFlag, baseRef, resume, fresh, noNotify, staged,
 }) {
   const forwardedArgs = staged ? staged.args : stripped;
   const mode = forwardedArgs[0];
   const rest = forwardedArgs.slice(1);
 
-  // No mode: preserve prior behavior (wrapper usage-error envelope).
   if (!mode) {
     const wrapper = resolveWrapperPath(process.env);
     if (!wrapper) {
@@ -660,39 +646,22 @@ async function dispatch({
     return runPassthrough(wrapper, []);
   }
 
-  // Companion-native commands
-  if (mode === "jobs") {
-    return cmdJobs(cwd);
-  }
-  if (mode === "result") {
-    return cmdResult(cwd, rest, pretty || rest.includes("--pretty"));
-  }
-  if (mode === "cancel") {
-    return cmdCancel(cwd, rest);
-  }
-  if (mode === "transfer") {
-    return cmdTransfer(cwd, rest);
-  }
-  if (mode === "setup") {
-    return cmdSetup(cwd, rest);
-  }
-  if (mode === "render") {
-    return cmdResult(cwd, rest, true);
-  }
+  if (mode === "jobs") return cmdJobs(cwd);
+  if (mode === "result") return cmdResult(cwd, rest, pretty || rest.includes("--pretty"));
+  if (mode === "cancel") return cmdCancel(cwd, rest);
+  if (mode === "transfer") return cmdTransfer(cwd, rest);
+  if (mode === "setup") return cmdSetup(cwd, rest);
+  if (mode === "render") return cmdResult(cwd, rest, true);
 
-  // One-shot --run-mode does NOT persist (adversarial: sticky direct was a trap).
-  // Only /grok:setup (cmdSetup -> setRunMode) may write workspace mode.
+  // One-shot --run-mode does NOT persist; only setup may write workspace mode.
   const runMode =
     runModeFlag === "direct" || runModeFlag === "hardened" ? runModeFlag : getRunMode(cwd);
 
-  // Rescue resume metadata (skill layer adds flags; we record intent)
   if (mode === "reason" || mode === "code") {
     if (resume && getLastRescueJobId(cwd)) {
       stderrLine(`[grok-companion] --resume: last rescue job was ${getLastRescueJobId(cwd)}`);
     }
-    if (fresh) {
-      stderrLine("[grok-companion] --fresh: starting a new rescue thread");
-    }
+    if (fresh) stderrLine("[grok-companion] --fresh: starting a new rescue thread");
   }
 
   if (mode === "debate") {
@@ -702,6 +671,24 @@ async function dispatch({
       return WRAPPER_NOT_FOUND_EXIT;
     }
     return cmdDebate(cwd, wrapper, forwardedArgs, runMode);
+  }
+
+  if (mode === "implement") {
+    if (runMode === "direct") return writeDirectNoHandoffRefuse();
+    const wrapper = resolveWrapperPath(process.env);
+    if (!wrapper) {
+      process.stderr.write(`${wrapperNotFoundMessage(process.env)}\n`);
+      return WRAPPER_NOT_FOUND_EXIT;
+    }
+    const implementRest =
+      baseRef && !rest.includes("--base") ? [...rest, "--base", baseRef] : rest;
+    return runImplementCombo(wrapper, implementRest, runMode, {
+      kind: "code",
+      mode: "code",
+      notifyMode: "implement",
+      runMode,
+      skipNotify: Boolean(noNotify),
+    }, { runWithLiveRelay, stderrLine });
   }
 
   let wrapperArgs = forwardedArgs;
@@ -789,6 +776,11 @@ async function dispatch({
     return finishCleanups(WRAPPER_NOT_FOUND_EXIT);
   }
 
+  // Direct-mode run ids: no hardened run state - refuse before wrapper spawn.
+  if (isDirectHandoffRequest(wrapperMode, wrapperArgs)) {
+    return finishCleanups(writeDirectNoHandoffRefuse());
+  }
+
   // status <bare-runId>: rewrite to --run-id before wrapper / jobs-table dispatch
   if (wrapperMode === "status" && !parseRunIdArg(wrapperArgs)) {
     const bareIdx = wrapperArgs.findIndex(
@@ -816,17 +808,10 @@ async function dispatch({
   }
 
   if (STREAMING_MODES.has(mode) || STREAMING_MODES.has(wrapperMode)) {
-    // Live relay on stderr + capture stdout for /grok:result job store.
     return Promise.resolve(runWithLiveRelay(wrapper, wrapperArgs, track)).then(finishCleanups);
   }
-
-  if (wrapperMode === "status") {
-    return finishCleanups(runStatus(wrapper, wrapperArgs));
-  }
-
-  if (wrapperMode === "handoff") {
-    return finishCleanups(runHandoff(wrapper, wrapperArgs));
-  }
+  if (wrapperMode === "status") return finishCleanups(runStatus(wrapper, wrapperArgs));
+  if (wrapperMode === "handoff") return finishCleanups(runHandoff(wrapper, wrapperArgs));
 
   if (WRAPPER_MODES.has(wrapperMode) || wrapperArgs[0]) {
     return Promise.resolve(

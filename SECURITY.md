@@ -53,7 +53,10 @@ over. It is **not** a complete sandbox against an adversarial model.
   binary). Direct mode rejects `--contract-file` (fail closed). Handoff mode
   re-hashes the patch under the owned run directory only (absolute/`..` paths
   rejected). Notify is not integration-ready - always call `handoff --run-id`
-  before apply. The plugin never auto-applies.
+  before apply. The plugin never auto-applies. **Direct mode produces no
+  handoff artifacts by design** - the artifacts' value is the isolation
+  evidence (owned worktree, sentinel, sandbox verification) that direct mode
+  cannot attest; use hardened mode for verified handoff.
 
 Full design notes: [docs/OPEN-SECURITY-DECISIONS.md](docs/OPEN-SECURITY-DECISIONS.md).
 

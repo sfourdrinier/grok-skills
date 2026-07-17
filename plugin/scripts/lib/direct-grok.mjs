@@ -4,12 +4,126 @@
 // using the installed Codex). Spawns the real `grok` binary with the operator
 // home/auth. No private-home isolation and no wrapper sandbox verification.
 // Emits a lightweight envelope so skills still see JSON on stdout.
+// Also owns direct-mode handoff refusal copy (Task 1.6) and the implement
+// combo (Task 1.4) so grok-companion.mjs stays under the 900-line cap.
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
+
+import { sanitizeRunId } from "./companion-terminal-notify.mjs";
+import { wrapperChildEnv } from "./notify.mjs";
+import { tryParseEnvelope } from "./render.mjs";
+
+/** Honest refusal when handoff artifacts are requested for a direct-mode run. */
+export const DIRECT_NO_HANDOFF_MSG =
+  "direct-mode runs have no hardened run state. Job output: result <id>. For verified handoff artifacts, rerun with setup --run-mode hardened.";
+
+/** Direct-mode runId shape (single source; result/cancel resolve via job index). */
+export const DIRECT_RUN_ID_RE = /^direct-[0-9]+$/;
+
+export function isDirectRunId(id) {
+  return typeof id === "string" && DIRECT_RUN_ID_RE.test(id);
+}
+
+/** Raw --run-id value (no hardened-shape filter). Used for direct-id refusal. */
+export function rawRunIdFlag(args) {
+  if (!Array.isArray(args)) return null;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === "--run-id" && typeof args[i + 1] === "string") return args[i + 1];
+    if (typeof a === "string" && a.startsWith("--run-id=")) return a.slice("--run-id=".length);
+  }
+  return null;
+}
+
+/** First bare positional after argv[0] that looks like a direct run id. */
+export function bareDirectRunId(args) {
+  if (!Array.isArray(args)) return null;
+  for (let i = 1; i < args.length; i++) {
+    const a = args[i];
+    if (typeof a === "string" && !a.startsWith("-") && isDirectRunId(a)) return a;
+  }
+  return null;
+}
+
+export function writeDirectNoHandoffRefuse() {
+  process.stderr.write(`[grok-companion] ${DIRECT_NO_HANDOFF_MSG}\n`);
+  return 1;
+}
+
+/** True when status/handoff target a direct-* id (refuse before wrapper spawn). */
+export function isDirectHandoffRequest(wrapperMode, args) {
+  if (wrapperMode !== "status" && wrapperMode !== "handoff") return false;
+  return isDirectRunId(rawRunIdFlag(args)) || isDirectRunId(bareDirectRunId(args));
+}
+
+/**
+ * Capture handoff stdout so implement can read response.integration.ready.
+ * Relays stderr + stdout like a passthrough; returns parsed envelope.
+ */
+export function runHandoffCaptured(wrapper, args, {
+  python = process.env.GROK_PYTHON?.trim() || "python3",
+  spawnFailedExit = 4,
+  signalExit = 1,
+  spawnFailedMessage = (w, d) =>
+    `[grok-companion] failed to launch ${python} ${w}: ${d}\n`,
+} = {}) {
+  const result = spawnSync(python, [wrapper, ...args], {
+    encoding: "utf8",
+    env: wrapperChildEnv(process.env),
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (result.error) {
+    process.stderr.write(spawnFailedMessage(wrapper, result.error.message));
+    return { code: spawnFailedExit, envelope: null };
+  }
+  if (result.stderr) process.stderr.write(result.stderr);
+  const stdout = result.stdout || "";
+  if (stdout) process.stdout.write(stdout.endsWith("\n") ? stdout : `${stdout}\n`);
+  return {
+    code: typeof result.status === "number" ? result.status : signalExit,
+    envelope: tryParseEnvelope(stdout),
+  };
+}
+
+/**
+ * One-call implement: code (live relay) then handoff. Exit 0 only when code
+ * exit 0 AND handoff exit 0 AND response.integration.ready === true.
+ * Direct mode is refused before any wrapper spawn.
+ */
+export async function runImplementCombo(wrapper, rest, runMode, track, {
+  runWithLiveRelay,
+  stderrLine = (line) => process.stderr.write(`${line}\n`),
+} = {}) {
+  if (runMode === "direct") {
+    return writeDirectNoHandoffRefuse();
+  }
+  const codeArgs = ["code", ...rest];
+  const res = await runWithLiveRelay(wrapper, codeArgs, { ...track, captureStdout: true });
+  const code = typeof res === "number" ? res : res.code;
+  const stdoutBuf = typeof res === "number" ? "" : res.stdout || "";
+  const env = tryParseEnvelope(stdoutBuf);
+  const runId = sanitizeRunId(env?.runId);
+  if (!runId) {
+    process.stderr.write(
+      "[grok-companion] implement: no runId in the code envelope; cannot hand off.\n"
+    );
+    return code === 0 ? 1 : code;
+  }
+  stderrLine(`[grok-implement] code finished (exit ${code}); verifying handoff for ${runId}`);
+  const { code: hCode, envelope: hEnv } = runHandoffCaptured(wrapper, [
+    "handoff",
+    "--run-id",
+    runId,
+  ]);
+  // Real handoff success shape (modes/handoff.py): response.integration.ready
+  const ready = hEnv?.response?.integration?.ready === true;
+  stderrLine(`[grok-implement] handoff ${ready ? "READY" : "NOT READY"} for ${runId}`);
+  return code === 0 && hCode === 0 && ready ? 0 : 1;
+}
 
 function resolveGrokBinary(env = process.env) {
   const override = (env.GROK_AGENT_BINARY ?? env.GROK_BINARY ?? "").trim();
@@ -217,7 +331,7 @@ export function runDirectGrok({ mode, args, cwd, env = process.env }) {
     schemaVersion: 1,
     mode,
     status: ok ? "success" : "failure",
-    runId: `direct-${Date.now().toString(16)}`,
+    runId: `direct-${Date.now()}`,
     response: { text: responseText },
     warnings: [
       "runMode=direct: used installed Grok CLI without grok-skills private-home isolation or wrapper sandbox verification",
