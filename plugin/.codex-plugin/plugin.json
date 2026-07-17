@@ -1,7 +1,7 @@
 {
   "name": "grok",
   "version": "1.6.0",
-  "description": "Use Grok as a coding assistant from Codex / ChatGPT: review, reason, implement, and verify through a hardened sandboxed wrapper. Not affiliated with xAI.",
+  "description": "Grok as a peer implementer agent for Codex / ChatGPT: delegate code to an isolated worktree, iterate with continue-run, integrate through verified handoff. Review, reason, and verify included. Not affiliated with xAI.",
   "author": {
     "name": "Stephane Fourdrinier"
   },
@@ -14,14 +14,17 @@
     "code-review",
     "agent",
     "sandbox",
-    "claude-code"
+    "claude-code",
+    "peer-agent",
+    "implementation-handoff",
+    "worktree"
   ],
   "skills": "./skills/",
   "hooks": "./hooks/hooks.json",
   "interface": {
     "displayName": "Grok Skills",
-    "shortDescription": "Hardened Grok companion for review, reason, code, verify",
-    "longDescription": "Ship-ready Grok CLI integration for Codex CLI and the ChatGPT desktop app (Codex). Every mode runs in a private auth home under a verified OS sandbox, emits exactly one machine-readable JSON result envelope, and keeps write-capable work in isolated git worktrees. The Python engine is bundled inside the plugin install tree so marketplace cache installs work without env hacks. Not affiliated with xAI.",
+    "shortDescription": "Peer implementer for Codex: implement, continue-run, verified handoff",
+    "longDescription": "Grok as a peer implementer for Codex CLI and the ChatGPT desktop app. Delegate code into isolated git worktrees, iterate with continue-run, and integrate through verified handoff. Review, reason, and verify modes included. Experimental peer channel available. Every mode runs in a private auth home under a verified OS sandbox and emits exactly one machine-readable JSON result envelope. The Python engine is bundled inside the plugin install tree so marketplace cache installs work without env hacks. Not affiliated with xAI.",
     "developerName": "Stephane Fourdrinier",
     "category": "Development & Workflow",
     "capabilities": [
@@ -32,7 +35,8 @@
     "defaultPrompt": [
       "Run the grok preflight skill and summarize readiness.",
       "Use the grok review skill on the current change set and report correctness bugs.",
-      "Use the grok reason skill to critique this architecture decision."
+      "Use the grok reason skill to critique this architecture decision.",
+      "Use the grok implement skill to fix a bug and verify the handoff."
     ],
     "brandColor": "#7CFFB2",
     "composerIcon": "./assets/icon.svg",

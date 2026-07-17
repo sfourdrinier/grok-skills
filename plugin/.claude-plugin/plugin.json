@@ -1,7 +1,7 @@
 {
   "name": "grok",
   "version": "1.6.0",
-  "description": "Use Grok as a coding assistant from Claude Code: review, reason, implement, and verify through a hardened sandboxed wrapper. Not affiliated with xAI.",
+  "description": "Grok as a peer implementer agent for Claude Code: delegate code to an isolated worktree, iterate with continue-run, integrate through verified handoff. Review, reason, and verify included. Not affiliated with xAI.",
   "author": {
     "name": "Stephane Fourdrinier"
   },
@@ -13,7 +13,10 @@
     "xai",
     "code-review",
     "agent",
-    "sandbox"
+    "sandbox",
+    "peer-agent",
+    "implementation-handoff",
+    "worktree"
   ],
   "displayName": "Grok Skills",
   "userConfig": {

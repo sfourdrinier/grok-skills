@@ -97,9 +97,10 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 - Agent frontmatter uses verified-honored keys (maxTurns 40, memory project;
   model stays inherited - review reversal: the agent is an orchestrator).
 - Companion test suites are fully isolated (fresh XDG/TMPDIR/data/cwd per
-  spawn); the recurring concurrent-suite flake was root-caused (leak tests
+  spawn); the shared-state concurrent-suite flake was root-caused (leak tests
   scanning the shared TMPDIR) and eliminated - proven with 3x-concurrent
-  batches. Validation blockers now name failing tests (TAP not-ok
+  batches. A separate load-induced spawn flake (EAGAIN under heavy
+  concurrency) was made resilient with a bounded spawn retry. Validation blockers now name failing tests (TAP not-ok
   extraction).
 - Deferred by decision: plugin `subagentStatusLine` (overriding all subagent
   rows to annotate Grok jobs is over-reach for 2.0.0).

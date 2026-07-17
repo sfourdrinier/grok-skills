@@ -8,6 +8,21 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 
+// Spawn under heavy concurrent load (a full suite plus other processes) can hit
+// EAGAIN/ENOMEM at the OS level - a resource-pressure failure, not a resolution
+// bug. Retry the spawn (never the assertions) a few times before giving up so a
+// deterministic root-resolution test is not flaky under load.
+function spawnNode(args) {
+  let result;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    result = spawnSync(process.execPath, args, { encoding: "utf8" });
+    if (!result.error) {
+      return result;
+    }
+  }
+  return result;
+}
+
 import {
   companionPath,
   isValidPluginRoot,
@@ -76,19 +91,11 @@ test("resolvePluginRoot fails closed when candidate has no companion", () => {
 });
 
 test("CLI --skill-dir prints root and --companion prints companion", () => {
-  const rootRun = spawnSync(
-    process.execPath,
-    [CLI, "--skill-dir", DUAL_LENS_SKILL],
-    { encoding: "utf8" }
-  );
+  const rootRun = spawnNode([CLI, "--skill-dir", DUAL_LENS_SKILL]);
   assert.equal(rootRun.status, 0, rootRun.stderr);
   assert.equal(rootRun.stdout.trim(), PLUGIN_ROOT);
 
-  const compRun = spawnSync(
-    process.execPath,
-    [CLI, "--skill-dir", DUAL_LENS_SKILL, "--companion"],
-    { encoding: "utf8" }
-  );
+  const compRun = spawnNode([CLI, "--skill-dir", DUAL_LENS_SKILL, "--companion"]);
   assert.equal(compRun.status, 0, compRun.stderr);
   assert.equal(compRun.stdout.trim(), companionPath(PLUGIN_ROOT));
 });
