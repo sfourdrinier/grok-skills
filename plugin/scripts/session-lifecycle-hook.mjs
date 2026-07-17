@@ -2,7 +2,7 @@
 // SessionStart: stamp for /grok:transfer + auto-ensure Codex agents.
 // SessionEnd: keep last stamp for transfer.
 // Codex does not register plugin agents natively (openai/codex#18988), so we
-// materialize ~/.codex/agents/*.toml here — zero post-install step for users.
+// materialize ~/.codex/agents/*.toml here - zero post-install step for users.
 
 import path from "node:path";
 import process from "node:process";

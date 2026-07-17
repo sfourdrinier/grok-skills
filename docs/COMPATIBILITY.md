@@ -49,7 +49,7 @@ Python wrapper.
 |------|------|
 | Operator re-attempt | Explicit re-fire after failed/stuck notify (may duplicate) |
 | Direct-mode push notify | Job-scoped marker home (direct has no wrapper `runs/<id>`) |
-| Headless / native honesty | Setup + docs: native needs a desktop session (macOS/Linux); **Windows** stays unsupported for native toast — use **webhook** |
+| Headless / native honesty | Setup + docs: native needs a desktop session (macOS/Linux); **Windows** stays unsupported for native toast - use **webhook** |
 
 Verified against local installs on 2026-07-15:
 
@@ -73,7 +73,7 @@ What we match:
 - Skills live under `skills/<name>/SKILL.md` (preferred over flat `commands/`)
 - Namespaced skills: `/grok:review`, `/grok:preflight`, …
 - **Critical:** plugin install copies only the plugin directory into
-  `~/.claude/plugins/cache` — paths like `../shared` do **not** survive install.
+  `~/.claude/plugins/cache` - paths like `../shared` do **not** survive install.
   The Python wrapper is therefore **bundled** at `plugin/wrapper/` so the cache
   still contains `wrapper/scripts/grok_agent.py`.
 - `claude plugin validate ./plugin --strict` and `claude plugin validate .` pass
@@ -99,7 +99,7 @@ What we match:
   | Git URL | `https://github.com/sfourdrinier/grok-skills.git` | same / SSH |
   | Local path (dev) | absolute path to repo root | same |
 
-  Marketplace JSON still uses relative `./plugin` — after a git marketplace add,
+  Marketplace JSON still uses relative `./plugin` - after a git marketplace add,
   the host clones the repo and resolves that path inside the clone. No local
   path is required for end users.
 

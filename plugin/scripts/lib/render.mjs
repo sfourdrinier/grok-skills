@@ -55,7 +55,7 @@ export function renderEnvelopePretty(envelope) {
     return String(envelope ?? "");
   }
   const lines = [];
-  lines.push(`# Grok ${envelope.mode ?? "run"} — ${envelope.status ?? "unknown"}`);
+  lines.push(`# Grok ${envelope.mode ?? "run"} - ${envelope.status ?? "unknown"}`);
   if (envelope.runId) {
     lines.push(`Run id: \`${envelope.runId}\``);
   }
@@ -142,7 +142,7 @@ export function renderSetupReport(info) {
   lines.push(`| Check | Result |`);
   lines.push(`| --- | --- |`);
   for (const row of info.rows ?? []) {
-    lines.push(`| ${row.name} | ${row.ok ? "ok" : "FAIL"} — ${row.detail} |`);
+    lines.push(`| ${row.name} | ${row.ok ? "ok" : "FAIL"} - ${row.detail} |`);
   }
   lines.push("");
   lines.push(`Run mode for this workspace: **${info.runMode}** (hardened = default sandbox path; direct = installed Grok CLI home).`);

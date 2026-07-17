@@ -511,7 +511,7 @@ class Phase1PatchTests(unittest.TestCase):
     def test_oversized_patch_fail_closed(self) -> None:
         (self.repo / "big.txt").write_bytes(b"Z" * 2000)
         with mock.patch.dict(os.environ, {"GROK_HANDOFF_PATCH_MAX_BYTES": str(100)}):
-            # clamp min is 1 MiB in code — set below by mocking _patch_max_bytes
+            # clamp min is 1 MiB in code - set below by mocking _patch_max_bytes
             with mock.patch(
                 "groklib.handoff_patch._patch_max_bytes", return_value=50
             ):

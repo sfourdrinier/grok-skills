@@ -8,7 +8,7 @@ Plugin name: `grok`. Claude Code and Codex both install the same package; they
 **invoke** skills differently (table below).
 
 **Division of labor:** Claude Code or Codex = orchestrator. Grok (via this
-plugin) = sandboxed second mind — especially **`grok-engineer-coder`** for
+plugin) = sandboxed second mind - especially **`grok-engineer-coder`** for
 implementation in an isolated worktree.
 
 ---
@@ -17,7 +17,7 @@ implementation in an isolated worktree.
 
 1. Install **Grok CLI**, log in, confirm `grok --version` works
    (macOS for live modes; Python 3 + Node on `PATH`). Any working Grok CLI
-   build is accepted — there is no exact version lock.
+   build is accepted - there is no exact version lock.
 2. Add the marketplace and install the plugin (no manual clone needed):
 
    ```text
@@ -85,13 +85,13 @@ You need all of these:
 2. **Python 3** and **Node.js** on your `PATH` (stdlib only; no pip/npm packages for this tool).
 3. **Grok CLI installed and logged in** (`grok --version` works). Any working
    Grok CLI is accepted. `plugin/wrapper/accepted-version.json` is **last
-   maintainer-validated evidence only** (advisory) — not a runtime allowlist.
+   maintainer-validated evidence only** (advisory) - not a runtime allowlist.
 
 You do **not** need a manual clone for normal use. Claude Code and Codex both install from this GitHub repo as a **plugin marketplace** (they clone it, then copy `plugin/` into their install cache).
 
 ### Claude Code
 
-From a Claude Code session (preferred — install straight from GitHub):
+From a Claude Code session (preferred - install straight from GitHub):
 
 ```text
 /plugin marketplace add sfourdrinier/grok-skills
@@ -136,7 +136,7 @@ Full interactive checklist: [plugin/references/manual-smoke.md](plugin/reference
 
 ### Codex CLI
 
-Preferred — marketplace from GitHub:
+Preferred - marketplace from GitHub:
 
 ```bash
 codex plugin marketplace add sfourdrinier/grok-skills
@@ -147,7 +147,7 @@ codex plugin list   # expect grok@grok-skills installed, enabled
 
 Also accepted: `https://github.com/sfourdrinier/grok-skills.git`, SSH URLs, or a local clone path for development.
 
-Skills ship with the plugin. Invoke them the way your Codex build exposes plugin skills (skill picker / `$skill` style, depending on version). Prefer each skill’s self-locating `run.mjs` (Skill base directory); custom agents get an absolute `agents/run.mjs` path on SessionStart — do not invent cache paths by hand.
+Skills ship with the plugin. Invoke them the way your Codex build exposes plugin skills (skill picker / `$skill` style, depending on version). Prefer each skill’s self-locating `run.mjs` (Skill base directory); custom agents get an absolute `agents/run.mjs` path on SessionStart - do not invent cache paths by hand.
 
 After install, start a new Codex session (or reload) so **SessionStart** can write `~/.codex/agents/grok-*.toml`. Then spawn **grok-engineer-coder** / **grok-rescue**, or run skills the same way you would in Claude. Prefer tasks via `--task-file` / stdin heredoc so nothing shell-expands.
 
@@ -286,7 +286,7 @@ At-most-once attempt only (`runs/<runId>/notified.json`); details:
 - Exactly one of `--task '…'` or `--task-file path` (prefer a file for long prompts).
 - `--web` only on review / reason / code when you need live docs or current APIs. Off by default. Never on verify.
 - `--model` (default `grok-4.5`), `--timeout` (mode-dependent; often 900s), optional
-  `--max-turns` (**omit for unlimited** — default). Defaults live in
+  `--max-turns` (**omit for unlimited** - default). Defaults live in
   [wrapper/SKILL.md](plugin/wrapper/SKILL.md) and argparse; skills pass flags through.
   Incomplete Cancelled/turn-cap stops with real findings still return success + warning
   (see [COMPATIBILITY.md](docs/COMPATIBILITY.md)).
@@ -296,7 +296,7 @@ At-most-once attempt only (`runs/<runId>/notified.json`); details:
 Every run prints **exactly one JSON envelope** on stdout (success, failure, or
 in-flight `running`). Exit code is 0 when `"status"` is `"success"` or
 `"running"`; otherwise 1. For `/grok:status`, exit 1 can mean a successfully
-inspected failed/interrupted **target** — still relay the JSON. Treat the
+inspected failed/interrupted **target** - still relay the JSON. Treat the
 envelope as the source of truth; any prose after it is optional commentary.
 
 For `code`, look for `worktreePath` / `changedFiles` in the envelope. For `verify`, look for the structured verdict.

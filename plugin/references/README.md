@@ -20,7 +20,7 @@ or remove managed agents.
 Prerequisites: `grok` CLI installed and authenticated, `node` and `python3` on
 PATH, macOS for live modes.
 
-Preferred — install the marketplace from GitHub (no manual clone):
+Preferred - install the marketplace from GitHub (no manual clone):
 
 ```
 /plugin marketplace add sfourdrinier/grok-skills
@@ -43,7 +43,7 @@ No `GROK_AGENT_WRAPPER` is required for a standard install.
 ## Activating in Codex
 
 Repo marketplace: `.agents/plugins/marketplace.json` (relative source
-`./plugin` — resolved after Claude/Codex clone the marketplace root).
+`./plugin` - resolved after Claude/Codex clone the marketplace root).
 
 Preferred:
 

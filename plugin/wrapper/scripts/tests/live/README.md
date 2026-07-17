@@ -98,5 +98,5 @@ asserted to leave `git status` untouched.
 `accepted-version.json` is advisory evidence only (`enforcement: none`). When
 Grok ships a new build, optionally run `--revalidate` after a green suite so the
 stamp matches what you just probed. On red runs, leave the stamp alone and fix
-wrapper assumptions (or escalate) — never fake-green the stamp. Runtime continues
+wrapper assumptions (or escalate) - never fake-green the stamp. Runtime continues
 to accept any working CLI either way.

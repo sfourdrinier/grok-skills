@@ -9,12 +9,12 @@ pick up after they refresh marketplaces.
 - User-visible behavior, install/UX, security, or packaging change that should
   ship beyond `main` experiments.
 - Prefer **semver** on the plugin version (`MAJOR.MINOR.PATCH`):
-  - **PATCH** — fix/UX (e.g. review drift notes)
-  - **MINOR** — new skills/agents/modes, non-breaking
-  - **MAJOR** — breaking skill/CLI/envelope contracts
+  - **PATCH** - fix/UX (e.g. review drift notes)
+  - **MINOR** - new skills/agents/modes, non-breaking
+  - **MAJOR** - breaking skill/CLI/envelope contracts
 
 Optional last-validated CLI stamp updates (`accepted-version.json`, advisory
-only) follow [CONTRIBUTING.md](../CONTRIBUTING.md) — never as a user allowlist.
+only) follow [CONTRIBUTING.md](../CONTRIBUTING.md) - never as a user allowlist.
 
 ## Checklist (every release)
 
@@ -96,7 +96,7 @@ force-push tags that others may have installed.
 
 ```bash
 gh release create "vX.Y.Z" \
-  --title "vX.Y.Z — short title" \
+  --title "vX.Y.Z - short title" \
   --notes-file - <<'EOF'
 ## Highlights
 - …
@@ -141,7 +141,7 @@ git add -A && git status
 git commit -m "Release summary (v${VER})"
 git tag -a "v${VER}" -m "v${VER}: summary"
 git push origin main && git push origin "v${VER}"
-gh release create "v${VER}" --title "v${VER} — summary" --notes "See CHANGELOG.md"
+gh release create "v${VER}" --title "v${VER} - summary" --notes "See CHANGELOG.md"
 ```
 
 ## 1.6.0 implementation handoff

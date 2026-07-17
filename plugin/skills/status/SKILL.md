@@ -64,7 +64,7 @@ node "$SKILL_BASE/run.mjs" status --run-id '<run-id from $ARGUMENTS>'
 - Return the command stdout envelope to the user VERBATIM. Do not paraphrase,
   summarize, reformat, or add commentary before or after it. Preserve the exit
   status: exit 1 with a parseable status envelope is a successful inspection of
-  a failed/interrupted target — still show the envelope.
+  a failed/interrupted target - still show the envelope.
 - Harness distinction: if top-level `error` is set (`invalid-target`,
   `output-malformed`, …), the status **command** could not inspect the run. If
   `response.target.lifecycle` is present with failed/canceled/interrupted and

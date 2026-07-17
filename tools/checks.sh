@@ -36,7 +36,7 @@ done < "$allowlist"
 echo "== ASCII hyphens only (prose/comments; dated evidence archives exempt) =="
 # docs/superpowers, docs/reviews, docs/research, docs/checklists are dated
 # records - rewriting them would falsify evidence, so they are excluded.
-if rg -n $'[\x{2014}\x{2013}]' README.md CHANGELOG.md CONTRIBUTING.md SECURITY.md AGENTS.md docs plugin \
+if rg -n '[\x{2014}\x{2013}]' README.md CHANGELOG.md CONTRIBUTING.md SECURITY.md AGENTS.md docs plugin \
   --glob '!*.svg' --glob '!*.png' \
   --glob '!docs/superpowers/**' --glob '!docs/reviews/**' \
   --glob '!docs/research/**' --glob '!docs/checklists/**' 2>/dev/null; then

@@ -30,7 +30,7 @@ const bareEnv = {
 /**
  * Assert self-locating entry reached the real wrapper and produced an envelope.
  *
- * These tests prove plugin-root resolution and companion spawn — not host grok
+ * These tests prove plugin-root resolution and companion spawn - not host grok
  * readiness. On CI (no ~/.grok/bin/grok) preflight returns failure /
  * tool-unavailable with exit 1; with a binary it may return success / 0.
  * Either path proves the entry located the install and ran the pipeline.

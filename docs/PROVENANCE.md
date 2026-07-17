@@ -17,7 +17,7 @@ Two layers:
   sole owner of all safety behavior. It is harness-agnostic: any agent, or a human, can
   shell out to it.
 - **The plugin** (`plugin/`): a thin **dual-host** surface (Claude Code + Codex /
-  ChatGPT) over that engine — skills (`/grok:…` / skill picker), Claude agents
+  ChatGPT) over that engine - skills (`/grok:…` / skill picker), Claude agents
   (`grok-engineer-coder`, `grok-rescue`), SessionStart-managed Codex agents, an
   opt-in Stop-review gate, and a live streaming relay. Hardened live modes shell
   to the wrapper and relay its envelope verbatim; companion-only commands and

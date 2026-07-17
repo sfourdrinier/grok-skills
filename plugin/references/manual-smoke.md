@@ -95,4 +95,4 @@ After a marketplace install, confirm the cached plugin contains:
 <cache>/skills/review/SKILL.md
 ```
 
-If `wrapper/` is missing, the install is incomplete — reinstall from this repo.
+If `wrapper/` is missing, the install is incomplete - reinstall from this repo.

@@ -87,6 +87,6 @@ node "$SKILL_BASE/run.mjs" setup --remove-codex-agents
 
 ## Resolver library (advanced / tests)
 
-- `plugin/scripts/lib/resolve-plugin-root.mjs` — pure resolve helpers
-- `plugin/scripts/resolve-plugin-root.mjs` — CLI
-- `plugin/scripts/lib/skill-run.mjs` — spawn companion from skill entry
+- `plugin/scripts/lib/resolve-plugin-root.mjs` - pure resolve helpers
+- `plugin/scripts/resolve-plugin-root.mjs` - CLI
+- `plugin/scripts/lib/skill-run.mjs` - spawn companion from skill entry

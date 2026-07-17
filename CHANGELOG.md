@@ -131,7 +131,7 @@ for marketplace / package tags.
 ### Fixed
 
 - **Docs matched code:** README, PROVENANCE, authority policies, wrapper SKILL,
-  checklists, roadmap, live probe docs, and setup hints now match behavior —
+  checklists, roadmap, live probe docs, and setup hints now match behavior - 
   no hard CLI pin, repo-agnostic targets, review drift as warnings, reason web
   default off, Codex `agents/run.mjs` / `GROK_AGENT_RUN`, dual-host surface.
 

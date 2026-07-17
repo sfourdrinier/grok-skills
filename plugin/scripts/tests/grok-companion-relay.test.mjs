@@ -117,7 +117,7 @@ test("degrade (iii) run fails: failure envelope delivered verbatim, exit 1", () 
 
 test("status stdout is only the envelope (no post-hoc progress dump on stderr)", () => {
   // Hosts that merge streams must still see a single relayable JSON document.
-  // Progress is inside response.events — not re-printed after the envelope.
+  // Progress is inside response.events - not re-printed after the envelope.
   const runId = "20260715T050000Z-abcdef";
   const xdg = fs.mkdtempSync(path.join(os.tmpdir(), "grok-relay-status-clean-"));
   const runDir = path.join(xdg, "grok-skills", "runs", runId);

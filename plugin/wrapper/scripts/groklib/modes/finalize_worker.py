@@ -163,7 +163,7 @@ def finalize_worker_liveness(run_dir: pathlib.Path) -> str:
         return _WORKER_LIVENESS_UNKNOWN
     if not raw:
         return _WORKER_LIVENESS_UNKNOWN
-    # Legacy plain-text "starting" has no parent identity — unknown (fail closed).
+    # Legacy plain-text "starting" has no parent identity - unknown (fail closed).
     if raw == _WORKER_STATE_STARTING:
         return _WORKER_LIVENESS_UNKNOWN
     try:
@@ -187,7 +187,7 @@ def finalize_worker_liveness(run_dir: pathlib.Path) -> str:
     state = payload.get("state")
     if state == _WORKER_STATE_STARTING:
         # Starting means "parent is about to spawn". If the parent is gone (or
-        # pid-reused), no worker was left running — treat as dead so status and
+        # pid-reused), no worker was left running - treat as dead so status and
         # terminalize can recover instead of hanging on finalizing forever.
         parent_pid = payload.get("parentPid")
         if not isinstance(parent_pid, int) or isinstance(parent_pid, bool) or parent_pid <= 0:
@@ -390,7 +390,7 @@ def run_finalize_parent(
     def _spawn_failure_result(message: str, reason: str) -> Tuple[dict, Optional[str], bool]:
         clear_worker_pid(paths.run_dir)
         # If a worker already wrote a valid envelope (post-start pid-marker failure
-        # race), preserve that body — never report synthetic cli-failure over it.
+        # race), preserve that body - never report synthetic cli-failure over it.
         existing = _load_valid_envelope(paths)
         if existing is not None:
             try:
