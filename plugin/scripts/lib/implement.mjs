@@ -258,6 +258,11 @@ export function buildAutoFinalEnvelope(result, finalCode, applied) {
       : {};
   return {
     ...h,
+    // This is the terminal envelope for a `code --integration auto` COMMAND, so
+    // it must key as mode "code" (callers dispatch on envelope.mode; the code
+    // contract keys terminal code envelopes by "code", not the handoff we built
+    // it from). Integration readiness/apply details are preserved below.
+    mode: "code",
     status: finalCode === 0 ? "success" : "failure",
     response: {
       ...baseResp,

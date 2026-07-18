@@ -279,7 +279,23 @@ export function applyVerifiedPatch({
     };
   }
 
-  const patchSha = sha256File(patchPath);
+  // locateImplementationPatch only stat-checked the file; it can still vanish or
+  // become unreadable before this hash. Convert that race into a BLOCKED outcome
+  // (not an exception): auto suppresses stdout until it builds the final envelope,
+  // so an uncaught throw here would skip the final envelope + job finalization and
+  // leave the code-leg job/output looking successful.
+  let patchSha;
+  try {
+    patchSha = sha256File(patchPath);
+  } catch (err) {
+    stderrLine(`[grok-auto] BLOCKED: cannot read patch for ${runId}: ${err.message}`);
+    return {
+      ok: false,
+      outcome: "blocked-patch-unreadable",
+      reason: "patch read/hash failed",
+      runId,
+    };
+  }
   const preStatus = git(targetRepo, ["status", "--porcelain", "-z", "--untracked-files=all"]);
 
   // 3a. Dirty-overlap guard: git apply --check can PASS even when the patch
@@ -533,4 +549,21 @@ export function maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stder
   }
   stderrLine(`[grok-peer] applied ${patchPath} to ${repo}`);
   return { attempted: true, ok: true, outcome: "applied" };
+}
+
+/**
+ * maybeIntegratePeerStop wrapped to FAIL CLOSED on any unexpected throw (state-dir
+ * I/O reading consent/mode, a patch vanishing between stat and hash, etc.): the
+ * companion's onStdout hook must never let an apply-path exception leave a ready
+ * peer-stop looking successful, so a throw becomes an attempted-but-failed
+ * integration (nonzero exit + failed job).
+ * @returns {{attempted: boolean, ok: boolean, outcome: string}}
+ */
+export function integratePeerStopFailClosed(stdout, cwd, integrationFlag, rest, stderrLine) {
+  try {
+    return maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stderrLine);
+  } catch (err) {
+    stderrLine(`[grok-peer] integration hook error: ${err.message}`);
+    return { attempted: true, ok: false, outcome: "integration-error" };
+  }
 }

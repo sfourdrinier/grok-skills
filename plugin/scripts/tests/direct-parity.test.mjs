@@ -188,6 +188,43 @@ test("runDirectGrok forwards --max-turns to the installed CLI", () => {
   }
 });
 
+test("runDirectGrok honors --worktree only for verify, not for code (consent safety)", () => {
+  // SECURITY: `code --target <A> --worktree <B>` passes the direct-consent gate on
+  // A but must NOT point the CLI at B (B never recorded consent). --worktree is a
+  // verify-only flag; for code it is ignored and the cwd stays --target (A).
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-wtsafe-"));
+  try {
+    const repoA = path.join(dir, "A");
+    const repoB = path.join(dir, "B");
+    fs.mkdirSync(repoA);
+    fs.mkdirSync(repoB);
+    const fakeGrok = path.join(dir, "fake-grok.sh");
+    fs.writeFileSync(
+      fakeGrok,
+      `#!/bin/sh\nc=""\nwhile [ $# -gt 0 ]; do\n  if [ "$1" = "--cwd" ]; then c="$2"; fi\n  shift\ndone\nprintf '{"result":"cwd=%s"}\\n' "$c"\n`
+    );
+    fs.chmodSync(fakeGrok, 0o755);
+    const scriptsDir = path.resolve(SCRIPT_DIR, "..", "..", "wrapper", "scripts");
+    const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const call = (mode) =>
+      runDirectGrok({
+        mode,
+        args: ["--target", repoA, "--worktree", repoB, "--base", "HEAD", "--task", "x"],
+        cwd: dir,
+        env: { ...process.env, GROK_AGENT_BINARY: fakeGrok },
+        scriptsDir,
+        python: "python3",
+      }).envelopeText;
+    // code: --worktree ignored -> cwd is the consented --target A.
+    assert.match(call("code"), new RegExp(`cwd=${esc(path.resolve(repoA))}`), "code must run in --target");
+    assert.doesNotMatch(call("code"), new RegExp(`cwd=${esc(path.resolve(repoB))}"`));
+    // verify: --worktree honored -> cwd is B (the retained worktree to inspect).
+    assert.match(call("verify"), new RegExp(`cwd=${esc(path.resolve(repoB))}`), "verify must run in --worktree");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runDirectGrok refuses --input/--rules-file in direct mode (no silent drop)", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-reason-"));
   try {

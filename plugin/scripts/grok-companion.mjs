@@ -73,7 +73,7 @@ import {
   refusePeerDirect,
   runPeerStartBackground,
 } from "./lib/peer-acp.mjs";
-import { isAcpDisabled, maybeIntegratePeerStop, peerStopExitCode } from "./lib/integrate.mjs";
+import { isAcpDisabled, integratePeerStopFailClosed, peerStopExitCode } from "./lib/integrate.mjs";
 import { cmdDebate, cmdTransfer } from "./lib/companion-extra-cmds.mjs";
 const PYTHON = process.env.GROK_PYTHON?.trim() || "python3";
 const WRAPPER_NOT_FOUND_EXIT = 3;
@@ -835,11 +835,13 @@ async function dispatch({
         onStdout:
           wrapperMode === "peer-stop"
             ? (stdout, code) => {
+                // Fails closed on any apply-path throw; returned code feeds the
+                // job status (an apply that failed after the wrapper's zero exit).
                 if (code === 0) {
-                  peerIntegration = maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stderrLine);
+                  peerIntegration = integratePeerStopFailClosed(
+                    stdout, cwd, integrationFlag, rest, stderrLine
+                  );
                 }
-                // Feed the integration-aware exit back so the JOB status reflects
-                // an apply that failed after the wrapper's zero exit.
                 return peerStopExitCode(code, peerIntegration);
               }
             : null,

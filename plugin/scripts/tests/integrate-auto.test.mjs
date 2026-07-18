@@ -103,6 +103,43 @@ function companionEnv(env, root, xdg, callsPath) {
   };
 }
 
+test("applyVerifiedPatch: an unreadable patch is a BLOCKED outcome, not a throw", () => {
+  // The patch can vanish/become unreadable between locateImplementationPatch's
+  // stat and the sha hash. That race must return a blocked outcome (so auto still
+  // builds its final envelope + finalizes the job), never an uncaught exception.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-auto-unread-"));
+  const xdg = path.join(root, "xdg");
+  const patchPath = stagePatch(xdg, RUN_ID, "diff --git a/x b/x\n+z\n");
+  fs.chmodSync(patchPath, 0o000);
+  let readable = true;
+  try {
+    fs.readFileSync(patchPath);
+  } catch {
+    readable = false;
+  }
+  try {
+    if (readable) return; // running as root (perm bypass) -> cannot exercise EACCES
+    const res = applyVerifiedPatch({
+      wrapper: "unused",
+      runId: RUN_ID,
+      targetRepo: root,
+      env: { XDG_STATE_HOME: xdg },
+      // handoff revalidation reports ready so we reach the patch-hash step.
+      runHandoff: () => ({ code: 0, envelope: { response: { integration: { ready: true } } } }),
+      stderrLine: () => {},
+    });
+    assert.equal(res.ok, false);
+    assert.equal(res.outcome, "blocked-patch-unreadable");
+  } finally {
+    try {
+      fs.chmodSync(patchPath, 0o644);
+    } catch {
+      /* ignore */
+    }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("unit: buildAutoFinalEnvelope carries handoff fields + apply outcome", () => {
   const result = {
     ready: true,
@@ -116,6 +153,9 @@ test("unit: buildAutoFinalEnvelope carries handoff fields + apply outcome", () =
   };
   const env = buildAutoFinalEnvelope(result, 0, { ok: true, outcome: "applied" });
   assert.equal(env.status, "success");
+  // The terminal envelope for a `code --integration auto` COMMAND keys as "code",
+  // not the handoff envelope it was built from (callers dispatch on envelope.mode).
+  assert.equal(env.mode, "code");
   assert.equal(env.runId, "r");
   assert.equal(env.response.integration.ready, true);
   assert.equal(env.response.integration.applied, true);
@@ -209,6 +249,7 @@ test("auto happy path: applies ready patch to real temp target; exit 0", () => {
     assert.equal(envLines.length, 1, `auto must emit one envelope; got: ${res.stdout}`);
     const finalEnv = JSON.parse(envLines[0]);
     assert.equal(finalEnv.status, "success");
+    assert.equal(finalEnv.mode, "code", "auto command envelope must key as mode code");
     assert.equal(finalEnv.response?.integration?.applied, true);
     assert.equal(finalEnv.response?.integration?.outcome, "applied");
   } finally {

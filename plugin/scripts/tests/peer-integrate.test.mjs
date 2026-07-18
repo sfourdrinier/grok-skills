@@ -14,7 +14,11 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
-import { maybeIntegratePeerStop, peerStopExitCode } from "../lib/integrate.mjs";
+import {
+  integratePeerStopFailClosed,
+  maybeIntegratePeerStop,
+  peerStopExitCode,
+} from "../lib/integrate.mjs";
 
 const RUN_ID = "20260717T130000Z-abc123";
 
@@ -184,6 +188,23 @@ test("peer-stop review: retains patch, does not apply", () => {
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("integratePeerStopFailClosed converts an apply-path throw into attempted+not-ok", () => {
+  // A non-string `cwd` makes resolveTargetWorkspaceRoot's path.resolve throw on a
+  // READY envelope. The wrapper must CATCH it and fail closed, never propagate.
+  const lines = [];
+  const res = integratePeerStopFailClosed(
+    peerStopEnvelope("relative-repo"), // relative -> path.resolve uses cwd
+    123, // non-string cwd -> path.resolve throws inside maybeIntegratePeerStop
+    "auto",
+    [],
+    (l) => lines.push(l)
+  );
+  assert.equal(res.attempted, true);
+  assert.equal(res.ok, false);
+  assert.equal(res.outcome, "integration-error");
+  assert.equal(peerStopExitCode(0, res), 1);
 });
 
 test("peer-stop: a patch tampered after validation is refused (integrity check)", () => {

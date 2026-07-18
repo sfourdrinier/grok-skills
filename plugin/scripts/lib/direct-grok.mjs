@@ -305,10 +305,15 @@ export function runDirectGrok({
   }
 
   const model = flagValue(args, "--model") || "grok-4.5";
-  // --worktree wins over --target: /grok:verify passes the retained worktree to
-  // inspect via --worktree, so a direct verify must run IN it, not in --target /
-  // the companion cwd (else it could report success against the wrong checkout).
-  const cwdFlag = flagValue(args, "--worktree") || flagValue(args, "--target") || cwd;
+  // --worktree is a VERIFY-only flag (the retained worktree to inspect). Honor it
+  // as the cwd ONLY for verify; for other direct modes it is not a valid flag and
+  // must be ignored, or `code --target <consented A> --worktree <B>` would pass
+  // the direct-consent gate on A yet point the CLI at B - a live edit of a repo
+  // that never recorded direct consent. Non-verify modes fall back to --target.
+  const cwdFlag =
+    (mode === "verify" ? flagValue(args, "--worktree") : null) ||
+    flagValue(args, "--target") ||
+    cwd;
   const web = hasFlag(args, "--web");
   // Stage the prompt with the shared 0600 helper (private mkdtemp dir): the task
   // text can carry transferred transcripts or pasted credentials, so it must not
