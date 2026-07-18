@@ -11,9 +11,8 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { randomBytes } from "node:crypto";
 
-import { extractTask } from "./task-file.mjs";
+import { extractTask, stageTaskFile } from "./task-file.mjs";
 
 /** Honest refusal when handoff artifacts are requested for a direct-mode run. */
 export const DIRECT_NO_HANDOFF_MSG =
@@ -95,6 +94,29 @@ function flagValue(args, name) {
 
 function hasFlag(args, name) {
   return args.includes(name);
+}
+
+// Per-mode default run timeouts (seconds). MIRRORS grok_agent.py _add_run_opts()
+// so direct mode honors the same deadlines as the hardened path; keep in sync.
+const DIRECT_TIMEOUT_DEFAULTS_SECONDS = {
+  code: 3600,
+  verify: 1800,
+  reason: 900,
+  review: 900,
+  "adversarial-review": 900,
+};
+// Hard ceiling mirrors runstate.MAX_RUN_TIMEOUT_SECONDS (the wrapper's clamp).
+const DIRECT_MAX_TIMEOUT_SECONDS = 7 * 24 * 3600;
+
+/** Resolve the effective direct-mode timeout: --timeout override, else per-mode
+ *  default; junk/non-positive falls back to the default; clamped to the ceiling. */
+export function resolveDirectTimeoutSeconds(args, mode) {
+  const fallback = DIRECT_TIMEOUT_DEFAULTS_SECONDS[mode] ?? 900;
+  const raw = flagValue(args, "--timeout");
+  if (raw == null) return fallback;
+  const n = Number.parseInt(String(raw), 10);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(n, DIRECT_MAX_TIMEOUT_SECONDS);
 }
 
 function toolsForMode(mode) {
@@ -231,11 +253,10 @@ export function runDirectGrok({
   const model = flagValue(args, "--model") || "grok-4.5";
   const cwdFlag = flagValue(args, "--target") || cwd;
   const web = hasFlag(args, "--web");
-  const promptFile = path.join(
-    os.tmpdir(),
-    `grok-skills-direct-${randomBytes(4).toString("hex")}.md`
-  );
-  fs.writeFileSync(promptFile, task, "utf8");
+  // Stage the prompt with the shared 0600 helper (private mkdtemp dir): the task
+  // text can carry transferred transcripts or pasted credentials, so it must not
+  // sit world-readable under /tmp while the installed Grok CLI runs.
+  const { taskPath: promptFile, cleanup: cleanupPrompt } = stageTaskFile(task);
 
   const argv = [
     "--prompt-file",
@@ -264,18 +285,21 @@ export function runDirectGrok({
     argv.push("--sandbox", "workspace");
   }
 
+  const timeoutSeconds = resolveDirectTimeoutSeconds(args, mode);
   const result = spawnSync(binary, argv, {
     cwd: path.resolve(cwd),
     encoding: "utf8",
     env,
     maxBuffer: 64 * 1024 * 1024,
+    // Honor --timeout / the per-mode default so a hung or endless-stream Grok
+    // CLI cannot block the companion in spawnSync forever (the hardened path
+    // enforces the same deadlines). On expiry spawnSync kills the child.
+    timeout: timeoutSeconds * 1000,
+    killSignal: "SIGTERM",
   });
+  const timedOut = Boolean(result.error && result.error.code === "ETIMEDOUT");
 
-  try {
-    fs.unlinkSync(promptFile);
-  } catch {
-    // ignore
-  }
+  cleanupPrompt();
 
   const raw = (result.stdout || "").trim();
   let responseText = raw;
@@ -308,11 +332,13 @@ export function runDirectGrok({
       ? null
       : {
           class: "tool-unavailable",
-          message: (result.stderr || "grok exited non-zero").trim().slice(0, 2000),
-          detail: { exitCode: result.status },
+          message: timedOut
+            ? `grok CLI exceeded the ${timeoutSeconds}s timeout (runMode=direct); process killed`
+            : (result.stderr || "grok exited non-zero").trim().slice(0, 2000),
+          detail: { exitCode: result.status, timedOut },
         },
     policy: { direct: true, webAccess: web, model },
-    grok: { stopReason: ok ? "end_turn" : "error" },
+    grok: { stopReason: ok ? "end_turn" : timedOut ? "timeout" : "error" },
   };
   if (result.stderr) {
     process.stderr.write(result.stderr);

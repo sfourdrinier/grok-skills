@@ -13,6 +13,7 @@ import { test } from "node:test";
 import {
   DIRECT_NO_HANDOFF_MSG,
   DIRECT_RUN_ID_RE,
+  resolveDirectTimeoutSeconds,
   runDirectGrok,
 } from "../lib/direct-grok.mjs";
 
@@ -83,6 +84,81 @@ test("[4] direct fallback withholds error.message when redaction cannot run", ()
       `secret must be withheld from the fail-closed envelope: ${res.envelopeText}`
     );
     assert.match(res.envelopeText, /withheld/i);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveDirectTimeoutSeconds: per-mode defaults, override, junk, clamp", () => {
+  assert.equal(resolveDirectTimeoutSeconds([], "code"), 3600);
+  assert.equal(resolveDirectTimeoutSeconds([], "verify"), 1800);
+  assert.equal(resolveDirectTimeoutSeconds([], "reason"), 900);
+  assert.equal(resolveDirectTimeoutSeconds([], "review"), 900);
+  assert.equal(resolveDirectTimeoutSeconds([], "adversarial-review"), 900);
+  assert.equal(resolveDirectTimeoutSeconds([], "unknown-mode"), 900);
+  assert.equal(resolveDirectTimeoutSeconds(["--timeout", "120"], "code"), 120);
+  assert.equal(resolveDirectTimeoutSeconds(["--timeout=45"], "code"), 45);
+  // junk / non-positive -> per-mode default
+  assert.equal(resolveDirectTimeoutSeconds(["--timeout", "0"], "code"), 3600);
+  // "--timeout -5" hits the flag-rejection branch (value starts with "-");
+  // the equals form exercises the parsed n<=0 branch directly.
+  assert.equal(resolveDirectTimeoutSeconds(["--timeout", "-5"], "code"), 3600);
+  assert.equal(resolveDirectTimeoutSeconds(["--timeout=-5"], "code"), 3600);
+  assert.equal(resolveDirectTimeoutSeconds(["--timeout", "abc"], "verify"), 1800);
+  // clamped to the 7-day ceiling
+  assert.equal(
+    resolveDirectTimeoutSeconds(["--timeout", String(99 * 24 * 3600)], "code"),
+    7 * 24 * 3600
+  );
+});
+
+test("runDirectGrok stages the prompt file with private 0600 perms", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-promptperm-"));
+  try {
+    const fakeGrok = path.join(dir, "fake-grok.sh");
+    // Echo the mode of the --prompt-file so we can assert it end to end. BSD stat
+    // (macOS) uses -f %Lp; GNU stat (Linux) uses -c %a.
+    fs.writeFileSync(
+      fakeGrok,
+      `#!/bin/sh\npf=""\nwhile [ $# -gt 0 ]; do\n  if [ "$1" = "--prompt-file" ]; then pf="$2"; fi\n  shift\ndone\nm=$(stat -f '%Lp' "$pf" 2>/dev/null || stat -c '%a' "$pf")\nprintf '{"result":"mode=%s"}\\n' "$m"\n`
+    );
+    fs.chmodSync(fakeGrok, 0o755);
+    const scriptsDir = path.resolve(SCRIPT_DIR, "..", "..", "wrapper", "scripts");
+    const res = runDirectGrok({
+      mode: "code",
+      args: ["--target", dir, "--base", "HEAD", "--task", "secret prompt body"],
+      cwd: dir,
+      env: { ...process.env, GROK_AGENT_BINARY: fakeGrok },
+      scriptsDir,
+      python: "python3",
+    });
+    assert.match(res.envelopeText, /mode=600/, `prompt file must be 0600: ${res.envelopeText}`);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runDirectGrok honors --timeout and classifies a hung CLI as timed out", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-timeout-"));
+  try {
+    const fakeGrok = path.join(dir, "fake-grok.sh");
+    // Sleeps far longer than the 1s --timeout; the spawn must kill it.
+    fs.writeFileSync(fakeGrok, `#!/bin/sh\nsleep 30\nprintf '{"result":"done"}\\n'\n`);
+    fs.chmodSync(fakeGrok, 0o755);
+    const scriptsDir = path.resolve(SCRIPT_DIR, "..", "..", "wrapper", "scripts");
+    const res = runDirectGrok({
+      mode: "code",
+      args: ["--target", dir, "--base", "HEAD", "--task", "x", "--timeout", "1"],
+      cwd: dir,
+      env: { ...process.env, GROK_AGENT_BINARY: fakeGrok },
+      scriptsDir,
+      python: "python3",
+    });
+    assert.equal(res.code, 1, `timed-out run must exit nonzero: ${res.envelopeText}`);
+    const env = JSON.parse(res.envelopeText);
+    assert.equal(env.status, "failure");
+    assert.match(env.error?.message || "", /timeout/i);
+    assert.equal(env.error?.detail?.timedOut, true);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
