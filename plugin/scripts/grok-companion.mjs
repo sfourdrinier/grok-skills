@@ -323,7 +323,9 @@ function runWithLiveRelay(wrapper, args, track) {
     if (child.stdout) {
       child.stdout.setEncoding("utf8");
       child.stdout.on("data", (chunk) => {
-        process.stdout.write(chunk);
+        // suppressStdoutRelay (auto combo): capture but do NOT relay the code-leg
+        // envelope, so the combo emits exactly one final envelope. Default relays.
+        if (!track?.suppressStdoutRelay) process.stdout.write(chunk);
         stdoutBuf += chunk;
       });
     }
@@ -610,8 +612,14 @@ async function dispatch({
     // suppressed. Prevents /grok:jobs + notifications reporting success for a
     // not-ready implement or a failed auto-apply.
     const comboStartedAtMs = Date.now();
-    const finalizeCombo = ({ jobId, finalCode, runId, stdoutText }) => {
+    const finalizeCombo = ({ jobId, finalCode, runId, stdoutText, finalEnvelopeText }) => {
       if (jobId) {
+        // Replace the stored code-leg stdout with the final combo outcome envelope
+        // so /grok:result reflects the handoff/apply result (not a stale SUCCESS
+        // code envelope) for a not-ready implement or a failed auto-apply.
+        if (finalEnvelopeText) {
+          storeJobStdout(cwd, jobId, finalEnvelopeText);
+        }
         updateJob(cwd, jobId, {
           status: finalCode === 0 ? "success" : "failure",
           summary: finalCode === 0 ? "ready" : `not ready (exit ${finalCode})`,

@@ -11,6 +11,7 @@ import path from "node:path";
 import { test } from "node:test";
 
 import {
+  buildAutoFinalEnvelope,
   companionIntegrationToWrapper,
   restForWrapperIntegration,
 } from "../lib/implement.mjs";
@@ -102,6 +103,36 @@ function companionEnv(env, root, xdg, callsPath) {
   };
 }
 
+test("unit: buildAutoFinalEnvelope carries handoff fields + apply outcome", () => {
+  const result = {
+    ready: true,
+    handoffEnvelope: {
+      schemaVersion: 1,
+      mode: "handoff",
+      runId: "r",
+      status: "success",
+      response: { integration: { ready: true, blockers: [] } },
+    },
+  };
+  const env = buildAutoFinalEnvelope(result, 0, { ok: true, outcome: "applied" });
+  assert.equal(env.status, "success");
+  assert.equal(env.runId, "r");
+  assert.equal(env.response.integration.ready, true);
+  assert.equal(env.response.integration.applied, true);
+  assert.equal(env.response.integration.outcome, "applied");
+  // failed apply -> status failure, applied false, the real apply outcome.
+  const env2 = buildAutoFinalEnvelope(result, 1, { ok: false, outcome: "blocked-dirty-overlap" });
+  assert.equal(env2.status, "failure");
+  assert.equal(env2.response.integration.applied, false);
+  assert.equal(env2.response.integration.outcome, "blocked-dirty-overlap");
+  // no apply (not-ready) -> applied false, outcome not-ready.
+  const env3 = buildAutoFinalEnvelope({ ready: false, handoffEnvelope: result.handoffEnvelope }, 1, null);
+  assert.equal(env3.response.integration.applied, false);
+  assert.equal(env3.response.integration.outcome, "not-ready");
+  // no handoff envelope (no runId) -> null so the caller falls back to code stdout.
+  assert.equal(buildAutoFinalEnvelope({ handoffEnvelope: null }, 1, null), null);
+});
+
 test("unit: companionIntegrationToWrapper maps auto/review to worktree", () => {
   assert.equal(companionIntegrationToWrapper("direct"), "direct");
   assert.equal(companionIntegrationToWrapper("worktree"), "worktree");
@@ -173,6 +204,13 @@ test("auto happy path: applies ready patch to real temp target; exit 0", () => {
     assert.match(res.stderr, /APPLIED|applied/i);
     const calls = readCalls(callsPath);
     assert.deepEqual(calls, ["code", "handoff", "handoff"]);
+    // auto is a `code` run -> EXACTLY ONE stdout envelope (not code + handoff).
+    const envLines = res.stdout.split("\n").filter((l) => l.trim().startsWith("{"));
+    assert.equal(envLines.length, 1, `auto must emit one envelope; got: ${res.stdout}`);
+    const finalEnv = JSON.parse(envLines[0]);
+    assert.equal(finalEnv.status, "success");
+    assert.equal(finalEnv.response?.integration?.applied, true);
+    assert.equal(finalEnv.response?.integration?.outcome, "applied");
   } finally {
     cleanup();
     fs.rmSync(root, { recursive: true, force: true });
@@ -217,6 +255,22 @@ test("auto not-ready: no apply; target unchanged; exit 1", () => {
       !/APPLIED runId=/i.test(res.stderr),
       "must not claim applied when not ready"
     );
+    // ONE stdout envelope, and it reflects the NOT-READY outcome (not a stale
+    // SUCCESS code envelope).
+    const envLines = res.stdout.split("\n").filter((l) => l.trim().startsWith("{"));
+    assert.equal(envLines.length, 1, `auto must emit one envelope; got: ${res.stdout}`);
+    const finalEnv = JSON.parse(envLines[0]);
+    assert.equal(finalEnv.status, "failure");
+    assert.equal(finalEnv.response?.integration?.ready, false);
+    // /grok:result must show that same not-ready envelope + exit 1 (not the code
+    // leg's SUCCESS envelope).
+    const resultRes = runCompanion(["result"], {
+      cwd: repo,
+      env: companionEnv(env, root, xdg, callsPath),
+    });
+    assert.equal(resultRes.code, 1, `result exit; stderr: ${resultRes.stderr}`);
+    const shown = JSON.parse(resultRes.stdout.trim());
+    assert.equal(shown.response?.integration?.ready, false, resultRes.stdout);
   } finally {
     cleanup();
     fs.rmSync(root, { recursive: true, force: true });

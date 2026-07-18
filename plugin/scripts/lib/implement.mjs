@@ -116,6 +116,10 @@ export async function runCodeThenHandoff(wrapper, rest, track, {
   runWithLiveRelay,
   stderrLine = (line) => process.stderr.write(`${line}\n`),
   logPrefix = "implement",
+  // combine: suppress the intermediate code + handoff stdout relays so the caller
+  // (auto) can emit exactly ONE final envelope. implement keeps combine=false and
+  // its documented two-envelope (code then handoff) relay.
+  combine = false,
 } = {}) {
   if (typeof runWithLiveRelay !== "function") {
     process.stderr.write(
@@ -140,6 +144,7 @@ export async function runCodeThenHandoff(wrapper, rest, track, {
     ...track,
     captureStdout: true,
     skipNotify: true,
+    suppressStdoutRelay: combine,
   });
   const codeExit = typeof res === "number" ? res : res.code;
   const stdoutBuf = typeof res === "number" ? "" : res.stdout || "";
@@ -166,7 +171,8 @@ export async function runCodeThenHandoff(wrapper, rest, track, {
   );
   const { code: handoffCode, envelope: handoffEnvelope } = runHandoffCaptured(
     wrapper,
-    ["handoff", "--run-id", runId]
+    ["handoff", "--run-id", runId],
+    { silent: combine }
   );
   const ready = handoffEnvelope?.response?.integration?.ready === true;
   stderrLine(
@@ -210,6 +216,13 @@ export async function runImplementCombo(wrapper, rest, runMode, track, {
     : result.codeExit === 0 && result.handoffCode === 0 && result.ready
       ? 0
       : 1;
+  // implement's LIVE stdout stays two envelopes (code then handoff, documented),
+  // but the STORED stdout.json becomes the handoff envelope so /grok:result shows
+  // the true readiness/blockers, not a stale SUCCESS code envelope.
+  const finalEnvelopeText =
+    result.handoffEnvelope && typeof result.handoffEnvelope === "object"
+      ? `${JSON.stringify(result.handoffEnvelope)}\n`
+      : "";
   // Finalize the job status + fire ONE notification on the true outcome (the
   // code-leg notify was suppressed), so /grok:jobs and notifications never
   // report success for a not-ready implement.
@@ -219,9 +232,42 @@ export async function runImplementCombo(wrapper, rest, runMode, track, {
       finalCode,
       runId: result.runId,
       stdoutText: result.codeStdout,
+      finalEnvelopeText,
     });
   }
   return finalCode;
+}
+
+/**
+ * Build the single final auto envelope from the handoff envelope (which carries
+ * runId + response.integration.ready + blockers), setting the TRUE combo status
+ * and recording whether the ready patch actually applied. Returns null when there
+ * is no handoff envelope (no runId) so the caller falls back to the code stdout.
+ * @param {object} result runCodeThenHandoff result
+ * @param {number} finalCode
+ * @param {{ok: boolean, outcome: string}|null} applied applyVerifiedPatch result
+ * @returns {object|null}
+ */
+export function buildAutoFinalEnvelope(result, finalCode, applied) {
+  const h = result?.handoffEnvelope;
+  if (!h || typeof h !== "object") return null;
+  const baseResp = h.response && typeof h.response === "object" ? h.response : {};
+  const baseInteg =
+    baseResp.integration && typeof baseResp.integration === "object"
+      ? baseResp.integration
+      : {};
+  return {
+    ...h,
+    status: finalCode === 0 ? "success" : "failure",
+    response: {
+      ...baseResp,
+      integration: {
+        ...baseInteg,
+        applied: applied?.ok === true,
+        outcome: applied?.outcome ?? (result?.ready ? "not-applied" : "not-ready"),
+      },
+    },
+  };
 }
 
 /**
@@ -248,12 +294,16 @@ export async function runAutoIntegrate(wrapper, rest, runMode, track, {
   if (runMode === "direct") {
     return writeDirectNoHandoffRefuse();
   }
+  // combine:true suppresses the code + initial-handoff stdout relays; auto emits
+  // exactly ONE final envelope below (the `code` single-envelope contract).
   const result = await runCodeThenHandoff(wrapper, rest, track, {
     runWithLiveRelay,
     stderrLine,
     logPrefix: "auto",
+    combine: true,
   });
   let finalCode;
+  let applied = null;
   if (!result.runId) {
     finalCode = 1;
   } else if (!(result.codeExit === 0 && result.handoffCode === 0 && result.ready)) {
@@ -265,25 +315,36 @@ export async function runAutoIntegrate(wrapper, rest, runMode, track, {
     const targetArg = parseTargetFlag(rest);
     const targetRepo = resolveTargetWorkspaceRoot(targetCwd, targetArg);
     stderrLine(`[grok-auto] ready; applying patch to target ${targetRepo}`);
-    const applied = applyVerifiedPatch({
+    applied = applyVerifiedPatch({
       wrapper,
       runId: result.runId,
       targetRepo,
-      // Silent capture: the initial handoff (runCodeThenHandoff) already emitted
-      // the single stdout envelope; the apply-time revalidation must not add a
-      // second one.
+      // Silent capture: the apply-time revalidation must not emit a second envelope.
       runHandoff: (w, a) => runHandoffCaptured(w, a, { silent: true }),
       stderrLine,
     });
     finalCode = applied.ok ? 0 : 1;
   }
-  // Finalize job status + one notification on the true outcome (apply included).
+  // Emit + store exactly one final outcome envelope (handoff envelope carries the
+  // runId + integration.ready + blockers; we set the true combo status and record
+  // the apply outcome). Falls back to the captured code envelope when there was no
+  // runId (nothing to hand off).
+  const finalEnvelope = buildAutoFinalEnvelope(result, finalCode, applied);
+  const finalEnvelopeText = finalEnvelope
+    ? `${JSON.stringify(finalEnvelope)}\n`
+    : result.codeStdout || "";
+  if (finalEnvelopeText) {
+    process.stdout.write(
+      finalEnvelopeText.endsWith("\n") ? finalEnvelopeText : `${finalEnvelopeText}\n`
+    );
+  }
   if (typeof finalizeCombo === "function") {
     await finalizeCombo({
       jobId: result.jobId,
       finalCode,
       runId: result.runId,
       stdoutText: result.codeStdout,
+      finalEnvelopeText,
     });
   }
   return finalCode;
