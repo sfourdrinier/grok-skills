@@ -172,11 +172,12 @@ test("runDirectGrok stages the prompt file with private 0600 perms", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-promptperm-"));
   try {
     const fakeGrok = path.join(dir, "fake-grok.sh");
-    // Echo the mode of the --prompt-file so we can assert it end to end. BSD stat
-    // (macOS) uses -f %Lp; GNU stat (Linux) uses -c %a.
+    // Echo the octal mode of the --prompt-file so we can assert it end to end.
+    // Use python's os.stat for portability (GNU `stat -f` means --file-system,
+    // not a format string, so a shell `stat -f`/`stat -c` fallback is unreliable).
     fs.writeFileSync(
       fakeGrok,
-      `#!/bin/sh\npf=""\nwhile [ $# -gt 0 ]; do\n  if [ "$1" = "--prompt-file" ]; then pf="$2"; fi\n  shift\ndone\nm=$(stat -f '%Lp' "$pf" 2>/dev/null || stat -c '%a' "$pf")\nprintf '{"result":"mode=%s"}\\n' "$m"\n`
+      `#!/bin/sh\npf=""\nwhile [ $# -gt 0 ]; do\n  if [ "$1" = "--prompt-file" ]; then pf="$2"; fi\n  shift\ndone\nm=$(python3 -c 'import os,sys; print("%o" % (os.stat(sys.argv[1]).st_mode & 0o777))' "$pf")\nprintf '{"result":"mode=%s"}\\n' "$m"\n`
     );
     fs.chmodSync(fakeGrok, 0o755);
     const scriptsDir = path.resolve(SCRIPT_DIR, "..", "..", "wrapper", "scripts");
