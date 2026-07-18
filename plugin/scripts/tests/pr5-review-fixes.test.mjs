@@ -92,6 +92,17 @@ test("parseDirtyStatusPaths: -z paths with a literal ' -> ' are never mis-split"
   assert.ok(!q.has("a") && !q.has("b.txt"));
 });
 
+test("parseNumstatPaths decodes git C-style octal-quoted UTF-8 paths", () => {
+  // `git apply --numstat` quotes non-ASCII: "é.txt" -> "\303\251.txt". The dirty
+  // set from `git status --porcelain -z` carries the RAW "é.txt", so the numstat
+  // path must decode to the same bytes or the overlap guard fails open on it.
+  const numstat = '1\t0\t"\\303\\251.txt"\n';
+  assert.deepEqual(parseNumstatPaths(numstat), ["é.txt"]);
+  // Named escapes still decode; an unquoted path is returned as-is.
+  assert.deepEqual(parseNumstatPaths('0\t0\t"a\\tb.js"\n'), ["a\tb.js"]);
+  assert.deepEqual(parseNumstatPaths("1\t0\tplain.js\n"), ["plain.js"]);
+});
+
 test("parseNumstatPaths: extracts patch target paths incl. BOTH rename sides + raw", () => {
   const numstat = "1\t0\tsrc/a.js\n-\t-\tbin.dat\n2\t1\t{old => new}/f.js\n0\t0\ta.js => b.js\n";
   const paths = parseNumstatPaths(numstat);

@@ -114,14 +114,42 @@ function git(cwd, args) {
 /** Strip git's double-quoted path quoting (special-char paths). */
 function unquoteGitPath(p) {
   const s = String(p).trim();
-  if (s.startsWith('"') && s.endsWith('"')) {
-    try {
-      return JSON.parse(s);
-    } catch {
-      return s.slice(1, -1);
+  if (!(s.startsWith('"') && s.endsWith('"'))) return s;
+  // git core.quotePath C-style: the path is wrapped in "..." with non-ASCII bytes
+  // rendered as \NNN OCTAL (e.g. UTF-8 "é.txt" -> "\303\251.txt") plus the named
+  // escapes \a \b \t \n \v \f \r \" \\. JSON.parse does NOT understand \NNN, so a
+  // UTF-8/special path must be decoded byte-by-byte and re-read as UTF-8, else it
+  // never matches the raw path from `git status --porcelain -z` (dirty guard fails
+  // open on that file).
+  const body = s.slice(1, -1);
+  const named = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, "\\": 92 };
+  const bytes = [];
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i];
+    if (ch !== "\\") {
+      bytes.push(body.charCodeAt(i) & 0xff);
+      continue;
+    }
+    const next = body[i + 1];
+    if (next >= "0" && next <= "7") {
+      // up to 3 octal digits (git emits 3 for a high byte)
+      let j = i + 1;
+      let oct = "";
+      while (j < body.length && oct.length < 3 && body[j] >= "0" && body[j] <= "7") {
+        oct += body[j];
+        j += 1;
+      }
+      bytes.push(parseInt(oct, 8) & 0xff);
+      i = j - 1;
+    } else if (next in named) {
+      bytes.push(named[next]);
+      i += 1;
+    } else if (next !== undefined) {
+      bytes.push(body.charCodeAt(i + 1) & 0xff);
+      i += 1;
     }
   }
-  return s;
+  return Buffer.from(bytes).toString("utf8");
 }
 
 /**
