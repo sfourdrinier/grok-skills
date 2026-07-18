@@ -395,6 +395,84 @@ class PeerLifecycleTests(PeerTestBase):
         self.assertEqual(ctx.exception.error_class, "rules-parity-failure")
         session.acp.session_prompt.assert_not_called()
 
+    def test_first_prompt_discovers_rules_from_operator_repo_not_worktree(self) -> None:
+        # Rules/parity are read from the OPERATOR checkout (repoRoot), which sees
+        # uncommitted rule files, NOT the committed-base worktree. A bad CLAUDE.md
+        # in repoRoot + a CLEAN worktree must fail the prompt closed (proving the
+        # discovery source is repoRoot, not the worktree).
+        from groklib.progress import ProgressWriter
+
+        repo = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(repo), ignore_errors=True)
+        (repo / "CLAUDE.md").write_bytes(b"\xff\xfe not valid utf-8\n")
+        clean_wt = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(clean_wt), ignore_errors=True)
+        run_paths = runstate.create_run("peer-start")
+        session = peer_mod.PeerSession.__new__(peer_mod.PeerSession)
+        session._prompt_lock = threading.Lock()
+        session._prompt_in_flight = False
+        session.sentinel_name = ".grok-run-" + run_paths.run_id
+        session.worktree = mock.Mock(path=clean_wt)
+        session.contract = None
+        session.run_id = run_paths.run_id
+        session.session_id = "s"
+        session.progress = ProgressWriter(run_paths.run_id, run_paths.progress_path)
+        session.run_paths = run_paths
+        session.model = "grok-4.5"
+        session.child = self.fake_child
+        session.peer_doc = {
+            "lifecycle": "running",
+            "child": {"pid": os.getpid()},
+            "repoRoot": str(repo),
+        }
+        session.renew_lease = mock.Mock()
+        session.acp = mock.Mock()  # must not be reached (discovery raises first)
+        with self.assertRaises(GrokWrapperError) as ctx:
+            peer_mod._handle_prompt(session, "task")
+        self.assertEqual(ctx.exception.error_class, "rules-parity-failure")
+        session.acp.session_prompt.assert_not_called()
+
+    def test_prompt_attempt_persisted_before_acp_wait(self) -> None:
+        # If session_prompt errors AFTER Grok ran tools, promptsHandled must
+        # already be 1 (persisted) so peer-stop still enforces the cwd sentinel
+        # instead of finalizing a mutated worktree unverified.
+        from groklib.progress import ProgressWriter
+
+        wt = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(wt), ignore_errors=True)
+        run_paths = runstate.create_run("peer-start")
+        session = peer_mod.PeerSession.__new__(peer_mod.PeerSession)
+        session._prompt_lock = threading.Lock()
+        session._prompt_in_flight = False
+        session.sentinel_name = ".grok-run-" + run_paths.run_id
+        session.worktree = mock.Mock(path=wt)
+        session.contract = None
+        session.run_id = run_paths.run_id
+        session.session_id = "s"
+        session.progress = ProgressWriter(run_paths.run_id, run_paths.progress_path)
+        session.run_paths = run_paths
+        session.model = "grok-4.5"
+        session.child = self.fake_child
+        session.peer_doc = {
+            "lifecycle": "running",
+            "child": {"pid": os.getpid()},
+            "repoRoot": str(wt),
+        }
+        # Record promptsHandled at each renew_lease (persist) call.
+        persisted = []
+        session.renew_lease = mock.Mock(
+            side_effect=lambda: persisted.append(int(session.peer_doc.get("promptsHandled", 0)))
+        )
+        session.acp = mock.Mock()
+        session.acp.session_prompt = mock.Mock(
+            side_effect=RuntimeError("ACP error after Grok ran tools")
+        )
+        with self.assertRaises(RuntimeError):
+            peer_mod._handle_prompt(session, "task")
+        # The attempt was counted AND persisted BEFORE the failing prompt.
+        self.assertEqual(session.peer_doc.get("promptsHandled"), 1)
+        self.assertIn(1, persisted)
+
     def test_control_socket_mode_0600_foreign_refused(self) -> None:
         if not platformsupport.is_posix():
             self.skipTest("unix socket 0600 is POSIX-only")

@@ -169,8 +169,9 @@ the chosen integration mode's gate.
 1. Read `runId` from the start/code envelope (success or failure with retained worktree).
 2. Optionally `/grok:status --run-id <runId>` for progress.
 3. **Peer:** `peer stop` already finalizes and may integrate via the active mode
-   (auto/direct apply when ready; review leaves patch). You may still call
-   `GROK_RUN handoff --run-id '<runId>'` to observe dual-condition ready.
+   (auto/direct apply when ready; review leaves patch). Use the peer-stop
+   response itself as the ready signal - `/grok:handoff` is code-mode only and
+   refuses peer runIds; do NOT call it for peer runs.
 4. **Code:** **Required before integrate:** `GROK_RUN handoff --run-id '<runId>'`.
 5. Integrate only when ready (handoff or peer-stop response) and the mode allows.
 6. Completion **notify** is not ready - always verify the ready signal.

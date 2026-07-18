@@ -155,6 +155,39 @@ test("runDirectGrok verify uses --worktree as cwd, not --target", () => {
   }
 });
 
+test("runDirectGrok forwards --max-turns to the installed CLI", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-mt-"));
+  try {
+    const fakeGrok = path.join(dir, "fake-grok.sh");
+    // Echo whether --max-turns <n> reached the CLI argv.
+    fs.writeFileSync(
+      fakeGrok,
+      `#!/bin/sh\nmt="none"\nwhile [ $# -gt 0 ]; do\n  if [ "$1" = "--max-turns" ]; then mt="$2"; fi\n  shift\ndone\nprintf '{"result":"maxturns=%s"}\\n' "$mt"\n`
+    );
+    fs.chmodSync(fakeGrok, 0o755);
+    const scriptsDir = path.resolve(SCRIPT_DIR, "..", "..", "wrapper", "scripts");
+    const call = (extra) =>
+      runDirectGrok({
+        mode: "code",
+        args: ["--target", dir, "--base", "HEAD", "--task", "x", ...extra],
+        cwd: dir,
+        env: { ...process.env, GROK_AGENT_BINARY: fakeGrok },
+        scriptsDir,
+        python: "python3",
+      }).envelopeText;
+    assert.match(call(["--max-turns", "5"]), /maxturns=5/, "valid --max-turns must be forwarded");
+    assert.match(call(["--max-turns=7"]), /maxturns=7/, "equals form must be forwarded");
+    // No --max-turns -> flag absent (not "0"/garbage).
+    assert.match(call([]), /maxturns=none/);
+    // Invalid / out-of-range values are not forwarded (no bogus cap).
+    assert.match(call(["--max-turns", "0"]), /maxturns=none/);
+    assert.match(call(["--max-turns", "abc"]), /maxturns=none/);
+    assert.match(call(["--max-turns", "100001"]), /maxturns=none/); // > _MAX_TURNS
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runDirectGrok refuses --input/--rules-file in direct mode (no silent drop)", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-reason-"));
   try {

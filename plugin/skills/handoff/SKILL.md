@@ -79,7 +79,11 @@ This plugin **never** auto-commits, merges, cherry-picks, or pushes in any mode.
 
 ### Manual parent apply (review / when auto did not apply)
 
-1. Dispatch `/grok:code` (or peer) with optional `--contract-file`
+This flow is **code-mode only**: `/grok:handoff` refuses peer runIds. A peer run
+is finalized by `peer stop` itself (use its response as the ready signal); it
+never routes through `/grok:handoff`.
+
+1. Dispatch `/grok:code` with optional `--contract-file`
 2. Wait for terminal status (`/grok:status --run-id` optional)
 3. Run `/grok:handoff --run-id <id>`
 4. Proceed only if envelope status is success and `response.integration.ready`

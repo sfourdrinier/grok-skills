@@ -341,6 +341,18 @@ export function runDirectGrok({
   } else if (mode === "code" || mode === "verify") {
     argv.push("--sandbox", "workspace");
   }
+  // Forward an operator turn budget: the hardened path passes --max-turns to the
+  // CLI, so direct must too, or a turn-capped run silently ignores the cap and
+  // runs to the wall-clock timeout / normal completion.
+  const maxTurnsRaw = flagValue(args, "--max-turns");
+  if (maxTurnsRaw != null) {
+    const n = Number.parseInt(String(maxTurnsRaw), 10);
+    // Same [1, 100000] bound the hardened wrapper enforces (_MAX_TURNS); an
+    // out-of-range/junk value is not forwarded rather than passed on unbounded.
+    if (Number.isFinite(n) && n > 0 && n <= 100000) {
+      argv.push("--max-turns", String(n));
+    }
+  }
 
   const timeoutSeconds = resolveDirectTimeoutSeconds(args, mode);
   const result = spawnSync(binary, argv, {

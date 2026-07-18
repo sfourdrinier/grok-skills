@@ -190,9 +190,16 @@ def _handle_prompt(session: PeerSession, task: str) -> dict:
             from groklib import rules
             from groklib.modes.code import _contract_directive, _sentinel_directive
 
-            worktree_path = session.worktree.path
+            # Discover rules from the OPERATOR checkout (repoRoot), NOT the
+            # committed-base worktree: code mode reads the live checkout, so
+            # uncommitted AGENTS.md/CLAUDE.md changes and a strict-parity divergence
+            # must be seen here too, before Grok edits. Grok still RUNS in the
+            # isolated worktree (the ACP session cwd is unchanged).
+            repo_root = pathlib.Path(
+                str(session.peer_doc.get("repoRoot") or session.worktree.path)
+            )
             target_rel = session.peer_doc.get("targetRelative") or ""
-            target_abs = (worktree_path / target_rel) if target_rel else worktree_path
+            target_abs = (repo_root / target_rel) if target_rel else repo_root
             # Discover repo rules the SAME way AND with the SAME strictness as code
             # mode (project ruleFileParity). Do NOT swallow errors: a
             # RulesParityError (unreadable / non-UTF-8 rule file, or a strict-parity
@@ -202,7 +209,7 @@ def _handle_prompt(session: PeerSession, task: str) -> dict:
             require_parity = bool(session.peer_doc.get("requireRuleFileParity", False))
             try:
                 instructions, rule_warnings = rules.discover_instruction_files_with_warnings(
-                    worktree_path, target_abs, require_parity=require_parity
+                    repo_root, target_abs, require_parity=require_parity
                 )
             except GrokWrapperError:
                 raise  # RulesParityError etc. -> control handler -> failure envelope
@@ -213,7 +220,7 @@ def _handle_prompt(session: PeerSession, task: str) -> dict:
                 raise GrokWrapperError(
                     "validation-failure",
                     "peer rule discovery failed: {}".format(exc),
-                    {"worktree": str(worktree_path)},
+                    {"repoRoot": str(repo_root)},
                 ) from exc
             for warning in rule_warnings:
                 session.progress.safe_emit("validate", warning)
@@ -224,12 +231,19 @@ def _handle_prompt(session: PeerSession, task: str) -> dict:
             )
             prompt_text = rules.build_prompt_payload(instructions, parts)
 
+        # Count + PERSIST the attempt BEFORE waiting for the final ACP response.
+        # If session_prompt times out or errors AFTER Grok already ran tools, a
+        # promptsHandled left at 0 would make peer-stop SKIP the mandatory cwd
+        # sentinel proof and finalize a mutated worktree unverified. Recording the
+        # attempt up front forces sentinel enforcement at stop (fail closed) for
+        # any turn that reached the model.
+        session.peer_doc["promptsHandled"] = prompts_handled + 1
+        session.renew_lease()
         result = session.acp.session_prompt(
             session_id=session.session_id,
             text=prompt_text,
             on_update=_on_update,
         )
-        session.peer_doc["promptsHandled"] = prompts_handled + 1
         session.renew_lease()
         combined = "".join(texts)
         redacted_result = redact_secret_material(
