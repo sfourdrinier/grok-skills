@@ -22,6 +22,7 @@ import json
 import os
 import pathlib
 import shutil
+import stat
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 from groklib import log_stderr
@@ -50,6 +51,8 @@ class ProtectedPathEntry:
     snapshotted: bool
     size: int
     reason: Optional[str] = None  # e.g. "over-cap"
+    mode: int = 0  # pre-run permission bits (reapplied on restore of a regular file)
+    symlink_target: Optional[str] = None  # set when the pre-run path was a symlink
 
 
 @dataclasses.dataclass(frozen=True)
@@ -102,6 +105,16 @@ def _is_regular_file(path: pathlib.Path) -> bool:
         return False
 
 
+def _is_snapshot_candidate(path: pathlib.Path) -> bool:
+    """True for a regular file OR a symlink (a pre-existing protected symlink must
+    be snapshotted so restore recreates it instead of deleting it - review)."""
+    try:
+        st = path.lstat()
+    except OSError:
+        return False
+    return stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode)
+
+
 def is_snapshot_scope(relative: str) -> bool:
     """True when a protected path is in the pre-run snapshot set if it exists.
 
@@ -142,13 +155,13 @@ def iter_existing_protected_paths(repo_root: pathlib.Path) -> Iterable[str]:
     git_dir = root / ".git"
     for name in _GIT_SNAPSHOT_FILES:
         candidate = git_dir / name
-        if _is_regular_file(candidate):
+        if _is_snapshot_candidate(candidate):
             yield ".git/" + name
     hooks = git_dir / "hooks"
     if hooks.is_dir():
         try:
             for child in sorted(hooks.iterdir()):
-                if _is_regular_file(child):
+                if _is_snapshot_candidate(child):
                     yield ".git/hooks/" + child.name
         except OSError as exc:
             _log("iter_existing_protected_paths", "hooks walk failed: {}".format(exc))
@@ -159,7 +172,7 @@ def iter_existing_protected_paths(repo_root: pathlib.Path) -> Iterable[str]:
                 dirnames.sort()
                 for fname in sorted(filenames):
                     child = pathlib.Path(dirpath) / fname
-                    if _is_regular_file(child):
+                    if _is_snapshot_candidate(child):
                         yield ".git/" + _posix_rel(os.path.relpath(str(child), str(git_dir)))
         except OSError as exc:
             _log("iter_existing_protected_paths", "refs walk failed: {}".format(exc))
@@ -179,7 +192,7 @@ def iter_existing_protected_paths(repo_root: pathlib.Path) -> Iterable[str]:
             if not path_matches_deny(rel):
                 continue
             candidate = root / rel
-            if _is_regular_file(candidate):
+            if _is_snapshot_candidate(candidate):
                 yield rel
 
 
@@ -209,13 +222,31 @@ def snapshot_protected_paths(
     for rel in iter_existing_protected_paths(root):
         abs_path = root / rel
         try:
-            size = abs_path.stat().st_size
+            lst = abs_path.lstat()
         except OSError as exc:
-            _log("snapshot_protected_paths", "stat failed for {}: {}".format(rel, exc))
+            _log("snapshot_protected_paths", "lstat failed for {}: {}".format(rel, exc))
             entries[rel] = ProtectedPathEntry(
                 relative=rel, existed=True, snapshotted=False, size=0, reason="stat-failed"
             )
             continue
+        mode = stat.S_IMODE(lst.st_mode)
+        # A pre-existing symlink is snapshotted as metadata (target only): restore
+        # recreates the link, instead of deleting it as if it never existed.
+        if stat.S_ISLNK(lst.st_mode):
+            try:
+                target = os.readlink(str(abs_path))
+            except OSError as exc:
+                _log("snapshot_protected_paths", "readlink failed for {}: {}".format(rel, exc))
+                entries[rel] = ProtectedPathEntry(
+                    relative=rel, existed=True, snapshotted=False, size=0, reason="readlink-failed"
+                )
+                continue
+            entries[rel] = ProtectedPathEntry(
+                relative=rel, existed=True, snapshotted=True, size=0, reason=None,
+                mode=mode, symlink_target=target,
+            )
+            continue
+        size = lst.st_size
         if total + size > max_total_bytes:
             _log(
                 "snapshot_protected_paths",
@@ -248,7 +279,7 @@ def snapshot_protected_paths(
             continue
         total += size
         entries[rel] = ProtectedPathEntry(
-            relative=rel, existed=True, snapshotted=True, size=size, reason=None
+            relative=rel, existed=True, snapshotted=True, size=size, reason=None, mode=mode
         )
 
     manifest = {
@@ -260,6 +291,8 @@ def snapshot_protected_paths(
                 "snapshotted": entry.snapshotted,
                 "size": entry.size,
                 "reason": entry.reason,
+                "mode": entry.mode,
+                "symlinkTarget": entry.symlink_target,
             }
             for rel, entry in sorted(entries.items())
         },
@@ -356,6 +389,24 @@ def restore_protected_paths(
                 )
             continue
 
+        # Pre-run symlink: recreate the exact link (no bytes were copied).
+        if entry.symlink_target is not None:
+            try:
+                if abs_path.is_dir() and not abs_path.is_symlink():
+                    shutil.rmtree(str(abs_path))
+                elif abs_path.is_symlink() or abs_path.exists():
+                    abs_path.unlink()
+                parent = abs_path.parent
+                if not parent.exists():
+                    parent.mkdir(parents=True, exist_ok=True)
+                os.symlink(entry.symlink_target, str(abs_path))
+                restored.append(rel)
+            except OSError as exc:
+                _log("restore_protected_paths", "symlink restore failed for {}: {}".format(rel, exc))
+                unrestored.append(rel)
+                errors.append({"path": rel, "error": str(exc)})
+            continue
+
         src = snapshot.snapshot_dir / rel
         try:
             if not src.is_file():
@@ -368,6 +419,13 @@ def restore_protected_paths(
             elif abs_path.is_symlink() or abs_path.exists():
                 abs_path.unlink()
             shutil.copyfile(str(src), str(abs_path))
+            # Reapply the pre-run permission bits: copyfile recreates the file at
+            # the process umask, so a 0600 credential would come back world-readable
+            # (review). Fall back to 0600 when the pre-run mode is unknown.
+            try:
+                os.chmod(str(abs_path), entry.mode if entry.mode else 0o600)
+            except OSError as exc:
+                _log("restore_protected_paths", "chmod restore failed for {}: {}".format(rel, exc))
             restored.append(rel)
         except OSError as exc:
             _log("restore_protected_paths", "restore failed for {}: {}".format(rel, exc))

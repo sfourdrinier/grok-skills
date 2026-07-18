@@ -3,7 +3,9 @@
 # Unit coverage for direct-mode protected-path snapshot + restore (Task 7.1b).
 # Integration disk-state tests live in test_mode_direct.DirectProtectedPathRollbackTests.
 
+import os
 import pathlib
+import stat
 import subprocess
 import tempfile
 import unittest
@@ -115,6 +117,31 @@ class DirectProtectSnapshotRestoreTests(unittest.TestCase):
         for rel in snap.entries:
             self.assertFalse(rel.startswith(".git/objects"), rel)
 
+    def test_restore_recreates_preexisting_env_symlink(self) -> None:
+        (self.repo / "secret-target").write_text("SECRET=1\n")
+        (self.repo / ".env").symlink_to("secret-target")
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        self.assertIn(".env", snap.entries)
+        self.assertEqual(snap.entries[".env"].symlink_target, "secret-target")
+        # Grok replaces the symlink with a regular file.
+        (self.repo / ".env").unlink()
+        (self.repo / ".env").write_text("LEAK=1\n")
+        result = direct_protect.restore_protected_paths(self.repo, snap, offenders=[".env"])
+        self.assertIn(".env", result.restored)
+        self.assertTrue((self.repo / ".env").is_symlink())
+        self.assertEqual(os.readlink(str(self.repo / ".env")), "secret-target")
+
+    def test_restore_preserves_0600_mode(self) -> None:
+        env = self.repo / ".env"
+        env.write_bytes(b"SECRET=1\n")
+        os.chmod(str(env), 0o600)
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        self.assertEqual(snap.entries[".env"].mode, 0o600)
+        env.write_bytes(b"LEAK=1\n")
+        os.chmod(str(env), 0o644)  # Grok widened it
+        direct_protect.restore_protected_paths(self.repo, snap, offenders=[".env"])
+        self.assertEqual(stat.S_IMODE(os.stat(str(env)).st_mode), 0o600)
+
     def test_snapshot_includes_git_refs(self) -> None:
         ref = self.repo / ".git" / "refs" / "heads" / "main"
         ref.parent.mkdir(parents=True)
@@ -191,12 +218,26 @@ class DirectGitGuardAndDenyTests(unittest.TestCase):
         after = capture_git_dir_guard(self.repo)
         self.assertEqual(_changed_paths(baseline, after), set())
 
+    def test_guard_detects_ref_move_with_restored_mtime(self) -> None:
+        # Content-hash signature: a same-length ref move with a coalesced/restored
+        # mtime still flips the set-difference (a stat-only sig would miss it).
+        from groklib.modes.direct_finalize import capture_git_dir_guard, _changed_paths
+
+        ref = self.repo / ".git" / "refs" / "heads" / "main"
+        ref.write_text("1" * 40 + "\n")
+        st = ref.stat()
+        baseline = capture_git_dir_guard(self.repo)
+        ref.write_text("f" * 40 + "\n")  # same length, different SHA
+        os.utime(str(ref), ns=(st.st_atime_ns, st.st_mtime_ns))  # restore mtime
+        after = capture_git_dir_guard(self.repo)
+        self.assertIn(".git/refs/heads/main", _changed_paths(baseline, after))
+
     def test_expanded_deny_globs(self) -> None:
         from groklib.modes.direct_finalize import path_matches_deny
 
         for p in ("id_rsa", "id_ed25519", ".netrc", ".npmrc", ".envrc", "key.p8",
                   "sub/dir/id_ecdsa", "deep/nested/.npmrc", ".env/production",
-                  ".env/staging.local"):
+                  ".env/staging.local", "credentials.json"):
             self.assertTrue(path_matches_deny(p), p)
         for p in ("src/app.py", "README.md", "package.json"):
             self.assertFalse(path_matches_deny(p), p)
@@ -211,7 +252,7 @@ class DirectAbortSweepTests(unittest.TestCase):
         self.run_dir = pathlib.Path(self.tmp) / "run"
         self.repo.mkdir()
         self.run_dir.mkdir()
-        self._git("init")
+        self._git("init", "--initial-branch=main")
         self._git("config", "user.email", "t@t.t")
         self._git("config", "user.name", "t")
         (self.repo / "src").mkdir()

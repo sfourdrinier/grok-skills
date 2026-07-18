@@ -28,8 +28,10 @@
 # Backlog: probe seatbelt write-deny subpaths for true prevention.
 
 import fnmatch
+import hashlib
 import os
 import pathlib
+import stat
 import subprocess
 import types
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
@@ -66,6 +68,7 @@ DENY_WRITE_GLOBS: Tuple[str, ...] = (
     ".netrc",
     ".npmrc",
     ".envrc",
+    "credentials.json",
 )
 
 # Cap the .git/refs fingerprint walk so a pathological ref count cannot stall
@@ -104,48 +107,110 @@ def path_matches_deny(path: str) -> bool:
     return False
 
 
-def _stat_sig(path: pathlib.Path) -> str:
+# Hash git files up to this size; above it, fall back to a stat signature (refs,
+# HEAD, config, packed-refs are tiny; a pathological multi-MB hook is the only
+# thing that would hit this).
+_MAX_GIT_HASH_BYTES = 4 * 1024 * 1024
+
+
+def _git_watch_sig(path: pathlib.Path) -> str:
+    """Content-addressed signature for a watched git file (review: hash, not stat).
+
+    A branch-ref move rewrites one 41-byte SHA line to another with the SAME
+    size; stat-only signatures (size:mtime:mode) miss it if mtime is coalesced
+    or restored. Hash the (small) content instead so the set-difference always
+    flips. Symlinks record their target; non-regular / oversized files fall back
+    to a stat signature.
+    """
     try:
         st = path.lstat()
     except OSError:
         return "absent"
-    return "{}:{}:{}".format(st.st_size, st.st_mtime_ns, st.st_mode)
+    if stat.S_ISLNK(st.st_mode):
+        try:
+            return "symlink:" + os.readlink(str(path))
+        except OSError:
+            return "symlink:?"
+    if not stat.S_ISREG(st.st_mode) or st.st_size > _MAX_GIT_HASH_BYTES:
+        return "stat:{}:{}:{}".format(st.st_size, st.st_mtime_ns, stat.S_IMODE(st.st_mode))
+    try:
+        with open(str(path), "rb") as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()
+        return "sha256:{}:{}".format(digest, stat.S_IMODE(st.st_mode))
+    except OSError:
+        return "stat:{}:{}:{}".format(st.st_size, st.st_mtime_ns, stat.S_IMODE(st.st_mode))
+
+
+def _resolve_git_dirs(repo_root: pathlib.Path) -> Tuple[pathlib.Path, pathlib.Path]:
+    """Resolve (per-worktree gitdir, common gitdir) via git; fall back to <root>/.git.
+
+    In a LINKED git worktree ``.git`` is a FILE pointing at
+    ``<common>/.git/worktrees/<name>``, and refs/config/packed-refs live in the
+    COMMON dir - so a plain ``<root>/.git`` directory assumption is blind to a
+    ref move there (review). HEAD is per-worktree; refs/config/packed-refs/hooks
+    are common.
+    """
+    root = pathlib.Path(repo_root)
+
+    def _rev_parse(flag: str) -> Optional[pathlib.Path]:
+        try:
+            completed = subprocess.run(
+                ["git", "-C", str(root), "rev-parse", flag],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                encoding="utf-8",
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if completed.returncode != 0:
+            return None
+        val = (completed.stdout or "").strip()
+        if not val:
+            return None
+        p = pathlib.Path(val)
+        return p if p.is_absolute() else (root / p).resolve()
+
+    git_dir = _rev_parse("--absolute-git-dir") or (root / ".git")
+    common_dir = _rev_parse("--git-common-dir") or git_dir
+    return git_dir, common_dir
 
 
 def capture_git_dir_guard(repo_root: pathlib.Path) -> FrozenSet[Tuple[str, str]]:
-    """Fingerprint security-relevant paths under ``.git`` (working-tree fingerprint is blind to them).
+    """Fingerprint security-relevant git paths (working-tree fingerprint is blind to them).
 
-    Watches config/HEAD/packed-refs, every file under ``.git/hooks/``, and every
-    ref under ``.git/refs/**`` (so a branch/tag move-to-planted-commit or a hook
-    plant is detected). A post-run set-difference surfaces Grok writes the sandbox
-    cannot block (workspace profile is whole-root).
+    Watches config/packed-refs/hooks/refs in the COMMON git dir and HEAD in the
+    per-worktree git dir (resolved via git, so a linked worktree whose ``.git``
+    is a file is handled), each by CONTENT HASH so a same-size ref move is
+    detected. A post-run set-difference surfaces Grok writes the sandbox cannot
+    block (workspace profile is whole-root).
 
     Deliberately NOT watched (benign working state git rewrites on ordinary reads
     like ``git status``, which would otherwise false-positive every real run):
-    ``.git/index`` (staging area; changes show in ``git status``) and
-    ``.git/COMMIT_EDITMSG``. Loose ``.git/objects`` are also not fingerprinted:
-    content-addressed and inert until a watched ref points at them.
+    ``.git/index`` and ``.git/COMMIT_EDITMSG``. Loose ``.git/objects`` are not
+    fingerprinted: content-addressed and inert until a watched ref points at them.
     """
-    git_dir = pathlib.Path(repo_root) / ".git"
+    git_dir, common_dir = _resolve_git_dirs(repo_root)
     pairs: Set[Tuple[str, str]] = set()
-    for name in ("config", "HEAD", "packed-refs"):
-        rel = ".git/" + name
-        pairs.add((rel, _stat_sig(git_dir / name)))
-    hooks = git_dir / "hooks"
+    # HEAD is per-worktree; config/packed-refs are shared (common dir).
+    pairs.add((".git/HEAD", _git_watch_sig(git_dir / "HEAD")))
+    for name in ("config", "packed-refs"):
+        pairs.add((".git/" + name, _git_watch_sig(common_dir / name)))
+    hooks = common_dir / "hooks"
     if hooks.is_dir():
         try:
             for child in hooks.iterdir():
                 if child.is_file() or child.is_symlink():
                     rel = ".git/hooks/" + child.name
-                    pairs.add((rel, _stat_sig(child)))
+                    pairs.add((rel, _git_watch_sig(child)))
         except OSError as exc:
             _log("capture_git_dir_guard", "hooks walk failed: {}".format(exc))
-    pairs |= _fingerprint_git_refs(git_dir)
+    pairs |= _fingerprint_git_refs(common_dir)
     return frozenset(pairs)
 
 
 def _fingerprint_git_refs(git_dir: pathlib.Path) -> Set[Tuple[str, str]]:
-    """Fingerprint every file under ``.git/refs`` (bounded by ``_MAX_GIT_REF_FILES``).
+    """Fingerprint every file under ``<gitdir>/refs`` (bounded by ``_MAX_GIT_REF_FILES``).
 
     Over-cap emits a single count-bearing sentinel so a ref add/remove past the
     cap still flips the set-difference, rather than silently going undetected.
@@ -160,8 +225,8 @@ def _fingerprint_git_refs(git_dir: pathlib.Path) -> Set[Tuple[str, str]]:
             dirnames.sort()
             for fname in sorted(filenames):
                 child = pathlib.Path(dirpath) / fname
-                rel = ".git/" + _posix_rel(os.path.relpath(str(child), str(git_dir)))
-                pairs.add((rel, _stat_sig(child)))
+                rel = ".git/refs/" + _posix_rel(os.path.relpath(str(child), str(refs_dir)))
+                pairs.add((rel, _git_watch_sig(child)))
                 count += 1
                 if count >= _MAX_GIT_REF_FILES:
                     pairs.add((".git/refs/**", "over-cap:{}".format(count)))
