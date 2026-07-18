@@ -136,8 +136,9 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
   only when an authoritative validation source passed and `commands[]` carries
   a real `exitStatus` (forgery guard fails closed). No authoritative gate ->
   honest `no-authoritative-validation` blocker. Ready peer results integrate
-  via the active mode (auto/direct apply verified patch; review leaves patch).
-  `/grok:handoff` accepts peer-stop envelopes. ACP is the **default** peer
+  via the active mode (auto/direct apply verified patch; review leaves patch),
+  applied by `peer stop` itself. `/grok:handoff` stays code-mode only and
+  refuses peer runIds (see the Fixed note below). ACP is the **default** peer
   channel for `grok-engineer-coder`; `GROK_DISABLE_ACP=1` is the opt-out
   (`GROK_EXPERIMENTAL_ACP` is no longer a hard gate). Crash-path peer-stop
   reuses the start baseline (never re-captures). Optional sandbox
@@ -229,17 +230,23 @@ three batches. Two release-blockers were real.
   exempted from the sentinel check.
 - **implement/auto job + notification** are finalized after handoff/apply, so a
   not-ready implement no longer reports a premature success job or notification.
-- **Re-review rounds 2-6 hardening** (the bot re-scanned every commit): the
+- **Re-review rounds 2-7 hardening** (the bot re-scanned every commit): the
   implement/auto combo notifies with a notify-eligible mode and never notifies
-  success on a failed apply; `extractTask` / `injectTaskFile` accept the
-  equals-form `--task=` / `--task-file=`; a `code --continue-run` in a
-  `runMode=direct` workspace routes to the hardened wrapper (retained lineage)
-  instead of a live direct edit; peer-stop fails closed (nonzero exit) when a
-  requested direct apply is blocked by missing consent; auto's apply-time
-  revalidation no longer emits a second stdout envelope; the durable peer-start
-  stderr log and the direct-mode prompt file are created `0600` (were
-  world-readable under `/tmp`); direct mode honors `--timeout` / the per-mode
-  defaults so a hung installed CLI cannot block the companion forever.
+  success on a failed apply; `extractTask` / `injectTaskFile` / stdin-sentinel
+  staging accept the equals-form `--task=` / `--task-file=` / `--task-file=-`;
+  a `code --continue-run` in a `runMode=direct` workspace routes to the hardened
+  wrapper (retained lineage) instead of a live direct edit; peer-stop fails
+  closed (nonzero exit) when a requested direct apply is blocked by missing
+  consent; auto's apply-time revalidation no longer emits a second stdout
+  envelope; the durable peer-start stderr log and the direct-mode prompt file are
+  created `0600` (were world-readable under `/tmp`); direct mode honors
+  `--timeout` / the per-mode defaults so a hung installed CLI cannot block the
+  companion forever; direct-mode installed-CLI stderr is redacted through the
+  single-source redactor before it reaches the terminal; the dirty-overlap guard
+  no longer mis-parses a literal `->` in a filename; direct `reason` refuses
+  `--input` / `--rules-file` rather than silently dropping them; and
+  `/grok:handoff` is documented consistently as code-mode only (peer runs
+  integrate via `peer stop` itself).
 
 Every applicable review finding was fixed (no deferrals). Comments that were
 already resolved or stale after the re-architecture are noted as such above.

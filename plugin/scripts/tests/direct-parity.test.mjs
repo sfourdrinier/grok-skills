@@ -89,6 +89,62 @@ test("[4] direct fallback withholds error.message when redaction cannot run", ()
   }
 });
 
+test("runDirectGrok redacts stderr before relaying it to the terminal", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-stderr-"));
+  const secret = "sk-" + "STDERRLEAK0123456789ABCDEFGHIJKL";
+  const captured = [];
+  const orig = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (s, enc, cb) => {
+    captured.push(String(s));
+    if (typeof enc === "function") enc();
+    else if (typeof cb === "function") cb();
+    return true;
+  };
+  try {
+    const fakeGrok = path.join(dir, "fake-grok.sh");
+    // Echo the secret to STDERR and exit nonzero.
+    fs.writeFileSync(fakeGrok, `#!/bin/sh\nprintf '%s\\n' 'boom ${secret} boom' 1>&2\nexit 3\n`);
+    fs.chmodSync(fakeGrok, 0o755);
+    const scriptsDir = path.resolve(SCRIPT_DIR, "..", "..", "wrapper", "scripts");
+    runDirectGrok({
+      mode: "code",
+      args: ["--target", dir, "--base", "HEAD", "--task", "x"],
+      cwd: dir,
+      env: { ...process.env, GROK_AGENT_BINARY: fakeGrok },
+      scriptsDir,
+      python: "python3",
+    });
+  } finally {
+    process.stderr.write = orig;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  const all = captured.join("");
+  assert.doesNotMatch(all, new RegExp(secret), `secret must not reach the terminal: ${all}`);
+});
+
+test("runDirectGrok refuses --input/--rules-file in direct mode (no silent drop)", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-reason-"));
+  try {
+    const scriptsDir = path.resolve(SCRIPT_DIR, "..", "..", "wrapper", "scripts");
+    for (const extra of [["--input", "art.md"], ["--rules-file", "rules.md"], ["--input=art.md"]]) {
+      const res = runDirectGrok({
+        mode: "reason",
+        args: ["--target", dir, "--task", "think", ...extra],
+        cwd: dir,
+        env: { ...process.env, GROK_AGENT_BINARY: "/bin/true" },
+        scriptsDir,
+        python: "python3",
+      });
+      assert.equal(res.code, 1, `must refuse ${extra.join(" ")}`);
+      const env = JSON.parse(res.envelopeText);
+      assert.equal(env.status, "failure");
+      assert.match(env.error?.message || "", /--input|--rules-file/);
+    }
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("resolveDirectTimeoutSeconds: per-mode defaults, override, junk, clamp", () => {
   assert.equal(resolveDirectTimeoutSeconds([], "code"), 3600);
   assert.equal(resolveDirectTimeoutSeconds([], "verify"), 1800);

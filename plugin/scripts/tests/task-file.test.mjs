@@ -102,6 +102,7 @@ test("injectTaskFile strips equals-form --task=/--task-file= tokens", () => {
 test("stageStdinTaskFile returns null when argv has no --task-file - sentinel", () => {
   assert.equal(stageStdinTaskFile(["code", "--target", "."]), null);
   assert.equal(stageStdinTaskFile(["code", "--task-file", "/tmp/x"]), null);
+  assert.equal(stageStdinTaskFile(["code", "--task-file=/tmp/x"]), null);
   assert.equal(stageStdinTaskFile(["code", "--task", "inline"]), null);
 });
 
@@ -141,6 +142,52 @@ sys.exit(0)
     assert.equal(res.code, 0);
     assert.equal(res.stdout.trim(), payload);
     // Staging dir under TMPDIR must be gone after companion exit.
+    const leftovers = fs.readdirSync(tmp).filter((d) => d.startsWith("grok-task-"));
+    assert.deepEqual(leftovers, []);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(tmp, { recursive: true, force: true });
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("stageStdinTaskFile equals form: --task-file=- also stages stdin end to end", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "grok-stdin-eq-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-stdin-eqcwd-"));
+  const payload = "equals-form staged stdin body";
+  // Echo wrapper handles BOTH --task-file <path> and --task-file=<path>.
+  const echoBody = `import sys
+args = sys.argv[1:]
+path = None
+for i, a in enumerate(args):
+    if a == "--task-file" and i + 1 < len(args):
+        path = args[i + 1]
+        break
+    if a.startswith("--task-file="):
+        path = a.split("=", 1)[1]
+        break
+if not path:
+    sys.stderr.write("missing --task-file\\n")
+    sys.exit(2)
+with open(path, "r", encoding="utf-8") as f:
+    sys.stdout.write(f.read())
+sys.exit(0)
+`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-fake-echo-eq-"));
+  const wrapperPath = path.join(dir, "grok_agent.py");
+  fs.writeFileSync(wrapperPath, echoBody, { mode: 0o600 });
+  try {
+    const res = runCompanion(["reason", "--task-file=-"], {
+      env: {
+        GROK_AGENT_WRAPPER: wrapperPath,
+        GROK_ALLOW_WRAPPER_OVERRIDE: "1",
+        TMPDIR: tmp,
+      },
+      cwd,
+      stdin: payload,
+    });
+    assert.equal(res.code, 0, res.stderr);
+    assert.equal(res.stdout.trim(), payload);
     const leftovers = fs.readdirSync(tmp).filter((d) => d.startsWith("grok-task-"));
     assert.deepEqual(leftovers, []);
   } finally {

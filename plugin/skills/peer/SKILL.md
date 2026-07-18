@@ -31,8 +31,10 @@ only (no direct run-mode).
 No contract + no build gate -> honest not-ready with
 `no-authoritative-validation`. Ready peer results integrate via the active
 integration mode (canonical: `plugin/references/integration-modes.md` -
-direct: live tree; auto: apply-on-ready; review: patch + manifest only).
-`/grok:handoff --run-id` also works on a peer run (mode peer-stop).
+direct: live tree; auto: apply-on-ready; review: patch + manifest only) -
+applied by `peer stop` itself, at stop time. `/grok:handoff` is code-mode only
+and refuses peer runIds (`handoff-unavailable`); peer integration never routes
+through it (see `integration-modes.md`).
 
 ## How to run (transparent)
 

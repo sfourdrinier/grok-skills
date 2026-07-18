@@ -72,14 +72,27 @@ export function stageTaskFile(taskText) {
  * @returns {{ args: string[], cleanup: () => void } | null}
  */
 export function stageStdinTaskFile(args) {
-  const flagIndex = args.indexOf("--task-file");
-  if (flagIndex < 0 || args[flagIndex + 1] !== "-") {
-    return null;
+  // Accept BOTH the split `--task-file -` and the equals `--task-file=-` stdin
+  // sentinels (parity with extractTask/injectTaskFile, which are equals-aware):
+  // the wrapper's argparse takes both, so the companion must stage stdin for both
+  // or the literal "-" reaches the wrapper and fails as a missing task file.
+  const splitIdx = args.indexOf("--task-file");
+  let valueIndex = -1; // argv slot to overwrite with the staged path
+  let equalsForm = false;
+  if (splitIdx >= 0 && args[splitIdx + 1] === "-") {
+    valueIndex = splitIdx + 1;
+  } else {
+    const eqIdx = args.findIndex((a) => a === "--task-file=-");
+    if (eqIdx >= 0) {
+      valueIndex = eqIdx;
+      equalsForm = true;
+    }
   }
+  if (valueIndex < 0) return null;
   const taskBytes = readAllStdinSync();
   const { taskPath, cleanup } = stageTaskFile(taskBytes);
   const staged = args.slice();
-  staged[flagIndex + 1] = taskPath;
+  staged[valueIndex] = equalsForm ? `--task-file=${taskPath}` : taskPath;
   return { args: staged, cleanup };
 }
 

@@ -142,24 +142,43 @@ function toolsForMode(mode) {
  * as hardened mode. Returns the redacted JSON string, or null (fail closed) if
  * redaction cannot run or a secret survives the scan.
  */
-function redactEnvelopeViaWrapper(envelope, { scriptsDir, python, env }) {
+const REDACT_SCRIPT =
+  "import sys,json;" +
+  "sys.path.insert(0, sys.argv[1]);" +
+  "from groklib.envelope import redact_secret_material, assert_no_secret_material;" +
+  "obj=json.load(sys.stdin);" +
+  "red=redact_secret_material(obj, redact_keys=True);" +
+  "assert_no_secret_material(red);" +
+  "sys.stdout.write(json.dumps(red))";
+
+/** Run the wrapper's single-source redactor over a JSON payload; returns the
+ *  redacted JSON string, or null if redaction cannot run / a secret survives. */
+function runRedactor(payload, { scriptsDir, python, env }) {
   if (!scriptsDir || !python) return null;
-  const script =
-    "import sys,json;" +
-    "sys.path.insert(0, sys.argv[1]);" +
-    "from groklib.envelope import redact_secret_material, assert_no_secret_material;" +
-    "obj=json.load(sys.stdin);" +
-    "red=redact_secret_material(obj, redact_keys=True);" +
-    "assert_no_secret_material(red);" +
-    "sys.stdout.write(json.dumps(red))";
-  const res = spawnSync(python, ["-c", script, scriptsDir], {
-    input: JSON.stringify(envelope),
+  const res = spawnSync(python, ["-c", REDACT_SCRIPT, scriptsDir], {
+    input: JSON.stringify(payload),
     encoding: "utf8",
     env,
     maxBuffer: 64 * 1024 * 1024,
   });
   if (res.error || res.status !== 0 || !res.stdout) return null;
   return res.stdout;
+}
+
+function redactEnvelopeViaWrapper(envelope, opts) {
+  return runRedactor(envelope, opts);
+}
+
+/** Redact a free-text string (e.g. installed-CLI stderr) through the same single
+ *  source; returns the redacted text, or null when redaction cannot run. */
+function redactTextViaWrapper(text, opts) {
+  const out = runRedactor({ t: String(text) }, opts);
+  if (out == null) return null;
+  try {
+    return JSON.parse(out).t;
+  } catch {
+    return null;
+  }
 }
 
 export function runDirectGrok({
@@ -189,6 +208,41 @@ export function runDirectGrok({
       response: null,
       warnings: [
         "runMode=direct: --isolated is rejected fail-closed (no silent live-checkout fallback)",
+      ],
+      policy: { direct: true },
+    };
+    return { code: 1, envelopeText: `${JSON.stringify(envelope)}\n` };
+  }
+
+  // --input / --rules-file are hardened reason-mode assembly flags: the wrapper
+  // reads each named artifact/rule file and folds it into the prompt. Direct mode
+  // builds the prompt only from the task text, so honoring these silently would
+  // return a "success" envelope that IGNORED every named input. Refuse fail-closed
+  // rather than drop them (parity with the --isolated refusal above).
+  if (
+    args.some(
+      (a) =>
+        a === "--input" ||
+        a === "--rules-file" ||
+        (typeof a === "string" && (a.startsWith("--input=") || a.startsWith("--rules-file=")))
+    )
+  ) {
+    const envelope = {
+      schemaVersion: 1,
+      mode,
+      status: "failure",
+      runId: `direct-${Date.now()}`,
+      error: {
+        class: "usage-error",
+        message:
+          "--input / --rules-file require hardened mode (runMode=direct does not assemble named artifacts or rule files into the prompt)",
+        detail: {
+          hint: "re-run without --input/--rules-file, or set GROK_SKILLS_MODE=hardened / companion setup --run-mode hardened",
+        },
+      },
+      response: null,
+      warnings: [
+        "runMode=direct: --input/--rules-file rejected fail-closed (no silent drop of named artifacts/rules)",
       ],
       policy: { direct: true },
     };
@@ -341,7 +395,18 @@ export function runDirectGrok({
     grok: { stopReason: ok ? "end_turn" : timedOut ? "timeout" : "error" },
   };
   if (result.stderr) {
-    process.stderr.write(result.stderr);
+    // Redact stderr through the SAME single source before relaying to the
+    // terminal: the installed CLI can echo a token it read from the repo/terminal
+    // to stderr, and relaying raw bytes would leak it to terminal logs even though
+    // the stdout envelope is redacted/withheld just below. Withhold on failure.
+    const redactedErr = redactTextViaWrapper(result.stderr, { scriptsDir, python, env });
+    if (redactedErr != null) {
+      process.stderr.write(redactedErr.endsWith("\n") ? redactedErr : `${redactedErr}\n`);
+    } else {
+      process.stderr.write(
+        "[runMode=direct: grok stderr withheld; secret redaction unavailable]\n"
+      );
+    }
   }
   // Redact the response through the wrapper's redaction (installed CLI output can
   // quote a token it read from the repo/terminal). Fail closed: if redaction

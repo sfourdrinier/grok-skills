@@ -538,17 +538,18 @@ def dual_condition_ready(
     if envelope.get("runId") != manifest.get("runId"):
         blockers.append({"kind": "handoff-unavailable", "message": "runId mismatch"})
         return False, blockers
-    # Dual-condition ready requires a terminal code or peer-stop envelope, not any
-    # success envelope that merely reuses the same runId (corrupt/replaced artifact).
-    # peer-stop is eligible when its evidence-backed ready manifest passes (Task 7.4).
+    # Dual-condition ready requires a terminal CODE envelope, not any success
+    # envelope that merely reuses the same runId (corrupt/replaced artifact).
+    # Handoff is code-mode only (handoff.py refuses non-code runs before this
+    # gate); peer runs integrate through peer-stop directly, never through here.
     env_mode = envelope.get("mode")
-    if env_mode not in ("code", "peer-stop"):
+    if env_mode != "code":
         blockers.append(
             {
                 "kind": "terminal-envelope-incomplete",
                 "message": (
                     "integration-ready handoff requires a success envelope with "
-                    "mode code or peer-stop"
+                    "mode code"
                 ),
                 "detail": {"envelopeMode": env_mode},
             }

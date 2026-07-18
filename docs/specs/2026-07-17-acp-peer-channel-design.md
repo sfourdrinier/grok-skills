@@ -22,9 +22,11 @@ A forgery guard fails closed if ready is claimed without that evidence. When no
 authoritative gate ran (no contract validations + no JS build gate), ready is
 false with a clear `no-authoritative-validation` blocker.
 
-`/grok:handoff` accepts a peer-stop terminal envelope with a ready manifest
-(peer-start/peer-stop lineage), same dual-condition path as code (mode
-`code` or `peer-stop`).
+`/grok:handoff` is code-mode only and refuses peer runIds
+(`handoff-unavailable`); peer integration is applied by `peer stop` itself, per
+the active integration mode. (The original Task 7.4 design also routed peer runs
+through handoff; the peer-honesty hardening removed that - canonical:
+`plugin/references/integration-modes.md`.)
 
 ## Architecture
 
@@ -106,8 +108,9 @@ mode (setup / `--integration` / userConfig):
   (`git apply --check --binary` then `git apply --binary`)
 - **review** or **worktree**: leave patch + manifest; no apply
 
-Consent gate applies for direct (same as code). Parent may also call
-`/grok:handoff --run-id` on a peer run (dual-condition accepts mode peer-stop).
+Consent gate applies for direct (same as code). `peer stop` applies the verified
+patch itself per integration mode; `/grok:handoff` does NOT accept peer runs
+(code-mode only).
 
 ## Failure model
 
@@ -135,8 +138,9 @@ Consent gate applies for direct (same as code). Parent may also call
    mcpServers [], web, sentinel, baseline, no .env).
 4. REDACTION: control-socket + turn envelopes scanned; multi-frame residual
    risk documented; child stderr dropped or redacted.
-5. HANDOFF: evidence-backed ready; dual-condition accepts peer-stop envelopes;
-   integrate via active mode (Task 7.4 un-gimp).
+5. HANDOFF: `/grok:handoff` is code-mode only (refuses peer runIds); peer runs
+   integrate via `peer stop` itself, per active mode (Task 7.4 peer-handoff
+   eligibility later removed by the peer-honesty hardening).
 6. pre_tool_use deny is NON-enforcement.
 7. Prompts serialized: one in-flight prompt per session.
 8. WRAPPER GATE: ACP default; `GROK_DISABLE_ACP=1` is the opt-out (both

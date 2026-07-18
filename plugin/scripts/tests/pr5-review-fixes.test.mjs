@@ -70,6 +70,22 @@ test("parseDirtyStatusPaths: extracts modified/untracked/renamed paths", () => {
   assert.ok(set.has("renamed.js"));
 });
 
+test("parseDirtyStatusPaths: only rename/copy lines split on ' -> '", () => {
+  // A non-rename path whose literal name contains ' -> ' must NOT be split, or
+  // the real path never enters the dirty set and the overlap guard fails open.
+  const set = parseDirtyStatusPaths(' M weird -> name.js\n?? other -> file.txt\n');
+  assert.ok(set.has("weird -> name.js"), [...set].join("|"));
+  assert.ok(set.has("other -> file.txt"), [...set].join("|"));
+  assert.ok(!set.has("weird"));
+  assert.ok(!set.has("name.js"));
+  // A real rename (R status) still splits into both sides.
+  const rn = parseDirtyStatusPaths("R  a.js -> b.js\n");
+  assert.ok(rn.has("a.js") && rn.has("b.js"));
+  // Copy status (C) also splits.
+  const cp = parseDirtyStatusPaths("C  a.js -> c.js\n");
+  assert.ok(cp.has("a.js") && cp.has("c.js"));
+});
+
 test("parseNumstatPaths: extracts patch target paths incl. BOTH rename sides + raw", () => {
   const numstat = "1\t0\tsrc/a.js\n-\t-\tbin.dat\n2\t1\t{old => new}/f.js\n0\t0\ta.js => b.js\n";
   const paths = parseNumstatPaths(numstat);

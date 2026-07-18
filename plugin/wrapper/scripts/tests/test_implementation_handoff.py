@@ -297,6 +297,24 @@ class ValidateHandoffTests(unittest.TestCase):
                 patch_abs=p,
             )
             self.assertTrue(ready2)
+            # Handoff is code-mode only: a peer-stop envelope is NOT eligible
+            # (peer runs integrate through peer-stop itself, never this gate).
+            ready_peer, peer_blockers = dual_condition_ready(
+                manifest=doc,
+                envelope={
+                    "status": "success",
+                    "runId": doc["runId"],
+                    "mode": "peer-stop",
+                    "baseRevision": doc["baseRevision"],
+                    "changedFiles": ["a.ts"],
+                },
+                patch_abs=p,
+            )
+            self.assertFalse(ready_peer)
+            self.assertTrue(
+                any(b.get("kind") == "terminal-envelope-incomplete" for b in peer_blockers),
+                peer_blockers,
+            )
 
     def test_dual_condition_rejects_null_envelope_base(self) -> None:
         import tempfile

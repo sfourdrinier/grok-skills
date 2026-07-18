@@ -294,7 +294,7 @@ class FailureEnvelopeDetailRedactionTests(unittest.TestCase):
         detail = {
             "argv": ["git", "-C", "/repo", "push"],
             "exitStatus": 128,
-            "stderr": "remote rejected: token sk-abcdef0123456789ABCDEFGHIJKLMNOP leaked in hook",
+            "stderr": "remote rejected: token sk-" "abcdef0123456789ABCDEFGHIJKLMNOP leaked in hook",
         }
         env = failure_envelope(
             run_id=_RUN_ID,
@@ -303,7 +303,7 @@ class FailureEnvelopeDetailRedactionTests(unittest.TestCase):
             message="git command failed",
             detail=detail,
         )
-        self.assertNotIn("sk-abcdef0123456789ABCDEFGHIJKLMNOP", json.dumps(env))
+        self.assertNotIn("sk-" "abcdef0123456789ABCDEFGHIJKLMNOP", json.dumps(env))
         self.assertIn("[redacted-api-key-token]", env["error"]["detail"]["stderr"])
         # Non-secret detail fields survive verbatim.
         self.assertEqual(env["error"]["detail"]["exitStatus"], 128)
@@ -352,7 +352,7 @@ class RedactSecretMaterialTests(unittest.TestCase):
         # for every pattern (bearer+value, sk-, xai-, JWT).
         cases = (
             "Bearer 4f8a9c3d2e1b7f6a5d4c3b2a1908f7e6d5c4b3a2secretvalue",
-            "sk-abcdef0123456789ABCDEFGHIJKLMNOP",
+            "sk-" "abcdef0123456789ABCDEFGHIJKLMNOP",
             "xai-" + "abcdefghijklmnopqrstuvwxyz0123456789",
             ("eyJhbGciOiJIUzI1NiJ9." + "eyJzdWIiOiIxMjMifQ." + "aGVsbG8xMjM"),
         )
@@ -426,7 +426,7 @@ class RedactSecretMaterialTests(unittest.TestCase):
 class StructuralViolationValueLeakTests(unittest.TestCase):
     """Round4 F1: a structural violation must never embed the raw offending VALUE."""
 
-    _SECRET = "Bearer xai-THISISASECRETVALUE1234567890ABCDEF"
+    _SECRET = "Bearer xai-" "THISISASECRETVALUE1234567890ABCDEF"
 
     def test_enum_violation_does_not_leak_secret_value(self) -> None:
         # build_envelope logs the violation to stderr AND embeds it in the raised
@@ -485,9 +485,9 @@ class ApiKeyPatternTighteningTests(unittest.TestCase):
         # entirely because the hyphen 3-5 chars in broke the {20,} run. All four
         # current provider shapes MUST be caught (value absent), NOT just legacy.
         for key in (
-            "sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
-            "sk-ant-api03-AbCdEf0123456789_Gh-IjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOAA",
-            "sk-ant-admin01-Zz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjklAA",
+            "sk-proj-" "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+            "sk-ant-" "api03-AbCdEf0123456789_Gh-IjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOAA",
+            "sk-ant-" "admin01-Zz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjklAA",
             "sk-" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
             "xai-" + "abcdefghijklmnopqrstuvwxyz0123456789",
         ):

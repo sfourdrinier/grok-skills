@@ -98,7 +98,12 @@ export function parseDirtyStatusPaths(statusOutput) {
   for (const raw of String(statusOutput || "").split("\n")) {
     if (!raw.trim()) continue;
     const line = raw.slice(3); // 2 status columns + 1 space
-    const arrow = line.indexOf(" -> ");
+    // Only rename/copy porcelain entries use " -> " as the old->new separator.
+    // A non-rename path whose literal name contains " -> " must NOT be split, or
+    // the real path never enters the dirty set and the overlap guard fails open.
+    const isRenameOrCopy =
+      raw[0] === "R" || raw[0] === "C" || raw[1] === "R" || raw[1] === "C";
+    const arrow = isRenameOrCopy ? line.indexOf(" -> ") : -1;
     if (arrow >= 0) {
       set.add(unquoteGitPath(line.slice(0, arrow)));
       set.add(unquoteGitPath(line.slice(arrow + 4)));
