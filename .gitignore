@@ -28,3 +28,6 @@ node_modules/
 htmlcov/
 coverage/
 *.log
+
+# stray temp git repos created by review/test agents
+tmp-git-port-*/
