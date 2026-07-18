@@ -70,12 +70,22 @@ function unquoteGitPath(p) {
   return s;
 }
 
-/** Resolve a numstat rename form ("old => new", "{a => b}/f") to the new path. */
-function normalizeRenamePath(p) {
-  let out = String(p).replace(/\{[^}]*? => ([^}]*?)\}/g, "$1");
-  const idx = out.indexOf(" => ");
-  if (idx >= 0) out = out.slice(idx + 4);
-  return out.replace(/\/{2,}/g, "/");
+/**
+ * Both sides of a numstat rename form ("old => new", "{a => b}/f") - a dirty
+ * `old` path being renamed carries the operator's edits into `new`, so the
+ * dirty-overlap guard must consider both (review). Non-renames return [p].
+ */
+function renamePathSides(p) {
+  const s = String(p);
+  const collapse = (x) => x.replace(/\/{2,}/g, "/");
+  const brace = s.match(/^(.*)\{([^}]*?) => ([^}]*?)\}(.*)$/);
+  if (brace) {
+    const [, pre, oldMid, newMid, post] = brace;
+    return [collapse(pre + oldMid + post), collapse(pre + newMid + post)];
+  }
+  const idx = s.indexOf(" => ");
+  if (idx >= 0) return [collapse(s.slice(0, idx)), collapse(s.slice(idx + 4))];
+  return [collapse(s)];
 }
 
 /**
@@ -110,7 +120,9 @@ export function parseNumstatPaths(numstatOutput) {
     if (!raw.trim()) continue;
     const parts = raw.split("\t"); // "<added>\t<deleted>\t<path>"
     if (parts.length < 3) continue;
-    paths.push(unquoteGitPath(normalizeRenamePath(parts.slice(2).join("\t"))));
+    for (const side of renamePathSides(parts.slice(2).join("\t"))) {
+      paths.push(unquoteGitPath(side));
+    }
   }
   return paths;
 }
@@ -305,25 +317,52 @@ import {
 } from "./jobs.mjs";
 import { resolveTargetWorkspaceRoot, parseTargetFlag } from "./git-context.mjs";
 
+/**
+ * Exit code for a peer-stop: a requested peer-stop apply that FAILED (moved tree
+ * / dirty overlap / half-apply) fails the command instead of the wrapper's 0.
+ */
+export function peerStopExitCode(wrapperCode, peerIntegration) {
+  if (peerIntegration && peerIntegration.attempted && !peerIntegration.ok) {
+    return typeof wrapperCode === "number" && wrapperCode !== 0 ? wrapperCode : 1;
+  }
+  return wrapperCode;
+}
+
 /** ACP default; GROK_DISABLE_ACP=1 opt-out (Task 7.4). */
 export function isAcpDisabled(env = process.env) {
   const f = String(env.GROK_DISABLE_ACP ?? "").trim().toLowerCase();
   return f === "1" || f === "true" || f === "yes" || f === "on";
 }
 
+/** True when rest carries an explicit --target (split or equals form). */
+function hasTargetFlag(rest) {
+  return (
+    Array.isArray(rest) &&
+    rest.some((a) => a === "--target" || (typeof a === "string" && a.startsWith("--target=")))
+  );
+}
+
 /**
  * On a READY peer-stop: auto/direct apply the verified patch to the target
- * tree (reusing applyVerifiedPatch's revalidation); review/worktree retain it.
+ * tree; review/worktree retain it. Returns an outcome so the caller can fail the
+ * command when a requested apply did not happen.
  * @param {(line: string) => void} stderrLine
+ * @returns {{attempted: boolean, ok: boolean, outcome: string}}
  */
 export function maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stderrLine) {
   const env = tryParseEnvelope(stdout || "");
   const ready =
     env?.response?.peer?.integrationReady === true ||
     env?.response?.integration?.ready === true;
-  if (!ready || env?.status !== "success") return;
-  const tArg = parseTargetFlag(rest) || env?.targetWorkspace || ".";
-  const tWs = resolveTargetWorkspaceRoot(cwd, tArg);
+  if (!ready || env?.status !== "success") return { attempted: false, ok: true, outcome: "not-ready" };
+  const repo = env?.repository;
+  // Consent/mode gate on the repo the patch is ACTUALLY applied to (env.repository
+  // for the peer that was started), not process.cwd(): peer-stop's documented
+  // form has no --target, so a stop from repo A must not read A's consent/mode
+  // to authorize an apply to repo B (review).
+  const tWs = hasTargetFlag(rest)
+    ? resolveTargetWorkspaceRoot(cwd, parseTargetFlag(rest))
+    : resolveTargetWorkspaceRoot(cwd, repo || env?.targetWorkspace || ".");
   const mode =
     integrationFlag != null && String(integrationFlag).trim() !== ""
       ? parseIntegrationMode(integrationFlag)
@@ -333,35 +372,48 @@ export function maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stder
       `[grok-companion] invalid --integration ${JSON.stringify(integrationFlag)} ` +
         `(valid: direct|worktree|auto|review)`
     );
-    return;
+    return { attempted: true, ok: false, outcome: "invalid-mode" };
   }
   if (mode === "worktree" || mode === "review") {
     stderrLine(`[grok-peer] integration=${mode}: patch retained; not applied`);
-    return;
+    return { attempted: false, ok: true, outcome: "retained" };
   }
   if (mode === "direct" && !getIntegrationConsent(tWs)) {
     stderrLine(formatDirectIntegrationConsentMsg({ targetWorkspace: tWs, companionCwd: cwd }));
-    return;
+    return { attempted: false, ok: true, outcome: "consent-required" };
   }
   const runId = sanitizeRunId(env?.runId);
-  const repo = env?.repository;
   if (!runId || typeof repo !== "string" || !repo) {
     stderrLine("[grok-peer] missing runId or repository on peer-stop envelope");
-    return;
+    return { attempted: true, ok: false, outcome: "missing-run-or-repo" };
   }
   const patchPath = locateImplementationPatch(runId);
   if (!patchPath) {
     stderrLine(`[grok-peer] patch missing for run ${runId}`);
-    return;
+    return { attempted: true, ok: false, outcome: "patch-missing" };
   }
-  // Peer-stop already ran real validation and produced a ready manifest, so we
-  // do not re-run handoff (unlike auto-code's applyVerifiedPatch). We still
-  // guard the apply with git apply --check (TOCTOU: the tree may have moved).
   const git = (a) => spawnSync("git", ["-C", repo, ...a], { encoding: "utf8" });
+  // Dirty-overlap guard (same as the auto path): git apply --check can pass when
+  // the patch touches an already-dirty file with non-conflicting hunks, silently
+  // entangling Grok's changes with the operator's edits.
+  const preStatus = git(["status", "--short", "--untracked-files=all"]);
+  const dirtyPaths = parseDirtyStatusPaths(preStatus.stdout || "");
+  const numstat = git(["apply", "--numstat", "--binary", patchPath]);
+  const patchPaths = numstat.status === 0 ? parseNumstatPaths(numstat.stdout || "") : [];
+  const overlap = patchPaths.filter((p) => dirtyPaths.has(p)).sort();
+  if (overlap.length > 0) {
+    stderrLine(
+      `[grok-peer] BLOCKED: patch overlaps already-dirty path(s): ${overlap.join(", ")}. ` +
+        `Commit or stash them, then re-run. No apply attempted.`
+    );
+    return { attempted: true, ok: false, outcome: "blocked-dirty-overlap" };
+  }
+  // Peer-stop already ran real validation, so we do not re-run handoff; still
+  // guard the apply with git apply --check (TOCTOU: the tree may have moved).
   const check = git(["apply", "--check", "--binary", patchPath]);
   if (check.status !== 0) {
     stderrLine(`[grok-peer] git apply --check failed: ${(check.stderr || check.stdout || "").trim()}`);
-    return;
+    return { attempted: true, ok: false, outcome: "blocked-apply-check" };
   }
   const apply = git(["apply", "--binary", patchPath]);
   if (apply.status !== 0) {
@@ -370,13 +422,14 @@ export function maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stder
     const rev = git(["apply", "-R", "--binary", patchPath]);
     if (rev.status === 0) {
       stderrLine(`[grok-peer] git apply failed; rolled back via -R: ${detail}`);
-    } else {
-      stderrLine(
-        `[grok-peer] git apply failed AND reverse failed; MANUAL-NEEDED ` +
-          `(inspect ${repo} for partial apply): ${detail}`
-      );
+      return { attempted: true, ok: false, outcome: "rolled-back" };
     }
-    return;
+    stderrLine(
+      `[grok-peer] git apply failed AND reverse failed; MANUAL-NEEDED ` +
+        `(inspect ${repo} for partial apply): ${detail}`
+    );
+    return { attempted: true, ok: false, outcome: "manual-needed" };
   }
   stderrLine(`[grok-peer] applied ${patchPath} to ${repo}`);
+  return { attempted: true, ok: true, outcome: "applied" };
 }

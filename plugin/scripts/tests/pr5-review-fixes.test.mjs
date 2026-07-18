@@ -44,10 +44,11 @@ test("parseDirtyStatusPaths: extracts modified/untracked/renamed paths", () => {
   assert.ok(set.has("renamed.js"));
 });
 
-test("parseNumstatPaths: extracts patch target paths incl. rename form", () => {
-  const numstat = "1\t0\tsrc/a.js\n-\t-\tbin.dat\n2\t1\t{old => new}/f.js\n";
+test("parseNumstatPaths: extracts patch target paths incl. BOTH rename sides", () => {
+  const numstat = "1\t0\tsrc/a.js\n-\t-\tbin.dat\n2\t1\t{old => new}/f.js\n0\t0\ta.js => b.js\n";
   const paths = parseNumstatPaths(numstat);
-  assert.deepEqual(paths, ["src/a.js", "bin.dat", "new/f.js"]);
+  // Rename forms yield both the old and new path so a dirty `old` is caught.
+  assert.deepEqual(paths, ["src/a.js", "bin.dat", "old/f.js", "new/f.js", "a.js", "b.js"]);
 });
 
 test("writeHandoffConsumedMarker: writes marker under the run dir", () => {

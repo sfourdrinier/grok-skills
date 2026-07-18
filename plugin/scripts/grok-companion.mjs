@@ -72,7 +72,7 @@ import {
   refusePeerDirect,
   runPeerStartBackground,
 } from "./lib/peer-acp.mjs";
-import { isAcpDisabled, maybeIntegratePeerStop } from "./lib/integrate.mjs";
+import { isAcpDisabled, maybeIntegratePeerStop, peerStopExitCode } from "./lib/integrate.mjs";
 import { cmdDebate, cmdTransfer } from "./lib/companion-extra-cmds.mjs";
 const PYTHON = process.env.GROK_PYTHON?.trim() || "python3";
 const WRAPPER_NOT_FOUND_EXIT = 3;
@@ -830,6 +830,7 @@ async function dispatch({
   if (wrapperMode === "status") return finishCleanups(runStatus(wrapper, wrapperArgs));
   if (wrapperMode === "handoff") return finishCleanups(runHandoff(wrapper, wrapperArgs));
   if (WRAPPER_MODES.has(wrapperMode) || wrapperArgs[0]) {
+    let peerIntegration = null;
     return Promise.resolve(
       captureAndTrack(wrapper, wrapperArgs, {
         cwd,
@@ -838,15 +839,14 @@ async function dispatch({
         runMode: "hardened",
         notifyMode: track.notifyMode,
         skipNotify: track.skipNotify,
-        // peer-stop: after envelope, integrate ready result via active mode.
         onStdout:
           wrapperMode === "peer-stop"
             ? (stdout, code) => {
-                if (code === 0) maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stderrLine);
+                if (code === 0) peerIntegration = maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stderrLine);
               }
             : null,
       })
-    ).then(finishCleanups);
+    ).then((code) => finishCleanups(peerStopExitCode(code, peerIntegration)));
   }
   return finishCleanups(runPassthrough(wrapper, wrapperArgs));
 }

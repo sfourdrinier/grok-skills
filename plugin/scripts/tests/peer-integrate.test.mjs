@@ -94,16 +94,16 @@ test("peer-stop auto: applies verified patch to the target tree", () => {
   }
 });
 
-test("peer-stop auto: --check refusal leaves the tree unchanged (no half-apply)", () => {
+test("peer-stop auto: dirty patch-path blocks apply, tree unchanged, outcome !ok", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-peer-int-nc-"));
   const repo = initRepo(path.join(root, "repo"));
   const xdg = path.join(root, "xdg");
   stagePatch(xdg, RUN_ID, capturePatch(repo));
-  // Move the tree so the patch no longer applies cleanly (git apply --check fails).
+  // foo.txt is both dirty AND the patch target -> the dirty-overlap guard blocks.
   fs.writeFileSync(path.join(repo, "foo.txt"), "diverged\n");
   const lines = [];
   try {
-    withXdg(xdg, () =>
+    const res = withXdg(xdg, () =>
       maybeIntegratePeerStop(peerStopEnvelope(repo), repo, "auto", ["--target", repo], (l) =>
         lines.push(l)
       )
@@ -111,9 +111,37 @@ test("peer-stop auto: --check refusal leaves the tree unchanged (no half-apply)"
     assert.equal(
       fs.readFileSync(path.join(repo, "foo.txt"), "utf8"),
       "diverged\n",
-      "must not apply when --check fails"
+      "must not apply when a patch path is already dirty"
     );
-    assert.ok(lines.some((l) => /apply --check failed/i.test(l)), lines.join("\n"));
+    assert.equal(res.attempted, true);
+    assert.equal(res.ok, false, "a blocked apply must report !ok so the command fails");
+    assert.equal(res.outcome, "blocked-dirty-overlap");
+    assert.ok(lines.some((l) => /dirty|overlap/i.test(l)), lines.join("\n"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("peer-stop auto: consent gate keys on the peer's repository, not cwd", () => {
+  // Started for repoB; stopped from repoA (cwd) with no --target. Direct mode
+  // must read repoB's consent, not repoA's (which we grant to prove it's ignored).
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-peer-int-consent-"));
+  const repoA = initRepo(path.join(root, "repoA"));
+  const repoB = initRepo(path.join(root, "repoB"));
+  const xdg = path.join(root, "xdg");
+  stagePatch(xdg, RUN_ID, capturePatch(repoB));
+  const lines = [];
+  try {
+    // No consent recorded for repoB -> direct apply must be refused (not applied).
+    const res = withXdg(xdg, () =>
+      maybeIntegratePeerStop(peerStopEnvelope(repoB), repoA, "direct", [], (l) => lines.push(l))
+    );
+    assert.equal(res.outcome, "consent-required");
+    assert.equal(
+      fs.readFileSync(path.join(repoB, "foo.txt"), "utf8"),
+      "hello\n",
+      "repoB must be untouched without repoB consent"
+    );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
