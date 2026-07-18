@@ -35,6 +35,32 @@ test("gateIntegrationForCodeish: continue-run is exempt from direct consent", ()
   assert.equal(res.effective, null);
 });
 
+test("[3] gateIntegrationForCodeish routes implement to worktree (never direct)", () => {
+  const res = gateIntegrationForCodeish(
+    "implement",
+    ["--target", ".", "--base", "HEAD", "--task-file", "-"],
+    null,
+    os.tmpdir(),
+    {}
+  );
+  assert.equal(res.ok, true);
+  assert.equal(res.effective, "worktree");
+  const i = res.rest.indexOf("--integration");
+  assert.ok(i >= 0 && res.rest[i + 1] === "worktree", res.rest.join(" "));
+});
+
+test("[11] gateIntegrationForCodeish exempts --continue-run= (equals form)", () => {
+  const res = gateIntegrationForCodeish(
+    "code",
+    ["--continue-run=20260101T000000Z-abc123", "--task-file", "-"],
+    null,
+    os.tmpdir(),
+    {}
+  );
+  assert.equal(res.ok, true);
+  assert.equal(res.effective, null);
+});
+
 test("parseDirtyStatusPaths: extracts modified/untracked/renamed paths", () => {
   const status = " M src/a.js\n?? new.txt\nR  old.js -> renamed.js\n";
   const set = parseDirtyStatusPaths(status);

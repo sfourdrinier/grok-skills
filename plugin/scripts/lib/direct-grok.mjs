@@ -76,11 +76,20 @@ function resolveGrokBinary(env = process.env) {
 }
 
 function flagValue(args, name) {
-  const i = args.indexOf(name);
-  if (i >= 0 && args[i + 1]) {
-    return args[i + 1];
+  // Accept BOTH `--name value` and `--name=value`, last-wins (matches the
+  // wrapper's argparse and the consent parser), so runMode=direct executes
+  // against the same --target the consent gate was keyed on (review).
+  const eq = name + "=";
+  let val = null;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === name && args[i + 1] !== undefined) {
+      val = args[i + 1];
+    } else if (typeof a === "string" && a.startsWith(eq)) {
+      val = a.slice(eq.length);
+    }
   }
-  return null;
+  return val;
 }
 
 function hasFlag(args, name) {
@@ -104,7 +113,40 @@ function toolsForMode(mode) {
 /**
  * Run a direct Grok CLI invocation. Returns { code, envelopeText }.
  */
-export function runDirectGrok({ mode, args, cwd, env = process.env }) {
+/**
+ * Redact a direct-mode envelope through the wrapper's SINGLE redaction source
+ * (groklib.envelope) so runMode=direct honors the same stdout redaction contract
+ * as hardened mode. Returns the redacted JSON string, or null (fail closed) if
+ * redaction cannot run or a secret survives the scan.
+ */
+function redactEnvelopeViaWrapper(envelope, { scriptsDir, python, env }) {
+  if (!scriptsDir || !python) return null;
+  const script =
+    "import sys,json;" +
+    "sys.path.insert(0, sys.argv[1]);" +
+    "from groklib.envelope import redact_secret_material, assert_no_secret_material;" +
+    "obj=json.load(sys.stdin);" +
+    "red=redact_secret_material(obj, redact_keys=True);" +
+    "assert_no_secret_material(red);" +
+    "sys.stdout.write(json.dumps(red))";
+  const res = spawnSync(python, ["-c", script, scriptsDir], {
+    input: JSON.stringify(envelope),
+    encoding: "utf8",
+    env,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (res.error || res.status !== 0 || !res.stdout) return null;
+  return res.stdout;
+}
+
+export function runDirectGrok({
+  mode,
+  args,
+  cwd,
+  env = process.env,
+  scriptsDir = null,
+  python = null,
+}) {
   // --isolated is wrapper-only (owned external worktree). Direct mode bypasses
   // the hardened parser and must not silently review the live tree instead.
   if (hasFlag(args, "--isolated")) {
@@ -274,7 +316,22 @@ export function runDirectGrok({ mode, args, cwd, env = process.env }) {
   if (result.stderr) {
     process.stderr.write(result.stderr);
   }
-  return { code: ok ? 0 : 1, envelopeText: `${JSON.stringify(envelope)}\n` };
+  // Redact the response through the wrapper's redaction (installed CLI output can
+  // quote a token it read from the repo/terminal). Fail closed: if redaction
+  // cannot run, withhold response.text rather than emit a possible secret.
+  const redacted = redactEnvelopeViaWrapper(envelope, { scriptsDir, python, env });
+  if (redacted) {
+    return { code: ok ? 0 : 1, envelopeText: `${redacted}\n` };
+  }
+  const withheld = {
+    ...envelope,
+    response: { text: "[redaction-unavailable: response withheld under runMode=direct]" },
+    warnings: [
+      ...(envelope.warnings || []),
+      "runMode=direct: secret redaction could not run; response text withheld",
+    ],
+  };
+  return { code: ok ? 0 : 1, envelopeText: `${JSON.stringify(withheld)}\n` };
 }
 
 export function grokBinaryAvailable(env = process.env) {

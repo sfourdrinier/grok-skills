@@ -48,8 +48,14 @@ export function runPeerStartBackground(python, wrapper, args, {
     };
     let child;
     try {
+      // Resident stderr is IGNORED (not a pipe): the companion resolves and
+      // exits after the first running envelope, which would close a stderr pipe;
+      // a later resident write (stop/finalize error handling via log_stderr's raw
+      // os.write) would then hit a broken pipe and could crash the peer instead
+      // of returning the control-socket result. Startup failures still surface
+      // via the one stdout envelope (status != running -> nonzero exit).
       child = spawn(python, [wrapper, ...args], {
-        stdio: ["ignore", "pipe", "pipe"],
+        stdio: ["ignore", "pipe", "ignore"],
         env: wrapperChildEnv(process.env),
         detached: true,
       });

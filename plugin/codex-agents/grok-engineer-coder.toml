@@ -58,7 +58,7 @@ artifact (fail-closed scan); expect retained-worktree manual integration
 DEFAULT - multi-turn peer:
 
   node "$GROK_AGENT_RUN" peer start \\
-    --target '<target>' --base '<base>' --contract-file '$CONTRACT_FILE'
+    --target '<target>' --base '<base>' --contract-file "$CONTRACT_FILE"
   node "$GROK_AGENT_RUN" peer prompt --run-id '<runId>' --task-file - <<'GROK_TASK'
   <implementation request>
   GROK_TASK
@@ -67,7 +67,7 @@ DEFAULT - multi-turn peer:
 FALLBACK - one-shot code:
 
   node "$GROK_AGENT_RUN" code \\
-    --target '<target>' --base '<base>' --contract-file '$CONTRACT_FILE' \\
+    --target '<target>' --base '<base>' --contract-file "$CONTRACT_FILE" \\
     --task-file - <<'GROK_TASK'
   <implementation request>
   GROK_TASK

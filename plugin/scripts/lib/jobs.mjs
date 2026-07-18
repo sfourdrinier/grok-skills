@@ -602,8 +602,18 @@ export function gateIntegrationForCodeish(mode, rest, integrationFlag, cwd, env 
   // does a live direct edit - exempt it from direct-integration consent, which
   // would otherwise refuse the documented continuation command in a fresh
   // workspace where the default mode resolves to direct.
-  if (rest.includes("--continue-run")) {
+  if (
+    rest.includes("--continue-run") ||
+    rest.some((a) => typeof a === "string" && a.startsWith("--continue-run="))
+  ) {
     return { ok: true, rest, effective: null };
+  }
+  // implement is verify-only (code + handoff, never applies to the live tree),
+  // so it ALWAYS takes the worktree path: never direct (which would record the
+  // code leg as mode=direct and make the immediate handoff refuse it after
+  // mutating the tree) and never the direct-consent gate.
+  if (mode === "implement") {
+    return { ok: true, effective: "worktree", rest: withExplicitIntegration(rest, "worktree") };
   }
   // SECURITY: key consent on the repo being edited, not process.cwd().
   const targetArg = parseTargetFlag(rest);

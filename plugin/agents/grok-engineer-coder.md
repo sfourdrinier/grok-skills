@@ -76,7 +76,7 @@ user's ask and write it to a temp file (hardened mode only; direct mode rejects
 it):
 
 ```bash
-CONTRACT_FILE="$(mktemp -t grok-contract)"
+CONTRACT_FILE="$(mktemp -t grok-contract.XXXXXX)"
 cat > "$CONTRACT_FILE" <<'GROK_CONTRACT'
 {
   "schemaVersion": 1,

@@ -63,6 +63,7 @@ import {
   writeDirectNoHandoffRefuse,
 } from "./lib/direct-grok.mjs";
 import { runAutoIntegrate, runImplementCombo } from "./lib/implement.mjs";
+import { stripFlags } from "./lib/companion-args.mjs";
 import { renderEnvelopePretty, tryParseEnvelope } from "./lib/render.mjs";
 import { terminateReviewTree } from "./lib/gate-kill.mjs";
 import {
@@ -108,61 +109,6 @@ function spawnFailedMessage(wrapper, detail) {
     "Fix: ensure python3 is on PATH (set GROK_PYTHON to override), then run /grok:setup.\n"
   );
 }
-function stripFlags(args) {
-  const out = [];
-  let pretty = false;
-  let runMode = null;
-  let integration = null;
-  let jsonOut = false;
-  let base = null;
-  let resume = false;
-  let fresh = false;
-  let noNotify = false;
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a === "--pretty") {
-      pretty = true;
-      continue;
-    }
-    if (a === "--json") {
-      jsonOut = true;
-      continue;
-    }
-    if (a === "--resume") {
-      resume = true;
-      continue;
-    }
-    if (a === "--fresh") {
-      fresh = true;
-      continue;
-    }
-    // Companion-only: suppress terminal completion notify for this invocation.
-    if (a === "--no-notify") {
-      noNotify = true;
-      continue;
-    }
-    if (a === "--run-mode" && args[i + 1]) {
-      runMode = args[++i];
-      continue;
-    }
-    // Integration (how edits land) - resolved + consent-gated for code/implement.
-    if (a === "--integration" && args[i + 1]) {
-      integration = args[++i];
-      continue;
-    }
-    if (typeof a === "string" && a.startsWith("--integration=")) {
-      integration = a.slice("--integration=".length);
-      continue;
-    }
-    if (a === "--base" && args[i + 1]) {
-      // Captured for review framing; re-attached for code mode later.
-      base = args[++i];
-      continue;
-    }
-    out.push(a);
-  }
-  return { args: out, pretty, runMode, integration, jsonOut, base, resume, fresh, noNotify };
-}
 function ensureTarget(args, cwd) {
   if (args.includes("--target") || args.includes("--worktree")) {
     return { args, cleanup: null };
@@ -191,7 +137,14 @@ function captureAndTrack(
   appendJobLog(cwd, job.id, `dispatch ${args.join(" ")}`);
   stderrLine(`[grok-job] ${job.id} started (${skillMode}, ${runMode})`);
   if (runMode === "direct") {
-    const direct = runDirectGrok({ mode, args, cwd, env: process.env });
+    const direct = runDirectGrok({
+      mode,
+      args,
+      cwd,
+      env: process.env,
+      scriptsDir: path.join(PLUGIN_ROOT, "wrapper", "scripts"),
+      python: PYTHON,
+    });
     storeJobStdout(cwd, job.id, direct.envelopeText);
     const directEnv = tryParseEnvelope(direct.envelopeText);
     const directRunId = isDirectRunId(directEnv?.runId) ? directEnv.runId : null;

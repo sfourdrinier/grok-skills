@@ -7,12 +7,16 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import {
   DIRECT_NO_HANDOFF_MSG,
   DIRECT_RUN_ID_RE,
+  runDirectGrok,
 } from "../lib/direct-grok.mjs";
+
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 import {
   createJob,
   storeJobStdout,
@@ -25,6 +29,36 @@ const DIRECT_ID = "direct-1234567890";
 function tempCwd() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-parity-"));
 }
+
+test("[4] runDirectGrok redacts secrets in the direct-mode envelope", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-redact-"));
+  try {
+    const fakeGrok = path.join(dir, "fake-grok.sh");
+    const secret = "sk-" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    fs.writeFileSync(
+      fakeGrok,
+      `#!/bin/sh\nprintf '%s\\n' '{"result":"here is a token ${secret} end"}'\n`
+    );
+    fs.chmodSync(fakeGrok, 0o755);
+    const scriptsDir = path.resolve(SCRIPT_DIR, "..", "..", "wrapper", "scripts");
+    const res = runDirectGrok({
+      mode: "code",
+      args: ["--target", dir, "--base", "HEAD", "--task", "x"],
+      cwd: dir,
+      env: { ...process.env, GROK_AGENT_BINARY: fakeGrok },
+      scriptsDir,
+      python: "python3",
+    });
+    assert.doesNotMatch(
+      res.envelopeText,
+      new RegExp(secret),
+      `secret must be redacted from the direct envelope: ${res.envelopeText}`
+    );
+    assert.match(res.envelopeText, /redacted/i, "redaction marker expected");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("result resolves direct-<timestamp> runId via the job index", () => {
   assert.ok(DIRECT_RUN_ID_RE.test(DIRECT_ID));

@@ -296,7 +296,12 @@ test("companion never maps terminal lifecycle to running (source contract)", () 
   // Debate intermediate round (lib) and --no-notify must skip notify.
   assert.match(extraCmds, /skipNotify:\s*true/);
   assert.match(src, /shouldAttemptTerminalNotify/);
-  assert.match(src, /--no-notify/);
+  // --no-notify flag handling lives in the extracted companion-args stripFlags.
+  const args = fs.readFileSync(
+    path.resolve(SCRIPT_DIR, "..", "lib", "companion-args.mjs"),
+    "utf8"
+  );
+  assert.match(args, /--no-notify/);
   assert.match(src, /companion-setup/);
   // Maintainability: entrypoint stays under the AGENTS 900-line cap.
   const lines = src.split("\n").length;
