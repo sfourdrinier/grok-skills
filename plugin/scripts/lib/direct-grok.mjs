@@ -305,7 +305,10 @@ export function runDirectGrok({
   }
 
   const model = flagValue(args, "--model") || "grok-4.5";
-  const cwdFlag = flagValue(args, "--target") || cwd;
+  // --worktree wins over --target: /grok:verify passes the retained worktree to
+  // inspect via --worktree, so a direct verify must run IN it, not in --target /
+  // the companion cwd (else it could report success against the wrong checkout).
+  const cwdFlag = flagValue(args, "--worktree") || flagValue(args, "--target") || cwd;
   const web = hasFlag(args, "--web");
   // Stage the prompt with the shared 0600 helper (private mkdtemp dir): the task
   // text can carry transferred transcripts or pasted credentials, so it must not

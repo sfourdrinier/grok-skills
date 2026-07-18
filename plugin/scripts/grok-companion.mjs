@@ -528,12 +528,19 @@ async function dispatch({
   if (mode === "result") return cmdResult(cwd, rest, pretty || rest.includes("--pretty"));
   if (mode === "cancel") return cmdCancel(cwd, rest);
   if (mode === "transfer") return cmdTransfer(cwd, rest);
-  // stripFlags peels --integration for the code/implement gate; re-attach for setup.
+  // stripFlags peels --integration AND --run-mode for the code/implement gate;
+  // re-attach BOTH for setup or `/grok:setup --run-mode direct|hardened` would be
+  // silently dropped (cmdSetup never sees it) and the persisted posture stays put.
   if (mode === "setup") {
-    const setupArgs =
-      integrationFlag != null && String(integrationFlag).trim() !== ""
-        ? ["--integration", String(integrationFlag), ...rest]
-        : rest;
+    const setupArgs = [
+      ...(integrationFlag != null && String(integrationFlag).trim() !== ""
+        ? ["--integration", String(integrationFlag)]
+        : []),
+      ...(runModeFlag != null && String(runModeFlag).trim() !== ""
+        ? ["--run-mode", String(runModeFlag)]
+        : []),
+      ...rest,
+    ];
     return cmdSetup(cwd, setupArgs);
   }
   if (mode === "render") return cmdResult(cwd, rest, true);

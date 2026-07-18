@@ -45,8 +45,10 @@ Required wrapper flags (copy exactly, substitute only placeholder values):
 - Fresh run: `--target <workspace-relative-path>` and `--base <committed-revision>`
   are required. For **auto/review** the wrapper builds the worktree from a
   committed revision (uncommitted task deps fail closed - commit first). For
-  **direct**, `--base` still frames the run; edits land on the live tree
-  (dirty-overlap policy applies; see integration-modes.md).
+  **direct**, `--base` is still required (CLI parity), but the run is anchored on
+  the live working-tree state at start - NOT a base diff - so `--base` does not
+  frame direct edits; they land on the live tree and protected paths roll back
+  after (dirty-overlap policy applies; see integration-modes.md).
 - Optional `--integration direct|auto|review|worktree` (default direct when
   consented; see `plugin/references/integration-modes.md`).
 - Continuation: `--continue-run <runId>` instead of `--target`/`--base` (reuses

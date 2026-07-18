@@ -122,6 +122,39 @@ test("runDirectGrok redacts stderr before relaying it to the terminal", () => {
   assert.doesNotMatch(all, new RegExp(secret), `secret must not reach the terminal: ${all}`);
 });
 
+test("runDirectGrok verify uses --worktree as cwd, not --target", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-wt-"));
+  try {
+    const worktree = path.join(dir, "retained-wt");
+    const target = path.join(dir, "other-target");
+    fs.mkdirSync(worktree);
+    fs.mkdirSync(target);
+    const fakeGrok = path.join(dir, "fake-grok.sh");
+    // Echo the --cwd the executor passed to the CLI.
+    fs.writeFileSync(
+      fakeGrok,
+      `#!/bin/sh\nc=""\nwhile [ $# -gt 0 ]; do\n  if [ "$1" = "--cwd" ]; then c="$2"; fi\n  shift\ndone\nprintf '{"result":"cwd=%s"}\\n' "$c"\n`
+    );
+    fs.chmodSync(fakeGrok, 0o755);
+    const scriptsDir = path.resolve(SCRIPT_DIR, "..", "..", "wrapper", "scripts");
+    const res = runDirectGrok({
+      mode: "verify",
+      args: ["--target", target, "--worktree", worktree, "--task", "check"],
+      cwd: dir,
+      env: { ...process.env, GROK_AGENT_BINARY: fakeGrok },
+      scriptsDir,
+      python: "python3",
+    });
+    // The CLI must be pointed at the worktree (path.resolve, as the executor
+    // does), not --target.
+    const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    assert.match(res.envelopeText, new RegExp(`cwd=${esc(path.resolve(worktree))}`), res.envelopeText);
+    assert.doesNotMatch(res.envelopeText, new RegExp(`cwd=${esc(path.resolve(target))}"`));
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runDirectGrok refuses --input/--rules-file in direct mode (no silent drop)", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-reason-"));
   try {

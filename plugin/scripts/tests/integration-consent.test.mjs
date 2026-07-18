@@ -102,6 +102,34 @@ test("RED: explicit --integration direct without consent refuses", () => {
   }
 });
 
+test("setup --run-mode direct is forwarded to cmdSetup and persists the posture", () => {
+  // Regression: the setup dispatch branch stripped --run-mode without reattaching
+  // it, so `/grok:setup --run-mode direct` silently left the posture unchanged.
+  const cwd = tempCwd();
+  const pluginData = path.join(cwd, "pdata");
+  const envBase = { CLAUDE_PLUGIN_DATA: pluginData };
+  assert.equal(getRunMode(cwd, envBase), "hardened", "starts hardened");
+  const intBefore = getIntegrationMode(cwd, envBase);
+  const res = runCompanion(["setup", "--run-mode", "direct", "--skip-codex-agents"], {
+    cwd,
+    env: envBase,
+  });
+  assert.ok(res.code === 0 || res.code === 1, res.stderr);
+  assert.equal(getRunMode(cwd, envBase), "direct", "run mode must switch to direct");
+  // Integration mode is orthogonal and must NOT be set by --run-mode.
+  assert.equal(
+    getIntegrationMode(cwd, envBase),
+    intBefore,
+    "--run-mode must not change integration mode"
+  );
+  const setBack = runCompanion(["setup", "--run-mode", "hardened", "--skip-codex-agents"], {
+    cwd,
+    env: envBase,
+  });
+  assert.ok(setBack.code === 0 || setBack.code === 1, setBack.stderr);
+  assert.equal(getRunMode(cwd, envBase), "hardened", "run mode must switch back");
+});
+
 test("after setup --integration direct, code proceeds with explicit --integration direct", () => {
   const cwd = tempCwd();
   const pluginData = path.join(cwd, "pdata");

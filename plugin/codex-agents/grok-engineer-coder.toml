@@ -35,8 +35,10 @@ the chosen mode (plugin/references/integration-modes.md).
 
 Derive a contract by default (skip only for exploratory tasks). Stage JSON to a
 temp file and pass --contract-file. Schema: schemaVersion 1, taskId, target
-(must equal --target), objective, writeScopes, acceptanceCriteria,
-requiredValidation. Scope paths are repo-relative (no .., no absolute).
+(repo-relative: the derived repo-relative target - '.' or a subpath - NOT a raw
+absolute --target value; the wrapper compares against the repo-relative target),
+objective, writeScopes, acceptanceCriteria, requiredValidation. Scope paths are
+repo-relative (no .., no absolute).
 
 requiredValidation argv is SHELL-FREE (plugin/references/argv-safety.md): no
 globs, no directory shorthands, no $VARS. Model examples:

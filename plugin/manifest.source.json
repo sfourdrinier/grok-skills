@@ -58,7 +58,7 @@
     "interface": {
       "displayName": "Grok Skills",
       "shortDescription": "Peer implementer for Codex: implement, continue-run, verified handoff",
-      "longDescription": "Grok as a peer implementer for Codex CLI and the ChatGPT desktop app. Delegate code into isolated git worktrees, iterate with continue-run, and integrate through verified handoff. Review, reason, and verify modes included. Experimental peer channel available. Every mode runs in a private auth home under a verified OS sandbox and emits exactly one machine-readable JSON result envelope. The Python engine is bundled inside the plugin install tree so marketplace cache installs work without env hacks. Not affiliated with xAI.",
+      "longDescription": "Grok as a peer implementer for Codex CLI and the ChatGPT desktop app. Delegate code into isolated git worktrees, iterate with continue-run, and integrate through verified handoff. Review, reason, and verify modes included. Experimental peer channel available. Hardened modes run in a private auth home under a verified OS sandbox; direct mode (opt-in, per-repo consent) uses your installed Grok home with post-run guards instead. Every mode emits exactly one machine-readable JSON result envelope. The Python engine is bundled inside the plugin install tree so marketplace cache installs work without env hacks. Not affiliated with xAI.",
       "developerName": "Stephane Fourdrinier",
       "category": "Development & Workflow",
       "capabilities": [

@@ -81,7 +81,7 @@ cat > "$CONTRACT_FILE" <<'GROK_CONTRACT'
 {
   "schemaVersion": 1,
   "taskId": "<short-slug-from-the-ask>",
-  "target": "<same value as --target>",
+  "target": "<repo-relative target: '.' or a subpath like 'pkg'; if --target is an absolute path, use the path relative to the repo root, NOT the raw flag value>",
   "objective": "<one-sentence goal in the user's words>",
   "writeScopes": [{"kind": "subtree", "path": "<narrowest dir that must change>"}],
   "acceptanceCriteria": [
