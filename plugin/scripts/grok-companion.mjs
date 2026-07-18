@@ -607,11 +607,16 @@ async function dispatch({
       if (Boolean(noNotify)) return Promise.resolve();
       return maybeNotifyAfterTerminal({
         cwd,
-        mode: track.notifyMode,
+        // Notify as "code": "implement" is not a notify-eligible mode, so the
+        // combo notification would be silently dropped. The combo IS a code run.
+        mode: "code",
         runId,
         code: finalCode,
         startedAtMs: comboStartedAtMs,
-        stdoutText: stdoutText || "",
+        // Only feed the (successful) code-leg stdout to the notifier on a TRUE
+        // success: maybeNotifyAfterTerminal reparses it and would flip a failed
+        // combo (not-ready handoff / failed apply) back to a success notification.
+        stdoutText: finalCode === 0 ? stdoutText || "" : "",
         stderrLine,
       });
     };

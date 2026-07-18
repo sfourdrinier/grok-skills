@@ -19,19 +19,31 @@ import { readAllStdinSync } from "./read-stdin.mjs";
  */
 export function extractTask(args) {
   if (!Array.isArray(args)) return "";
-  const tf = args.indexOf("--task-file");
-  if (tf >= 0 && args[tf + 1] && args[tf + 1] !== "-") {
+  // Accept BOTH `--flag value` and `--flag=value` (the hardened wrapper's
+  // argparse takes both, so the direct path must too, or `code --task=...`
+  // fails with a spurious "requires --task" before Grok runs).
+  const tf = taskFlagValue(args, "--task-file");
+  if (tf && tf !== "-") {
     try {
-      return fs.readFileSync(args[tf + 1], "utf8");
+      return fs.readFileSync(tf, "utf8");
     } catch {
       return "";
     }
   }
-  const t = args.indexOf("--task");
-  if (t >= 0 && args[t + 1]) {
-    return args[t + 1];
-  }
+  const t = taskFlagValue(args, "--task");
+  if (t) return t;
   return "";
+}
+
+/** First value for `--flag value` or `--flag=value`; null when absent. */
+function taskFlagValue(args, name) {
+  const eq = name + "=";
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === name && args[i + 1] !== undefined) return args[i + 1];
+    if (typeof a === "string" && a.startsWith(eq)) return a.slice(eq.length);
+  }
+  return null;
 }
 
 /**
@@ -81,11 +93,15 @@ export function stageStdinTaskFile(args) {
 export function injectTaskFile(args, taskText) {
   const cleaned = [];
   for (let i = 0; i < args.length; i++) {
-    if (args[i] === "--task" || args[i] === "--task-file") {
+    const a = args[i];
+    if (a === "--task" || a === "--task-file") {
       i += 1;
       continue;
     }
-    cleaned.push(args[i]);
+    if (a.startsWith("--task=") || a.startsWith("--task-file=")) {
+      continue;
+    }
+    cleaned.push(a);
   }
   const { taskPath, cleanup } = stageTaskFile(taskText);
   cleaned.push("--task-file", taskPath);

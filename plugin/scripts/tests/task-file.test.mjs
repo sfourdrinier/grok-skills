@@ -12,6 +12,19 @@ import {
 } from "../lib/task-file.mjs";
 import { runCompanion } from "./helpers/fake-wrapper.mjs";
 
+test("extractTask reads the equals-form --task=... and --task-file=...", () => {
+  // The hardened wrapper's argparse accepts both forms; the direct path must too.
+  assert.equal(extractTask(["code", "--task=fix the bug", "--target", "."]), "fix the bug");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "grok-task-eq-"));
+  try {
+    const f = path.join(tmp, "task.md");
+    fs.writeFileSync(f, "task from file\n");
+    assert.equal(extractTask(["code", `--task-file=${f}`, "--target", "."]), "task from file\n");
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 test("extractTask reads --task inline text", () => {
   assert.equal(extractTask(["code", "--task", "do the thing", "--target", "."]), "do the thing");
 });
@@ -69,6 +82,21 @@ test("injectTaskFile strips an existing --task-file path pair", () => {
   } finally {
     prior.cleanup();
   }
+});
+
+test("injectTaskFile strips equals-form --task=/--task-file= tokens", () => {
+  const { args, cleanup } = injectTaskFile(
+    ["code", "--task=old inline", "--target", "."],
+    "replacement text"
+  );
+  assert.equal(args[0], "code");
+  assert.ok(!args.some((a) => a.startsWith("--task=")));
+  const tfEq = args.filter((a) => a.startsWith("--task-file=")).length;
+  assert.equal(tfEq, 0);
+  const tf = args.indexOf("--task-file");
+  assert.ok(tf > 0);
+  assert.equal(fs.readFileSync(args[tf + 1], "utf8"), "replacement text");
+  cleanup();
 });
 
 test("stageStdinTaskFile returns null when argv has no --task-file - sentinel", () => {
