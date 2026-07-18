@@ -233,6 +233,22 @@ three batches. Two release-blockers were real.
 Every applicable review finding was fixed (no deferrals). Comments that were
 already resolved or stale after the re-architecture are noted as such above.
 
+**Round 2** (the review bot re-scanned each commit and found further issues,
+including regressions in the round-1 fixes): direct git-guard now content-hashes
+watched files (a same-size ref move with restored mtime no longer evades) and
+resolves linked-worktree git dirs; protected rollback preserves pre-existing
+symlinks and file modes; the wrapper's bare-call integration default is the safe
+`worktree` (product direct-default unchanged - the companion passes it explicitly
+after consent); direct-mode state nested in the target repo fails closed;
+runMode=direct envelopes are redacted through the wrapper's single redaction
+source; peer-stop apply keys consent on the peer repo, blocks dirty overlap
+(both rename sides), and fails the command on a failed apply; implement always
+routes to worktree; the stale-home reaper never reaps a live-owner peer;
+peer prompts carry the repo rules + contract; peer-prompt failures keep the run
+id; peer-stop fails closed if it cannot persist terminal evidence; the resident
+peer wrapper uses an ignored stderr fd; agent recipes use a valid mktemp template
+and quote the contract path. Suite: wrapper 809, plugin 285.
+
 ### Changed (Phase 0)
 
 - `plugin/scripts/lib/task-file.mjs`: task-text temp staging deduplicated
