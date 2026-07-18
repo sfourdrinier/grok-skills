@@ -133,6 +133,17 @@ function toolsForMode(mode) {
   return "read_file,list_dir,grep";
 }
 
+// Web tool IDs the hardened grokcli path folds into the allowlist when web access
+// is on (D-WEB contract). MIRRORS groklib/grokcli.py WEB_TOOLS; keep in sync.
+const WEB_TOOLS = ["web_search", "web_fetch", "open_page", "open_page_with_find"];
+
+/** The mode's tool allowlist, with the web tools appended when web is enabled -
+ *  else the installed CLI runs ungrounded while the envelope reports webAccess. */
+function toolsAllowlist(mode, web) {
+  const base = toolsForMode(mode);
+  return web ? `${base},${WEB_TOOLS.join(",")}` : base;
+}
+
 /**
  * Run a direct Grok CLI invocation. Returns { code, envelopeText }.
  */
@@ -249,6 +260,37 @@ export function runDirectGrok({
     return { code: 1, envelopeText: `${JSON.stringify(envelope)}\n` };
   }
 
+  // --schema is a structured-output contract: the hardened wrapper loads the
+  // schema, passes it to Grok, AND validates the output (schema-mismatch failure).
+  // Direct mode has none of that machinery, so honoring it would return a
+  // "success" envelope with arbitrary unvalidated JSON/text. Refuse fail-closed.
+  if (
+    args.some(
+      (a) => a === "--schema" || (typeof a === "string" && a.startsWith("--schema="))
+    )
+  ) {
+    const envelope = {
+      schemaVersion: 1,
+      mode,
+      status: "failure",
+      runId: `direct-${Date.now()}`,
+      error: {
+        class: "usage-error",
+        message:
+          "--schema requires hardened mode (runMode=direct cannot load or validate a structured-output schema, so the result would be unvalidated)",
+        detail: {
+          hint: "re-run without --schema, or set GROK_SKILLS_MODE=hardened / companion setup --run-mode hardened",
+        },
+      },
+      response: null,
+      warnings: [
+        "runMode=direct: --schema rejected fail-closed (no schema load/validation available)",
+      ],
+      policy: { direct: true },
+    };
+    return { code: 1, envelopeText: `${JSON.stringify(envelope)}\n` };
+  }
+
   const binary = resolveGrokBinary(env);
   const task = extractTask(args);
   if (!task.trim() && mode !== "preflight") {
@@ -333,7 +375,7 @@ export function runDirectGrok({
     "--permission-mode",
     "auto",
     "--tools",
-    toolsForMode(mode),
+    toolsAllowlist(mode, web),
     "--no-subagents",
     "--no-memory",
     "--no-plan",

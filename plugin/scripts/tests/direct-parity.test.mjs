@@ -155,6 +155,39 @@ test("runDirectGrok verify uses --worktree as cwd, not --target", () => {
   }
 });
 
+test("runDirectGrok appends web tools to the allowlist only when --web", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-webtools-"));
+  try {
+    const fakeGrok = path.join(dir, "fake-grok.sh");
+    // Echo the --tools allowlist the CLI received.
+    fs.writeFileSync(
+      fakeGrok,
+      `#!/bin/sh\nt=""\nwhile [ $# -gt 0 ]; do\n  if [ "$1" = "--tools" ]; then t="$2"; fi\n  shift\ndone\nprintf '{"result":"tools=%s"}\\n' "$t"\n`
+    );
+    fs.chmodSync(fakeGrok, 0o755);
+    const scriptsDir = path.resolve(SCRIPT_DIR, "..", "..", "wrapper", "scripts");
+    const call = (extra) =>
+      runDirectGrok({
+        mode: "reason",
+        args: ["--target", dir, "--task", "think", ...extra],
+        cwd: dir,
+        env: { ...process.env, GROK_AGENT_BINARY: fakeGrok },
+        scriptsDir,
+        python: "python3",
+      }).envelopeText;
+    // --web: the D-WEB tool set must be in the allowlist (else it runs ungrounded).
+    const withWeb = call(["--web"]);
+    for (const t of ["web_search", "web_fetch", "open_page", "open_page_with_find"]) {
+      assert.match(withWeb, new RegExp(t), `--web must allowlist ${t}: ${withWeb}`);
+    }
+    // No --web: web tools must NOT be present.
+    const noWeb = call([]);
+    assert.doesNotMatch(noWeb, /web_search/, noWeb);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runDirectGrok forwards --max-turns to the installed CLI", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-mt-"));
   try {
@@ -220,6 +253,29 @@ test("runDirectGrok honors --worktree only for verify, not for code (consent saf
     assert.doesNotMatch(call("code"), new RegExp(`cwd=${esc(path.resolve(repoB))}"`));
     // verify: --worktree honored -> cwd is B (the retained worktree to inspect).
     assert.match(call("verify"), new RegExp(`cwd=${esc(path.resolve(repoB))}`), "verify must run in --worktree");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runDirectGrok refuses --schema in direct mode (no unvalidated structured output)", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-schema-"));
+  try {
+    const scriptsDir = path.resolve(SCRIPT_DIR, "..", "..", "wrapper", "scripts");
+    for (const extra of [["--schema", "s.json"], ["--schema=s.json"]]) {
+      const res = runDirectGrok({
+        mode: "reason",
+        args: ["--target", dir, "--task", "answer", ...extra],
+        cwd: dir,
+        env: { ...process.env, GROK_AGENT_BINARY: "/bin/true" },
+        scriptsDir,
+        python: "python3",
+      });
+      assert.equal(res.code, 1, `must refuse ${extra.join(" ")}`);
+      const env = JSON.parse(res.envelopeText);
+      assert.equal(env.status, "failure");
+      assert.match(env.error?.message || "", /--schema/);
+    }
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
