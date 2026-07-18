@@ -61,6 +61,37 @@ def _log(function: str, message: str) -> None:
     log_stderr("modes._direct", function, message)
 
 
+def _assert_not_linked_worktree(repo_root: pathlib.Path) -> None:
+    """Refuse direct mode from a LINKED git worktree (or submodule), where ``.git``
+    is a FILE pointing at the common git dir.
+
+    Direct mode's protected snapshot/restore watches ``<repo>/.git`` on disk; in a
+    linked worktree the real config/refs/hooks live in the common dir, so a
+    ``.git`` write there could be detected but NOT rolled back. Fail closed and
+    point the operator at ``--integration worktree`` rather than risk a
+    non-restorable ``.git`` mutation.
+    """
+    git_path = repo_root / ".git"
+    try:
+        is_file = git_path.is_file()
+    except OSError as exc:
+        # Fail CLOSED (parity with _assert_state_root_outside_repo): if we cannot
+        # even stat .git, we cannot vouch for .git rollback safety.
+        raise GrokWrapperError(
+            "sandbox-failure",
+            "could not classify .git for direct mode: {}".format(exc),
+            {"repository": str(repo_root)},
+        ) from exc
+    if is_file:
+        raise GrokWrapperError(
+            "sandbox-failure",
+            "direct mode is not supported from a linked git worktree / submodule "
+            "(.git is a file, so protected .git rollback is not reliable); re-run "
+            "with --integration worktree",
+            {"repository": str(repo_root)},
+        )
+
+
 def _assert_state_root_outside_repo(repo_root: pathlib.Path) -> None:
     """Fail closed when the run state root is the target repo or nested inside it."""
     try:
@@ -213,6 +244,7 @@ def run_direct_mode(
         # the checkout would show up as Grok changes or leak prompt text into
         # commit-able state (mirrors the external-worktree nested-root guard).
         _assert_state_root_outside_repo(pathlib.Path(repository))
+        _assert_not_linked_worktree(pathlib.Path(repository))
         run_paths = runstate.create_run(mode)
         progress = ProgressWriter(run_paths.run_id, run_paths.progress_path)
         return _run_direct_mode_body(

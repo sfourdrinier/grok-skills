@@ -9,8 +9,9 @@
 
 import os
 import pathlib
+import stat
 import subprocess
-from typing import Any
+from typing import Any, Tuple
 
 from groklib import GrokWrapperError, log_stderr
 from groklib import grokcli
@@ -77,6 +78,51 @@ def spawn_acp_child(
             {"binary": str(binary)},
         ) from exc
     return proc
+
+
+def assert_start_parity(
+    *,
+    worktree: worktree_mod.ExternalWorktree,
+    home: PrivateHome,
+    tools: Tuple[str, ...],
+    web_access: bool,
+    policy: Any,
+) -> None:
+    """Fail closed before first prompt if code-mode start invariants are unmet."""
+    if policy is None or not getattr(policy, "profile", None):
+        raise GrokWrapperError(
+            "sandbox-failure",
+            "start parity: missing sandbox profile capability",
+        )
+    if not tools:
+        raise GrokWrapperError(
+            "tool-unavailable",
+            "start parity: tool allowlist is empty; refusing unpinned peer session",
+        )
+    # The cwd sentinel is NOT planted by the wrapper: a wrapper-planted sentinel
+    # makes the stop-time proof vacuous (it passes even if Grok never operated in
+    # the worktree). Instead Grok is instructed to create it as its mandatory
+    # first action on the first peer-prompt (see _handle_prompt), matching code
+    # mode, so the stop-time check is genuine evidence Grok ran in the worktree.
+    # No .env in the worktree (code-mode invariant).
+    for env_name in (".env", ".env.local"):
+        env_path = worktree.path / env_name
+        if env_path.exists() or env_path.is_symlink():
+            raise GrokWrapperError(
+                "validation-failure",
+                "start parity: {} must not be present in the peer worktree".format(env_name),
+                {"path": str(env_path)},
+            )
+    # Private home must exist and be 0700 on POSIX.
+    if not home.home_dir.is_dir():
+        raise GrokWrapperError("sandbox-failure", "start parity: private home missing")
+    if platformsupport.is_posix():
+        mode = stat.S_IMODE(home.home_dir.stat().st_mode)
+        if mode != 0o700:
+            raise GrokWrapperError(
+                "sandbox-failure",
+                "start parity: private home mode is {:o}, expected 0700".format(mode),
+            )
 
 
 def kill_recorded_child(doc: dict) -> None:

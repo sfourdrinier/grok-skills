@@ -70,11 +70,28 @@ test("parseDirtyStatusPaths: extracts modified/untracked/renamed paths", () => {
   assert.ok(set.has("renamed.js"));
 });
 
-test("parseNumstatPaths: extracts patch target paths incl. BOTH rename sides", () => {
+test("parseNumstatPaths: extracts patch target paths incl. BOTH rename sides + raw", () => {
   const numstat = "1\t0\tsrc/a.js\n-\t-\tbin.dat\n2\t1\t{old => new}/f.js\n0\t0\ta.js => b.js\n";
   const paths = parseNumstatPaths(numstat);
-  // Rename forms yield both the old and new path so a dirty `old` is caught.
-  assert.deepEqual(paths, ["src/a.js", "bin.dat", "old/f.js", "new/f.js", "a.js", "b.js"]);
+  // Ordinary paths appear once; rename-looking fields yield both sides AND the
+  // raw field (so a filename literally containing " => " is still checked).
+  assert.deepEqual(paths, [
+    "src/a.js",
+    "bin.dat",
+    "old/f.js",
+    "new/f.js",
+    "{old => new}/f.js",
+    "a.js",
+    "b.js",
+    "a.js => b.js",
+  ]);
+});
+
+test("parseNumstatPaths: a real filename containing ' => ' keeps its raw path", () => {
+  // git does NOT quote ` => ` in a path; the rename-split mis-parses it, but the
+  // raw field is retained so the dirty-overlap guard can still match it.
+  const paths = parseNumstatPaths("1\t0\tweird => name.txt\n");
+  assert.ok(paths.includes("weird => name.txt"), paths.join(","));
 });
 
 test("writeHandoffConsumedMarker: writes marker under the run dir", () => {

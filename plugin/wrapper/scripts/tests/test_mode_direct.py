@@ -472,6 +472,20 @@ class DirectPolicyAndCliTests(DirectModeHarness):
         with mock.patch("groklib.runstate.state_root", return_value=outside):
             _direct._assert_state_root_outside_repo(repo)  # must not raise
 
+    def test_linked_worktree_refused_for_direct(self) -> None:
+        from groklib.modes import _direct
+
+        linked = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(linked), ignore_errors=True)
+        (linked / ".git").write_text("gitdir: /common/.git/worktrees/x\n")  # .git is a FILE
+        with self.assertRaises(GrokWrapperError) as ctx:
+            _direct._assert_not_linked_worktree(linked)
+        self.assertEqual(ctx.exception.error_class, "sandbox-failure")
+        primary = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(primary), ignore_errors=True)
+        (primary / ".git").mkdir()  # primary worktree: .git is a dir
+        _direct._assert_not_linked_worktree(primary)  # must not raise
+
     def test_integration_worktree_routes_to_run_worktree_mode(self) -> None:
         repo = self.make_code_repo()
         called = {"worktree": False, "direct": False}

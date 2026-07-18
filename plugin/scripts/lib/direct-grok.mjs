@@ -84,7 +84,8 @@ function flagValue(args, name) {
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === name && args[i + 1] !== undefined) {
-      val = args[i + 1];
+      // Do not consume a following FLAG as the value (parity with parseTargetFlag).
+      val = String(args[i + 1]).startsWith("-") ? null : args[i + 1];
     } else if (typeof a === "string" && a.startsWith(eq)) {
       val = a.slice(eq.length);
     }
@@ -323,12 +324,22 @@ export function runDirectGrok({
   if (redacted) {
     return { code: ok ? 0 : 1, envelopeText: `${redacted}\n` };
   }
+  // Fail closed on EVERY field derived from untrusted Grok output: response.text
+  // AND error.message (built from grok stderr, which can echo a token). Emit a
+  // minimal envelope that carries no unredacted model/stderr text.
   const withheld = {
     ...envelope,
     response: { text: "[redaction-unavailable: response withheld under runMode=direct]" },
+    error: ok
+      ? null
+      : {
+          class: (envelope.error && envelope.error.class) || "tool-unavailable",
+          message: "[redaction-unavailable: error detail withheld under runMode=direct]",
+          detail: { exitCode: (envelope.error && envelope.error.detail && envelope.error.detail.exitCode) ?? null },
+        },
     warnings: [
       ...(envelope.warnings || []),
-      "runMode=direct: secret redaction could not run; response text withheld",
+      "runMode=direct: secret redaction could not run; response/error text withheld",
     ],
   };
   return { code: ok ? 0 : 1, envelopeText: `${JSON.stringify(withheld)}\n` };

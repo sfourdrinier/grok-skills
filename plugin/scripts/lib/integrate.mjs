@@ -120,8 +120,15 @@ export function parseNumstatPaths(numstatOutput) {
     if (!raw.trim()) continue;
     const parts = raw.split("\t"); // "<added>\t<deleted>\t<path>"
     if (parts.length < 3) continue;
-    for (const side of renamePathSides(parts.slice(2).join("\t"))) {
-      paths.push(unquoteGitPath(side));
+    const pathField = parts.slice(2).join("\t");
+    const sides = renamePathSides(pathField);
+    for (const side of sides) paths.push(unquoteGitPath(side));
+    // If the field LOOKED like a rename (split changed it), also keep the raw
+    // field: a real filename literally containing " => " / "{...}" (git does not
+    // quote those) would be mis-split, so the raw path keeps the dirty-overlap
+    // guard from failing open. No duplicate for ordinary paths.
+    if (sides.length !== 1 || sides[0] !== pathField) {
+      paths.push(unquoteGitPath(pathField));
     }
   }
   return paths;
@@ -392,14 +399,18 @@ export function maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stder
     stderrLine(`[grok-peer] patch missing for run ${runId}`);
     return { attempted: true, ok: false, outcome: "patch-missing" };
   }
-  const git = (a) => spawnSync("git", ["-C", repo, ...a], { encoding: "utf8" });
+  // Reuse the module git() helper (64 MB maxBuffer): the default 1 MB buffer
+  // would truncate a large `git status`/`--numstat`, making the dirty-overlap
+  // guard below see empty input and FAIL OPEN (apply anyway). Same helper the
+  // auto path uses.
+  const g = (a) => git(repo, a);
   // Dirty-overlap guard (same as the auto path): git apply --check can pass when
   // the patch touches an already-dirty file with non-conflicting hunks, silently
   // entangling Grok's changes with the operator's edits.
-  const preStatus = git(["status", "--short", "--untracked-files=all"]);
+  const preStatus = g(["status", "--short", "--untracked-files=all"]);
   const dirtyPaths = parseDirtyStatusPaths(preStatus.stdout || "");
-  const numstat = git(["apply", "--numstat", "--binary", patchPath]);
-  const patchPaths = numstat.status === 0 ? parseNumstatPaths(numstat.stdout || "") : [];
+  const numstat = g(["apply", "--numstat", "--binary", patchPath]);
+  const patchPaths = numstat.code === 0 ? parseNumstatPaths(numstat.stdout || "") : [];
   const overlap = patchPaths.filter((p) => dirtyPaths.has(p)).sort();
   if (overlap.length > 0) {
     stderrLine(
@@ -410,17 +421,17 @@ export function maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stder
   }
   // Peer-stop already ran real validation, so we do not re-run handoff; still
   // guard the apply with git apply --check (TOCTOU: the tree may have moved).
-  const check = git(["apply", "--check", "--binary", patchPath]);
-  if (check.status !== 0) {
+  const check = g(["apply", "--check", "--binary", patchPath]);
+  if (check.code !== 0) {
     stderrLine(`[grok-peer] git apply --check failed: ${(check.stderr || check.stdout || "").trim()}`);
     return { attempted: true, ok: false, outcome: "blocked-apply-check" };
   }
-  const apply = git(["apply", "--binary", patchPath]);
-  if (apply.status !== 0) {
+  const apply = g(["apply", "--binary", patchPath]);
+  if (apply.code !== 0) {
     const detail = (apply.stderr || apply.stdout || "").trim();
     // Never leave a half-applied tree: reverse (git apply -R) like the auto path.
-    const rev = git(["apply", "-R", "--binary", patchPath]);
-    if (rev.status === 0) {
+    const rev = g(["apply", "-R", "--binary", patchPath]);
+    if (rev.code === 0) {
       stderrLine(`[grok-peer] git apply failed; rolled back via -R: ${detail}`);
       return { attempted: true, ok: false, outcome: "rolled-back" };
     }

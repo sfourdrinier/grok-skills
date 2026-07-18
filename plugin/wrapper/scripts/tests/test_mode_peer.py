@@ -365,6 +365,36 @@ class PeerLifecycleTests(PeerTestBase):
         self.assertEqual(sent[1], "second turn")  # no directive/rules on later turns
         self.assertEqual(session.peer_doc["promptsHandled"], 2)
 
+    def test_first_prompt_fails_closed_on_unreadable_rules(self) -> None:
+        # A non-UTF-8 CLAUDE.md must fail the first peer prompt CLOSED
+        # (rules-parity-failure), not run Grok with zero governing rules.
+        from groklib.progress import ProgressWriter
+
+        wt = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(wt), ignore_errors=True)
+        (wt / "AGENTS.md").write_text("project rules\n", encoding="utf-8")
+        (wt / "CLAUDE.md").write_bytes(b"\xff\xfe not valid utf-8\n")
+        run_paths = runstate.create_run("peer-start")
+        session = peer_mod.PeerSession.__new__(peer_mod.PeerSession)
+        session._prompt_lock = threading.Lock()
+        session._prompt_in_flight = False
+        session.sentinel_name = ".grok-run-" + run_paths.run_id
+        session.worktree = mock.Mock(path=wt)
+        session.contract = None
+        session.run_id = run_paths.run_id
+        session.session_id = "s"
+        session.progress = ProgressWriter(run_paths.run_id, run_paths.progress_path)
+        session.run_paths = run_paths
+        session.model = "grok-4.5"
+        session.child = self.fake_child
+        session.peer_doc = {"lifecycle": "running", "child": {"pid": os.getpid()}}
+        session.renew_lease = mock.Mock()
+        session.acp = mock.Mock()  # must not be reached (discovery raises first)
+        with self.assertRaises(GrokWrapperError) as ctx:
+            peer_mod._handle_prompt(session, "task")
+        self.assertEqual(ctx.exception.error_class, "rules-parity-failure")
+        session.acp.session_prompt.assert_not_called()
+
     def test_control_socket_mode_0600_foreign_refused(self) -> None:
         if not platformsupport.is_posix():
             self.skipTest("unix socket 0600 is POSIX-only")

@@ -51,6 +51,7 @@ from groklib.modes import peer_control
 from groklib.modes.peer_process import (
     StartResources as _StartResources,
     abort_peer_start as _abort_peer_start,
+    assert_start_parity as _assert_start_parity,
     kill_recorded_child as _kill_recorded_child,
     spawn_acp_child as _spawn_acp_child,
 )
@@ -127,51 +128,6 @@ def source_grok_dir() -> pathlib.Path:
     return _shared.source_grok_dir()
 
 
-def _assert_start_parity(
-    *,
-    worktree: worktree_mod.ExternalWorktree,
-    home: PrivateHome,
-    tools: Tuple[str, ...],
-    web_access: bool,
-    policy: Any,
-) -> None:
-    """Fail closed before first prompt if code-mode start invariants are unmet."""
-    if policy is None or not getattr(policy, "profile", None):
-        raise GrokWrapperError(
-            "sandbox-failure",
-            "start parity: missing sandbox profile capability",
-        )
-    if not tools:
-        raise GrokWrapperError(
-            "tool-unavailable",
-            "start parity: tool allowlist is empty; refusing unpinned peer session",
-        )
-    # The cwd sentinel is NOT planted by the wrapper: a wrapper-planted sentinel
-    # makes the stop-time proof vacuous (it passes even if Grok never operated in
-    # the worktree). Instead Grok is instructed to create it as its mandatory
-    # first action on the first peer-prompt (see _handle_prompt), matching code
-    # mode, so the stop-time check is genuine evidence Grok ran in the worktree.
-    # No .env in the worktree (code-mode invariant).
-    for env_name in (".env", ".env.local"):
-        env_path = worktree.path / env_name
-        if env_path.exists() or env_path.is_symlink():
-            raise GrokWrapperError(
-                "validation-failure",
-                "start parity: {} must not be present in the peer worktree".format(env_name),
-                {"path": str(env_path)},
-            )
-    # Private home must exist and be 0700 on POSIX.
-    if not home.home_dir.is_dir():
-        raise GrokWrapperError("sandbox-failure", "start parity: private home missing")
-    if platformsupport.is_posix():
-        mode = stat.S_IMODE(home.home_dir.stat().st_mode)
-        if mode != 0o700:
-            raise GrokWrapperError(
-                "sandbox-failure",
-                "start parity: private home mode is {:o}, expected 0700".format(mode),
-            )
-
-
 def _extract_chunk_text(notification: dict) -> str:
     params = notification.get("params") or {}
     update = params.get("update") or {}
@@ -237,15 +193,30 @@ def _handle_prompt(session: PeerSession, task: str) -> dict:
             worktree_path = session.worktree.path
             target_rel = session.peer_doc.get("targetRelative") or ""
             target_abs = (worktree_path / target_rel) if target_rel else worktree_path
+            # Discover repo rules the SAME way AND with the SAME strictness as code
+            # mode (project ruleFileParity). Do NOT swallow errors: a
+            # RulesParityError (unreadable / non-UTF-8 rule file, or a strict-parity
+            # divergence) is a GrokWrapperError and propagates to the control
+            # handler as a rules-parity-failure turn envelope - failing the prompt
+            # CLOSED, instead of running Grok with zero governing rules (fail-open).
+            require_parity = bool(session.peer_doc.get("requireRuleFileParity", False))
             try:
                 instructions, rule_warnings = rules.discover_instruction_files_with_warnings(
-                    worktree_path, target_abs, require_parity=False
+                    worktree_path, target_abs, require_parity=require_parity
                 )
-                for warning in rule_warnings:
-                    session.progress.safe_emit("validate", warning)
+            except GrokWrapperError:
+                raise  # RulesParityError etc. -> control handler -> failure envelope
             except Exception as exc:
-                _log("_handle_prompt", "peer rule discovery failed: {}".format(exc))
-                instructions = []
+                # Any unexpected discovery error still fails the prompt CLOSED via a
+                # classified error, so it cannot run ruleless AND cannot crash the
+                # resident serving loop (which only catches GrokWrapperError).
+                raise GrokWrapperError(
+                    "validation-failure",
+                    "peer rule discovery failed: {}".format(exc),
+                    {"worktree": str(worktree_path)},
+                ) from exc
+            for warning in rule_warnings:
+                session.progress.safe_emit("validate", warning)
             parts = (
                 _sentinel_directive(session.sentinel_name)
                 + _contract_directive(session.contract)
@@ -642,6 +613,7 @@ def run_peer_start(args: argparse.Namespace) -> dict:
             "webAccess": web_access,
             "pristineScriptsCaptured": pristine_scripts is not None,
             "projectPackageManager": project_config.package_manager,
+        "requireRuleFileParity": bool(project_config.require_rule_file_parity),
         }
         runstate.write_json_atomic(run_paths.run_dir / "peer.json", peer_doc)
         runstate.write_peer_lease(
@@ -745,10 +717,17 @@ def run_peer_prompt(args: argparse.Namespace) -> dict:
         # terminalize under a FRESH run id in grok_agent.main, so callers and
         # /grok:jobs lose correlation exactly when they need to stop/clean up the
         # broken peer. Success prompts already carry the resident run id.
+        # Guard the error class: a remote control-plane error can carry an
+        # arbitrary `class`, and an unregistered one would make failure_envelope
+        # raise InvalidEnvelopeError (escaping this except and re-introducing the
+        # fresh-run-id bug). Fall back to acp-failure.
+        from groklib.envelope import ERROR_CLASSES
+
+        error_class = exc.error_class if exc.error_class in ERROR_CLASSES else "acp-failure"
         return failure_envelope(
             run_id=str(run_id),
             mode="peer-prompt",
-            error_class=exc.error_class,
+            error_class=error_class,
             message=str(exc),
             detail=dict(exc.detail or {}),
             progressStreamPath=None,

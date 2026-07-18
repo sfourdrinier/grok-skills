@@ -60,6 +60,34 @@ test("[4] runDirectGrok redacts secrets in the direct-mode envelope", () => {
   }
 });
 
+test("[4] direct fallback withholds error.message when redaction cannot run", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-failclosed-"));
+  try {
+    const secret = "sk-" + "SECRETSECRETSECRETSECRET0123456789";
+    const fakeGrok = path.join(dir, "fake-grok.sh");
+    // Emit the secret on STDERR and exit nonzero -> envelope.error.message = secret.
+    fs.writeFileSync(fakeGrok, `#!/bin/sh\nprintf '%s\\n' 'token ${secret} here' 1>&2\nexit 3\n`);
+    fs.chmodSync(fakeGrok, 0o755);
+    const scriptsDir = path.resolve(SCRIPT_DIR, "..", "..", "wrapper", "scripts");
+    const res = runDirectGrok({
+      mode: "code",
+      args: ["--target", dir, "--base", "HEAD", "--task", "x"],
+      cwd: dir,
+      env: { ...process.env, GROK_AGENT_BINARY: fakeGrok },
+      scriptsDir,
+      python: "/nonexistent-python-interpreter", // redaction cannot run -> fail closed
+    });
+    assert.doesNotMatch(
+      res.envelopeText,
+      new RegExp(secret),
+      `secret must be withheld from the fail-closed envelope: ${res.envelopeText}`
+    );
+    assert.match(res.envelopeText, /withheld/i);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("result resolves direct-<timestamp> runId via the job index", () => {
   assert.ok(DIRECT_RUN_ID_RE.test(DIRECT_ID));
   const cwd = tempCwd();

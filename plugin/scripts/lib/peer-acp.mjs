@@ -3,6 +3,9 @@
 // Experimental ACP peer channel companion helpers (gate + peer-start background).
 
 import { spawn } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import process from "node:process";
 
 import { wrapperChildEnv } from "./notify.mjs";
@@ -47,19 +50,43 @@ export function runPeerStartBackground(python, wrapper, args, {
       resolve(code);
     };
     let child;
+    // Resident stderr goes to a DURABLE LOG FILE, not a pipe and not /dev/null:
+    // the companion exits after the first running envelope, which would break a
+    // stderr pipe on a later resident write (log_stderr uses raw os.write ->
+    // could crash the peer); /dev/null would instead lose the diagnostics for a
+    // pre-envelope resident crash. A file fd survives the companion exit and
+    // stays inspectable. The parent closes its copy after spawn (child keeps its
+    // own dup); falls back to "ignore" if the log cannot be opened.
+    let errTarget = "ignore";
+    let errLogPath = null;
     try {
-      // Resident stderr is IGNORED (not a pipe): the companion resolves and
-      // exits after the first running envelope, which would close a stderr pipe;
-      // a later resident write (stop/finalize error handling via log_stderr's raw
-      // os.write) would then hit a broken pipe and could crash the peer instead
-      // of returning the control-socket result. Startup failures still surface
-      // via the one stdout envelope (status != running -> nonzero exit).
+      errLogPath = path.join(os.tmpdir(), `grok-peer-start-${process.pid}-${Date.now()}.log`);
+      errTarget = fs.openSync(errLogPath, "a");
+    } catch {
+      errTarget = "ignore";
+      errLogPath = null;
+    }
+    try {
       child = spawn(python, [wrapper, ...args], {
-        stdio: ["ignore", "pipe", "ignore"],
+        stdio: ["ignore", "pipe", errTarget],
         env: wrapperChildEnv(process.env),
         detached: true,
       });
+      if (typeof errTarget === "number") {
+        try {
+          fs.closeSync(errTarget);
+        } catch {
+          /* child holds its own dup of the fd */
+        }
+      }
     } catch (err) {
+      if (typeof errTarget === "number") {
+        try {
+          fs.closeSync(errTarget);
+        } catch {
+          /* ignore */
+        }
+      }
       process.stderr.write(spawnFailedMessage(wrapper, err.message));
       finish(spawnFailedExit);
       return;
@@ -107,6 +134,11 @@ export function runPeerStartBackground(python, wrapper, args, {
       if (settled) return;
       if (stdoutBuf.trim()) {
         process.stdout.write(stdoutBuf.endsWith("\n") ? stdoutBuf : `${stdoutBuf}\n`);
+      } else if (errLogPath) {
+        // Pre-envelope resident crash: point at the durable stderr log.
+        process.stderr.write(
+          `[grok-companion] peer-start produced no envelope; resident diagnostics: ${errLogPath}\n`
+        );
       }
       if (typeof code === "number") {
         finish(code);
