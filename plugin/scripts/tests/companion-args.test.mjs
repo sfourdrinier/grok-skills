@@ -2,7 +2,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { stripFlags } from "../lib/companion-args.mjs";
+import { hasFlagOrEquals, stripFlags } from "../lib/companion-args.mjs";
+
+test("hasFlagOrEquals matches split AND equals forms, not prefixes", () => {
+  assert.equal(hasFlagOrEquals(["review", "--target", "."], "--target"), true);
+  assert.equal(hasFlagOrEquals(["review", "--target=/repo"], "--target"), true);
+  assert.equal(hasFlagOrEquals(["review", "--schema=/s.json"], "--schema"), true);
+  assert.equal(hasFlagOrEquals(["review"], "--target"), false);
+  // Must NOT match a longer flag that merely shares the prefix.
+  assert.equal(hasFlagOrEquals(["--target-workspace=x"], "--target"), false);
+});
 
 test("stripFlags captures split AND equals forms of --base / --run-mode", () => {
   const split = stripFlags(["review", "--base", "main", "--run-mode", "direct"]);

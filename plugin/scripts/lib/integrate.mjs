@@ -332,7 +332,19 @@ export function applyVerifiedPatch({
   // file - block before apply (operator commits/stashes, then re-runs).
   const dirtyPaths = parseDirtyStatusPaths(preStatus.stdout);
   const numstat = git(targetRepo, ["apply", "--numstat", "--binary", patchPath]);
-  const patchPaths = numstat.code === 0 ? parseNumstatPaths(numstat.stdout) : [];
+  if (numstat.code !== 0) {
+    // Fail closed: without the patch's path list we cannot compute dirty overlap,
+    // and `git apply --check` alone can pass on a non-conflicting hunk in a dirty
+    // file. Do not apply blind.
+    stderrLine(`[grok-auto] BLOCKED: git apply --numstat failed; cannot verify dirty overlap`);
+    return {
+      ok: false,
+      outcome: "blocked-numstat",
+      reason: "numstat failed; cannot compute dirty overlap",
+      runId,
+    };
+  }
+  const patchPaths = parseNumstatPaths(numstat.stdout);
   const overlap = patchPaths.filter((p) => dirtyPaths.has(p)).sort();
   if (overlap.length > 0) {
     stderrLine(
@@ -544,7 +556,13 @@ export function maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stder
   const preStatus = g(["status", "--porcelain", "-z", "--untracked-files=all"]);
   const dirtyPaths = parseDirtyStatusPaths(preStatus.stdout || "");
   const numstat = g(["apply", "--numstat", "--binary", patchPath]);
-  const patchPaths = numstat.code === 0 ? parseNumstatPaths(numstat.stdout || "") : [];
+  if (numstat.code !== 0) {
+    // Fail closed (same as the auto path): no path list means no dirty-overlap
+    // check, and git apply --check alone can pass on a dirty file.
+    stderrLine("[grok-peer] BLOCKED: git apply --numstat failed; cannot verify dirty overlap");
+    return { attempted: true, ok: false, outcome: "blocked-numstat" };
+  }
+  const patchPaths = parseNumstatPaths(numstat.stdout || "");
   const overlap = patchPaths.filter((p) => dirtyPaths.has(p)).sort();
   if (overlap.length > 0) {
     stderrLine(

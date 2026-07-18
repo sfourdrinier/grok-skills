@@ -207,6 +207,28 @@ test("integratePeerStopFailClosed converts an apply-path throw into attempted+no
   assert.equal(peerStopExitCode(0, res), 1);
 });
 
+test("peer-stop: a malformed patch (numstat fails) blocks fail-closed", () => {
+  // If `git apply --numstat` fails we can't compute dirty overlap, and apply
+  // --check alone can pass on a dirty file -> must block, never apply blind.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-peer-int-numstat-"));
+  const repo = initRepo(path.join(root, "repo"));
+  const xdg = path.join(root, "xdg");
+  stagePatch(xdg, RUN_ID, "this is not a valid git patch\n"); // manifest matches this body
+  const lines = [];
+  try {
+    const res = withXdg(xdg, () =>
+      maybeIntegratePeerStop(peerStopEnvelope(repo), repo, "auto", ["--target", repo], (l) =>
+        lines.push(l)
+      )
+    );
+    assert.equal(res.outcome, "blocked-numstat");
+    assert.equal(res.ok, false);
+    assert.equal(fs.readFileSync(path.join(repo, "foo.txt"), "utf8"), "hello\n");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("peer-stop: a patch tampered after validation is refused (integrity check)", () => {
   // The manifest records the ORIGINAL sha/bytes; if the patch on disk is swapped
   // after peer-stop validation, the companion apply must fail closed, not apply.

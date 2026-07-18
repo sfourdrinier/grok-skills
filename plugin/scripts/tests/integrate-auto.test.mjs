@@ -258,6 +258,34 @@ test("auto happy path: applies ready patch to real temp target; exit 0", () => {
   }
 });
 
+test("auto: a malformed (non-JSON) handoff envelope yields a FAILURE stdout envelope, not code-success", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-auto-badhandoff-"));
+  const repo = initTargetRepo(path.join(root, "repo"));
+  const xdg = path.join(root, "xdg");
+  stagePatch(xdg, RUN_ID, capturePatchAndRestore(repo));
+  const callsPath = path.join(root, "calls.log");
+  const { env, cleanup } = makeFakeWrapper({
+    code: { stdout: `${codeEnvelope()}\n`, exitCode: 0 },
+    handoff: { stdout: "not json at all\n", exitCode: 0 }, // unparseable
+  });
+  try {
+    const res = runCompanion(
+      ["code", "--integration", "auto", "--target", ".", "--base", "HEAD", "--task", "x"],
+      { cwd: repo, env: companionEnv(env, root, xdg, callsPath) }
+    );
+    assert.equal(res.code, 1, `stderr: ${res.stderr}`);
+    const envLines = res.stdout.split("\n").filter((l) => l.trim().startsWith("{"));
+    assert.equal(envLines.length, 1, `one envelope; got: ${res.stdout}`);
+    const finalEnv = JSON.parse(envLines[0]);
+    // Must NOT report the code leg's success; must be an honest failure.
+    assert.equal(finalEnv.status, "failure", res.stdout);
+    assert.equal(finalEnv.mode, "code");
+  } finally {
+    cleanup();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("auto not-ready: no apply; target unchanged; exit 1", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-auto-notready-"));
   const repo = initTargetRepo(path.join(root, "repo"));

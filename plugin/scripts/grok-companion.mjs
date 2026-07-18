@@ -63,7 +63,7 @@ import {
   writeDirectNoHandoffRefuse,
 } from "./lib/direct-grok.mjs";
 import { runAutoIntegrate, runImplementCombo } from "./lib/implement.mjs";
-import { stripFlags } from "./lib/companion-args.mjs";
+import { hasFlagOrEquals, stripFlags } from "./lib/companion-args.mjs";
 import { renderEnvelopePretty, tryParseEnvelope } from "./lib/render.mjs";
 import { terminateReviewTree } from "./lib/gate-kill.mjs";
 import {
@@ -110,14 +110,14 @@ function spawnFailedMessage(wrapper, detail) {
   );
 }
 function ensureTarget(args, cwd) {
-  if (args.includes("--target") || args.includes("--worktree")) {
+  if (hasFlagOrEquals(args, "--target") || hasFlagOrEquals(args, "--worktree")) {
     return { args, cleanup: null };
   }
   const { target } = defaultReviewTarget(cwd);
   return { args: [...args, "--target", target], cleanup: null };
 }
 function maybeSchema(args) {
-  if (args.includes("--schema")) {
+  if (hasFlagOrEquals(args, "--schema")) {
     return args;
   }
   if (fs.existsSync(REVIEW_SCHEMA)) {
@@ -466,7 +466,7 @@ function cmdCancel(cwd, args) {
 function cmdSetup(cwd, args) {
   return setupCmd(cwd, args, { python: PYTHON, pluginRoot: PLUGIN_ROOT });
 }
-function prepareReviewishArgs(mode, args, cwd, base) {
+function prepareReviewishArgs(mode, args, cwd, base, runMode) {
   let next = [...args];
   // map adversarial-review -> review for wrapper
   if (mode === "adversarial-review") {
@@ -481,7 +481,7 @@ function prepareReviewishArgs(mode, args, cwd, base) {
     if (!hasFlag(next, "--web") && !hasFlag(next, "--no-web")) {
       next.push("--web");
     }
-    next = maybeSchema(next);
+    if (runMode !== "direct") next = maybeSchema(next); // direct refuses --schema
   } else if (mode === "review") {
     if (base) {
       userTask = buildBranchReviewTask(base, userTask);
@@ -666,7 +666,7 @@ async function dispatch({
   let extraCleanup = null;
   let wrapperMode = mode;
   if (mode === "adversarial-review" || mode === "review") {
-    const prepared = prepareReviewishArgs(mode, forwardedArgs, cwd, baseRef);
+    const prepared = prepareReviewishArgs(mode, forwardedArgs, cwd, baseRef, runMode);
     wrapperArgs = prepared.args;
     extraCleanup = prepared.cleanup;
     wrapperMode = prepared.wrapperMode;

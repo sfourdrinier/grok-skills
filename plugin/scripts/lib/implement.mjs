@@ -335,9 +335,27 @@ export async function runAutoIntegrate(wrapper, rest, runMode, track, {
   // the apply outcome). Falls back to the captured code envelope when there was no
   // runId (nothing to hand off).
   const finalEnvelope = buildAutoFinalEnvelope(result, finalCode, applied);
-  const finalEnvelopeText = finalEnvelope
-    ? `${JSON.stringify(finalEnvelope)}\n`
-    : result.codeStdout || "";
+  let finalEnvelopeText;
+  if (finalEnvelope) {
+    finalEnvelopeText = `${JSON.stringify(finalEnvelope)}\n`;
+  } else {
+    // No handoff envelope (no runId / handoff crashed or returned non-JSON) but
+    // finalCode is nonzero: emit an HONEST failure envelope, not the code-leg
+    // success stdout, so a consumer keying on status never sees success for an
+    // auto run that never applied. Carry the code envelope's fields (runId/error).
+    const ce =
+      result.codeEnvelope && typeof result.codeEnvelope === "object" ? result.codeEnvelope : {};
+    finalEnvelopeText = `${JSON.stringify({
+      ...ce,
+      schemaVersion: ce.schemaVersion || 1,
+      mode: "code",
+      status: "failure",
+      response: {
+        ...(ce.response || {}),
+        integration: { ready: false, applied: false, outcome: "not-ready" },
+      },
+    })}\n`;
+  }
   if (finalEnvelopeText) {
     process.stdout.write(
       finalEnvelopeText.endsWith("\n") ? finalEnvelopeText : `${finalEnvelopeText}\n`

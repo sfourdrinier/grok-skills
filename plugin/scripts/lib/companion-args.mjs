@@ -3,6 +3,13 @@
 // Pure argv flag-stripping for the companion entrypoint (extracted to keep
 // grok-companion.mjs under the 900-line cap).
 
+/** True if `args` contains `name` in split (`--x`) OR equals (`--x=v`) form.
+ *  Presence check parity with the wrapper's argparse (which accepts both). */
+export function hasFlagOrEquals(args, name) {
+  const eq = name + "=";
+  return args.some((a) => a === name || (typeof a === "string" && a.startsWith(eq)));
+}
+
 export function stripFlags(args) {
   const out = [];
   let pretty = false;

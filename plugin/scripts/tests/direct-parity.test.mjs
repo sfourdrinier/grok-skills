@@ -20,6 +20,7 @@ import {
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 import {
   createJob,
+  setRunMode,
   storeJobStdout,
   updateJob,
 } from "../lib/jobs.mjs";
@@ -255,6 +256,34 @@ test("runDirectGrok honors --worktree only for verify, not for code (consent saf
     assert.match(call("verify"), new RegExp(`cwd=${esc(path.resolve(repoB))}`), "verify must run in --worktree");
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("default adversarial-review in a direct workspace is NOT broken by the --schema refusal", () => {
+  // Regression: prepareReviewishArgs auto-injects the default findings schema; under
+  // runMode=direct that must be SKIPPED, or the new --schema refusal rejects every
+  // default `/grok:adversarial-review` even though the user passed no --schema.
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-arev-direct-"));
+  const pluginData = path.join(cwd, "pdata");
+  setRunMode(cwd, "direct", { CLAUDE_PLUGIN_DATA: pluginData });
+  const fakeGrok = path.join(cwd, "fake-grok.sh");
+  fs.writeFileSync(fakeGrok, `#!/bin/sh\nprintf '%s\\n' '{"result":"reviewed"}'\n`);
+  fs.chmodSync(fakeGrok, 0o755);
+  try {
+    const res = runCompanion(["adversarial-review", "--target", "."], {
+      cwd,
+      env: {
+        CLAUDE_PLUGIN_DATA: pluginData,
+        GROK_AGENT_BINARY: fakeGrok,
+        GROK_COMPANION_EXECUTION_CONTEXT: "foreground",
+      },
+    });
+    const all = `${res.stdout}\n${res.stderr}`;
+    assert.doesNotMatch(all, /--schema requires hardened/, `must not refuse: ${all}`);
+    assert.equal(res.code, 0, `direct adversarial-review should run; ${all}`);
+    assert.match(res.stdout, /reviewed/, "the installed CLI actually ran");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
   }
 });
 
