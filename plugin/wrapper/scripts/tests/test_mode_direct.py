@@ -11,6 +11,7 @@ import io
 import json
 import os
 import pathlib
+import shutil
 import tempfile
 from typing import Callable, Dict, List, Optional
 from unittest import mock
@@ -45,9 +46,11 @@ class DirectModeHarness(WorktreeModeHarness):
     ):
         """Like WorktreeModeHarness.drive but no worktree inject; plant targets repo_root."""
         argv = list(argv)
-        if "--integration" not in argv:
-            # Keep explicit direct (or default) - never inject worktree.
-            pass
+        if "--integration" not in argv and not any(a.startswith("--integration=") for a in argv):
+            # This is the DIRECT harness: make direct explicit (the wrapper's own
+            # bare-call default is now the safe worktree; the product's direct
+            # default is applied by the companion, which always passes the flag).
+            argv = argv + ["--integration", "direct"]
         if sandbox_profile is None:
             sandbox_profile = sandbox_mod.custom_profile_name("direct")
         real_create = _direct.create_private_home
@@ -444,13 +447,30 @@ class DirectPolicyAndCliTests(DirectModeHarness):
             sandbox_mod.policy_for_mode("direct", worktree=None, private_tmp=private_tmp)
         self.assertEqual(caught.exception.error_class, "usage-error")
 
-    def test_code_integration_defaults_to_direct(self) -> None:
+    def test_code_bare_wrapper_call_defaults_to_worktree(self) -> None:
+        # The wrapper's bare-call default is the SAFE worktree so an un-consented
+        # direct wrapper call cannot silently edit the live tree; the product's
+        # direct default is applied by the companion, which always passes the flag.
         parser = grok_agent._build_parser()
         args = parser.parse_args(
             ["code", "--target", "pkg", "--base", "HEAD", "--task", "x"]
         )
-        self.assertEqual(args.integration, "direct")
+        self.assertEqual(args.integration, "worktree")
         self.assertFalse(args.force)
+
+    def test_state_root_inside_repo_fails_closed(self) -> None:
+        from groklib.modes import _direct
+
+        repo = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(repo), ignore_errors=True)
+        with mock.patch("groklib.runstate.state_root", return_value=repo / ".state"):
+            with self.assertRaises(GrokWrapperError) as ctx:
+                _direct._assert_state_root_outside_repo(repo)
+        self.assertEqual(ctx.exception.error_class, "sandbox-failure")
+        outside = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(outside), ignore_errors=True)
+        with mock.patch("groklib.runstate.state_root", return_value=outside):
+            _direct._assert_state_root_outside_repo(repo)  # must not raise
 
     def test_integration_worktree_routes_to_run_worktree_mode(self) -> None:
         repo = self.make_code_repo()

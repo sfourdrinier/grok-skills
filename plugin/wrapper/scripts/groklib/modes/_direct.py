@@ -61,6 +61,28 @@ def _log(function: str, message: str) -> None:
     log_stderr("modes._direct", function, message)
 
 
+def _assert_state_root_outside_repo(repo_root: pathlib.Path) -> None:
+    """Fail closed when the run state root is the target repo or nested inside it."""
+    try:
+        repo = repo_root.resolve()
+        state = runstate.state_root().resolve()
+    except OSError as exc:
+        raise GrokWrapperError(
+            "sandbox-failure",
+            "could not resolve state root vs repository: {}".format(exc),
+        ) from exc
+    try:
+        state.relative_to(repo)
+    except ValueError:
+        return  # state root is outside the repo (expected)
+    raise GrokWrapperError(
+        "sandbox-failure",
+        "direct-mode run state root is inside the target repository; set "
+        "XDG_STATE_HOME to a path outside the checkout",
+        {"stateRoot": str(state), "repository": str(repo)},
+    )
+
+
 @dataclasses.dataclass(frozen=True)
 class DirectPrep:
     """What ``prepare`` returns once the prompt is built (no worktree)."""
@@ -185,6 +207,12 @@ def run_direct_mode(
     run_paths: Optional[runstate.RunPaths] = None
     progress: Optional[ProgressWriter] = None
     try:
+        # Fail closed BEFORE creating the run dir when the state root is nested
+        # inside the target repo (e.g. XDG_STATE_HOME=$PWD/.state): direct mode
+        # edits the live tree, so run prompt/progress/envelope files landing in
+        # the checkout would show up as Grok changes or leak prompt text into
+        # commit-able state (mirrors the external-worktree nested-root guard).
+        _assert_state_root_outside_repo(pathlib.Path(repository))
         run_paths = runstate.create_run(mode)
         progress = ProgressWriter(run_paths.run_id, run_paths.progress_path)
         return _run_direct_mode_body(

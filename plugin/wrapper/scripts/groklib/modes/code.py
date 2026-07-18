@@ -615,7 +615,9 @@ def run(args: argparse.Namespace) -> dict:
     always uses the worktree lineage (continuation reuses a retained worktree).
     """
     continue_id = _validate_code_cli_shape(args)
-    integration = getattr(args, "integration", None) or "direct"
+    # Bare wrapper default is the SAFE worktree; the companion passes explicit
+    # --integration direct after its per-repo consent gate (product direct-default).
+    integration = getattr(args, "integration", None) or "worktree"
     if continue_id is None and integration == "direct":
         from groklib.modes.direct import run as run_direct
 
