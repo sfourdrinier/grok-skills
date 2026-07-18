@@ -98,7 +98,10 @@ GROK_CONTRACT
 
 Then add `--contract-file "$CONTRACT_FILE"` to peer start (or code). Rules:
 
-- `target` must equal `--target` exactly (the wrapper rejects mismatches).
+- `target` must be the **repo-relative** target (`.` or a subpath like `pkg`); if
+  `--target` is an absolute path, use the path relative to the repo root, NOT the
+  raw flag value (the wrapper compares against the derived repo-relative target
+  and rejects mismatches).
 - Scope paths are repo-relative, no `..`, no absolute paths.
 - `requiredValidation` argv is **shell-free** (canonical:
   `plugin/references/argv-safety.md`): no globs, no directory shorthands, no

@@ -188,16 +188,22 @@ function captureAndTrack(
     }
   }
   const code = typeof result.status === "number" ? result.status : SIGNAL_EXIT;
+  // onStdout may return an integration-aware effective code (e.g. peer-stop
+  // whose apply failed after a wrapper exit 0). Finalize the JOB on that code so
+  // /grok:jobs and /grok:result don't show a "successful" peer-stop whose patch
+  // was never applied.
+  let effectiveCode = code;
   if (typeof onStdout === "function") {
     try {
-      onStdout(stdout, code);
+      const hookCode = onStdout(stdout, code);
+      if (typeof hookCode === "number") effectiveCode = hookCode;
     } catch (err) {
       stderrLine(`[grok-companion] onStdout hook failed: ${err.message}`);
     }
   }
   const updated = updateJob(cwd, job.id, {
-    status: code === 0 ? "success" : "failure",
-    summary: code === 0 ? "completed" : `exit ${code}`,
+    status: effectiveCode === 0 ? "success" : "failure",
+    summary: effectiveCode === 0 ? "completed" : `exit ${effectiveCode}`,
     pid: null,
   });
   if (!shouldAttemptTerminalNotify({ skipNotify })) {
@@ -814,7 +820,12 @@ async function dispatch({
         onStdout:
           wrapperMode === "peer-stop"
             ? (stdout, code) => {
-                if (code === 0) peerIntegration = maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stderrLine);
+                if (code === 0) {
+                  peerIntegration = maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stderrLine);
+                }
+                // Feed the integration-aware exit back so the JOB status reflects
+                // an apply that failed after the wrapper's zero exit.
+                return peerStopExitCode(code, peerIntegration);
               }
             : null,
       })

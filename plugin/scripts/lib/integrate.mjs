@@ -368,13 +368,23 @@ export function maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stder
     env?.response?.integration?.ready === true;
   if (!ready || env?.status !== "success") return { attempted: false, ok: true, outcome: "not-ready" };
   const repo = env?.repository;
-  // Consent/mode gate on the repo the patch is ACTUALLY applied to (env.repository
-  // for the peer that was started), not process.cwd(): peer-stop's documented
-  // form has no --target, so a stop from repo A must not read A's consent/mode
-  // to authorize an apply to repo B (review).
-  const tWs = hasTargetFlag(rest)
-    ? resolveTargetWorkspaceRoot(cwd, parseTargetFlag(rest))
-    : resolveTargetWorkspaceRoot(cwd, repo || env?.targetWorkspace || ".");
+  // SECURITY: the peer patch belongs to env.repository and is ALWAYS applied there
+  // (git(repo, ...) below). Consent/mode MUST be gated on THAT repo, never on a
+  // supplied --target - otherwise a --target naming repo A (which the operator has
+  // consented) could authorize applying the patch to repo B from the envelope
+  // (consent laundering / cross-repo apply). The documented peer-stop form has no
+  // --target; if one is given it must resolve to the SAME repo, else refuse.
+  const tWs = resolveTargetWorkspaceRoot(cwd, repo || env?.targetWorkspace || ".");
+  if (hasTargetFlag(rest)) {
+    const targetWs = resolveTargetWorkspaceRoot(cwd, parseTargetFlag(rest));
+    if (path.resolve(targetWs) !== path.resolve(tWs)) {
+      stderrLine(
+        `[grok-peer] --target ${JSON.stringify(parseTargetFlag(rest))} does not resolve to the ` +
+          `peer repository ${JSON.stringify(repo)}; refusing (peer-stop applies to the peer's own repo)`
+      );
+      return { attempted: true, ok: false, outcome: "target-mismatch" };
+    }
+  }
   const mode =
     integrationFlag != null && String(integrationFlag).trim() !== ""
       ? parseIntegrationMode(integrationFlag)

@@ -174,3 +174,36 @@ test("peer-stop review: retains patch, does not apply", () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("peer-stop: --target that differs from the peer repo is refused (no cross-repo apply)", () => {
+  // SECURITY: consent for repo A (named via --target) must NOT authorize applying
+  // the peer patch to repo B (the envelope repository). The patch belongs to the
+  // peer's own repo, so a mismatched --target fails closed and nothing is applied.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-peer-int-xrepo-"));
+  const repoA = initRepo(path.join(root, "repoA")); // consented, named via --target
+  const repoB = initRepo(path.join(root, "repoB")); // the peer's actual repo
+  const xdg = path.join(root, "xdg");
+  stagePatch(xdg, RUN_ID, capturePatch(repoB));
+  const lines = [];
+  try {
+    // --target names repoA but the envelope repository is repoB. The mismatch is
+    // caught BEFORE any consent lookup, so even a consented repoA cannot launder
+    // an apply onto repoB: it fails closed with no apply.
+    const res = withXdg(xdg, () =>
+      maybeIntegratePeerStop(peerStopEnvelope(repoB), repoA, "direct", ["--target", repoA], (l) =>
+        lines.push(l)
+      )
+    );
+    assert.equal(res.outcome, "target-mismatch");
+    assert.equal(res.attempted, true);
+    assert.equal(res.ok, false);
+    assert.equal(peerStopExitCode(0, res), 1);
+    assert.equal(
+      fs.readFileSync(path.join(repoB, "foo.txt"), "utf8"),
+      "hello\n",
+      "repoB (the peer repo) must be untouched"
+    );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

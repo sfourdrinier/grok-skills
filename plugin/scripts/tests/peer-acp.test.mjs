@@ -15,6 +15,7 @@ import {
   runCompanion,
 } from "./helpers/fake-wrapper.mjs";
 import { runPeerStartBackground } from "../lib/peer-acp.mjs";
+import { listJobs } from "../lib/jobs.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const COMPANION = path.resolve(SCRIPT_DIR, "..", "grok-companion.mjs");
@@ -251,6 +252,74 @@ test("peer-stop ready + integration=auto applies patch to target repo", () => {
     assert.match(res.stderr || "", /applied/i);
     const body = fs.readFileSync(path.join(target, "hello.txt"), "utf8");
     assert.equal(body, "new\n", "auto must apply the verified patch");
+  } finally {
+    cleanup();
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("peer-stop job is marked FAILED when the apply is blocked (job-status honesty)", () => {
+  // A ready peer-stop whose apply is refused (direct integration, no consent)
+  // must NOT leave /grok:jobs showing the job as successful.
+  const rid = "20260717T120000Z-abc199";
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "grok-peer-jobfail-"));
+  const target = path.join(tmp, "target");
+  const state = path.join(tmp, "state");
+  const pluginData = path.join(tmp, "pdata");
+  fs.mkdirSync(target, { recursive: true });
+  fs.mkdirSync(path.join(state, "grok-skills", "runs", rid, "artifacts"), { recursive: true });
+  const git = (args) => spawnSync("git", ["-C", target, ...args], { encoding: "utf8" });
+  git(["init", "-q"]);
+  git(["config", "user.name", "t"]);
+  git(["config", "user.email", "t@example.com"]);
+  git(["config", "commit.gpgsign", "false"]);
+  fs.writeFileSync(path.join(target, "hello.txt"), "old\n", "utf8");
+  git(["add", "hello.txt"]);
+  git(["commit", "-q", "-m", "base"]);
+  const work = path.join(tmp, "work");
+  spawnSync("git", ["clone", "-q", target, work], { encoding: "utf8" });
+  fs.writeFileSync(path.join(work, "hello.txt"), "new\n", "utf8");
+  const diff = spawnSync("git", ["-C", work, "diff", "--binary", "HEAD", "--", "hello.txt"], {
+    encoding: "utf8",
+  });
+  fs.writeFileSync(
+    path.join(state, "grok-skills", "runs", rid, "artifacts", "implementation.patch"),
+    diff.stdout,
+    "utf8"
+  );
+  const envelope = {
+    schemaVersion: 1,
+    mode: "peer-stop",
+    status: "success",
+    runId: rid,
+    repository: target,
+    targetWorkspace: ".",
+    response: { peer: { integrationReady: true }, integration: { ready: true, blockers: [] } },
+  };
+  const { env, cleanup } = makeFakeWrapper({
+    "peer-stop": { stdout: `${JSON.stringify(envelope)}\n`, exitCode: 0 },
+  });
+  try {
+    const runEnv = {
+      ...env,
+      XDG_STATE_HOME: state,
+      CLAUDE_PLUGIN_DATA: pluginData,
+      GROK_DISABLE_ACP: "",
+    };
+    // direct integration with NO recorded consent -> apply blocked (consent-required).
+    const res = runCompanion(["peer-stop", "--run-id", rid, "--integration", "direct"], {
+      env: runEnv,
+      cwd: target,
+    });
+    assert.equal(res.code, 1, `blocked apply must exit nonzero; stderr: ${res.stderr}`);
+    assert.equal(
+      fs.readFileSync(path.join(target, "hello.txt"), "utf8"),
+      "old\n",
+      "target must be untouched (no apply)"
+    );
+    const jobs = listJobs(target, { CLAUDE_PLUGIN_DATA: pluginData, XDG_STATE_HOME: state });
+    assert.ok(jobs.length >= 1, "a peer-stop job was recorded");
+    assert.equal(jobs[0].status, "failure", "the peer-stop job must be marked failed");
   } finally {
     cleanup();
     fs.rmSync(tmp, { recursive: true, force: true });

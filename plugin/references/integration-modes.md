@@ -42,8 +42,13 @@ Under **runMode hardened** (the security default), `integration=direct` is
   session store for the child)
 - **OS sandbox** write-confined to the **repo root** (+ private tmp)
 - **Secret redaction** on the single stdout envelope
-- **Protected paths** (`.git/**`, `.env` / `.env.*`, keys, hooks): deny-scan +
-  **post-run rollback** if touched (best-effort; not seatbelt subpath deny)
+- **Protected paths**: deny-scan + **post-run rollback** if touched (best-effort;
+  not seatbelt subpath deny). Covered: `.env` / `.env.*`, keys / `.netrc` /
+  `.npmrc` / `.envrc`, and the sensitive `.git` subset `config`, `HEAD`,
+  `packed-refs`, `hooks/**`, `refs/**` (a moved/created ref is reverted/removed).
+  **NOT covered:** `.git/index`, `.git/COMMIT_EDITMSG`, and loose `.git/objects`
+  (benign working state git rewrites on ordinary reads; loose objects are inert
+  until a guarded ref points at them)
 - **Source edits land live** - no worktree isolation, no pre-apply dual-condition
   gate, no forensic patch required for the edit to exist
 - **One-time setup consent** per target repo before the first direct run
