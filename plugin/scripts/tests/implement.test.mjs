@@ -11,7 +11,7 @@ import { test } from "node:test";
 
 import { DIRECT_NO_HANDOFF_MSG } from "../lib/direct-grok.mjs";
 import { setRunMode } from "../lib/jobs.mjs";
-import { runImplementCombo } from "../lib/implement.mjs";
+import { runImplementCombo, runHandoffCaptured } from "../lib/implement.mjs";
 import { makeFakeWrapper, readCalls, runCompanion } from "./helpers/fake-wrapper.mjs";
 
 const RUN_ID = "20260716T000000Z-abc123";
@@ -298,6 +298,71 @@ test("implement refuses in direct run-mode", () => {
       !res.stderr.includes("[fake-wrapper] unregistered mode"),
       "direct refuse must happen before any wrapper spawn"
     );
+  } finally {
+    cleanup();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+// Auto's apply-time revalidation reuses runHandoffCaptured only to re-check
+// readiness; it must NOT relay a second stdout envelope after the initial
+// handoff already emitted (one-stdout-envelope contract).
+test("runHandoffCaptured silent: parses envelope but does not relay stdout", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-handoff-silent-"));
+  const wrapper = path.join(dir, "grok_agent.py");
+  const envJson = handoffEnvelope(true);
+  fs.writeFileSync(
+    wrapper,
+    `import sys\nsys.stdout.write(${JSON.stringify(envJson)} + "\\n")\nsys.exit(0)\n`,
+    { mode: 0o600 }
+  );
+  const writes = [];
+  const orig = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (s, enc, cb) => {
+    writes.push(String(s));
+    if (typeof enc === "function") enc();
+    else if (typeof cb === "function") cb();
+    return true;
+  };
+  let silent;
+  let afterSilent;
+  let loud;
+  try {
+    silent = runHandoffCaptured(wrapper, ["handoff", "--run-id", RUN_ID], { silent: true });
+    afterSilent = writes.length;
+    loud = runHandoffCaptured(wrapper, ["handoff", "--run-id", RUN_ID]);
+  } finally {
+    process.stdout.write = orig;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+  // Silent: envelope captured, NOTHING written to stdout.
+  assert.equal(silent.code, 0);
+  assert.equal(silent.envelope?.response?.integration?.ready, true);
+  assert.equal(afterSilent, 0, "silent capture must not relay to stdout");
+  // Default (non-silent): still relays, proving the option is what gates it.
+  assert.equal(loud.code, 0);
+  assert.ok(writes.join("").includes('"handoff"'), "default must relay stdout");
+});
+
+// continue-run is worktree-only in the wrapper (retained lineage); a direct-mode
+// workspace pref must NOT reroute it to runDirectGrok's live-tree edit.
+test("continue-run in a direct workspace uses the wrapper, never runDirectGrok", () => {
+  const cwd = tempCwd();
+  const pluginData = path.join(cwd, "pdata");
+  setRunMode(cwd, "direct", { CLAUDE_PLUGIN_DATA: pluginData });
+  const callsPath = path.join(cwd, "calls.log");
+  const { env, cleanup } = makeFakeWrapper({
+    code: { stdout: `${codeEnvelope()}\n`, exitCode: 0 },
+  });
+  try {
+    const res = runCompanion(["code", "--continue-run", RUN_ID], {
+      cwd,
+      env: companionEnv(env, cwd, callsPath),
+    });
+    // The hardened fake wrapper WAS invoked -> continuation took the wrapper path,
+    // not runDirectGrok (which would never call the fake wrapper).
+    assert.deepEqual(readCalls(callsPath), ["code"], `stderr: ${res.stderr}`);
+    assert.equal(res.code, 0, `stderr: ${res.stderr}`);
   } finally {
     cleanup();
     fs.rmSync(cwd, { recursive: true, force: true });

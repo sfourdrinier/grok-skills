@@ -13,7 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 
-import { maybeIntegratePeerStop } from "../lib/integrate.mjs";
+import { maybeIntegratePeerStop, peerStopExitCode } from "../lib/integrate.mjs";
 
 const RUN_ID = "20260717T130000Z-abc123";
 
@@ -137,6 +137,11 @@ test("peer-stop auto: consent gate keys on the peer's repository, not cwd", () =
       maybeIntegratePeerStop(peerStopEnvelope(repoB), repoA, "direct", [], (l) => lines.push(l))
     );
     assert.equal(res.outcome, "consent-required");
+    // Fail closed: a requested-but-blocked direct apply is attempted+not-ok, so
+    // peerStopExitCode surfaces a nonzero exit rather than the wrapper's 0.
+    assert.equal(res.attempted, true);
+    assert.equal(res.ok, false);
+    assert.equal(peerStopExitCode(0, res), 1);
     assert.equal(
       fs.readFileSync(path.join(repoB, "foo.txt"), "utf8"),
       "hello\n",

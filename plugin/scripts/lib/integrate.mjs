@@ -387,7 +387,13 @@ export function maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stder
   }
   if (mode === "direct" && !getIntegrationConsent(tWs)) {
     stderrLine(formatDirectIntegrationConsentMsg({ targetWorkspace: tWs, companionCwd: cwd }));
-    return { attempted: false, ok: true, outcome: "consent-required" };
+    // Fail closed: direct was the REQUESTED integration but consent blocked the
+    // apply. Unlike worktree/review (retained by design), returning ok:true here
+    // would let peerStopExitCode preserve the wrapper's 0 exit, so the command
+    // would look successful while the verified patch was never applied. Mark it
+    // an attempted-but-failed integration so callers see a nonzero exit, parity
+    // with the code/direct consent gate.
+    return { attempted: true, ok: false, outcome: "consent-required" };
   }
   const runId = sanitizeRunId(env?.runId);
   if (!runId || typeof repo !== "string" || !repo) {

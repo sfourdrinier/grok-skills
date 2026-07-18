@@ -61,7 +61,13 @@ export function runPeerStartBackground(python, wrapper, args, {
     let errLogPath = null;
     try {
       errLogPath = path.join(os.tmpdir(), `grok-peer-start-${process.pid}-${Date.now()}.log`);
-      errTarget = fs.openSync(errLogPath, "a");
+      // Private (0600) + exclusive create: the resident peer later writes repo
+      // paths and operational diagnostics here, and the file is long-lived under
+      // a world-writable /tmp. "ax" refuses a pre-planted path (symlink attack),
+      // and the 0600 create mode keeps another local user from reading it (a
+      // normal umask only clears bits, and 0600 has none to clear). On any
+      // failure we fall back to "ignore" below (diagnostics lost, no leak/crash).
+      errTarget = fs.openSync(errLogPath, "ax", 0o600);
     } catch {
       errTarget = "ignore";
       errLogPath = null;

@@ -73,6 +73,11 @@ export function runHandoffCaptured(wrapper, args, {
   python = process.env.GROK_PYTHON?.trim() || "python3",
   spawnFailedExit = 4,
   signalExit = 1,
+  // silent: capture the envelope WITHOUT relaying stdout. Apply-time revalidation
+  // (auto) reuses this only to re-check readiness; relaying it would emit a second
+  // JSON object after the handoff envelope already went to stdout, breaking the
+  // one-stdout-envelope-per-run contract that the code skill documents.
+  silent = false,
   spawnFailedMessage = (w, d) =>
     `[grok-companion] failed to launch ${python} ${w}: ${d}\n`,
 } = {}) {
@@ -87,7 +92,7 @@ export function runHandoffCaptured(wrapper, args, {
   }
   if (result.stderr) process.stderr.write(result.stderr);
   const stdout = result.stdout || "";
-  if (stdout) process.stdout.write(stdout.endsWith("\n") ? stdout : `${stdout}\n`);
+  if (stdout && !silent) process.stdout.write(stdout.endsWith("\n") ? stdout : `${stdout}\n`);
   return {
     code: typeof result.status === "number" ? result.status : signalExit,
     envelope: tryParseEnvelope(stdout),
@@ -264,7 +269,10 @@ export async function runAutoIntegrate(wrapper, rest, runMode, track, {
       wrapper,
       runId: result.runId,
       targetRepo,
-      runHandoff: runHandoffCaptured,
+      // Silent capture: the initial handoff (runCodeThenHandoff) already emitted
+      // the single stdout envelope; the apply-time revalidation must not add a
+      // second one.
+      runHandoff: (w, a) => runHandoffCaptured(w, a, { silent: true }),
       stderrLine,
     });
     finalCode = applied.ok ? 0 : 1;

@@ -62,6 +62,35 @@ test("peer-start background: running envelope exits 0", async () => {
   }
 });
 
+test("peer-start background: durable stderr log is created private (0600)", async () => {
+  // The resident peer later writes repo paths + operational diagnostics to this
+  // long-lived /tmp file; another local user must not be able to read it.
+  const { file, cleanup } = fakeEnvelopeWrapper(
+    JSON.stringify({ status: "running", mode: "peer-start", runId: "x" })
+  );
+  const prefix = `grok-peer-start-${process.pid}-`;
+  const listLogs = () =>
+    fs.readdirSync(os.tmpdir()).filter((f) => f.startsWith(prefix) && f.endsWith(".log"));
+  const before = new Set(listLogs());
+  try {
+    await runPeerStartBackground(process.execPath, file, [], {
+      spawnFailedMessage: () => "",
+      signalExit: 1,
+      spawnFailedExit: 4,
+    });
+    const created = listLogs().filter((f) => !before.has(f));
+    assert.ok(created.length >= 1, "a durable stderr log must be created");
+    for (const f of created) {
+      const full = path.join(os.tmpdir(), f);
+      const mode = fs.statSync(full).mode & 0o777;
+      assert.equal(mode, 0o600, `peer stderr log ${f} must be 0600, got ${mode.toString(8)}`);
+      fs.rmSync(full, { force: true });
+    }
+  } finally {
+    cleanup();
+  }
+});
+
 function runCompanionLegacy(args, env = {}) {
   return spawnSync(process.execPath, [COMPANION, ...args], {
     encoding: "utf8",

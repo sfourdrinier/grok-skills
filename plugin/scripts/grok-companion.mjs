@@ -693,6 +693,13 @@ async function dispatch({
   const hasContractFile = wrapperArgs.some(
     (a) => a === "--contract-file" || (typeof a === "string" && a.startsWith("--contract-file="))
   );
+  // continue-run is worktree-only in the wrapper (it loads retained worktree
+  // lineage and forbids --target/--base/--contract-file), so it must NEVER be
+  // routed to runDirectGrok - a direct workspace pref would otherwise send the
+  // continuation to a live-tree edit that has no knowledge of the lineage.
+  const hasContinueRun = wrapperArgs.some(
+    (a) => a === "--continue-run" || (typeof a === "string" && a.startsWith("--continue-run="))
+  );
   if (runMode === "direct") {
     if (wrapperMode === "code" && hasContractFile) {
       process.stderr.write(
@@ -701,7 +708,7 @@ async function dispatch({
       );
       return finishCleanups(1);
     }
-    if (!WRAPPER_ONLY_MODES.has(wrapperMode)) {
+    if (!WRAPPER_ONLY_MODES.has(wrapperMode) && !hasContinueRun) {
       return Promise.resolve(
         captureAndTrack(null, wrapperArgs, {
           cwd,
@@ -713,7 +720,7 @@ async function dispatch({
         })
       ).then(finishCleanups);
     }
-    // handoff/status/cleanup: fall through to wrapper path below
+    // continue-run + handoff/status/cleanup: fall through to wrapper path below
   }
   const wrapper = resolveWrapperPath(process.env);
   if (!wrapper) {
