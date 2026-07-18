@@ -137,10 +137,15 @@ class PeerLifecycleTests(PeerTestBase):
         }
         runstate.write_json_atomic(run_paths.run_dir / "peer.json", peer_doc)
         ns = mock.Mock(run_id=run_paths.run_id, task="hi", task_file=None)
-        with self.assertRaises(GrokWrapperError) as ctx:
-            peer_mod.run_peer_prompt(ns)
-        self.assertEqual(ctx.exception.error_class, "acp-failure")
-        self.assertIn("reattach", str(ctx.exception).lower() + json.dumps(ctx.exception.detail).lower())
+        # A post-load peer-prompt failure returns a failure envelope tagged with
+        # the REQUESTED run id (not a raise under a fresh id), so callers keep
+        # correlation for stop/cleanup.
+        env = peer_mod.run_peer_prompt(ns)
+        self.assertEqual(env["status"], "failure")
+        self.assertEqual(env["mode"], "peer-prompt")
+        self.assertEqual(env["runId"], run_paths.run_id)
+        self.assertEqual(env["error"]["class"], "acp-failure")
+        self.assertIn("reattach", json.dumps(env).lower())
 
     def test_concurrent_prompt_rejected(self) -> None:
         # Serialization is enforced inside the resident control plane.
@@ -250,9 +255,12 @@ class PeerLifecycleTests(PeerTestBase):
             child_start_token=platformsupport.process_start_token(os.getpid()),
             lease_seconds=3600,
         )
-        # Dead peer: a pid that has already exited (no live child).
+        # Dead peer: the OWNER (resident wrapper) is dead. A live owner is never
+        # reaped regardless of lease staleness (review [34]), so a genuinely
+        # reapable home must have a dead owner, not just a dead child/stale lease.
         dead_proc = __import__("subprocess").Popen(["true"])
         dead_proc.wait()
+        runstate.write_home_liveness_marker(dead_home, dead_proc.pid)
         runstate.write_peer_lease(
             dead_home,
             child_pid=dead_proc.pid,
@@ -270,6 +278,27 @@ class PeerLifecycleTests(PeerTestBase):
         self.assertTrue(live_home.exists())
         self.assertFalse(dead_home.exists())
 
+    def test_reaper_keeps_live_owner_despite_stale_lease(self) -> None:
+        # [34]: an idle peer whose lease expired but whose resident wrapper
+        # (owner) is still alive must NOT be reaped - the lease is a keepalive
+        # hint, not evidence of death.
+        home = pathlib.Path(tempfile.mkdtemp(prefix=runstate.TEMP_HOME_PREFIX))
+        self.addCleanup(lambda: __import__("shutil").rmtree(str(home), True))
+        os.chmod(str(home), 0o700)
+        runstate.write_owner_marker(home, runstate.new_run_id())
+        runstate.write_home_liveness_marker(home, os.getpid())  # owner alive
+        runstate.write_peer_lease(
+            home,
+            child_pid=os.getpid(),
+            child_start_token=platformsupport.process_start_token(os.getpid()),
+            lease_seconds=-1,  # already expired -> stale
+        )
+        past = time.time() - (runstate.LIVE_START_STALE_HOME_MAX_AGE_SECONDS + 100)
+        os.utime(home, (past, past))
+        removed = runstate.audit_stale_temp_homes(runstate.LIVE_START_STALE_HOME_MAX_AGE_SECONDS)
+        self.assertNotIn(str(home), removed)
+        self.assertTrue(home.exists())
+
     def test_session_update_chunk_redacted_in_progress_and_envelope(self) -> None:
         secret = _split_bearer_fixture()
         self.fake_acp.chunk_secret = secret
@@ -281,6 +310,8 @@ class PeerLifecycleTests(PeerTestBase):
         session._prompt_lock = threading.Lock()
         session._prompt_in_flight = False
         session.sentinel_name = ".grok-run-test"
+        session.worktree = mock.Mock(path=self.repo)
+        session.contract = None
         session.run_id = run_paths.run_id
         session.session_id = "s1"
         session.acp = self.fake_acp
@@ -311,6 +342,8 @@ class PeerLifecycleTests(PeerTestBase):
         session._prompt_lock = threading.Lock()
         session._prompt_in_flight = False
         session.sentinel_name = ".grok-run-" + run_paths.run_id
+        session.worktree = mock.Mock(path=self.repo)
+        session.contract = None
         session.run_id = run_paths.run_id
         session.session_id = "s"
         session.progress = progress
@@ -328,8 +361,8 @@ class PeerLifecycleTests(PeerTestBase):
         peer_mod._handle_prompt(session, "do the task")
         peer_mod._handle_prompt(session, "second turn")
         self.assertIn(session.sentinel_name, sent[0])
-        self.assertTrue(sent[0].endswith("do the task"))
-        self.assertEqual(sent[1], "second turn")  # no directive on later turns
+        self.assertIn("do the task", sent[0])  # task carried through the payload
+        self.assertEqual(sent[1], "second turn")  # no directive/rules on later turns
         self.assertEqual(session.peer_doc["promptsHandled"], 2)
 
     def test_control_socket_mode_0600_foreign_refused(self) -> None:
@@ -352,6 +385,8 @@ class PeerLifecycleTests(PeerTestBase):
         session._prompt_lock = threading.Lock()
         session._prompt_in_flight = False
         session.sentinel_name = ".grok-run-test"
+        session.worktree = mock.Mock(path=self.repo)
+        session.contract = None
         session.acp = self.fake_acp
         session.progress = mock.Mock()
         session.progress.safe_emit = mock.Mock()
@@ -359,7 +394,7 @@ class PeerLifecycleTests(PeerTestBase):
         session.renew_lease = mock.Mock()
         session.peer_doc = {}
         session.home = None
-        session.worktree = None
+        session.worktree = mock.Mock(path=self.repo)
         session.contract = None
         session.original_baseline = None
         session.child = self.fake_child

@@ -151,8 +151,9 @@ def _apply_post_finalize_manifest(
     return doc
 
 
-def _terminalize_peer_run(run_paths: runstate.RunPaths, envelope: dict) -> None:
-    """Persist terminal envelope + lifecycle so cleanup can rebuild the worktree."""
+def _terminalize_peer_run(run_paths: runstate.RunPaths, envelope: dict) -> bool:
+    """Persist terminal envelope + lifecycle. Returns True on durable persistence
+    (or an already-terminal record), False if it could not be persisted."""
     try:
         durable = dict(envelope)
         durable["mode"] = "peer-start"
@@ -171,12 +172,14 @@ def _terminalize_peer_run(run_paths: runstate.RunPaths, envelope: dict) -> None:
             record = runstate.set_lifecycle(run_paths, rev, "finalizing")
             rev = int(record["recordRevision"])
         if life in ("completed", "failed", "canceled"):
-            return
+            return True
         runstate.persist_terminal_envelope(
             run_paths, rev, durable, lifecycle=lifecycle
         )
+        return True
     except Exception as exc:
         _log("_terminalize_peer_run", "could not terminalize peer run: {}".format(exc))
+        return False
 
 
 def _build_gate_runner(
@@ -431,5 +434,28 @@ def finalize_peer_session(
         status="success",
         **fields,
     )
-    _terminalize_peer_run(run_paths, env)
+    if not _terminalize_peer_run(run_paths, env):
+        # Durable terminal evidence could not be persisted: a ready peer-stop must
+        # NOT report success - handoff/cleanup rely on it and companion auto/direct
+        # integration may already apply the patch. Fail closed (parity with the
+        # shared _publish_terminal_envelope contract).
+        from groklib.envelope import failure_envelope
+
+        return failure_envelope(
+            run_id=run_paths.run_id,
+            mode="peer-stop",
+            error_class="state-ownership-violation",
+            message="peer-stop could not persist durable terminal evidence",
+            detail={"reason": "terminalize-failed", "confinement": label},
+            cleanup=cleanup,
+            worktreePath=str(worktree.path),
+            worktreeBranch=worktree.branch,
+            baseRevision=worktree.base_revision,
+            repository=str(worktree.repo_root),
+            changedFiles=list(stage.acc.changed_files or []),
+            diffSummary=stage.acc.diff_summary,
+            progressStreamPath=str(run_paths.progress_path),
+            commands=list(stage.acc.commands or []),
+            response=response,
+        )
     return env

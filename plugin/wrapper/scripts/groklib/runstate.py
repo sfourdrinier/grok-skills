@@ -715,12 +715,18 @@ def _is_removable_stale_home(candidate: pathlib.Path, now: float, max_age_second
         _log_stderr("_is_removable_stale_home", "skipping {} (peer lease live)".format(candidate))
         return False
     liveness = _home_owner_liveness(candidate)
-    if _peer_lease_present(candidate) and not _peer_lease_keeps_home_alive(candidate):
-        liveness = _LIVENESS_DEAD
-        _log_stderr("_is_removable_stale_home", "peer lease stale/dead for {}".format(candidate))
+    # A LIVE owner is never reaped, regardless of peer-lease staleness: the lease
+    # is a keepalive hint, NOT evidence of death (review). A long-idle peer whose
+    # resident peer-start wrapper is still alive would otherwise have its live
+    # credential home + control socket deleted once the lease expired.
     if liveness == _LIVENESS_ALIVE:
         _log_stderr("_is_removable_stale_home", "skipping {} (owner is alive)".format(candidate))
         return False
+    # Owner is NOT alive: a stale/expired peer lease confirms definitely-dead
+    # (rather than possibly-active-unknown), so it becomes reapable in-window.
+    if _peer_lease_present(candidate) and not _peer_lease_keeps_home_alive(candidate):
+        liveness = _LIVENESS_DEAD
+        _log_stderr("_is_removable_stale_home", "peer lease stale/dead for {}".format(candidate))
     reap_age_threshold = (
         max_age_seconds if liveness == _LIVENESS_DEAD else UNKNOWN_LEASE_HARD_REAP_AGE_SECONDS
     )

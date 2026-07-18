@@ -222,16 +222,36 @@ def _handle_prompt(session: PeerSession, task: str) -> dict:
                 data={"text": redacted, "sessionUpdate": True},
             )
 
-        # Grok creates the cwd sentinel as its mandatory first action (the wrapper
-        # no longer plants it, so the stop-time check is genuine proof Grok
-        # operated in the isolated worktree). Prepend the directive on the FIRST
-        # prompt only; peer-stop enforces the sentinel iff a prompt was handled.
-        from groklib.modes.code import _sentinel_directive
-
+        # On the FIRST prompt, build the payload the SAME way code mode does:
+        # repo rules (AGENTS/CLAUDE) + contract directive + the cwd-sentinel
+        # directive (Grok's mandatory first action; the wrapper no longer plants
+        # it, so the stop-time check is genuine proof Grok operated in the
+        # worktree). Without this a peer session could implement while never
+        # seeing the governing rules/scopes and only discover the mismatch at stop.
         prompts_handled = int(session.peer_doc.get("promptsHandled", 0) or 0)
         prompt_text = task
         if prompts_handled == 0:
-            prompt_text = _sentinel_directive(session.sentinel_name) + task
+            from groklib import rules
+            from groklib.modes.code import _contract_directive, _sentinel_directive
+
+            worktree_path = session.worktree.path
+            target_rel = session.peer_doc.get("targetRelative") or ""
+            target_abs = (worktree_path / target_rel) if target_rel else worktree_path
+            try:
+                instructions, rule_warnings = rules.discover_instruction_files_with_warnings(
+                    worktree_path, target_abs, require_parity=False
+                )
+                for warning in rule_warnings:
+                    session.progress.safe_emit("validate", warning)
+            except Exception as exc:
+                _log("_handle_prompt", "peer rule discovery failed: {}".format(exc))
+                instructions = []
+            parts = (
+                _sentinel_directive(session.sentinel_name)
+                + _contract_directive(session.contract)
+                + task
+            )
+            prompt_text = rules.build_prompt_payload(instructions, parts)
 
         result = session.acp.session_prompt(
             session_id=session.session_id,
@@ -718,6 +738,24 @@ def run_peer_prompt(args: argparse.Namespace) -> dict:
     run_id = getattr(args, "run_id", None)
     if not run_id:
         raise GrokWrapperError("usage-error", "peer-prompt requires --run-id")
+    try:
+        return _run_peer_prompt_body(args, str(run_id))
+    except GrokWrapperError as exc:
+        # Preserve the requested run id: a raised error would otherwise
+        # terminalize under a FRESH run id in grok_agent.main, so callers and
+        # /grok:jobs lose correlation exactly when they need to stop/clean up the
+        # broken peer. Success prompts already carry the resident run id.
+        return failure_envelope(
+            run_id=str(run_id),
+            mode="peer-prompt",
+            error_class=exc.error_class,
+            message=str(exc),
+            detail=dict(exc.detail or {}),
+            progressStreamPath=None,
+        )
+
+
+def _run_peer_prompt_body(args: argparse.Namespace, run_id: str) -> dict:
     task = _shared.resolve_task_text(args)
     paths, doc = _load_peer_doc(str(run_id))
     lifecycle = doc.get("lifecycle")
