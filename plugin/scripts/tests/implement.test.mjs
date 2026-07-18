@@ -344,6 +344,30 @@ test("runHandoffCaptured silent: parses envelope but does not relay stdout", () 
   assert.ok(writes.join("").includes('"handoff"'), "default must relay stdout");
 });
 
+// worktree/review integrations need the hardened wrapper's isolated worktree; a
+// direct-mode workspace pref must NOT reroute them to runDirectGrok's live edit.
+test("code --integration worktree in a direct workspace uses the wrapper, not runDirectGrok", () => {
+  const cwd = tempCwd();
+  const pluginData = path.join(cwd, "pdata");
+  setRunMode(cwd, "direct", { CLAUDE_PLUGIN_DATA: pluginData });
+  const callsPath = path.join(cwd, "calls.log");
+  const { env, cleanup } = makeFakeWrapper({
+    code: { stdout: `${codeEnvelope()}\n`, exitCode: 0 },
+  });
+  try {
+    const res = runCompanion(
+      ["code", "--integration", "worktree", "--target", ".", "--base", "HEAD", "--task", "x"],
+      { cwd, env: companionEnv(env, cwd, callsPath) }
+    );
+    // The hardened fake wrapper WAS invoked -> worktree isolation honored via the
+    // wrapper, not silently downgraded to a live runDirectGrok edit.
+    assert.deepEqual(readCalls(callsPath), ["code"], `stderr: ${res.stderr}`);
+  } finally {
+    cleanup();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 // continue-run is worktree-only in the wrapper (retained lineage); a direct-mode
 // workspace pref must NOT reroute it to runDirectGrok's live-tree edit.
 test("continue-run in a direct workspace uses the wrapper, never runDirectGrok", () => {

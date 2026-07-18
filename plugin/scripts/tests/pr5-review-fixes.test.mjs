@@ -61,8 +61,9 @@ test("[11] gateIntegrationForCodeish exempts --continue-run= (equals form)", () 
   assert.equal(res.effective, null);
 });
 
-test("parseDirtyStatusPaths: extracts modified/untracked/renamed paths", () => {
-  const status = " M src/a.js\n?? new.txt\nR  old.js -> renamed.js\n";
+test("parseDirtyStatusPaths: extracts modified/untracked/renamed paths (-z)", () => {
+  // `git status --porcelain -z`: NUL-terminated; a rename is two NUL tokens.
+  const status = " M src/a.js\0?? new.txt\0R  renamed.js\0old.js\0";
   const set = parseDirtyStatusPaths(status);
   assert.ok(set.has("src/a.js"));
   assert.ok(set.has("new.txt"));
@@ -70,20 +71,25 @@ test("parseDirtyStatusPaths: extracts modified/untracked/renamed paths", () => {
   assert.ok(set.has("renamed.js"));
 });
 
-test("parseDirtyStatusPaths: only rename/copy lines split on ' -> '", () => {
-  // A non-rename path whose literal name contains ' -> ' must NOT be split, or
-  // the real path never enters the dirty set and the overlap guard fails open.
-  const set = parseDirtyStatusPaths(' M weird -> name.js\n?? other -> file.txt\n');
+test("parseDirtyStatusPaths: -z paths with a literal ' -> ' are never mis-split", () => {
+  // Non-rename paths whose literal name contains ' -> ' must enter the set whole,
+  // or the real path never registers and the overlap guard fails open.
+  const set = parseDirtyStatusPaths(" M weird -> name.js\0?? other -> file.txt\0");
   assert.ok(set.has("weird -> name.js"), [...set].join("|"));
   assert.ok(set.has("other -> file.txt"), [...set].join("|"));
   assert.ok(!set.has("weird"));
   assert.ok(!set.has("name.js"));
-  // A real rename (R status) still splits into both sides.
-  const rn = parseDirtyStatusPaths("R  a.js -> b.js\n");
+  // A rename (R) contributes BOTH the new and paired source path.
+  const rn = parseDirtyStatusPaths("R  b.js\0a.js\0");
   assert.ok(rn.has("a.js") && rn.has("b.js"));
-  // Copy status (C) also splits.
-  const cp = parseDirtyStatusPaths("C  a.js -> c.js\n");
+  // Copy (C) too.
+  const cp = parseDirtyStatusPaths("C  c.js\0a.js\0");
   assert.ok(cp.has("a.js") && cp.has("c.js"));
+  // A rename whose SOURCE name literally contains ' -> ' is kept whole (the -z
+  // format is unquoted, so there is no arrow to mis-split on).
+  const q = parseDirtyStatusPaths("R  c.txt\0a -> b.txt\0");
+  assert.ok(q.has("c.txt") && q.has("a -> b.txt"), [...q].join("|"));
+  assert.ok(!q.has("a") && !q.has("b.txt"));
 });
 
 test("parseNumstatPaths: extracts patch target paths incl. BOTH rename sides + raw", () => {

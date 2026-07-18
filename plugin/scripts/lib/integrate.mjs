@@ -43,6 +43,60 @@ export function sha256File(filePath) {
   return h.digest("hex");
 }
 
+/**
+ * Resolve `<runsDir>/<runId>/implementation-handoff.json` (the validation manifest
+ * at the run root, one level up from `artifacts/implementation.patch`).
+ * @param {string} runId
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string|null}
+ */
+export function locateHandoffManifest(runId, env = process.env) {
+  const runsDir = runsDirFor(env);
+  const safe = safeRunIdForRunsDir(runId, runsDir);
+  if (!safe) return null;
+  return path.join(runsDir, safe, "implementation-handoff.json");
+}
+
+/**
+ * Verify an on-disk patch matches the validation manifest's `patch.sha256`
+ * (lowercase hex) + `patch.bytes`. Fail closed on a missing/corrupt manifest or
+ * any mismatch, so a patch substituted/corrupted between wrapper validation and
+ * companion apply cannot land (the wrapper's handoff re-check does the equivalent
+ * for the code auto path, which re-runs handoff instead of reusing this).
+ * @returns {{ok: boolean, reason?: string}}
+ */
+export function verifyPatchAgainstManifest(runId, patchPath, env = process.env) {
+  const manifestPath = locateHandoffManifest(runId, env);
+  if (!manifestPath) return { ok: false, reason: "unsafe runId" };
+  let doc;
+  try {
+    doc = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  } catch {
+    return { ok: false, reason: "manifest missing or unreadable" };
+  }
+  const expectedSha = doc?.patch?.sha256;
+  const expectedBytes = doc?.patch?.bytes;
+  if (typeof expectedSha !== "string" || !/^[0-9a-fA-F]{64}$/.test(expectedSha)) {
+    return { ok: false, reason: "manifest patch.sha256 invalid" };
+  }
+  if (!Number.isInteger(expectedBytes) || expectedBytes < 1) {
+    return { ok: false, reason: "manifest patch.bytes invalid" };
+  }
+  let actualBytes;
+  try {
+    actualBytes = fs.statSync(patchPath).size;
+  } catch {
+    return { ok: false, reason: "patch unreadable" };
+  }
+  if (actualBytes !== expectedBytes) {
+    return { ok: false, reason: `patch bytes ${actualBytes} != manifest ${expectedBytes}` };
+  }
+  if (sha256File(patchPath).toLowerCase() !== expectedSha.toLowerCase()) {
+    return { ok: false, reason: "patch sha256 does not match manifest" };
+  }
+  return { ok: true };
+}
+
 function git(cwd, args) {
   const result = spawnSync("git", args, {
     cwd,
@@ -89,26 +143,29 @@ function renamePathSides(p) {
 }
 
 /**
- * Repo-relative paths that are dirty per `git status --short --untracked-files=all`.
+ * Repo-relative dirty paths from `git status --porcelain -z --untracked-files=all`.
  * @param {string} statusOutput
  * @returns {Set<string>}
  */
 export function parseDirtyStatusPaths(statusOutput) {
+  // Input is `git status --porcelain -z --untracked-files=all`: NUL-TERMINATED
+  // entries with paths NOT quoted (no `"..."`, no ` -> ` arrow). A rename/copy
+  // entry (R/C in either status column) is followed by a SECOND NUL-token holding
+  // the paired path. We add BOTH the status-line path and any paired path
+  // (direction-agnostic), so the overlap guard catches either name - and a literal
+  // ` -> ` (even a quoted one) inside a filename can never be mis-split.
   const set = new Set();
-  for (const raw of String(statusOutput || "").split("\n")) {
-    if (!raw.trim()) continue;
-    const line = raw.slice(3); // 2 status columns + 1 space
-    // Only rename/copy porcelain entries use " -> " as the old->new separator.
-    // A non-rename path whose literal name contains " -> " must NOT be split, or
-    // the real path never enters the dirty set and the overlap guard fails open.
-    const isRenameOrCopy =
-      raw[0] === "R" || raw[0] === "C" || raw[1] === "R" || raw[1] === "C";
-    const arrow = isRenameOrCopy ? line.indexOf(" -> ") : -1;
-    if (arrow >= 0) {
-      set.add(unquoteGitPath(line.slice(0, arrow)));
-      set.add(unquoteGitPath(line.slice(arrow + 4)));
-    } else {
-      set.add(unquoteGitPath(line));
+  const entries = String(statusOutput || "").split("\0");
+  for (let i = 0; i < entries.length; i++) {
+    const raw = entries[i];
+    if (!raw) continue; // trailing empty token after the final NUL
+    const xy = raw.slice(0, 2);
+    const p = raw.slice(3); // "XY " prefix: 2 status columns + 1 space
+    if (p) set.add(p);
+    if (xy[0] === "R" || xy[0] === "C" || xy[1] === "R" || xy[1] === "C") {
+      i += 1;
+      const paired = entries[i]; // the rename/copy source path (raw, no prefix)
+      if (paired) set.add(paired);
     }
   }
   return set;
@@ -223,7 +280,7 @@ export function applyVerifiedPatch({
   }
 
   const patchSha = sha256File(patchPath);
-  const preStatus = git(targetRepo, ["status", "--short", "--untracked-files=all"]);
+  const preStatus = git(targetRepo, ["status", "--porcelain", "-z", "--untracked-files=all"]);
 
   // 3a. Dirty-overlap guard: git apply --check can PASS even when the patch
   // touches a file the operator is actively editing (non-conflicting hunks).
@@ -420,6 +477,18 @@ export function maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stder
     stderrLine(`[grok-peer] patch missing for run ${runId}`);
     return { attempted: true, ok: false, outcome: "patch-missing" };
   }
+  // Re-verify the patch bytes/sha against the peer-stop validation manifest before
+  // touching it (peer-stop skips the handoff re-run, so without this a patch
+  // substituted or corrupted between wrapper validation and companion apply could
+  // land while the command reports a validated peer result). A ready peer-stop
+  // always wrote a manifest, so missing/corrupt/mismatch = tampering -> fail closed.
+  const integrity = verifyPatchAgainstManifest(runId, patchPath);
+  if (!integrity.ok) {
+    stderrLine(
+      `[grok-peer] BLOCKED: patch integrity check failed for ${runId}: ${integrity.reason}`
+    );
+    return { attempted: true, ok: false, outcome: "patch-integrity-failure" };
+  }
   // Reuse the module git() helper (64 MB maxBuffer): the default 1 MB buffer
   // would truncate a large `git status`/`--numstat`, making the dirty-overlap
   // guard below see empty input and FAIL OPEN (apply anyway). Same helper the
@@ -428,7 +497,7 @@ export function maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stder
   // Dirty-overlap guard (same as the auto path): git apply --check can pass when
   // the patch touches an already-dirty file with non-conflicting hunks, silently
   // entangling Grok's changes with the operator's edits.
-  const preStatus = g(["status", "--short", "--untracked-files=all"]);
+  const preStatus = g(["status", "--porcelain", "-z", "--untracked-files=all"]);
   const dirtyPaths = parseDirtyStatusPaths(preStatus.stdout || "");
   const numstat = g(["apply", "--numstat", "--binary", patchPath]);
   const patchPaths = numstat.code === 0 ? parseNumstatPaths(numstat.stdout || "") : [];

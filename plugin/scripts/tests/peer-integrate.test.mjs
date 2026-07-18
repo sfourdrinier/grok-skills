@@ -8,6 +8,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -46,9 +47,19 @@ function capturePatch(repo) {
 }
 
 function stagePatch(xdg, runId, body) {
-  const art = path.join(xdg, "grok-skills", "runs", runId, "artifacts");
+  const runDir = path.join(xdg, "grok-skills", "runs", runId);
+  const art = path.join(runDir, "artifacts");
   fs.mkdirSync(art, { recursive: true });
-  fs.writeFileSync(path.join(art, "implementation.patch"), body);
+  const buf = Buffer.from(body);
+  fs.writeFileSync(path.join(art, "implementation.patch"), buf);
+  // Matching validation manifest: the apply path re-verifies patch bytes/sha256.
+  const sha = createHash("sha256").update(buf).digest("hex");
+  fs.writeFileSync(
+    path.join(runDir, "implementation-handoff.json"),
+    JSON.stringify({
+      patch: { sha256: sha, bytes: buf.length, relativePath: "artifacts/implementation.patch" },
+    })
+  );
 }
 
 function peerStopEnvelope(repo, over = {}) {
@@ -170,6 +181,38 @@ test("peer-stop review: retains patch, does not apply", () => {
       "review must not apply to the tree"
     );
     assert.ok(lines.some((l) => /retained|not applied/i.test(l)), lines.join("\n"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("peer-stop: a patch tampered after validation is refused (integrity check)", () => {
+  // The manifest records the ORIGINAL sha/bytes; if the patch on disk is swapped
+  // after peer-stop validation, the companion apply must fail closed, not apply.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-peer-int-integ-"));
+  const repo = initRepo(path.join(root, "repo"));
+  const xdg = path.join(root, "xdg");
+  stagePatch(xdg, RUN_ID, capturePatch(repo)); // writes patch + matching manifest
+  // Tamper: overwrite the staged patch with different bytes (manifest now stale).
+  const patchFile = path.join(xdg, "grok-skills", "runs", RUN_ID, "artifacts", "implementation.patch");
+  fs.writeFileSync(patchFile, `${fs.readFileSync(patchFile, "utf8")}\n# injected\n`);
+  const lines = [];
+  try {
+    const res = withXdg(xdg, () =>
+      maybeIntegratePeerStop(peerStopEnvelope(repo), repo, "auto", ["--target", repo], (l) =>
+        lines.push(l)
+      )
+    );
+    assert.equal(res.outcome, "patch-integrity-failure");
+    assert.equal(res.attempted, true);
+    assert.equal(res.ok, false);
+    assert.equal(peerStopExitCode(0, res), 1);
+    assert.equal(
+      fs.readFileSync(path.join(repo, "foo.txt"), "utf8"),
+      "hello\n",
+      "a tampered patch must not be applied"
+    );
+    assert.ok(lines.some((l) => /integrity/i.test(l)), lines.join("\n"));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

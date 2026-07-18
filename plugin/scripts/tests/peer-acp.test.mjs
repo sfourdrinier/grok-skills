@@ -16,6 +16,22 @@ import {
 } from "./helpers/fake-wrapper.mjs";
 import { runPeerStartBackground } from "../lib/peer-acp.mjs";
 import { listJobs } from "../lib/jobs.mjs";
+import { createHash } from "node:crypto";
+
+/** Write the validation manifest the companion apply re-verifies (sha/bytes). */
+function stageHandoffManifest(stateDir, runId, patchBody) {
+  const buf = Buffer.from(patchBody);
+  fs.writeFileSync(
+    path.join(stateDir, "grok-skills", "runs", runId, "implementation-handoff.json"),
+    JSON.stringify({
+      patch: {
+        sha256: createHash("sha256").update(buf).digest("hex"),
+        bytes: buf.length,
+        relativePath: "artifacts/implementation.patch",
+      },
+    })
+  );
+}
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const COMPANION = path.resolve(SCRIPT_DIR, "..", "grok-companion.mjs");
@@ -220,6 +236,7 @@ test("peer-stop ready + integration=auto applies patch to target repo", () => {
     "implementation.patch"
   );
   fs.writeFileSync(patchPath, diff.stdout, "utf8");
+  stageHandoffManifest(state, rid, diff.stdout);
 
   const envelope = {
     schemaVersion: 1,

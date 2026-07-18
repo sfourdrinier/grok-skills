@@ -713,6 +713,12 @@ async function dispatch({
   const hasContinueRun = wrapperArgs.some(
     (a) => a === "--continue-run" || (typeof a === "string" && a.startsWith("--continue-run="))
   );
+  // worktree / review integrations require the hardened wrapper's isolated
+  // external worktree; routing them to runDirectGrok under a direct workspace
+  // pref would silently ignore the requested isolation and edit the live tree.
+  // (auto/implement already returned above.) Send them to the wrapper instead.
+  const isIsolatedIntegration =
+    integrationEffective === "worktree" || integrationEffective === "review";
   if (runMode === "direct") {
     if (wrapperMode === "code" && hasContractFile) {
       process.stderr.write(
@@ -721,7 +727,7 @@ async function dispatch({
       );
       return finishCleanups(1);
     }
-    if (!WRAPPER_ONLY_MODES.has(wrapperMode) && !hasContinueRun) {
+    if (!WRAPPER_ONLY_MODES.has(wrapperMode) && !hasContinueRun && !isIsolatedIntegration) {
       return Promise.resolve(
         captureAndTrack(null, wrapperArgs, {
           cwd,
@@ -733,7 +739,8 @@ async function dispatch({
         })
       ).then(finishCleanups);
     }
-    // continue-run + handoff/status/cleanup: fall through to wrapper path below
+    // continue-run + worktree/review + handoff/status/cleanup: fall through to
+    // the hardened wrapper path below.
   }
   const wrapper = resolveWrapperPath(process.env);
   if (!wrapper) {
