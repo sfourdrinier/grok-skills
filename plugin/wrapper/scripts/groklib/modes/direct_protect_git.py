@@ -273,20 +273,32 @@ def discover_workspace_git_roots(
                     "hint": "reduce nested .git / vendor caches in the workspace or raise the bound only after review",
                 },
             )
+        if not abs_dir.is_dir():
+            return
         try:
             key = str(abs_dir.resolve())
         except OSError:
             key = str(abs_dir)
-        if key in seen_abs:
-            return
-        if not abs_dir.is_dir():
-            return
-        seen_abs.add(key)
         pfx = _posix_rel(rel_prefix).rstrip("/")
-        found.append((pfx, abs_dir))
-        if inventory_modules:
-            # Modules under this gitdir: add with inventory_modules=True so nested
-            # modules/ of a module gitdir are also found; seen_abs stops loops.
+        if not pfx:
+            return
+        # Always retain the logical prefix mapping. seen_abs only suppresses
+        # modules/** recursion so a real submodule alias
+        # (vendor/lib/.git gitfile -> .git/modules/lib) still gets its own
+        # logical prefix even when the abs gitdir was already inventoried.
+        already = key in seen_abs
+        if not already:
+            seen_abs.add(key)
+        found_keys: Set[Tuple[str, str]] = set()
+        for ep, ea in found:
+            try:
+                found_keys.add((_posix_rel(ep).rstrip("/"), str(ea.resolve())))
+            except OSError:
+                found_keys.add((_posix_rel(ep).rstrip("/"), str(ea)))
+        if (pfx, key) not in found_keys:
+            found.append((pfx, abs_dir))
+        if inventory_modules and not already:
+            # Modules under this gitdir once per abs only (seen_abs recursion guard).
             _inventory_modules_under(
                 abs_dir,
                 pfx,
@@ -440,6 +452,8 @@ def iter_sensitive_git_entries(
     if also_live or not roots:
         live = list(discover_workspace_git_roots(repo_root))
         roots = merge_git_root_pairs(roots, live) if roots else live
+    # Emit sensitive entries under EVERY logical prefix, including submodule
+    # aliases (vendor/lib/.git and .git/modules/lib share an abs gitdir).
     for rel_prefix, git_dir in roots:
         for name in _GIT_SNAPSHOT_FILES:
             candidate = pathlib.Path(git_dir) / name
@@ -483,31 +497,39 @@ def resolve_protected_abs_path(
     relative: str,
     *,
     git_roots: Optional[object] = None,
+    abs_paths: Optional[Dict[str, str]] = None,
 ) -> pathlib.Path:
     """Map a logical protected relative path to the actual absolute path.
 
-    For free-standing ``.git`` directories this is ``repo_root / relative``.
-    For in-workspace gitfiles the logical prefix (``.git`` or
-    ``vendor/lib/.git``) maps onto the snapshotted/discovered absolute gitdir
-    so restore never writes ``repo_root/.git/HEAD`` under a gitfile.
+    Order (restore contract):
+    1. ``abs_paths[rel]`` exact snapshot map (gitfile marker bytes, sensitive files)
+    2. longest ``git_roots`` prefix for children under a logical ``.git``
+       (``vendor/lib/.git/HEAD`` -> modules abs + HEAD) - never for the bare
+       marker key itself (``.git`` / ``vendor/lib/.git`` stay the gitfile path)
+    3. live discovery when no baseline provided
+    4. ``repo_root / relative`` fallback
 
-    Prefer a provided ``git_roots`` baseline (snapshot-time mapping). When
-    omitted, live discovery is used only as a last resort.
+    Never map a gitfile marker key to its target gitdir (that would replace a
+    directory with a file or trash a redirect target).
     """
     root = pathlib.Path(repo_root)
     rel = _posix_rel(relative)
     if not rel:
         return root
+    if abs_paths and rel in abs_paths:
+        return pathlib.Path(abs_paths[rel])
     roots = _normalize_git_roots(git_roots)
     if not roots:
         roots = discover_workspace_git_roots(root)
-    # Longest logical prefix wins (nested vendor/lib/.git before .git).
+    # Longest logical prefix wins for *children* only (not the bare marker key).
     for prefix, git_dir in sorted(roots, key=lambda item: len(item[0]), reverse=True):
         pfx = _posix_rel(prefix).rstrip("/")
         if not pfx:
             continue
         if rel == pfx:
-            return pathlib.Path(git_dir)
+            # Bare git root key: free-standing dir OR gitfile marker path under
+            # the workspace - never the modules target for a gitfile alias.
+            return root / rel
         if rel.startswith(pfx + "/"):
             return pathlib.Path(git_dir) / rel[len(pfx) + 1 :]
     return root / rel

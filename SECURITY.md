@@ -173,8 +173,12 @@ gaps to paper over):
    protected-path-write; restore prefers the baseline map and clears live-only
    extras for the same logical key when possible. `modules/**` is inventoried
    under every discovered abs gitdir (root/nested free-standing and gitfile
-   targets). Gitfile pointer bytes themselves are outside auto-restore but are
-   content-fingerprinted so an external redirect is not silent. **External**
+   targets). Real submodule aliases (`vendor/lib/.git` gitfile ->
+   `.git/modules/lib`) retain **both** logical prefixes even when they share
+   one abs gitdir. Restore order is `abs_paths` exact, then baseline
+   `git_roots` children, then live-only; the bare gitfile marker key never
+   maps onto its target dir. Marker bytes are stored under a dedicated
+   snapshot store prefix and restored as a file when snapshotted. **External**
    linked-worktree common dirs (gitfile target outside the workspace) are
    **not** fully inventoried; only the git-resolved primary HEAD/config/hooks/refs
    fingerprint remains for that case. `.git/index` and `.git/COMMIT_EDITMSG`

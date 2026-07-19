@@ -187,10 +187,13 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
   gitfile pointer content is fingerprinted (external redirect not silent;
   pointer bytes outside auto-restore). `modules/**` inventoried under every
   discovered abs gitdir (root/nested free-standing and gitfile targets).
-  Bounded no-symlink discovery fails closed on overflow. External linked
-  common dirs remain outside full inventory. SECURITY direct-default item 3
-  documents the honest limit. Node `parseDiffGitHeaderPaths` dual-condition
-  parity + bytes-safe `git_ignored_paths` land in the same pass.
+  Submodule aliases retain every logical gitfile prefix even when abs is
+  already seen; restore prefers `abs_paths` then baseline roots (marker key
+  never maps to target dir). Bounded no-symlink discovery fails closed on
+  overflow. External linked common dirs remain outside full inventory.
+  SECURITY direct-default item 3 documents the honest limit. Node
+  `parseDiffGitHeaderPaths` dual-condition parity + bytes-safe
+  `git_ignored_paths` land in the same pass.
 - **Codex marketplace root drift (DRY hole):** `tools/gen-manifests.mjs` now
   generates and `--check`-guards BOTH marketplace roots. Previously only
   `.claude-plugin/marketplace.json` (version fields) was covered, so

@@ -372,19 +372,26 @@ class DirectProtectGitfileAndModulesTests(unittest.TestCase):
         # Original common restored via baseline map.
         self.assertEqual(head.read_text(), original_head)
         self.assertEqual(hook.read_bytes(), original_hook)
-        # New-side plant must be deleted (live path) or honestly unrestored - not
-        # claimed restored while still present on evil.
-        if evil_plant.exists():
-            self.assertIn(".git/hooks/pre-commit", result.unrestored)
-        else:
-            self.assertIn(".git/hooks/pre-commit", result.restored)
+        # Marker restored => pointer fixed to original common; baseline hook is
+        # restored. Leftover content under the abandoned evil target is outside
+        # the live gitdir (honest residual, not auto-wiped).
+        self.assertIn(".git/hooks/pre-commit", result.restored)
+        self.assertTrue((self.repo / ".git").is_file())
+        # Evil dir may still exist as abandoned redirect target; must not be a
+        # file (marker restore never maps onto it).
+        if evil.exists():
+            self.assertTrue(evil.is_dir())
+            self.assertFalse(evil.is_file())
 
     def test_guard_detects_external_pointer_rewrite(self) -> None:
         from groklib.modes.direct_finalize import capture_git_dir_guard, _changed_paths
 
         common = self.repo / ".linked-common"
         self._seed_in_workspace_gitfile(self.repo / ".git", common)
+        original_ptr = (self.repo / ".git").read_text()
         snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        self.assertIn(".git", snap.abs_paths)
+        self.assertTrue(snap.entries[".git"].snapshotted)
         baseline = capture_git_dir_guard(self.repo)
         (self.repo / ".git").write_text(
             "gitdir: /tmp/outside-common/.git/worktrees/x\n"
@@ -392,22 +399,125 @@ class DirectProtectGitfileAndModulesTests(unittest.TestCase):
         after = capture_git_dir_guard(self.repo, git_roots=snap.git_roots)
         changed = _changed_paths(baseline, after)
         # Pointer rewrite must not be silent (gitfile content fingerprint).
-        self.assertTrue(
-            any(p == ".git" or p.endswith("/.git") for p in changed) or ".git" in changed,
-            "external pointer rewrite must surface: {}".format(changed),
-        )
-        # Pointer bytes are outside auto-restore scope.
+        self.assertIn(".git", changed, "external pointer rewrite must surface: {}".format(changed))
+        # Snapshotted gitfile marker bytes restore via abs_paths (not target dir).
         result = direct_protect.restore_protected_paths(
             self.repo, snap, offenders=sorted(changed)
         )
-        if ".git" in changed:
-            self.assertNotIn(".git", result.restored)
-            self.assertTrue(
-                ".git" in result.unrestored
-                or any(e.get("path") == ".git" for e in result.errors)
-                or ".git" not in result.restored,
+        self.assertTrue((self.repo / ".git").is_file())
+        self.assertEqual((self.repo / ".git").read_text(), original_ptr)
+        self.assertIn(".git", result.restored)
+        self.assertNotIn(".git", result.unrestored)
+
+    def test_submodule_alias_gitfile_retains_logical_prefix_and_abs_paths_first(
+        self,
+    ) -> None:
+        # Real layout: vendor/lib/.git gitfile -> .git/modules/lib. seen_abs must
+        # not drop the vendor alias. Restore uses abs_paths for the marker file
+        # and must not replace the evil redirect target dir with a file.
+        import shutil
+
+        root_git = self.repo / ".git"
+        mod = root_git / "modules" / "lib"
+        (mod / "hooks").mkdir(parents=True)
+        original_head = "ref: refs/heads/main\n"
+        original_hook = b"#!/bin/sh\necho good\n"
+        (mod / "HEAD").write_text(original_head)
+        (mod / "config").write_text("[core]\n")
+        (mod / "hooks" / "pre-commit").write_bytes(original_hook)
+        os.chmod(str(mod / "hooks" / "pre-commit"), 0o755)
+
+        vendor = self.repo / "vendor" / "lib"
+        vendor.mkdir(parents=True)
+        gitfile = vendor / ".git"
+        rel_target = os.path.relpath(str(mod), str(vendor))
+        original_ptr = "gitdir: {}\n".format(rel_target)
+        gitfile.write_text(original_ptr)
+
+        roots = dict(direct_protect.discover_workspace_git_roots(self.repo))
+        self.assertIn("vendor/lib/.git", roots)
+        self.assertIn(".git/modules/lib", roots)
+        self.assertEqual(
+            pathlib.Path(roots["vendor/lib/.git"]).resolve(), mod.resolve()
+        )
+        self.assertEqual(
+            pathlib.Path(roots[".git/modules/lib"]).resolve(), mod.resolve()
+        )
+
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        self.assertIn("vendor/lib/.git", snap.git_roots)
+        self.assertIn("vendor/lib/.git", snap.abs_paths)
+        self.assertEqual(
+            pathlib.Path(snap.abs_paths["vendor/lib/.git"]).resolve(),
+            gitfile.resolve(),
+        )
+        self.assertTrue(snap.entries["vendor/lib/.git"].snapshotted)
+        # Sensitive children under BOTH logical prefixes.
+        self.assertIn("vendor/lib/.git/HEAD", snap.entries)
+        self.assertIn(".git/modules/lib/HEAD", snap.entries)
+        self.assertTrue(snap.entries["vendor/lib/.git/HEAD"].snapshotted)
+
+        # Attack: rewrite pointer to in-workspace evil dir + move module HEAD.
+        evil = self.repo / ".evil"
+        (evil / "hooks").mkdir(parents=True)
+        (evil / "HEAD").write_text("ref: refs/heads/evil\n")
+        (evil / "config").write_text("[core]\n")
+        (evil / "hooks" / "pre-commit").write_bytes(b"#!/bin/sh\necho evil\n")
+        gitfile.write_text("gitdir: ../../.evil\n")
+        (mod / "HEAD").write_text("ref: refs/heads/moved\n")
+
+        result = direct_protect.restore_protected_paths(
+            self.repo,
+            snap,
+            offenders=[
+                "vendor/lib/.git",
+                "vendor/lib/.git/HEAD",
+                ".git/modules/lib/HEAD",
+                "vendor/lib/.git/hooks/pre-commit",
+            ],
+        )
+        # Pointer restored as a FILE via abs_paths - never map marker to target.
+        self.assertTrue(gitfile.is_file(), "gitfile marker must remain a file")
+        self.assertEqual(gitfile.read_text(), original_ptr)
+        self.assertIn("vendor/lib/.git", result.restored)
+        # Sensitive common paths restored through correct logical mappings.
+        self.assertEqual((mod / "HEAD").read_text(), original_head)
+        self.assertEqual((mod / "hooks" / "pre-commit").read_bytes(), original_hook)
+        self.assertIn(".git/modules/lib/HEAD", result.restored)
+        self.assertIn("vendor/lib/.git/HEAD", result.restored)
+        # Evil dir must not be replaced by a pointer file (marker restore uses
+        # abs_paths to the gitfile path, never the redirect target dir).
+        self.assertTrue(evil.is_dir(), "evil target dir must not be clobbered by marker restore")
+        self.assertFalse(evil.is_file())
+        self.assertEqual(result.unrestored, [])
+
+    def test_live_rediscovery_failure_is_honest(self) -> None:
+        from unittest import mock
+        from groklib import GrokWrapperError
+
+        common = self.repo / ".linked-common"
+        self._seed_in_workspace_gitfile(self.repo / ".git", common)
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        (common / "HEAD").write_text("ref: refs/heads/evil\n")
+
+        def _boom(*_a, **_k):
+            raise GrokWrapperError(
+                "protected-path-write",
+                "nested git discovery failed; fail closed",
+                {"error": "simulated"},
             )
 
+        with mock.patch(
+            "groklib.modes.direct_protect.discover_workspace_git_roots",
+            side_effect=_boom,
+        ):
+            # Must not raise through restore; baseline git_roots still work.
+            result = direct_protect.restore_protected_paths(
+                self.repo, snap, offenders=[".git/HEAD"]
+            )
+        self.assertEqual((common / "HEAD").read_text(), "ref: refs/heads/main\n")
+        self.assertIn(".git/HEAD", result.restored)
+        self.assertEqual(result.unrestored, [])
 
 
 

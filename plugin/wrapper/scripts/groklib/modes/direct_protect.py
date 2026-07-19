@@ -53,6 +53,25 @@ _git_rel_parts = _git._git_rel_parts
 SNAPSHOT_DIR_NAME = "protected-snapshot"
 MANIFEST_NAME = "manifest.json"
 DEFAULT_MAX_TOTAL_BYTES = 25 * 1024 * 1024
+# Gitfile marker bytes live under this store prefix so they never collide with
+# sensitive children (``.git/HEAD`` needs a directory ``.git/`` in the store).
+_SNAPSHOT_GITFILE_MARKER_PREFIX = "_gitfile_markers"
+
+
+def _snapshot_store_rel(logical: str, abs_path: pathlib.Path) -> str:
+    """Relative path under snapshot_dir for a logical protected key."""
+    rel = _posix_rel(logical)
+    try:
+        is_marker_file = (
+            abs_path.is_file()
+            and not abs_path.is_symlink()
+            and pathlib.Path(rel).name == ".git"
+        )
+    except OSError:
+        is_marker_file = False
+    if is_marker_file:
+        return _SNAPSHOT_GITFILE_MARKER_PREFIX + "/" + rel
+    return rel
 
 
 def _log(function: str, message: str) -> None:
@@ -149,21 +168,22 @@ def iter_existing_protected_path_map(
     """Map logical protected relative path -> actual absolute path to snapshot.
 
     Sensitive git metadata uses discovered gitdir abs paths (gitfile-safe).
-    Other deny-glob matches resolve under ``repo_root``. Does not walk
-    ``objects``. Prunes ``.git`` directory names during the deny walk.
+    Gitfile *marker* files (``.git`` / ``vendor/lib/.git`` as a file) are
+    snapshotted under their logical key to the marker path itself (not the
+    target dir). Other deny-glob matches resolve under ``repo_root``.
     """
     # Late import: direct_finalize imports this module for restore.
     from groklib.modes.direct_finalize import path_matches_deny
 
     root = pathlib.Path(repo_root)
     mapping: Dict[str, pathlib.Path] = {}
-    git_root_prefixes = {
-        _posix_rel(prefix).rstrip("/")
-        for prefix, _git_dir in discover_workspace_git_roots(root)
-        if _posix_rel(prefix).rstrip("/")
-    }
     for rel, abs_path in iter_sensitive_git_entries(root):
         mapping[rel] = abs_path
+
+    # Snapshot every in-workspace gitfile marker under its logical key.
+    for pfx, gitfile in discover_workspace_gitfiles(root):
+        if pfx not in mapping and _is_snapshot_candidate(gitfile):
+            mapping[pfx] = gitfile
 
     for dirpath, dirnames, filenames in os.walk(str(root), topdown=True, followlinks=False):
         rel_dir = _posix_rel(os.path.relpath(dirpath, str(root)))
@@ -186,11 +206,6 @@ def iter_existing_protected_path_map(
             if is_sensitive_git_relative(rel):
                 continue
             if rel in mapping:
-                continue
-            # Do not snapshot the gitfile/gitdir marker itself under a key that
-            # collides with sensitive children (``.git`` / ``vendor/.../.git``):
-            # contents are inventoried via discover + iter_sensitive_git_entries.
-            if rel in git_root_prefixes:
                 continue
             candidate = root / rel
             if _is_snapshot_candidate(candidate):
@@ -280,7 +295,8 @@ def snapshot_protected_paths(
                 reason="over-cap",
             )
             continue
-        dest = snapshot_dir / rel
+        store_rel = _snapshot_store_rel(rel, abs_path)
+        dest = snapshot_dir / store_rel
         try:
             _mkdir_0700(dest.parent)
             shutil.copyfile(str(abs_path), str(dest))
@@ -414,37 +430,49 @@ def restore_protected_paths(
     union_pairs = merge_git_root_pairs(baseline_roots, live_roots)
 
     def _abs_for(rel: str) -> pathlib.Path:
-        # Primary restore path: baseline prefix wins over live redirect target.
-        return resolve_protected_abs_path(root, rel, git_roots=merged)
+        # Order: abs_paths exact -> baseline git_roots children -> live-only.
+        # Bare gitfile marker keys never map to target dirs.
+        return resolve_protected_abs_path(
+            root,
+            rel,
+            git_roots=merged,
+            abs_paths=snapshot.abs_paths or {},
+        )
 
     def _all_abs_for(rel: str) -> List[pathlib.Path]:
-        """Every abs path for logical rel across baseline+live gitdirs."""
+        """Every abs path for logical rel across baseline+live gitdirs.
+
+        Bare marker keys (``.git`` / ``vendor/lib/.git``) resolve only via
+        abs_paths / workspace path - never every aliased target dir.
+        """
         found: List[pathlib.Path] = []
         seen: Set[str] = set()
-        primary = _abs_for(rel)
-        found.append(primary)
-        try:
-            seen.add(str(primary.resolve()))
-        except OSError:
-            seen.add(str(primary))
-        for pfx, git_dir in sorted(union_pairs, key=lambda item: len(item[0]), reverse=True):
-            pfx_n = _posix_rel(pfx).rstrip("/")
-            if not pfx_n:
-                continue
-            if rel == pfx_n:
-                candidate = pathlib.Path(git_dir)
-            elif rel.startswith(pfx_n + "/"):
-                candidate = pathlib.Path(git_dir) / rel[len(pfx_n) + 1 :]
-            else:
-                continue
+
+        def _remember(candidate: pathlib.Path) -> None:
             try:
                 key = str(candidate.resolve())
             except OSError:
                 key = str(candidate)
             if key in seen:
-                continue
+                return
             seen.add(key)
             found.append(candidate)
+
+        _remember(_abs_for(rel))
+        # Children under a logical prefix: baseline + live abs gitdirs.
+        bare_marker = False
+        for pfx, _git_dir in union_pairs:
+            if _posix_rel(pfx).rstrip("/") == rel:
+                bare_marker = True
+                break
+        if bare_marker:
+            return found
+        for pfx, git_dir in sorted(union_pairs, key=lambda item: len(item[0]), reverse=True):
+            pfx_n = _posix_rel(pfx).rstrip("/")
+            if not pfx_n:
+                continue
+            if rel.startswith(pfx_n + "/"):
+                _remember(pathlib.Path(git_dir) / rel[len(pfx_n) + 1 :])
         return found
 
     def _delete_path(abs_path: pathlib.Path) -> Optional[str]:
@@ -460,10 +488,16 @@ def restore_protected_paths(
         except OSError as exc:
             return str(exc)
 
-    for raw in offenders:
-        rel = _posix_rel(raw)
-        if not rel:
-            continue
+    def _is_gitfile_marker_key(rel: str) -> bool:
+        return rel == ".git" or rel.endswith("/.git")
+
+    # Restore gitfile markers first so child residual checks see fixed pointers.
+    ordered_offenders = sorted(
+        (_posix_rel(raw) for raw in offenders if _posix_rel(raw)),
+        key=lambda r: (0 if _is_gitfile_marker_key(r) else 1, r),
+    )
+
+    for rel in ordered_offenders:
         abs_path = _abs_for(rel)
         entry = snapshot.entries.get(rel)
 
@@ -531,7 +565,12 @@ def restore_protected_paths(
                 errors.append({"path": rel, "error": str(exc)})
             continue
 
-        src = snapshot.snapshot_dir / rel
+        src = snapshot.snapshot_dir / _snapshot_store_rel(rel, abs_path)
+        if not src.is_file():
+            # Legacy snapshots stored markers under the logical path.
+            legacy = snapshot.snapshot_dir / rel
+            if legacy.is_file():
+                src = legacy
         try:
             if not src.is_file():
                 raise OSError("snapshot file missing: {}".format(src))
@@ -550,33 +589,58 @@ def restore_protected_paths(
                 os.chmod(str(abs_path), entry.mode if entry.mode else 0o600)
             except OSError as exc:
                 _log("restore_protected_paths", "chmod restore failed for {}: {}".format(rel, exc))
-            # After restoring baseline abs, delete live-only extras for the same
-            # logical key (in-workspace pointer redirect plants on the new side).
+            # Snapshotted restores write only the baseline abs_paths target. Do not
+            # delete live-only aliases for the same logical key (a redirected
+            # gitfile target may hold independent content). Residual live-side
+            # paths are reported unrestored only when the gitfile marker for
+            # that prefix was not restored in this call (pointer still wrong).
+            restored.append(rel)
             try:
                 primary_key = str(abs_path.resolve())
             except OSError:
                 primary_key = str(abs_path)
-            extras_remain = False
-            for candidate in _all_abs_for(rel):
+            for pfx, live_abs in live_roots:
+                pfx_n = _posix_rel(pfx).rstrip("/")
+                if not pfx_n or not (
+                    rel == pfx_n or rel.startswith(pfx_n + "/")
+                ):
+                    continue
+                base_s = baseline_roots.get(pfx_n)
+                if base_s:
+                    try:
+                        if str(pathlib.Path(base_s).resolve()) == str(
+                            pathlib.Path(live_abs).resolve()
+                        ):
+                            continue  # live still matches baseline
+                    except OSError:
+                        if str(base_s) == str(live_abs):
+                            continue
+                # Marker restored this call => pointer fixed; ignore stale pre-restore live map.
+                if pfx_n in restored:
+                    continue
+                if rel == pfx_n:
+                    continue  # marker itself handled by abs_paths
+                if not rel.startswith(pfx_n + "/"):
+                    continue
+                candidate = pathlib.Path(live_abs) / rel[len(pfx_n) + 1 :]
                 try:
                     ckey = str(candidate.resolve())
                 except OSError:
                     ckey = str(candidate)
                 if ckey == primary_key:
                     continue
-                err = _delete_path(candidate)
-                if err:
-                    extras_remain = True
+                if candidate.exists() or candidate.is_symlink():
+                    if rel not in unrestored:
+                        unrestored.append(rel)
                     errors.append(
                         {
                             "path": rel,
-                            "error": "live redirect plant not cleared: {}".format(err),
+                            "error": (
+                                "live redirect path still present after baseline "
+                                "restore; clear it yourself"
+                            ),
                         }
                     )
-            if extras_remain:
-                unrestored.append(rel)
-            else:
-                restored.append(rel)
         except OSError as exc:
             _log("restore_protected_paths", "restore failed for {}: {}".format(rel, exc))
             unrestored.append(rel)
