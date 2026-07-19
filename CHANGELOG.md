@@ -13,13 +13,21 @@ Phases land as sequential PRs; no tag until the release phase. Most implementati
 is delegated to Grok itself through this plugin's own contract -> code -> handoff
 pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 
+**Shipping branch:** `feat/2.0-peer-agent` (PR #5). Maintainer still owns annotated
+`v2.0.0` tag + dual-host installed-host post-smoke per `docs/RELEASE.md`.
+
+**Post-2.0 engineering backlog (not blocking tag):** DRY consolidation of dual
+sources - [issue #6](https://github.com/sfourdrinier/grok-skills/issues/6)
+(TDD, no-regression PR). Do not grow known dual constants/helpers while open.
+
 ### Fixed (direct runMode - version probe hang)
 
 - **Bounded `grok --version` probes:** setup (`grokBinaryAvailable`) and direct
   preflight share `probeGrokVersion` with a 10s wall-clock timeout (overridable
   via `GROK_DIRECT_VERSION_PROBE_TIMEOUT_MS` for tests). A hanging installed CLI
   shim no longer blocks the companion indefinitely. Timeouts classify as
-  `error.class: "timeout"` (distinct from `tool-unavailable`).
+  `error.class: "timeout"` (distinct from `tool-unavailable`). Covered by
+  `direct-parity.test.mjs` (hanging binary + fast binary + preflight envelope).
 
 ### Fixed (direct protect - nested modules / tree-walk / watch-hash)
 
@@ -212,7 +220,9 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 - **Unknown peer-home liveness:** a present but expired/malformed `peer.lease`
   no longer forces UNKNOWN `owner.pid` liveness to DEAD. Only a parseable lease
   that proves the ACP child is gone may shorten UNKNOWN and reap inside the
-  live-start window.
+  live-start window. Unit coverage: expired lease with live child kept; parseable
+  lease with dead child reaped; unparseable `peer.lease` kept
+  (`test_mode_peer.PeerLifecycleTests`).
 - **Symlinked session roots refused:** `archive_session` lstats
   `<home>/.grok/sessions` and refuses when the sessions root itself is a
   symlink, so a poisoned root cannot archive arbitrary readable directories into

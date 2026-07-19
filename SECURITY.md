@@ -138,8 +138,12 @@ over. It is **not** a complete sandbox against an adversarial model.
   `surrogateescape` for non-UTF-8 filenames.
 - **Apply lock honesty:** exclusive apply lock + durable marker is concurrent
   restop safety under trusted local state - **not** an atomic TOCTOU seal.
-  Ownerless/unknown locks never age-reclaim (manual cleanup if abandoned
-  without a durable owner).
+  **Automatic reclaim is disabled for all holders** (live, dead, ownerless,
+  unknown): Node stdlib cannot CAS an in-place lock directory without displacing
+  a live replacement under three contenders. Acquire waits or times out with
+  owner diagnostics; abandoned locks need holder release or operator cleanup.
+  Canonical ladder: [plugin/references/integration-modes.md](plugin/references/integration-modes.md)
+  (Exclusive apply lock + durable marker).
 
 ### Direct-default trust posture (integration=direct)
 
