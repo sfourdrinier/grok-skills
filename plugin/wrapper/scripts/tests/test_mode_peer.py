@@ -385,6 +385,28 @@ class PeerLifecycleTests(PeerTestBase):
         self.assertIn(str(home), removed)
         self.assertFalse(home.exists())
 
+    def test_reaper_keeps_unknown_owner_with_malformed_peer_lease_in_window(self) -> None:
+        # UNKNOWN owner + unparseable peer.lease is still possibly-active: only a
+        # parseable lease that proves the child is gone may shorten to DEAD.
+        import shutil
+        from unittest import mock
+
+        fake_temp_root = tempfile.mkdtemp(prefix="grok-cli-faketemp-unknown-badlease-")
+        self.addCleanup(shutil.rmtree, fake_temp_root, True)
+        home = pathlib.Path(fake_temp_root) / "gs-unknown-bad-lease"
+        home.mkdir(mode=0o700)
+        os.chmod(str(home), 0o700)
+        runstate.write_owner_marker(home, runstate.new_run_id())
+        # No owner.pid; peer.lease is present but not valid JSON.
+        (home / "peer.lease").write_text("{not-json\n", encoding="utf-8")
+        past = time.time() - (runstate.LIVE_START_STALE_HOME_MAX_AGE_SECONDS + 100)
+        os.utime(home, (past, past))
+        with mock.patch("tempfile.gettempdir", return_value=fake_temp_root):
+            removed = runstate.audit_stale_temp_homes(
+                runstate.LIVE_START_STALE_HOME_MAX_AGE_SECONDS
+            )
+        self.assertNotIn(str(home), removed)
+        self.assertTrue(home.exists())
 
     def test_session_update_chunk_redacted_in_progress_and_envelope(self) -> None:
         secret = _split_bearer_fixture()
