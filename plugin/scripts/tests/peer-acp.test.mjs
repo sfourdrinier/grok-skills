@@ -15,7 +15,10 @@ import {
   runCompanion,
 } from "./helpers/fake-wrapper.mjs";
 import { runPeerStartBackground } from "../lib/peer-acp.mjs";
-import { listJobs } from "../lib/jobs.mjs";
+import {
+  listJobs,
+  readJobStdout,
+} from "../lib/jobs.mjs";
 import { createHash } from "node:crypto";
 
 /** Write the validation manifest the companion apply re-verifies (sha/bytes). */
@@ -414,5 +417,209 @@ test("peer-stop ready + integration=review does not apply", () => {
   } finally {
     cleanup();
     fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Fixture for peer-stop completion-path honesty: ready wrapper envelope + real
+ * patch + optional dirty target. Returns everything needed to assert the full
+ * chain (stdout / stored / job / notify / target bytes).
+ */
+function stagePeerStopCompletionFixture({
+  rid,
+  integration,
+  dirtyTarget = false,
+}) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "grok-peer-complete-"));
+  const target = path.join(tmp, "target");
+  const state = path.join(tmp, "state");
+  const pluginData = path.join(tmp, "pdata");
+  fs.mkdirSync(target, { recursive: true });
+  fs.mkdirSync(path.join(state, "grok-skills", "runs", rid, "artifacts"), {
+    recursive: true,
+  });
+  const git = (args) => spawnSync("git", ["-C", target, ...args], { encoding: "utf8" });
+  git(["init", "-q"]);
+  git(["config", "user.name", "t"]);
+  git(["config", "user.email", "t@example.com"]);
+  git(["config", "commit.gpgsign", "false"]);
+  fs.writeFileSync(path.join(target, "hello.txt"), "old\n", "utf8");
+  git(["add", "hello.txt"]);
+  git(["commit", "-q", "-m", "base"]);
+  const work = path.join(tmp, "work");
+  spawnSync("git", ["clone", "-q", target, work], { encoding: "utf8" });
+  fs.writeFileSync(path.join(work, "hello.txt"), "new\n", "utf8");
+  const diff = spawnSync("git", ["-C", work, "diff", "--binary", "HEAD", "--", "hello.txt"], {
+    encoding: "utf8",
+  });
+  assert.equal(diff.status, 0, diff.stderr);
+  fs.writeFileSync(
+    path.join(state, "grok-skills", "runs", rid, "artifacts", "implementation.patch"),
+    diff.stdout,
+    "utf8"
+  );
+  stageHandoffManifest(state, rid, diff.stdout);
+  if (dirtyTarget) {
+    // Overlap the patch path so the dirty-overlap guard blocks apply.
+    fs.writeFileSync(path.join(target, "hello.txt"), "diverged\n", "utf8");
+  }
+  const envelope = {
+    schemaVersion: 1,
+    mode: "peer-stop",
+    status: "success",
+    runId: rid,
+    repository: target,
+    targetWorkspace: ".",
+    response: {
+      peer: { integrationReady: true, preview: false },
+      integration: { ready: true, blockers: [] },
+    },
+  };
+  const { env, cleanup: cleanupWrapper } = makeFakeWrapper({
+    "peer-stop": { stdout: `${JSON.stringify(envelope)}\n`, exitCode: 0 },
+  });
+  // Notifications stay off (default): peer-stop is not notify-eligible, and we
+  // avoid external webhook attempts. Lifecycle honesty is still asserted if a
+  // marker is ever written.
+  const runEnv = {
+    ...env,
+    XDG_STATE_HOME: state,
+    CLAUDE_PLUGIN_DATA: pluginData,
+    GROK_DISABLE_ACP: "",
+    GROK_COMPANION_EXECUTION_CONTEXT: "background",
+  };
+  return {
+    tmp,
+    target,
+    state,
+    pluginData,
+    runEnv,
+    integration,
+    rid,
+    dirtyTarget,
+    cleanup: () => {
+      cleanupWrapper();
+      fs.rmSync(tmp, { recursive: true, force: true });
+    },
+  };
+}
+
+function assertPeerStopBlockedCompletion(res, fx, expectedOutcome) {
+  assert.notEqual(res.code, 0, `blocked apply must exit nonzero; stderr: ${res.stderr}`);
+  const envLines = (res.stdout || "").split("\n").filter((l) => l.trim().startsWith("{"));
+  assert.equal(envLines.length, 1, `exactly one stdout envelope; got: ${res.stdout}`);
+  const finalEnv = JSON.parse(envLines[0]);
+  assert.equal(finalEnv.status, "failure", `stdout must not report success; got: ${res.stdout}`);
+  assert.notEqual(finalEnv.status, "success");
+  assert.equal(finalEnv.response?.integration?.applied, false);
+  assert.equal(finalEnv.response?.integration?.outcome, expectedOutcome);
+  const jobs = listJobs(fx.target, {
+    CLAUDE_PLUGIN_DATA: fx.pluginData,
+    XDG_STATE_HOME: fx.state,
+  });
+  assert.ok(jobs.length >= 1, "a peer-stop job was recorded");
+  assert.equal(jobs[0].status, "failure", "job must be failed for a blocked apply");
+  const stored = readJobStdout(fx.target, jobs[0].id, {
+    CLAUDE_PLUGIN_DATA: fx.pluginData,
+    XDG_STATE_HOME: fx.state,
+  });
+  assert.ok(stored, "stored result must exist");
+  assert.equal(stored.trim(), envLines[0].trim(), "stored result must match the final stdout envelope");
+  const storedEnv = JSON.parse(stored);
+  assert.equal(storedEnv.status, "failure");
+  assert.equal(storedEnv.response?.integration?.applied, false);
+  assert.equal(storedEnv.response?.integration?.outcome, expectedOutcome);
+  const expectedBody = fx.dirtyTarget ? "diverged\n" : "old\n";
+  assert.equal(
+    fs.readFileSync(path.join(fx.target, "hello.txt"), "utf8"),
+    expectedBody,
+    "target must be untouched when apply is blocked"
+  );
+  const notifiedPath = path.join(
+    fx.state,
+    "grok-skills",
+    "runs",
+    fx.rid,
+    "notified.json"
+  );
+  if (fs.existsSync(notifiedPath)) {
+    const marker = JSON.parse(fs.readFileSync(notifiedPath, "utf8"));
+    assert.notEqual(
+      marker.lifecycle,
+      "completed",
+      "blocked peer-stop must not notify lifecycle=completed"
+    );
+    assert.equal(marker.lifecycle, "failed");
+  }
+}
+
+test("peer-stop consent-blocked: final stdout/stored envelope is failure with applied=false", () => {
+  // Wrapper returns ready+success, but direct integration has no consent. The
+  // companion completion path must rewrite the FINAL envelope (and stored
+  // /grok:result payload) before first stdout write so consumers never see a
+  // success envelope for an unapplied peer-stop.
+  const rid = "20260717T120000Z-abc301";
+  const fx = stagePeerStopCompletionFixture({
+    rid,
+    integration: "direct",
+  });
+  try {
+    const res = runCompanion(["peer-stop", "--run-id", rid, "--integration", "direct"], {
+      env: fx.runEnv,
+      cwd: fx.target,
+    });
+    assertPeerStopBlockedCompletion(res, fx, "consent-required");
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("peer-stop dirty-overlap blocked: final stdout/stored envelope is failure with applied=false", () => {
+  const rid = "20260717T120000Z-abc302";
+  const fx = stagePeerStopCompletionFixture({
+    rid,
+    integration: "auto",
+    dirtyTarget: true,
+  });
+  try {
+    const res = runCompanion(["peer-stop", "--run-id", rid, "--integration", "auto"], {
+      env: fx.runEnv,
+      cwd: fx.target,
+    });
+    assertPeerStopBlockedCompletion(res, fx, "blocked-dirty-overlap");
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("peer-stop success apply: still exactly one success envelope with applied=true", () => {
+  const rid = "20260717T120000Z-abc303";
+  const fx = stagePeerStopCompletionFixture({ rid, integration: "auto" });
+  try {
+    const res = runCompanion(["peer-stop", "--run-id", rid, "--integration", "auto"], {
+      env: fx.runEnv,
+      cwd: fx.target,
+    });
+    assert.equal(res.code, 0, res.stderr);
+    const envLines = (res.stdout || "").split("\n").filter((l) => l.trim().startsWith("{"));
+    assert.equal(envLines.length, 1, `exactly one stdout envelope; got: ${res.stdout}`);
+    const finalEnv = JSON.parse(envLines[0]);
+    assert.equal(finalEnv.status, "success");
+    assert.equal(finalEnv.response?.integration?.applied, true);
+    assert.equal(finalEnv.response?.integration?.outcome, "applied");
+    assert.equal(fs.readFileSync(path.join(fx.target, "hello.txt"), "utf8"), "new\n");
+    const jobs = listJobs(fx.target, {
+      CLAUDE_PLUGIN_DATA: fx.pluginData,
+      XDG_STATE_HOME: fx.state,
+    });
+    assert.ok(jobs.length >= 1);
+    assert.equal(jobs[0].status, "success");
+    const stored = readJobStdout(fx.target, jobs[0].id, {
+      CLAUDE_PLUGIN_DATA: fx.pluginData,
+      XDG_STATE_HOME: fx.state,
+    });
+    assert.equal(stored.trim(), envLines[0].trim());
+  } finally {
+    fx.cleanup();
   }
 });

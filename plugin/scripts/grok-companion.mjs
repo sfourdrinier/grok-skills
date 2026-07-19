@@ -47,6 +47,7 @@ import {
   resolveRunIdFromJobAndStdout,
   sanitizeRunId,
 } from "./lib/companion-terminal-notify.mjs";
+import { createCaptureAndTrack } from "./lib/companion-capture.mjs";
 import { cmdSetup as setupCmd } from "./lib/companion-setup.mjs";
 import {
   buildAdversarialTask,
@@ -59,10 +60,13 @@ import {
 import {
   isDirectHandoffRequest,
   isDirectRunId,
-  runDirectGrok,
   writeDirectNoHandoffRefuse,
 } from "./lib/direct-grok.mjs";
-import { runAutoIntegrate, runImplementCombo } from "./lib/implement.mjs";
+import {
+  buildPeerStopFinalEnvelope,
+  runAutoIntegrate,
+  runImplementCombo,
+} from "./lib/implement.mjs";
 import { hasFlagOrEquals, stripFlags } from "./lib/companion-args.mjs";
 import { renderEnvelopePretty, tryParseEnvelope } from "./lib/render.mjs";
 import { terminateReviewTree } from "./lib/gate-kill.mjs";
@@ -125,103 +129,14 @@ function maybeSchema(args) {
   }
   return args;
 }
-function captureAndTrack(
-  wrapper,
-  args,
-  { cwd, mode, kind, runMode, notifyMode, skipNotify, onStdout }
-) {
-  const startedAtMs = Date.now();
-  // Job registry stores skill mode (e.g. adversarial-review), not wrapper remaps.
-  const skillMode = notifyMode || mode;
-  const job = createJob(cwd, { kind, mode: skillMode, runMode });
-  appendJobLog(cwd, job.id, `dispatch ${args.join(" ")}`);
-  stderrLine(`[grok-job] ${job.id} started (${skillMode}, ${runMode})`);
-  if (runMode === "direct") {
-    const direct = runDirectGrok({
-      mode,
-      args,
-      cwd,
-      env: process.env,
-      scriptsDir: path.join(PLUGIN_ROOT, "wrapper", "scripts"),
-      python: PYTHON,
-    });
-    storeJobStdout(cwd, job.id, direct.envelopeText);
-    const directEnv = tryParseEnvelope(direct.envelopeText);
-    const directRunId = isDirectRunId(directEnv?.runId) ? directEnv.runId : null;
-    updateJob(cwd, job.id, {
-      status: direct.code === 0 ? "success" : "failure",
-      summary: direct.code === 0 ? "direct grok finished" : "direct grok failed",
-      ...(directRunId ? { runId: directRunId } : {}),
-    });
-    process.stdout.write(direct.envelopeText);
-    // Direct has no durable runs/<id> for notified.json; skip push notify.
-    return Promise.resolve(direct.code);
-  }
-  const result = spawnSync(PYTHON, [wrapper, ...args], {
-    cwd,
-    encoding: "utf8",
-    env: wrapperChildEnv(process.env),
-    maxBuffer: 64 * 1024 * 1024,
-  });
-  if (result.error) {
-    process.stderr.write(spawnFailedMessage(wrapper, result.error.message));
-    updateJob(cwd, job.id, { status: "failure", error: result.error.message });
-    return Promise.resolve(SPAWN_FAILED_EXIT);
-  }
-  if (result.stderr) {
-    process.stderr.write(result.stderr);
-    for (const line of result.stderr.split("\n")) {
-      const runId = parseRunIdMarker(line);
-      if (runId && sanitizeRunId(runId)) {
-        updateJob(cwd, job.id, { runId });
-      }
-    }
-  }
-  const stdout = result.stdout || "";
-  if (stdout) {
-    process.stdout.write(stdout.endsWith("\n") ? stdout : `${stdout}\n`);
-    storeJobStdout(cwd, job.id, stdout);
-    const env = tryParseEnvelope(stdout);
-    const safe = sanitizeRunId(env?.runId);
-    if (safe) {
-      updateJob(cwd, job.id, { runId: safe });
-    }
-  }
-  const code = typeof result.status === "number" ? result.status : SIGNAL_EXIT;
-  // onStdout may return an integration-aware effective code (e.g. peer-stop
-  // whose apply failed after a wrapper exit 0). Finalize the JOB on that code so
-  // /grok:jobs and /grok:result don't show a "successful" peer-stop whose patch
-  // was never applied.
-  let effectiveCode = code;
-  if (typeof onStdout === "function") {
-    try {
-      const hookCode = onStdout(stdout, code);
-      if (typeof hookCode === "number") effectiveCode = hookCode;
-    } catch (err) {
-      stderrLine(`[grok-companion] onStdout hook failed: ${err.message}`);
-    }
-  }
-  const updated = updateJob(cwd, job.id, {
-    status: effectiveCode === 0 ? "success" : "failure",
-    summary: effectiveCode === 0 ? "completed" : `exit ${effectiveCode}`,
-    pid: null,
-  });
-  if (!shouldAttemptTerminalNotify({ skipNotify })) {
-    return Promise.resolve(code);
-  }
-  const runId = resolveRunIdFromJobAndStdout(cwd, updated, stdout);
-  // Fire-and-forget is wrong for short sync path - wait so process does not exit mid-notify
-  // but never throw.
-  return maybeNotifyAfterTerminal({
-    cwd,
-    mode: skillMode,
-    runId,
-    code,
-    startedAtMs,
-    stdoutText: stdout,
-    stderrLine,
-  }).then(() => code);
-}
+const captureAndTrack = createCaptureAndTrack({
+  python: PYTHON,
+  pluginRoot: PLUGIN_ROOT,
+  spawnFailedExit: SPAWN_FAILED_EXIT,
+  signalExit: SIGNAL_EXIT,
+  spawnFailedMessage,
+  stderrLine,
+});
 function runPassthrough(wrapper, args) {
   const result = spawnSync(PYTHON, [wrapper, ...args], {
     stdio: "inherit",
@@ -835,14 +750,25 @@ async function dispatch({
         onStdout:
           wrapperMode === "peer-stop"
             ? (stdout, code) => {
-                // Fails closed on any apply-path throw; returned code feeds the
-                // job status (an apply that failed after the wrapper's zero exit).
+                // Capture wrapper output, run peer integration, attach final
+                // outcome via the auto-envelope SSOT, then emit/store/notify
+                // exactly that envelope with the effective code (BEFORE first
+                // stdout write - captureAndTrack rewrites pre-write).
                 if (code === 0) {
                   peerIntegration = integratePeerStopFailClosed(
                     stdout, cwd, integrationFlag, rest, stderrLine
                   );
                 }
-                return peerStopExitCode(code, peerIntegration);
+                const effective = peerStopExitCode(code, peerIntegration);
+                const raw = tryParseEnvelope(stdout || "");
+                const finalEnv = buildPeerStopFinalEnvelope(raw, effective, peerIntegration);
+                if (finalEnv) {
+                  return {
+                    code: effective,
+                    stdoutText: `${JSON.stringify(finalEnv)}\n`,
+                  };
+                }
+                return { code: effective, stdoutText: stdout };
               }
             : null,
       })

@@ -207,6 +207,20 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
   claims `/grok:handoff` observes peer-stop ready - handoff stays code-mode only
   and refuses peer runIds (`handoff-unavailable`).
 
+### Fixed (Phase 7 - peer-stop final-envelope completion path)
+
+- **Peer-stop completion honesty:** a ready wrapper envelope whose apply is
+  blocked (consent-required, dirty-overlap, integrity, etc.) no longer leaves
+  stdout / `/grok:result` storage as raw `status: success`. Companion captures
+  wrapper output, runs peer integration, attaches the final outcome via the
+  shared auto final-envelope SSOT (`attachIntegrationFinalOutcome` /
+  `buildPeerStopFinalEnvelope`), then emits exactly one final envelope, stores
+  that envelope, finalizes the job, and notifies from final envelope +
+  effective code - all before first stdout write. Success apply still one
+  success envelope with `response.integration.applied=true`.
+- Capture path extracted to `lib/companion-capture.mjs` so the entrypoint stays
+  under the 900-line cap while the rewrite-before-write contract is centralized.
+
 ### Fixed (Phase 7 - PR #5 Codex code-review remediation)
 
 Verified each inline review comment against current code (many were already

@@ -133,6 +133,15 @@ its verified patch **itself** per the active integration mode (above);
 `/grok:handoff --run-id` stays **code-mode only** and refuses peer runIds
 (`handoff-unavailable`), so peer integration never routes through it.
 
+Companion completion honesty (parity with `code --integration auto`): peer-stop
+captures the wrapper envelope, runs integration, attaches the final apply
+outcome (`response.integration.applied` / `outcome`) via the shared final-envelope
+helper, then emits **exactly one** stdout envelope, stores that same envelope for
+`/grok:result`, finalizes the job, and notifies from the final envelope +
+effective exit code. A blocked apply (consent, dirty-overlap, integrity, etc.)
+is `status: failure`, nonzero exit, job failed, target untouched - never a raw
+wrapper `success` for an unapplied ready peer-stop.
+
 ## Mode-aware integrate rules (summary)
 
 | Mode | Auto-apply? | Parent apply? |

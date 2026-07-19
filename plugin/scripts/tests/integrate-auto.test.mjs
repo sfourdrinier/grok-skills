@@ -11,7 +11,9 @@ import path from "node:path";
 import { test } from "node:test";
 
 import {
+  attachIntegrationFinalOutcome,
   buildAutoFinalEnvelope,
+  buildPeerStopFinalEnvelope,
   companionIntegrationToWrapper,
   restForWrapperIntegration,
 } from "../lib/implement.mjs";
@@ -171,6 +173,60 @@ test("unit: buildAutoFinalEnvelope carries handoff fields + apply outcome", () =
   assert.equal(env3.response.integration.outcome, "not-ready");
   // no handoff envelope (no runId) -> null so the caller falls back to code stdout.
   assert.equal(buildAutoFinalEnvelope({ handoffEnvelope: null }, 1, null), null);
+});
+
+test("unit: attachIntegrationFinalOutcome + buildPeerStopFinalEnvelope share the SSOT", () => {
+  const base = {
+    schemaVersion: 1,
+    mode: "peer-stop",
+    status: "success",
+    runId: "peer-r",
+    response: {
+      peer: { integrationReady: true },
+      integration: { ready: true, blockers: [] },
+    },
+  };
+  const attached = attachIntegrationFinalOutcome(
+    base,
+    1,
+    { ok: false, outcome: "consent-required" },
+    { readyFallback: true }
+  );
+  assert.equal(attached.status, "failure");
+  assert.equal(attached.mode, "peer-stop", "peer mode is preserved unless overridden");
+  assert.equal(attached.response.integration.ready, true);
+  assert.equal(attached.response.integration.applied, false);
+  assert.equal(attached.response.integration.outcome, "consent-required");
+
+  const blocked = buildPeerStopFinalEnvelope(base, 1, {
+    attempted: true,
+    ok: false,
+    outcome: "blocked-dirty-overlap",
+  });
+  assert.equal(blocked.status, "failure");
+  assert.equal(blocked.response.integration.applied, false);
+  assert.equal(blocked.response.integration.outcome, "blocked-dirty-overlap");
+
+  const applied = buildPeerStopFinalEnvelope(base, 0, {
+    attempted: true,
+    ok: true,
+    outcome: "applied",
+  });
+  assert.equal(applied.status, "success");
+  assert.equal(applied.response.integration.applied, true);
+  assert.equal(applied.response.integration.outcome, "applied");
+
+  // Retained (review) is not an apply success: applied stays false.
+  const retained = buildPeerStopFinalEnvelope(base, 0, {
+    attempted: false,
+    ok: true,
+    outcome: "retained",
+  });
+  assert.equal(retained.status, "success");
+  assert.equal(retained.response.integration.applied, false);
+  assert.equal(retained.response.integration.outcome, "retained");
+
+  assert.equal(buildPeerStopFinalEnvelope(null, 1, null), null);
 });
 
 test("unit: companionIntegrationToWrapper maps auto/review to worktree", () => {

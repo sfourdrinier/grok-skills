@@ -239,6 +239,46 @@ export async function runImplementCombo(wrapper, rest, runMode, track, {
 }
 
 /**
+ * SSOT: attach final integration outcome onto a base envelope (auto handoff or
+ * peer-stop wrapper). Sets TRUE terminal status + response.integration.applied
+ * / outcome so stdout, /grok:result storage, and notify share one shape.
+ *
+ * @param {object|null|undefined} baseEnvelope
+ * @param {number} finalCode
+ * @param {{ok?: boolean, outcome?: string}|null} applied
+ * @param {{ mode?: string, readyFallback?: boolean }} [opts]
+ * @returns {object|null}
+ */
+export function attachIntegrationFinalOutcome(baseEnvelope, finalCode, applied, opts = {}) {
+  if (!baseEnvelope || typeof baseEnvelope !== "object") return null;
+  const baseResp =
+    baseEnvelope.response && typeof baseEnvelope.response === "object"
+      ? baseEnvelope.response
+      : {};
+  const baseInteg =
+    baseResp.integration && typeof baseResp.integration === "object"
+      ? baseResp.integration
+      : {};
+  const out = {
+    ...baseEnvelope,
+    status: finalCode === 0 ? "success" : "failure",
+    response: {
+      ...baseResp,
+      integration: {
+        ...baseInteg,
+        applied: applied?.ok === true,
+        outcome:
+          applied?.outcome ?? (opts.readyFallback === true ? "not-applied" : "not-ready"),
+      },
+    },
+  };
+  if (typeof opts.mode === "string" && opts.mode) {
+    out.mode = opts.mode;
+  }
+  return out;
+}
+
+/**
  * Build the single final auto envelope from the handoff envelope (which carries
  * runId + response.integration.ready + blockers), setting the TRUE combo status
  * and recording whether the ready patch actually applied. Returns null when there
@@ -249,30 +289,38 @@ export async function runImplementCombo(wrapper, rest, runMode, track, {
  * @returns {object|null}
  */
 export function buildAutoFinalEnvelope(result, finalCode, applied) {
-  const h = result?.handoffEnvelope;
-  if (!h || typeof h !== "object") return null;
-  const baseResp = h.response && typeof h.response === "object" ? h.response : {};
-  const baseInteg =
-    baseResp.integration && typeof baseResp.integration === "object"
-      ? baseResp.integration
-      : {};
-  return {
-    ...h,
-    // This is the terminal envelope for a `code --integration auto` COMMAND, so
-    // it must key as mode "code" (callers dispatch on envelope.mode; the code
-    // contract keys terminal code envelopes by "code", not the handoff we built
-    // it from). Integration readiness/apply details are preserved below.
+  // Terminal envelope for a `code --integration auto` COMMAND keys as mode "code"
+  // (callers dispatch on envelope.mode; not the handoff we built it from).
+  return attachIntegrationFinalOutcome(result?.handoffEnvelope, finalCode, applied, {
     mode: "code",
-    status: finalCode === 0 ? "success" : "failure",
-    response: {
-      ...baseResp,
-      integration: {
-        ...baseInteg,
-        applied: applied?.ok === true,
-        outcome: applied?.outcome ?? (result?.ready ? "not-applied" : "not-ready"),
-      },
-    },
-  };
+    readyFallback: result?.ready === true,
+  });
+}
+
+/**
+ * Peer-stop terminal envelope: rewrite the wrapper's ready/success envelope with
+ * the real apply outcome BEFORE first stdout write / store / notify.
+ * applied is true only for an attempted+ok apply (retained/not-ready stay false).
+ *
+ * @param {object|null|undefined} rawEnvelope wrapper peer-stop envelope
+ * @param {number} finalCode
+ * @param {{attempted?: boolean, ok?: boolean, outcome?: string}|null} peerIntegration
+ * @returns {object|null}
+ */
+export function buildPeerStopFinalEnvelope(rawEnvelope, finalCode, peerIntegration) {
+  const applied =
+    peerIntegration == null
+      ? null
+      : {
+          ok: peerIntegration.attempted === true && peerIntegration.ok === true,
+          outcome: peerIntegration.outcome,
+        };
+  const ready =
+    rawEnvelope?.response?.peer?.integrationReady === true ||
+    rawEnvelope?.response?.integration?.ready === true;
+  return attachIntegrationFinalOutcome(rawEnvelope, finalCode, applied, {
+    readyFallback: ready === true,
+  });
 }
 
 /**

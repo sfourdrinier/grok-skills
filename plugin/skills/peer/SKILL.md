@@ -34,7 +34,11 @@ integration mode (canonical: `plugin/references/integration-modes.md` -
 direct: live tree; auto: apply-on-ready; review: patch + manifest only) -
 applied by `peer stop` itself, at stop time. `/grok:handoff` is code-mode only
 and refuses peer runIds (`handoff-unavailable`); peer integration never routes
-through it (see `integration-modes.md`).
+through it (see `integration-modes.md`). The companion emits **one** final
+stdout envelope that already includes the apply outcome
+(`response.integration.applied` / `outcome`); blocked apply is `status: failure`
++ nonzero exit + failed job + identical stored `/grok:result` payload (never a
+raw wrapper success for an unapplied ready peer-stop).
 
 ## How to run (transparent)
 

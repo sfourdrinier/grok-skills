@@ -112,6 +112,13 @@ Consent gate applies for direct (same as code). `peer stop` applies the verified
 patch itself per integration mode; `/grok:handoff` does NOT accept peer runs
 (code-mode only).
 
+Terminal honesty: the companion rewrites the peer-stop stdout envelope with the
+true apply outcome **before** first write / store / notify (shared auto final-
+envelope SSOT). Blocked apply => one `status: failure` envelope with
+`response.integration.applied=false` + outcome, stored identically for
+`/grok:result`, job failed, nonzero exit; success apply => one success envelope
+with `applied=true`.
+
 ## Failure model
 
 - Child death -> peer.json lifecycle "died"; peer-prompt fails closed
