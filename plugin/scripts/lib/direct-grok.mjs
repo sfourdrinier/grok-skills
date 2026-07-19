@@ -89,6 +89,78 @@ const DIRECT_TIMEOUT_DEFAULTS_SECONDS = {
 // Hard ceiling mirrors runstate.MAX_RUN_TIMEOUT_SECONDS (the wrapper's clamp).
 const DIRECT_MAX_TIMEOUT_SECONDS = 7 * 24 * 3600;
 
+/**
+ * Bound for `grok --version` probes (setup + direct preflight). Small on purpose:
+ * --version must return promptly; a hanging shim must not block the companion.
+ * Override via GROK_DIRECT_VERSION_PROBE_TIMEOUT_MS for tests only.
+ */
+export const DIRECT_VERSION_PROBE_TIMEOUT_MS = 10_000;
+
+/** Resolve version-probe timeout ms (env override for tests; production uses constant). */
+export function resolveVersionProbeTimeoutMs(env = process.env) {
+  const raw = env && env.GROK_DIRECT_VERSION_PROBE_TIMEOUT_MS;
+  if (raw != null && String(raw).trim() !== "") {
+    const n = Number.parseInt(String(raw), 10);
+    if (Number.isFinite(n) && n > 0 && n <= 60_000) return n;
+  }
+  return DIRECT_VERSION_PROBE_TIMEOUT_MS;
+}
+
+/**
+ * Bounded `grok --version` probe shared by setup and direct preflight.
+ * @returns {{
+ *   ok: boolean,
+ *   version: string|null,
+ *   detail: string|null,
+ *   timedOut: boolean,
+ *   errorClass: "timeout"|"tool-unavailable"|null,
+ *   status: number|null,
+ * }}
+ */
+export function probeGrokVersion(binary, env = process.env) {
+  const timeoutMs = resolveVersionProbeTimeoutMs(env);
+  const result = spawnSync(binary, ["--version"], {
+    encoding: "utf8",
+    env,
+    timeout: timeoutMs,
+    killSignal: "SIGTERM",
+  });
+  const timedOut = Boolean(result.error && result.error.code === "ETIMEDOUT");
+  if (timedOut) {
+    return {
+      ok: false,
+      version: null,
+      detail: `grok --version exceeded the ${timeoutMs}ms probe timeout (runMode=direct); process killed`,
+      timedOut: true,
+      errorClass: "timeout",
+      status: result.status,
+    };
+  }
+  if (result.status === 0) {
+    const version = (result.stdout || "").trim().split("\n")[0] || null;
+    return {
+      ok: true,
+      version,
+      detail: null,
+      timedOut: false,
+      errorClass: null,
+      status: 0,
+    };
+  }
+  const detail =
+    (result.stderr || result.stdout || result.error?.message || "not found")
+      .toString()
+      .trim() || "not found";
+  return {
+    ok: false,
+    version: null,
+    detail,
+    timedOut: false,
+    errorClass: "tool-unavailable",
+    status: result.status,
+  };
+}
+
 /** Resolve the effective direct-mode timeout: --timeout override, else per-mode
  *  default; junk/non-positive falls back to the default; clamped to the ceiling. */
 export function resolveDirectTimeoutSeconds(args, mode) {
@@ -315,8 +387,8 @@ export function runDirectGrok({
   }
 
   if (mode === "preflight") {
-    const version = spawnSync(binary, ["--version"], { encoding: "utf8", env });
-    const ok = version.status === 0;
+    const probe = probeGrokVersion(binary, env);
+    const ok = probe.ok;
     const envelope = {
       schemaVersion: 1,
       mode: "preflight",
@@ -327,7 +399,9 @@ export function runDirectGrok({
           {
             name: "grokBinary",
             ok,
-            detail: ok ? (version.stdout || "").trim().split("\n")[0] : version.stderr || "grok --version failed",
+            detail: ok
+              ? probe.version
+              : probe.detail || "grok --version failed",
           },
           {
             name: "runMode",
@@ -341,7 +415,17 @@ export function runDirectGrok({
       ],
       error: ok
         ? null
-        : { class: "tool-unavailable", message: "grok CLI not usable", detail: version.stderr },
+        : {
+            class: probe.errorClass || "tool-unavailable",
+            message: probe.timedOut
+              ? probe.detail
+              : "grok CLI not usable",
+            detail: {
+              timedOut: probe.timedOut,
+              exitCode: probe.status,
+              stderr: probe.timedOut ? null : probe.detail,
+            },
+          },
       policy: { direct: true },
     };
     return { code: ok ? 0 : 1, envelopeText: `${JSON.stringify(envelope)}\n` };
@@ -516,11 +600,13 @@ export function runDirectGrok({
 
 export function grokBinaryAvailable(env = process.env) {
   const binary = resolveGrokBinary(env);
-  const result = spawnSync(binary, ["--version"], { encoding: "utf8", env });
+  const probe = probeGrokVersion(binary, env);
   return {
     binary,
-    ok: result.status === 0,
-    version: (result.stdout || "").trim().split("\n")[0] || null,
-    detail: result.status === 0 ? null : (result.stderr || "not found").trim(),
+    ok: probe.ok,
+    version: probe.version,
+    detail: probe.detail,
+    timedOut: probe.timedOut,
+    errorClass: probe.errorClass,
   };
 }

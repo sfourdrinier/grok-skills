@@ -13,6 +13,8 @@ import { test } from "node:test";
 import {
   DIRECT_NO_HANDOFF_MSG,
   DIRECT_RUN_ID_RE,
+  DIRECT_VERSION_PROBE_TIMEOUT_MS,
+  grokBinaryAvailable,
   isDirectHandoffRequest,
   rawRunIdFlag,
   resolveDirectTimeoutSeconds,
@@ -665,6 +667,90 @@ test("runDirectGrok honors --timeout and classifies a hung CLI as timed out", ()
     assert.equal(env.status, "failure");
     assert.match(env.error?.message || "", /timeout/i);
     assert.equal(env.error?.detail?.timedOut, true);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("grokBinaryAvailable bounds --version and classifies probe timeout", () => {
+  // Setup/preflight must not hang forever on a broken hanging `grok --version`.
+  assert.ok(
+    Number.isInteger(DIRECT_VERSION_PROBE_TIMEOUT_MS) &&
+      DIRECT_VERSION_PROBE_TIMEOUT_MS > 0 &&
+      DIRECT_VERSION_PROBE_TIMEOUT_MS <= 30_000,
+    "version probe timeout must be a small positive bound"
+  );
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-verprobe-"));
+  try {
+    const hang = path.join(dir, "hang-grok.sh");
+    fs.writeFileSync(hang, "#!/bin/sh\nsleep 30\necho never\n");
+    fs.chmodSync(hang, 0o755);
+    const t0 = Date.now();
+    const res = grokBinaryAvailable({
+      ...process.env,
+      GROK_AGENT_BINARY: hang,
+      // Override probe bound for a fast unit test (production default is higher).
+      GROK_DIRECT_VERSION_PROBE_TIMEOUT_MS: "500",
+    });
+    const elapsed = Date.now() - t0;
+    assert.equal(res.ok, false);
+    assert.equal(res.timedOut, true);
+    assert.equal(res.errorClass, "timeout");
+    assert.match(String(res.detail || ""), /timeout/i);
+    assert.ok(elapsed < 10_000, `probe must not hang: elapsed=${elapsed}ms`);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runDirectGrok preflight bounds --version and classifies timeout", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-preflight-timeout-"));
+  try {
+    const hang = path.join(dir, "hang-grok.sh");
+    fs.writeFileSync(hang, "#!/bin/sh\nsleep 30\necho never\n");
+    fs.chmodSync(hang, 0o755);
+    const scriptsDir = path.resolve(SCRIPT_DIR, "..", "..", "wrapper", "scripts");
+    const t0 = Date.now();
+    const res = runDirectGrok({
+      mode: "preflight",
+      args: [],
+      cwd: dir,
+      env: {
+        ...process.env,
+        GROK_AGENT_BINARY: hang,
+        GROK_DIRECT_VERSION_PROBE_TIMEOUT_MS: "500",
+      },
+      scriptsDir,
+      python: "python3",
+    });
+    const elapsed = Date.now() - t0;
+    assert.equal(res.code, 1);
+    const env = JSON.parse(res.envelopeText);
+    assert.equal(env.status, "failure");
+    assert.equal(env.error?.class, "timeout");
+    assert.match(String(env.error?.message || ""), /timeout/i);
+    assert.equal(env.error?.detail?.timedOut, true);
+    assert.equal(env.response?.checks?.[0]?.ok, false);
+    assert.ok(elapsed < 10_000, `preflight must not hang: elapsed=${elapsed}ms`);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("grokBinaryAvailable reports success for a fast --version binary", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-verok-"));
+  try {
+    const okBin = path.join(dir, "ok-grok.sh");
+    fs.writeFileSync(okBin, "#!/bin/sh\necho 'grok 1.2.3'\n");
+    fs.chmodSync(okBin, 0o755);
+    const res = grokBinaryAvailable({
+      ...process.env,
+      GROK_AGENT_BINARY: okBin,
+    });
+    assert.equal(res.ok, true);
+    assert.equal(res.timedOut, false);
+    assert.match(String(res.version || ""), /1\.2\.3/);
+    assert.equal(res.errorClass, null);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

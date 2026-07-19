@@ -13,6 +13,14 @@ Phases land as sequential PRs; no tag until the release phase. Most implementati
 is delegated to Grok itself through this plugin's own contract -> code -> handoff
 pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 
+### Fixed (direct runMode - version probe hang)
+
+- **Bounded `grok --version` probes:** setup (`grokBinaryAvailable`) and direct
+  preflight share `probeGrokVersion` with a 10s wall-clock timeout (overridable
+  via `GROK_DIRECT_VERSION_PROBE_TIMEOUT_MS` for tests). A hanging installed CLI
+  shim no longer blocks the companion indefinitely. Timeouts classify as
+  `error.class: "timeout"` (distinct from `tool-unavailable`).
+
 ### Fixed (direct protect - nested modules / tree-walk / watch-hash)
 
 - **Nested `.git/modules/**` suffix classifier:** multi-component submodule paths
