@@ -59,7 +59,10 @@ Constants live in `plugin/wrapper/scripts/groklib/implementation_contract.py`
 | **runMode vs integration** | Orthogonal axes that both use the word "direct". runMode=direct = installed CLI home; integration=direct = edit-landing default name. For one-shot code, integration=direct means live-tree edits; for ACP peer it means stop-time apply of a verified ready patch (still external worktree during prompts). See integration-modes.md. |
 | **handoff vs peer** | `/grok:handoff` remains **code-mode only** and refuses peer runIds (`handoff-unavailable`). Peer integrate runs at `peer stop` via the shared auto/peer apply spine (dirty-status fail-closed + patch integrity): direct and auto both apply when ready (direct needs consent); review retains. |
 | **peer notifications** | Peer-stop is **not** completion-notification eligible (`NOTIFY_ELIGIBLE_MODES` excludes peer modes). |
-| **task / web argv** | Companion last-wins split-or-equals for `--task`/`--task-file` and `--web`/`--no-web` (`companion-args` SSOT). |
+| **task / web argv** | Companion **last-valid** split-or-equals for value flags (`flagValue` SSOT): later bare without value does not wipe; never consume a following flag as value. `--web`/`--no-web` last occurrence via `resolveWebFlag`. See `plugin/references/argv-safety.md`. |
+| **apply lock + marker** | Exclusive per-`(runId, targetKey)` apply lock (`apply-locks/<targetKey>.lock` + durable owner); durable `integration-applied-<targetKey>.json`; ownerless/unknown never age-reclaim; not a TOCTOU seal. See integration-modes Shared apply spine. |
+| **implement always-worktree** | `/grok:implement` always forces isolated worktree + verify-only handoff; never live lands even when workspace integration is direct/auto. Product direct default remains for **code** + **peer-stop** landing. |
+| **continue-run prior target** | `--target`/`--base`/`--contract-file` forbidden on continue; target/consent keyed on prior `run.json` identity; direct consent exempt; auto apply-on-ready on the **new** run; review retains; direct continue uses hardened wrapper lineage. |
 | **Older contracts** | schemaVersion must be 1; missing optional display fields normalize to empty; oversized objective/criteria fail at load (no silent truncation). |
 
 ## Completion notifications (1.5.0+)

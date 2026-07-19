@@ -12,6 +12,10 @@ already cover the companion, gate, and wrapper contracts.
 - Grok CLI installed, authenticated (`grok --version` works; any build).
 - Plugin installed via marketplace (cache path) **or** `--plugin-dir ./plugin`.
 - No `GROK_AGENT_WRAPPER` set (prove the bundled layout works).
+- Before any **direct** live-tree code smoke or **direct** peer-stop apply, record
+  consent with `setup --integration direct` (or opt into
+  `auto`/`review`). First direct landing without consent fails closed - see
+  [integration-modes.md](integration-modes.md).
 
 ## Install (Claude Code)
 
@@ -89,7 +93,9 @@ Reply with exactly: PEER-PONG-2
 GROK_TASK
 # peer-stop finalizes: real validation, then apply/retain per --integration.
 # review|worktree retain the verified patch; auto/direct apply when ready
-# (direct needs consent). Landing is controlled here, not at peer-start.
+# (direct needs consent - run setup --integration direct first if testing
+# apply). Landing is controlled here, not at peer-start. Peer-stop is not
+# completion-notification eligible.
 node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" peer stop \
   --run-id '<runId>' --integration review
 ```

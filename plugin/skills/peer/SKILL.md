@@ -38,14 +38,19 @@ additionally requires per-repo direct consent); **review** / **worktree** retain
 patch + manifest for manual parent apply. Peer direct is therefore **stop-time
 apply**, not one-shot code live-edit direct. `/grok:handoff` is code-mode only
 and refuses peer runIds (`handoff-unavailable`); peer integration never routes
-through it. The companion emits **one** final stdout envelope that already
-includes the apply outcome (`response.integration.applied` / `outcome`) under
+through it. Shared apply spine (exclusive lock + durable marker + pure-rename
+header fail-closed): [integration-modes.md](../../references/integration-modes.md).
+The companion emits **one** final stdout envelope that already includes the
+apply outcome (`response.integration.applied` / `outcome`) under
 rewrite-before-write/store/finalize (onStdout computes final
 emitStdout/effectiveCode before first write; then write; then storeJobStdout;
 then updateJob/finalize; then notify). Blocked apply is `status: failure` +
 nonzero exit + failed job + identical stored `/grok:result` payload (never a
 raw wrapper success for an unapplied ready peer-stop). Peer-stop is **not**
-completion-notification eligible (see `NOTIFY_ELIGIBLE_MODES`).
+completion-notification eligible (see `NOTIFY_ELIGIBLE_MODES`). Lifecycle
+honesty: durable terminal before restop success; mandatory `promptsHandled`
+persist; `startToken` identity fail-closed; control frame caps (~4 MiB);
+active-proc never pid-scan-unregistered on kill refusal.
 
 ## How to run (transparent)
 

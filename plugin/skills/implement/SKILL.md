@@ -48,15 +48,17 @@ blockers surface on stdout. Without a runId, handoff is skipped and the
 combo exits 1.
 
 `implement` itself is **verify-only**: it does not apply, commit, or push (see
-`plugin/references/integration-modes.md`). Unlike `/grok:code`, it **always runs
-in an isolated worktree** - even when the workspace's integration mode is
-`direct` or `auto`, `implement` is routed to worktree, so nothing lands in your
-live tree. The edits stay in the retained worktree + handoff artifacts until you
-apply them manually. For **apply-on-verified-ready**, use `/grok:code
---integration auto` (worktree + handoff + apply-time revalidation); for a live
-edit use `/grok:code` under the direct integration mode. In **review**, parent
-apply stays manual after ready handoff (`references/implementation-handoff.md`).
-Requires hardened **runMode**; runMode direct is refused fail-closed.
+`plugin/references/integration-modes.md`). Unlike `/grok:code`, the companion
+gate **always forces** `--integration worktree` - even when the workspace
+default is `direct` or `auto` - so nothing lands in your live tree. Product
+direct default still applies to **code** and **peer-stop** landing only. The
+edits stay in the retained worktree + handoff artifacts until you apply them
+manually. For **apply-on-verified-ready**, use `/grok:code --integration auto`
+(shared apply spine: lock + durable marker + dirty-guard); for a live edit use
+`/grok:code` under the direct integration mode (after setup consent). In
+**review**, parent apply stays manual after ready handoff
+(`references/implementation-handoff.md`). Requires hardened **runMode**;
+runMode direct is refused fail-closed.
 Foreground/background selection: same AskUserQuestion flow as /grok:code.
 
 Raw slash-command arguments:
@@ -133,8 +135,8 @@ message instead of an envelope, tell the user to run `/grok:setup`.
 
 `implement` requires **hardened** runMode. runMode direct is refused fail-closed
 (no handoff artifacts without isolation evidence). `implement` never applies,
-commits, or pushes - it only runs code + handoff verification. How a parent
-(or auto mode) integrates after ready is mode-aware:
-`plugin/references/integration-modes.md`. For apply-on-verified-ready, use
+commits, or pushes - it only runs code + handoff verification and **always**
+forces isolated worktree even when the workspace is `direct` or `auto`
+(`plugin/references/integration-modes.md`). For apply-on-verified-ready, use
 `/grok:code --integration auto` instead. See `skills/handoff/SKILL.md` and
 `references/implementation-handoff.md`.

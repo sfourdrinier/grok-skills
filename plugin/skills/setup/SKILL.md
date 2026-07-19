@@ -60,8 +60,8 @@ Supported flags:
 |------|--------|
 | `--run-mode hardened` | Persist hardened mode (default) |
 | `--run-mode direct` | Persist direct (installed Grok CLI home) |
-| `--integration direct` | Persist integration mode **and** record one-time consent for direct landing on the **target** repo (orthogonal to run mode): one-shot code live-tree edits, and ACP peer stop-time apply of a verified ready patch after an always-external worktree. Consent is keyed on the resolved target workspace, not companion cwd. Canonical matrix: `plugin/references/integration-modes.md`. |
-| `--integration worktree\|auto\|review` | Persist integration mode for the target repo (no consent required; auto = apply-on-ready; review/worktree = isolated, manual parent apply) |
+| `--integration direct` | Persist integration mode **and** record one-time consent for direct landing on the **target** repo (orthogonal to run mode): one-shot **code** live-tree edits, and ACP **peer-stop** apply of a verified ready patch after an always-external worktree. Does **not** make `/grok:implement` live-land (implement always forces worktree + verify-only). Consent is keyed on the resolved target workspace, not companion cwd. Canonical matrix: `plugin/references/integration-modes.md`. |
+| `--integration worktree\|auto\|review` | Persist integration mode for the target repo (no consent required; auto = apply-on-ready for code/peer-stop; review/worktree = isolated, manual parent apply). Prefer explicit setup before promising implementer success without live-tree consent. |
 | `--target <path>` | Repo (or dir) that integration prefs/consent apply to (default `.`). Git toplevel when inside a repo; absolute path when not. Use when consenting for a repo other than companion cwd. |
 | `--notification-mode off\|auto\|native\|webhook` | Completion signal prefs (default `off`; **auto** recommended for background jobs) |
 | `--notification-webhook-url <url>` | Webhook URL when mode is `webhook` |

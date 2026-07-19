@@ -108,22 +108,22 @@ plugin's own contract -> code -> handoff pipeline.
 | 4 (PR10) | Codex parity polish | **done 2026-07-17** |
 | 5 (PR11) | ACP probe + spec + peer channel (default; opt out with `GROK_DISABLE_ACP=1`; `GROK_EXPERIMENTAL_ACP` no longer a hard gate) | **done 2026-07-17** |
 | 6 (PR11) | Manifest polish + drift guard + version bump; tag pending maintainer go | **done 2026-07-17** (tag still maintainer-gated) |
-| 7 | Peer-native re-architecture: integration=direct consented default, auto/review opt-in worktrees, ACP default peer channel, mode-aware integrate, honest docs | **in progress on `feat/2.0-peer-agent`** (code + docs-follow-code closeout; plan: `docs/superpowers/plans/2026-07-17-phase7-peer-native.md`; design: `docs/specs/2026-07-17-peer-native-integration-design.md`; live evidence: `docs/checklists/2.0-live-smoke-ledger.md`) |
+| 7 | Peer-native re-architecture: integration=direct consented default, auto/review opt-in worktrees, ACP default peer channel, mode-aware integrate, honest docs | **code + docs-follow-code closeout** on `feat/2.0-peer-agent` (final-review apply lock/marker, last-valid argv, peer lifecycle honesty, SSOT docs); dual-host installed-host smoke + tag still maintainer-gated. Plan: `docs/superpowers/plans/2026-07-17-phase7-peer-native.md`; design: `docs/specs/2026-07-17-peer-native-integration-design.md`; live evidence: `docs/checklists/2.0-live-smoke-ledger.md` |
 
 Phase 7 locks product defaults (not a silent flip):
 
-- **integration=direct** (product default name) = for one-shot code, consented live-tree edit landing (setup consent once per repo); for ACP peer, consented stop-time apply after an always-external worktree
+- **integration=direct** (product default name) = for one-shot **code** and **peer-stop** landing, consented live-tree / stop-time apply (setup consent once per repo); **implement always forces worktree + verify-only** and never live lands
 - **auto / review** = for one-shot code, opt-in isolated worktrees (apply-on-ready vs parent apply); for ACP peer, same stop-time land/retain choice after always-external isolation
 - **ACP** = default multi-turn peer channel for `grok-engineer-coder` (opt out with `GROK_DISABLE_ACP=1`); one-shot `code` is fallback; peer is never live-edit of the operator tree during prompts
 - **runMode direct** remains a **separate** installed-home security posture (orthogonal to integration; peer is hardened-only)
-- **Shared auto/peer apply spine** + peer-stop final-envelope / single-flight lifecycle honesty (see CHANGELOG Phase 7 post-round-14)
+- **Shared auto/peer apply spine** (exclusive apply lock + durable marker + header-union dirty set + fail-closed ownerless reclaim) + peer-stop final-envelope / durable-terminal / single-flight lifecycle honesty; peer-stop **not** completion-notification eligible (see CHANGELOG Phase 7 final-review Fixed)
 
 Canonical mode matrix (do not restate here): [plugin/references/integration-modes.md](../plugin/references/integration-modes.md).
 
 ## Recommended next order (after Wave 1 polish)
 
 1. ~~**Live validation**~~ done 2026-07-15 (`docs/checklists/wave1-live-results-2026-07-15.md`)
-2. **Finish Phase 7** peer-native closeout (docs honesty landed; dual-host installed-host smoke + tag readiness still open) on `feat/2.0-peer-agent`
+2. **Phase 7 release gate** (dual-host installed-host smoke + tag readiness) on `feat/2.0-peer-agent` after final-review docs-follow-code
 3. **Linux sandbox profile** when a probe report exists  
 4. Optional apply-worktree UX; official directory listings
 

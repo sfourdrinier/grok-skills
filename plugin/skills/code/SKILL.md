@@ -53,7 +53,9 @@ Required wrapper flags (copy exactly, substitute only placeholder values):
   consented; see `plugin/references/integration-modes.md`).
 - Continuation: `--continue-run <runId>` instead of `--target`/`--base` (reuses
   the prior retained worktree; mutually exclusive with `--target`, `--base`, and
-  `--contract-file`).
+  `--contract-file`). Prior target identity, consent keying, auto apply-on-ready
+  on the **new** run, and direct-continue hardened-wrapper lineage: see
+  [integration-modes.md](../../references/integration-modes.md) continue-run.
 - Exactly one of `--task <text>` or `--task-file <path>` is required. Prefer
   `--task-file` for a multi-paragraph spec.
 - Preserve the user's arguments exactly. Do not strip, add, or reorder flags.
@@ -172,10 +174,14 @@ GROK_TASK
 
 - Do **not** pass `--target`, `--base`, or `--contract-file` with
   `--continue-run` (usage-error). Target, base, and the prior contract are
-  derived from the prior run.
-- `--model` / `--timeout` / `--max-turns` / `--web` remain allowed.
+  derived from the prior run (apply/consent keyed on prior `run.json`
+  target/repository). Continue-run is direct-consent exempt; product direct
+  continues on hardened wrapper worktree lineage (never live direct edit).
+- `--model` / `--timeout` / `--max-turns` / `--web` remain allowed (last-valid
+  companion argv SSOT: [argv-safety.md](../../references/argv-safety.md)).
 - Each continuation is a **new** run id with `continuesRunId` + `iteration` on
-  `run.json` and the handoff manifest. Handoff the **new** run id before integrate.
+  `run.json` and the handoff manifest. Auto apply-on-ready (when effective) runs
+  on the **new** run; review retains. Handoff the **new** run id before integrate.
 - Prefer at most two continuations, then report blockers rather than looping.
 - **Single-lineage:** each prior may be continued only once (`continuedByRunId`);
   to iterate further, continue the child run (A->B->C), never fork siblings of A.

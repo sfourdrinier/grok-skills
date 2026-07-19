@@ -404,6 +404,51 @@ and quote the contract path. Suite: wrapper 809, plugin 285.
   Peer skill / agents already matched product surfaces; only the smoke recipe
   was wrong.
 
+### Fixed (Phase 7 - final-review apply lock / argv / peer lifecycle / docs)
+
+Consolidated final-review remediation against code at `3fca5a4` (not per-round
+spam). Unit contracts land with each behavior; dual-host installed-host smoke
+remains release-gated.
+
+- **Exclusive apply lock + durable marker (auto + peer):** per-`(runId,
+  targetKey)` atomic mkdir lock + durable `owner.json` (`pid`/`startToken`/
+  `acquiredAt`); reclaim only positively dead owners after settle; ownerless /
+  unknown never age-reclaim; owner write fail removes lock dir and fails closed.
+  Durable `integration-applied-<targetKey>.json` (patchSha + targetKey; tmp +
+  rename + re-read). Under-lock ladder: matching marker + reverse-check =>
+  already-applied; marker but reverted tree => clear + reapply; no marker but
+  reverse OK => revalidate under lock then heal marker; else revalidate, apply,
+  finalize with marker (marker fail after apply => reverse =>
+  `marker-persist-failure` or `manual-needed`). Honesty: not a TOCTOU seal;
+  abandoned ownerless locks need manual cleanup.
+- **`loadPatchTouchPaths` header fail-closed:** union numstat +
+  `diff --git`/rename-copy both sides; non-empty numstat makes headers
+  load-bearing (`blocked-patch-headers` when empty/unparseable/uncorroborated);
+  pure renames put both old and new in the dirty-overlap set.
+- **Last-valid companion argv SSOT:** `flagValue` is last **valid** split/equals
+  value; later bare without value does not wipe; never consume a following flag
+  as value; `resolveWebFlag` last occurrence. continue-run forbids
+  `--target`/`--base`/`--contract-file`; prior-run target identity; continue-run
+  consent exempt; direct continue uses hardened wrapper for retained lineage;
+  auto apply-on-ready on the **new** run; review manual.
+- **implement always worktree + verify-only:** companion gate always forces
+  implement to isolated worktree + handoff; never live lands even when workspace
+  integration is direct/auto. Product direct default remains for **code** and
+  **peer-stop** landing.
+- **Peer lifecycle honesty:** durable terminal before restop success; mandatory
+  `promptsHandled` persist; `startToken` identity fail-closed; control frame
+  caps (~4 MiB); active-proc never pid-scan-unregister on kill refusal; peer-stop
+  not completion-notification eligible.
+- **Security honesty:** direct `REDACT_SCRIPT` loads D4(a) operator-auth exact
+  denylist; protected content-hash includes ignored protected paths + nested
+  hooks; patch injected denylist scan; path inventory bytes + surrogateescape;
+  direct sandbox limits unchanged.
+- **Docs-follow-code:** `integration-modes.md` SSOT expands Shared apply spine +
+  implement force-worktree + continue-run; README First 5 minutes requires setup
+  consent or explicit isolation before promising implementer success; SECURITY /
+  COMPATIBILITY / argv-safety / handoff / manual-smoke / skills link SSOT
+  without copying tables.
+
 ### Changed (Phase 0)
 
 - `plugin/scripts/lib/task-file.mjs`: task-text temp staging deduplicated

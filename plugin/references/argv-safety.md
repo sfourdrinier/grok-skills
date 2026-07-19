@@ -24,18 +24,21 @@ value would be command-substituted locally BEFORE the wrapper ever sees it --
 the same injection class as an unsafe `--task "..."`. Bare flags (`--web`,
 `--confirm`) carry no value to quote.
 
-## Last-wins task / web argv (companion SSOT)
+## Last-valid flag values (companion SSOT)
 
-Companion parsing of repeated flags is **last-wins** (split or equals form),
-owned by `plugin/scripts/lib/companion-args.mjs` (`flagValue`,
-`resolveWebFlag`) so direct-mode and task-file staging stay argparse-parity
-with the wrapper:
+Companion parsing of value-bearing flags uses **last valid** (split or equals
+form), owned by `plugin/scripts/lib/companion-args.mjs` (`flagValue`,
+`flagOccurrences`, `stripValueFlag`). A following flag is never consumed as a
+value. A later bare duplicate without a value does **not** wipe a prior good
+value. Direct-mode and task-file staging stay argparse-parity with the wrapper:
 
-- `--task` / `--task-file` (including `--task=` / `--task-file=`): last explicit
+- `--task` / `--task-file` (including `--task=` / `--task-file=`): last **valid**
   value wins; task-file-over-task policy and stdin sentinel `--task-file -` /
   `--task-file=-` staging are preserved
-- `--web` / `--no-web` (including equals forms): last occurrence wins;
-  prefix-safe (`--web-search` is not `--web`)
+- Other value flags (`--run-id`, `--integration`, `--target`, `--base`,
+  `--timeout`, ...) use the same last-valid SSOT
+- `--web` / `--no-web` (including equals forms): last occurrence wins via
+  `resolveWebFlag`; prefix-safe (`--web-search` is not `--web`)
 - Hermetic modes that force web off, schema refusal, and D-WEB tool expansion
   still apply after resolution
 

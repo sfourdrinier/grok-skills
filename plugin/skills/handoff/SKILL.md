@@ -73,7 +73,9 @@ This skill is **read-only** - it never applies. How results land is mode-aware
   on pure live-tree paths; review the working tree diff (ACP peer is separate:
   always worktree + stop-time apply - see integration-modes.md)
 - **auto:** companion may auto-apply after dual-condition ready + apply-time
-  revalidation (you still may call handoff to observe ready)
+  revalidation via the shared apply spine (exclusive lock + durable marker;
+  you still may call handoff to observe ready). Canonical:
+  [integration-modes.md](../../references/integration-modes.md)
 - **review:** never auto-applies; parent apply is manual after ready
 
 This plugin **never** auto-commits, merges, cherry-picks, or pushes in any mode.

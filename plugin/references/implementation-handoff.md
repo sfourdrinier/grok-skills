@@ -90,18 +90,27 @@ characters; only operator-supplied contract paths reject Windows drive forms.
 - Wrapper path listings that feed dirty-overlap, escape checks, and handoff
   inventories use a shared **NUL-safe** `-z` inventory (`path_inventory`) so
   default `core.quotePath` C-quoting of non-ASCII names cannot invent phantom
-  keys or miss a real rewrite.
+  keys or miss a real rewrite. Bytes decode with `utf-8` + `surrogateescape`
+  so non-UTF-8 filename bytes stay recoverable.
 - Handoff path cross-check decodes C-quoted `diff --git` headers via
   `git_path_quote` (octal + named escapes, a/b sides, `/dev/null`). That decoder
   is **not** applied to already-raw `-z` inventory values (do not merge NUL-safe
   `-z` decoding with C-quote decoding).
-- Companion dirty-guard / numstat parsing uses the same C-style unquote rules
-  (`unquoteGitPath`) so auto and peer apply see one path set. Shared golden
-  vectors: [git-c-quoted-path-vectors.json](git-c-quoted-path-vectors.json)
+- Companion dirty-guard touch set (`loadPatchTouchPaths`) unions numstat with
+  `diff --git` / rename-copy headers (both sides). Non-empty numstat makes
+  headers load-bearing (`blocked-patch-headers` when empty/unparseable or
+  uncorroborated). Pure renames include **both** old and new paths in the
+  dirty-overlap set. Same C-style unquote rules (`unquoteGitPath`). Shared
+  golden vectors: [git-c-quoted-path-vectors.json](git-c-quoted-path-vectors.json)
   (Python + Node unit parity; no runtime cross-language dependency).
-- Auto apply-time patch integrity recheck is best-effort under trusted local
-  state (manifest bytes/size/hash via `verifyPatchAgainstManifest`); it is not
-  an atomic TOCTOU guarantee against hostile concurrent substitution.
+- Patch generation also fails closed on secret-shaped material **and** exact
+  injected-credential denylist occurrence in patch bytes.
+- Auto/peer apply-time patch integrity recheck is best-effort under trusted
+  local state (manifest bytes/size/hash via `verifyPatchAgainstManifest`); it
+  is not an atomic TOCTOU guarantee against hostile concurrent substitution.
+  Canonical under-lock ladder (exclusive lock, durable marker, heal under
+  revalidate, `marker-persist-failure`): [integration-modes.md](integration-modes.md)
+  Shared apply spine.
 
 ## Parent apply checklist
 

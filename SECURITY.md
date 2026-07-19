@@ -75,11 +75,13 @@ over. It is **not** a complete sandbox against an adversarial model.
   **real commands** and sets `integration.ready` only from authoritative,
   non-forgeable command evidence - never a synthesized exit status or a no-op
   build gate. On ready, **peer-stop itself** integrates via the active mode and
-  the **shared auto/peer apply spine** (best-effort patch integrity recheck
-  under trusted local state, NUL-safe dirty status, numstat, dirty-overlap,
-  `git apply --check`, apply, reverse-on-failure - see
-  [integration-modes.md](plugin/references/integration-modes.md) ACP peer
-  section): `direct` and `auto` both apply the verified ready patch (`direct`
+  the **shared auto/peer apply spine** (exclusive apply lock + durable applied
+  marker, best-effort patch integrity recheck under trusted local state,
+  NUL-safe dirty status, numstat + header-union touch set with pure-rename both
+  sides and `blocked-patch-headers` fail-closed, dirty-overlap, `git apply
+  --check`, apply, reverse-on-failure - see
+  [integration-modes.md](plugin/references/integration-modes.md) Shared apply
+  spine): `direct` and `auto` both apply the verified ready patch (`direct`
   additionally requires per-repo direct consent); `review` / `worktree` retain
   for manual parent apply. **Not** via `/grok:handoff`, which stays code-mode
   only and still refuses peer runIds. Peer direct is therefore **stop-time
@@ -87,16 +89,39 @@ over. It is **not** a complete sandbox against an adversarial model.
   is rewrite-before-write/store/finalize: onStdout computes final
   emitStdout/effectiveCode before first write, then stdout write, then
   storeJobStdout, then updateJob/finalize, then notify; peer-stop is **not**
-  completion-notification eligible. Progress-chunk redaction is **per-frame**: a
-  secret split across ACP `session/update` frames may partially land in
-  `progress.jsonl` before a full token shape is visible to the scanner (residual
-  risk; not a complete secret firewall). Control-socket payloads and turn
-  envelopes are scanned with the same `assert_no_secret_material` path as stdout
-  envelopes. The opt-out env gate is enforced in the wrapper (not
-  companion-only). `pre_tool_use` may appear as an initialize capability only -
-  the wrapper does not register a deny hook (NON-enforcement; OS sandbox + C6
-  child pins enforce). Do **not** claim full runtime tool-approval enforcement
-  beyond local CLI parse + initialize probe evidence.
+  completion-notification eligible (`NOTIFY_ELIGIBLE_MODES` excludes peer).
+  Peer lifecycle honesty: durable terminal mark before restop success; mandatory
+  `promptsHandled` persist; `startToken` identity fail-closed; control frame
+  caps (~4 MiB); active-proc is never pid-scan-unregistered on kill refusal.
+  Progress-chunk redaction is **per-frame**: a secret split across ACP
+  `session/update` frames may partially land in `progress.jsonl` before a full
+  token shape is visible to the scanner (residual risk; not a complete secret
+  firewall). Control-socket payloads and turn envelopes are scanned with the
+  same `assert_no_secret_material` path as stdout envelopes. The opt-out env
+  gate is enforced in the wrapper (not companion-only). `pre_tool_use` may
+  appear as an initialize capability only - the wrapper does not register a
+  deny hook (NON-enforcement; OS sandbox + C6 child pins enforce). Do **not**
+  claim full runtime tool-approval enforcement beyond local CLI parse +
+  initialize probe evidence.
+- **D4(a) exact injected denylist on direct REDACT_SCRIPT:** runMode=direct
+  stdout redaction loads the same production path as hardened private-home
+  registration (`AUTH_FILE_NAMES` + `register_injected_secrets_from_home` /
+  `redact_injected_secrets` / `assert_no_secret_material`). Unreadable auth
+  yields an empty denylist (pattern scan still runs); denylist always cleared
+  in `finally`. Direct OS sandbox limits are unchanged (write confinement to
+  repo root + private tmp; not a read firewall).
+- **Protected content-hash including ignored protected paths + nested hooks:**
+  deny/snapshot scope fingerprints use content+mode for protected paths even
+  when gitignored (same-size+mtime rewrite still flips); nested `.git/hooks/**`
+  remain in the protected set. Bulk ignored caches stay stat-only.
+- **Patch secret denylist scan:** handoff patch generation fails closed on
+  secret-shaped material and on exact injected-denylist occurrence in patch
+  bytes (not pattern-only). Path inventory uses NUL-safe bytes with
+  `surrogateescape` for non-UTF-8 filenames.
+- **Apply lock honesty:** exclusive apply lock + durable marker is concurrent
+  restop safety under trusted local state - **not** an atomic TOCTOU seal.
+  Ownerless/unknown locks never age-reclaim (manual cleanup if abandoned
+  without a durable owner).
 
 ### Direct-default trust posture (integration=direct)
 

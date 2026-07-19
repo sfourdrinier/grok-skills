@@ -6,12 +6,16 @@
 instead of restating the matrix. Orthogonal to **run mode** (security posture);
 see [Naming: two "direct" axes](#naming-two-direct-axes) below.
 
-Workspace default for code / implement / peer is **`direct`**. First direct
-landing in a target repo without recorded consent fails closed with a trust
-summary (one-shot code run, or ready peer-stop apply); accept once via
-`setup --integration direct` (optionally `--target <repo>`). For ACP peer,
-`direct` still means stop-time apply after an always-external worktree - not
-live-edit during prompts.
+Workspace default for **code** and **peer-stop landing** is **`direct`**.
+First direct landing in a target repo without recorded consent fails closed
+with a trust summary (one-shot code run, or ready peer-stop apply); accept
+once via `setup --integration direct` (optionally `--target <repo>`), or opt
+into isolation with `setup --integration auto|review` before promising
+live-tree success. **`implement` is different:** it always forces an isolated
+worktree + verify-only handoff and never lands on the live tree, even when
+the workspace default is direct/auto. For ACP peer, `direct` still means
+stop-time apply after an always-external worktree - not live-edit during
+prompts.
 
 ```bash
 node "$SKILL_BASE/run.mjs" setup --integration direct
@@ -26,10 +30,12 @@ node "$SKILL_BASE/run.mjs" code --integration review --target '...' --base 'HEAD
 
 ## The three product modes (one-shot `code`)
 
-The matrix below is the **one-shot `code` / implement** landing story. ACP
-**peer** always uses an external retained worktree during the session and lands
-only at **peer-stop** - see [ACP peer channel](#acp-peer-channel). Do not read
-peer `integration=direct` as live-edit direct.
+The matrix below is the **one-shot `code`** landing story (not
+`/grok:implement`, which always forces worktree + verify-only - see
+[implement always forces worktree](#implement-always-forces-worktree--verify-only)).
+ACP **peer** always uses an external retained worktree during the session and
+lands only at **peer-stop** - see [ACP peer channel](#acp-peer-channel). Do not
+read peer `integration=direct` as live-edit direct.
 
 | Mode | Isolation (one-shot code) | How changes land (one-shot code) | When to use |
 |------|---------------------------|----------------------------------|-------------|
@@ -83,25 +89,97 @@ captured at run start, unless `--force`. Clean-elsewhere is fine.
 ### Shared apply spine (auto + peer)
 
 Canonical ladder for landing a verified patch on the operator tree
-(`plugin/scripts/lib/integrate.mjs`). Auto and ready peer-stop share it; consent
-/ readiness / target identity stay outside the helper:
+(`plugin/scripts/lib/integrate.mjs` +
+`plugin/scripts/lib/integrate-apply-state.mjs`). Auto and ready peer-stop share
+it; consent / readiness / target identity stay outside the helper. This is
+**not** an atomic TOCTOU seal against a hostile concurrent writer of the patch
+or tree.
 
-1. **Patch integrity** - best-effort recheck of on-disk `implementation.patch`
-   bytes/size/hash against the revalidated handoff manifest
-   (`verifyPatchAgainstManifest`) under trusted local state; mismatch =>
-   `patch-integrity-failure` (fail closed). Not an atomic TOCTOU seal against a
-   hostile concurrent writer.
-2. **Dirty status** - `git status --porcelain -z --untracked-files=all` (NUL-safe).
-   Non-zero / truncated status => `blocked-dirty-status` (no blind apply)
-3. **Patch path list** - `git apply --numstat --binary` with C-style path unquote
-   for default `core.quotePath` non-ASCII names (Node `unquoteGitPath`; golden
-   vectors in [git-c-quoted-path-vectors.json](git-c-quoted-path-vectors.json));
-   numstat failure => `blocked-numstat`
-4. **Dirty overlap** - any patch path already dirty in the operator checkout =>
-   `blocked-dirty-overlap` (operator commits/stashes, then re-runs)
-5. **`git apply --check --binary`** then **`git apply --binary`**; on apply
+#### Exclusive apply lock + durable marker
+
+Per `(runId, targetKey)`:
+
+1. **Lock** - atomic mkdir
+   `runs/<id>/apply-locks/<targetKey>.lock` plus a durable `owner.json`
+   (`pid`, `startToken`, `acquiredAt`). Owner write failure removes the lock
+   dir and fails closed (never leaves an ownerless lock that could be
+   age-stolen).
+2. **Reclaim** - only a **positively dead** owner (dead pid or pid-reuse via
+   mismatched startToken) after a short settle may be reclaimed. **Ownerless /
+   unknown / unreadable** locks are **never** age-reclaimed - acquire waits or
+   times out (manual cleanup if a lock is abandoned without a durable owner).
+3. **Marker** - durable `integration-applied-<targetKey>.json` keyed by
+   `patchSha` + `targetKey` (tmp + rename, then re-read to prove presence).
+
+#### Under-lock ladder (`completeIntegrationApplyUnderLock`)
+
+1. Matching marker + reverse-check still applies => **`already-applied`**
+   (idempotent restop).
+2. Marker present but tree no longer has the patch (operator reverted) => clear
+   marker and re-apply.
+3. No marker but reverse-check says the tree already has the patch
+   (crash-after-apply residue) => **revalidate under lock**, then heal the
+   marker; heal failure => `marker-persist-failure` (tree stays applied; not
+   claimed as durable applied success without a marker).
+4. Else revalidate under lock, run the dirty-guard apply spine, then
+   `finalizeAppliedWithMarker`. If marker write fails after a successful apply,
+   reverse the apply when possible (`marker-persist-failure`); reverse failure
+   => `manual-needed`.
+
+#### Dirty-guard apply spine (`applyPatchWithGuards`)
+
+1. **Patch integrity** (caller, before/under lock revalidation) - best-effort
+   recheck of on-disk `implementation.patch` bytes/size/hash against the
+   revalidated handoff manifest (`verifyPatchAgainstManifest`) under trusted
+   local state; mismatch => `patch-integrity-failure` (fail closed).
+2. **Dirty status** - `git status --porcelain -z --untracked-files=all`
+   (NUL-safe). Non-zero / truncated status => `blocked-dirty-status` (no blind
+   apply).
+3. **Patch path list** - `git apply --numstat --binary` with C-style path
+   unquote for default `core.quotePath` non-ASCII names (Node `unquoteGitPath`;
+   golden vectors in
+   [git-c-quoted-path-vectors.json](git-c-quoted-path-vectors.json)); numstat
+   failure => `blocked-numstat`.
+4. **Header union (`loadPatchTouchPaths`)** - union numstat destinations with
+   `diff --git` / rename-copy headers (both old and new sides). Non-empty
+   numstat makes headers **load-bearing**: empty/unparseable headers or a
+   numstat path not corroborated by headers => **`blocked-patch-headers`**
+   (no numstat-only fallback). Pure renames put **both** old and new paths in
+   the dirty-overlap set so a dirty source cannot fail the guard open.
+5. **Dirty overlap** - any touch path already dirty in the operator checkout =>
+   `blocked-dirty-overlap` (operator commits/stashes, then re-runs).
+6. **`git apply --check --binary`** then **`git apply --binary`**; on apply
    failure reverse with `git apply -R` when possible (`rolled-back` /
-   `manual-needed`)
+   `manual-needed`).
+
+Published outcomes include: `already-applied`, `applied`,
+`blocked-dirty-status`, `blocked-numstat`, `blocked-patch-headers`,
+`blocked-dirty-overlap`, `blocked-apply-check`, `rolled-back`,
+`marker-persist-failure`, `manual-needed`, plus caller-owned readiness /
+consent / integrity failures.
+
+### `implement` always forces worktree + verify-only
+
+`/grok:implement` is **not** product-direct land. The companion gate always
+rewrites implement to `--integration worktree` (never live direct; never
+apply-on-ready). It runs code + handoff only; exit 0 only when dual-condition
+ready. Product `direct` default still applies to **code** and **peer-stop**
+landing. For apply-on-ready use `code --integration auto` (or peer-stop with
+`auto` / consented `direct`).
+
+### `continue-run` (one-shot code)
+
+- **Forbidden on continue:** `--target`, `--base`, `--contract-file` (usage-error).
+  Target identity, base, and prior contract are derived from the prior run.
+- **Target workspace** for consent / apply is the prior run's durable
+  `run.json` `targetWorkspace` / `repository` (not companion cwd). Missing
+  prior metadata falls back to cwd-scoped default.
+- **Direct consent exempt** on continue (wrapper reuses retained worktree
+  lineage). Effective mode still resolves: `auto` keeps apply-on-ready on the
+  **new** run; `review` retains (manual parent apply); product `direct` maps
+  the wrapper to worktree lineage without live apply.
+- Direct continue uses the **hardened wrapper** for retained lineage (never
+  `runDirectGrok` live-edit). Handoff the **new** run id before integrate.
 
 ### `review`
 
@@ -216,8 +294,10 @@ above. Do not summarize peer as "direct = edits already live".
 **Never** auto-commit, merge, cherry-pick, or push from this plugin in any mode.
 
 Handoff skill remains **read-only** (never applies). `implement` is **verify-only**
-(code + handoff; does not apply) - for apply-on-ready use `code --integration auto`
-or peer-stop with `integration=auto` / consented `direct`.
+and always isolated (code + handoff; never applies, never live lands) - for
+apply-on-ready use `code --integration auto` or peer-stop with
+`integration=auto` / consented `direct`. Peer-stop remains **outside**
+completion-notification eligibility.
 
 ## Related
 

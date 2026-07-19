@@ -57,7 +57,22 @@ How edits land is mode-aware:
    macOS/Linux desktop only). Full smoke:
    [manual-smoke.md](plugin/references/manual-smoke.md).
 
-4. Try a review or ask the host to use **grok-engineer-coder** for implementation.
+4. Before promising implementer success on the **live tree**, record integration
+   consent or opt into isolation (canonical matrix:
+   [integration-modes.md](plugin/references/integration-modes.md)):
+
+   ```text
+   /grok:setup --integration direct
+   # or isolation without live land:
+   /grok:setup --integration auto
+   # or:
+   /grok:setup --integration review
+   ```
+
+   First direct landing without setup consent fails closed. `/grok:implement`
+   always forces an isolated worktree + verify-only handoff (never live lands).
+
+5. Try a review or ask the host to use **grok-engineer-coder** for implementation.
 
 You should see one JSON envelope on stdout with `"status": "success"` for live
 modes. Use `/grok:jobs` / `/grok:result --pretty` (Claude) or the equivalent
@@ -194,7 +209,7 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 | `/grok:reason` | Cold second opinion on files you name. No automatic repo crawl. Web off by default. |
 | `/grok:code` | Implements per **integration mode** (default **direct** = live tree; `auto`/`review` = external worktree off a committed `--base`). Does not commit or push. Optional `--contract-file` (writeScopes + requiredValidation; runMode hardened only). Handoff artifacts under the run dir for isolated modes. See [integration-modes.md](plugin/references/integration-modes.md). |
 | `/grok:peer` | Multi-turn **ACP peer channel** (`start` / `prompt` / `stop`). Default path for `grok-engineer-coder`; one-shot `code` is the fallback (`GROK_DISABLE_ACP=1`). Hardened runMode only. **Always** external retained worktree during the session (not live-edit). At ready `peer stop`, `direct`/`auto` apply the verified patch (direct needs consent); `review` retains. Shared auto/peer apply spine; **not** via `/grok:handoff`. Final apply envelope rewrite-before-write/store/finalize; **not** completion-notification eligible. Does **not** claim host-level tool-approval enforcement beyond local CLI parse+initialize probe - trusted-input peer channel. See [peer skill](plugin/skills/peer/SKILL.md) + [integration-modes.md](plugin/references/integration-modes.md). |
-| `/grok:implement` | **One-call delegate:** `code` then auto-`handoff` on the resulting runId. Relays both envelopes. Exit 0 only when code ok AND handoff dual-condition ready. Hardened runMode only (runMode direct refused). Verify-only (does not apply); for apply-on-ready use `code --integration auto`. |
+| `/grok:implement` | **One-call delegate:** `code` then auto-`handoff` on the resulting runId. Relays both envelopes. Exit 0 only when code ok AND handoff dual-condition ready. Hardened runMode only (runMode direct refused). **Always** isolated worktree + verify-only (never live lands even when workspace is direct/auto); for apply-on-ready use `code --integration auto`. |
 | `/grok:handoff` | **Read-only** verified implementation handoff by **`runId` only** (1.6.0+). Dual-condition ready: ready manifest + success envelope + patch rehash. Never applies (read-only). Code-mode only (peer runIds refuse). Notify is not ready. |
 | `/grok:verify` | Pass/fail/inconclusive check on an existing worktree. No `--web`. |
 | `/grok:debate` | Two opposing Grok reason passes + synthesis on a topic. |
