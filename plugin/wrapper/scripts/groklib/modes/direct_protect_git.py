@@ -182,6 +182,61 @@ def _is_within(child: pathlib.Path, root: pathlib.Path) -> bool:
         return False
 
 
+def _inventory_modules_under(
+    abs_git_dir: pathlib.Path,
+    rel_prefix: str,
+    *,
+    add_fn,
+    max_discovery: int,
+    visits_holder: List[int],
+) -> None:
+    """Discover ``modules/**`` gitdirs under one abs gitdir (bounded, no symlink).
+
+    Logical keys are ``{rel_prefix}/modules/<name>/...``. Called for every
+    discovered free-standing or gitfile-target gitdir so root-gitfile common
+    dirs and nested repos are covered - not only free-standing root ``.git``.
+    """
+    modules = pathlib.Path(abs_git_dir) / "modules"
+    if not modules.is_dir() or modules.is_symlink():
+        return
+    pfx = _posix_rel(rel_prefix).rstrip("/")
+    try:
+        for dirpath, dirnames, _filenames in os.walk(
+            str(modules), topdown=True, followlinks=False
+        ):
+            dirnames.sort()
+            # Do not follow symlink children inside modules.
+            dirnames[:] = [
+                d
+                for d in dirnames
+                if not (pathlib.Path(dirpath) / d).is_symlink()
+            ]
+            head = pathlib.Path(dirpath) / "HEAD"
+            config = pathlib.Path(dirpath) / "config"
+            if head.exists() or config.exists():
+                rel_mod = _posix_rel(os.path.relpath(dirpath, str(modules)))
+                if rel_mod != ".":
+                    logical = pfx + "/modules/" + rel_mod
+                    add_fn(logical, pathlib.Path(dirpath))
+                    # Nested modules/ of this gitdir are inventoried by add_fn;
+                    # do not walk objects/hooks/refs here (duplicate + unbounded).
+                    dirnames[:] = []
+            visits_holder[0] += 1
+            if visits_holder[0] > max_discovery:
+                raise GrokWrapperError(
+                    "protected-path-write",
+                    "nested git discovery exceeded bound under {}/modules; fail closed".format(
+                        pfx
+                    ),
+                    {"maxDiscovery": max_discovery},
+                )
+    except OSError as exc:
+        _log(
+            "_inventory_modules_under",
+            "modules walk failed for {}: {}".format(abs_git_dir, exc),
+        )
+
+
 def discover_workspace_git_roots(
     repo_root: pathlib.Path,
     *,
@@ -190,24 +245,26 @@ def discover_workspace_git_roots(
     """Bounded no-symlink discovery of workspace gitdirs (root + nested + modules).
 
     Yields ``(repo_relative_git_prefix, abs_git_dir)`` for:
-    - root ``.git`` directory
+    - root ``.git`` directory or in-workspace gitfile target
     - nested ``**/.git`` directories (vendored repos / plain submodules)
     - nested ``**/.git`` gitfiles whose ``gitdir:`` target resolves **inside**
       the workspace (honest linked-worktree limit: external common dirs skipped)
-    - ``.git/modules/**`` directory trees under the root gitdir
+    - ``modules/**`` under **every** discovered abs gitdir (root free-standing,
+      root gitfile target, nested free-standing, nested gitfile target)
 
     Fail closed with ``protected-path-write`` when discovery hits ``max_discovery``
     (unbounded ignored caches must not silently leave nested git unguarded).
+    ``seen_abs`` prevents recursive duplicate loops when the same gitdir is
+    reachable via multiple logical prefixes.
     """
     root = pathlib.Path(repo_root)
     found: List[Tuple[str, pathlib.Path]] = []
     seen_abs: Set[str] = set()
-    visits = 0
+    visits_holder = [0]
 
-    def _add(rel_prefix: str, abs_dir: pathlib.Path) -> None:
-        nonlocal visits
-        visits += 1
-        if visits > max_discovery:
+    def _add(rel_prefix: str, abs_dir: pathlib.Path, *, inventory_modules: bool = True) -> None:
+        visits_holder[0] += 1
+        if visits_holder[0] > max_discovery:
             raise GrokWrapperError(
                 "protected-path-write",
                 "nested git discovery exceeded bound; fail closed rather than leave unguarded gitdirs",
@@ -225,33 +282,22 @@ def discover_workspace_git_roots(
         if not abs_dir.is_dir():
             return
         seen_abs.add(key)
-        found.append((_posix_rel(rel_prefix).rstrip("/"), abs_dir))
+        pfx = _posix_rel(rel_prefix).rstrip("/")
+        found.append((pfx, abs_dir))
+        if inventory_modules:
+            # Modules under this gitdir: add with inventory_modules=True so nested
+            # modules/ of a module gitdir are also found; seen_abs stops loops.
+            _inventory_modules_under(
+                abs_dir,
+                pfx,
+                add_fn=lambda r, a: _add(r, a, inventory_modules=True),
+                max_discovery=max_discovery,
+                visits_holder=visits_holder,
+            )
 
     root_git = root / ".git"
     if root_git.is_dir() and not root_git.is_symlink():
         _add(".git", root_git)
-        modules = root_git / "modules"
-        if modules.is_dir() and not modules.is_symlink():
-            # Each submodule dir under modules/ is itself a gitdir.
-            try:
-                for dirpath, dirnames, filenames in os.walk(str(modules), topdown=True, followlinks=False):
-                    dirnames.sort()
-                    # A modules entry looks like a gitdir when it has HEAD or config.
-                    head = pathlib.Path(dirpath) / "HEAD"
-                    config = pathlib.Path(dirpath) / "config"
-                    if head.exists() or config.exists():
-                        rel = _posix_rel(os.path.relpath(dirpath, str(root)))
-                        _add(rel, pathlib.Path(dirpath))
-                        # Still walk children (nested modules), but do not re-add via files.
-                    visits += 1
-                    if visits > max_discovery:
-                        raise GrokWrapperError(
-                            "protected-path-write",
-                            "nested git discovery exceeded bound under .git/modules; fail closed",
-                            {"maxDiscovery": max_discovery},
-                        )
-            except OSError as exc:
-                _log("discover_workspace_git_roots", "modules walk failed: {}".format(exc))
     elif root_git.is_file() and not root_git.is_symlink():
         # Linked worktree gitfile at repo root: only protect when target is inside
         # the workspace (common dir often lives outside linked checkouts).
@@ -263,8 +309,8 @@ def discover_workspace_git_roots(
     # we enter a .git directory so we do not invent paths under objects/.
     try:
         for dirpath, dirnames, filenames in os.walk(str(root), topdown=True, followlinks=False):
-            visits += 1
-            if visits > max_discovery:
+            visits_holder[0] += 1
+            if visits_holder[0] > max_discovery:
                 raise GrokWrapperError(
                     "protected-path-write",
                     "nested git discovery exceeded bound while scanning workspace; fail closed",
@@ -312,11 +358,72 @@ def discover_workspace_git_roots(
     return found
 
 
+def discover_workspace_gitfiles(
+    repo_root: pathlib.Path,
+) -> List[Tuple[str, pathlib.Path]]:
+    """Yield ``(logical_prefix, gitfile_abs)`` for in-workspace ``.git`` files.
+
+    Used by the git-dir guard to fingerprint pointer content so an external or
+    in-workspace redirect is not silent. Does not follow the target.
+    """
+    root = pathlib.Path(repo_root)
+    out: List[Tuple[str, pathlib.Path]] = []
+    root_git = root / ".git"
+    if root_git.is_file() and not root_git.is_symlink():
+        out.append((".git", root_git))
+    try:
+        for dirpath, dirnames, filenames in os.walk(str(root), topdown=True, followlinks=False):
+            rel_dir = _posix_rel(os.path.relpath(dirpath, str(root)))
+            if rel_dir == ".":
+                rel_dir = ""
+            if rel_dir == ".git" or rel_dir.startswith(".git/"):
+                dirnames[:] = []
+                continue
+            dirnames[:] = [
+                d
+                for d in sorted(dirnames)
+                if d != ".git" and not (pathlib.Path(dirpath) / d).is_symlink()
+            ]
+            if ".git" in filenames:
+                gitfile = pathlib.Path(dirpath) / ".git"
+                if gitfile.is_file() and not gitfile.is_symlink():
+                    rel = (rel_dir + "/.git") if rel_dir else ".git"
+                    out.append((_posix_rel(rel), gitfile))
+    except OSError as exc:
+        _log("discover_workspace_gitfiles", "walk failed: {}".format(exc))
+    return out
+
+
+def merge_git_root_pairs(
+    *groups: Optional[object],
+) -> List[Tuple[str, pathlib.Path]]:
+    """Union multiple git-root maps/lists; keep ALL (prefix, abs) pairs.
+
+    Same logical prefix may map to multiple abs dirs (baseline common + live
+    redirect target). Detection fingerprints both; restore still prefers
+    baseline-first single mapping via ``resolve_protected_abs_path``.
+    """
+    out: List[Tuple[str, pathlib.Path]] = []
+    seen: Set[Tuple[str, str]] = set()
+    for group in groups:
+        for pfx, abs_dir in _normalize_git_roots(group):
+            try:
+                key = (pfx, str(pathlib.Path(abs_dir).resolve()))
+            except OSError:
+                key = (pfx, str(abs_dir))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((pfx, pathlib.Path(abs_dir)))
+    return out
+
+
 def iter_sensitive_git_entries(
     repo_root: pathlib.Path,
     *,
     max_files_per_tree: int = MAX_GIT_TREE_WALK_FILES,
     git_roots: Optional[object] = None,
+    also_live: bool = False,
 ) -> Iterable[Tuple[str, pathlib.Path]]:
     """Yield ``(logical_rel, abs_path)`` for every sensitive file under workspace gitdirs.
 
@@ -325,12 +432,14 @@ def iter_sensitive_git_entries(
     target directory elsewhere in the workspace.
 
     When ``git_roots`` is provided (snapshot baseline), those prefix->abs mappings
-    are used instead of live discovery so a post-run gitfile pointer rewrite
-    cannot hide plants under the original common dir.
+    are used. With ``also_live=True``, live discovery is **unioned** so a post-run
+    in-workspace pointer redirect's new-side plants are still fingerprinted, while
+    baseline abs paths remain for original common continuity.
     """
     roots = _normalize_git_roots(git_roots)
-    if not roots:
-        roots = list(discover_workspace_git_roots(repo_root))
+    if also_live or not roots:
+        live = list(discover_workspace_git_roots(repo_root))
+        roots = merge_git_root_pairs(roots, live) if roots else live
     for rel_prefix, git_dir in roots:
         for name in _GIT_SNAPSHOT_FILES:
             candidate = pathlib.Path(git_dir) / name

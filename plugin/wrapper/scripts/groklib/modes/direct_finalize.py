@@ -205,16 +205,23 @@ def capture_git_dir_guard(
     fingerprinted: content-addressed and inert until a watched ref points at them.
     """
     pairs: Set[Tuple[str, str]] = set()
-    # Nested + modules + root via shared discovery / baseline map.
+    # Baseline roots (if any) UNION live discovery: restore still prefers baseline
+    # mapping, but detection must see new in-workspace redirect targets + plants.
     for rel, abs_path in direct_protect.iter_sensitive_git_entries(
-        repo_root, git_roots=git_roots
+        repo_root, git_roots=git_roots, also_live=bool(git_roots)
     ):
         pairs.add((rel, _git_watch_sig(abs_path)))
+
+    # Fingerprint gitfile pointer content so an external (or in-workspace)
+    # redirect is not silent. Pointer bytes remain outside auto-restore.
+    for pfx, gitfile in direct_protect.discover_workspace_gitfiles(repo_root):
+        pairs.add((pfx, _git_watch_sig(gitfile)))
 
     # Linked worktree: when common/git dirs live outside the workspace, still
     # fingerprint the primary HEAD/config/packed-refs/hooks/refs via rev-parse
     # (under synthetic .git/ keys) so a common-dir ref move is not silent.
-    # Skip when baseline already maps .git (in-workspace gitfile was snapshotted).
+    # Skip when baseline already maps .git (in-workspace gitfile was snapshotted)
+    # OR live discovery currently maps .git inside the workspace.
     baseline_has_root = False
     if git_roots is not None:
         for pfx, _ in direct_protect._normalize_git_roots(git_roots):
@@ -229,7 +236,15 @@ def capture_git_dir_guard(
         ).startswith(str(root.resolve()) + os.sep)
     except OSError:
         common_inside = False
-    if not common_inside and not baseline_has_root:
+    live_has_root = False
+    try:
+        for pfx, _abs in direct_protect.discover_workspace_git_roots(root):
+            if pfx == ".git":
+                live_has_root = True
+                break
+    except Exception:
+        live_has_root = False
+    if not common_inside and not baseline_has_root and not live_has_root:
         pairs.add((".git/HEAD", _git_watch_sig(git_dir / "HEAD")))
         for name in ("config", "packed-refs"):
             pairs.add((".git/" + name, _git_watch_sig(common_dir / name)))

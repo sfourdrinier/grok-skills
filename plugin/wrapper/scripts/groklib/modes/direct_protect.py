@@ -43,7 +43,9 @@ is_sensitive_git_relative = _git.is_sensitive_git_relative
 is_snapshot_scope = _git.is_snapshot_scope
 iter_git_tree_entries = _git.iter_git_tree_entries
 discover_workspace_git_roots = _git.discover_workspace_git_roots
+discover_workspace_gitfiles = _git.discover_workspace_gitfiles
 iter_sensitive_git_entries = _git.iter_sensitive_git_entries
+merge_git_root_pairs = _git.merge_git_root_pairs
 resolve_protected_abs_path = _git.resolve_protected_abs_path
 _normalize_git_roots = _git._normalize_git_roots
 _git_rel_parts = _git._git_rel_parts
@@ -400,7 +402,7 @@ def restore_protected_paths(
         live_roots = list(discover_workspace_git_roots(root))
     except GrokWrapperError as exc:
         _log("restore_protected_paths", "git root rediscovery failed: {}".format(exc))
-    # Merge: baseline prefixes first; live only fills missing prefixes.
+    # Baseline-preferring single map for primary restore target.
     merged: Dict[str, pathlib.Path] = {
         pfx: pathlib.Path(abs_s) for pfx, abs_s in baseline_roots.items()
     }
@@ -408,12 +410,55 @@ def restore_protected_paths(
         key = _posix_rel(pfx).rstrip("/")
         if key and key not in merged:
             merged[key] = abs_dir
+    # Full union pairs (baseline + live) for multi-abs plant cleanup.
+    union_pairs = merge_git_root_pairs(baseline_roots, live_roots)
 
     def _abs_for(rel: str) -> pathlib.Path:
-        # Always resolve via baseline-preferring git_roots (never live-only
-        # rediscovery for a snapshotted prefix). Per-path abs_paths alone are
-        # insufficient for planted children under a rewritten gitfile pointer.
+        # Primary restore path: baseline prefix wins over live redirect target.
         return resolve_protected_abs_path(root, rel, git_roots=merged)
+
+    def _all_abs_for(rel: str) -> List[pathlib.Path]:
+        """Every abs path for logical rel across baseline+live gitdirs."""
+        found: List[pathlib.Path] = []
+        seen: Set[str] = set()
+        primary = _abs_for(rel)
+        found.append(primary)
+        try:
+            seen.add(str(primary.resolve()))
+        except OSError:
+            seen.add(str(primary))
+        for pfx, git_dir in sorted(union_pairs, key=lambda item: len(item[0]), reverse=True):
+            pfx_n = _posix_rel(pfx).rstrip("/")
+            if not pfx_n:
+                continue
+            if rel == pfx_n:
+                candidate = pathlib.Path(git_dir)
+            elif rel.startswith(pfx_n + "/"):
+                candidate = pathlib.Path(git_dir) / rel[len(pfx_n) + 1 :]
+            else:
+                continue
+            try:
+                key = str(candidate.resolve())
+            except OSError:
+                key = str(candidate)
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append(candidate)
+        return found
+
+    def _delete_path(abs_path: pathlib.Path) -> Optional[str]:
+        try:
+            if abs_path.exists() or abs_path.is_symlink():
+                if abs_path.is_dir() and not abs_path.is_symlink():
+                    shutil.rmtree(str(abs_path))
+                else:
+                    abs_path.unlink()
+            if abs_path.exists() or abs_path.is_symlink():
+                return "protected plant still present after delete attempt"
+            return None
+        except OSError as exc:
+            return str(exc)
 
     for raw in offenders:
         rel = _posix_rel(raw)
@@ -425,7 +470,7 @@ def restore_protected_paths(
         if entry is None:
             # Absent from pre-run index. Only auto-delete paths that would have
             # been snapshotted if they existed (Grok-created .env/.pem/hooks).
-            # Other .git/* (e.g. index) are detect-only without a snapshot.
+            # Other .git/* (e.g. index, bare gitfile pointer) are detect-only.
             if not is_snapshot_scope(rel):
                 unrestored.append(rel)
                 errors.append(
@@ -435,27 +480,24 @@ def restore_protected_paths(
                     }
                 )
                 continue
-            try:
-                if abs_path.exists() or abs_path.is_symlink():
-                    if abs_path.is_dir() and not abs_path.is_symlink():
-                        shutil.rmtree(str(abs_path))
-                    else:
-                        abs_path.unlink()
-                # Honesty: never claim restored while the plant still exists.
-                if abs_path.exists() or abs_path.is_symlink():
-                    unrestored.append(rel)
-                    errors.append(
-                        {
-                            "path": rel,
-                            "error": "protected plant still present after delete attempt",
-                        }
-                    )
-                else:
-                    restored.append(rel)
-            except OSError as exc:
-                _log("restore_protected_paths", "delete failed for {}: {}".format(rel, exc))
+            # Delete plant on every baseline+live abs for this logical key.
+            remaining = False
+            last_err: Optional[str] = None
+            for candidate in _all_abs_for(rel):
+                err = _delete_path(candidate)
+                if err:
+                    remaining = True
+                    last_err = err
+            if remaining:
                 unrestored.append(rel)
-                errors.append({"path": rel, "error": str(exc)})
+                errors.append(
+                    {
+                        "path": rel,
+                        "error": last_err or "protected plant still present after delete attempt",
+                    }
+                )
+            else:
+                restored.append(rel)
             continue
 
         if not entry.snapshotted:
@@ -508,7 +550,33 @@ def restore_protected_paths(
                 os.chmod(str(abs_path), entry.mode if entry.mode else 0o600)
             except OSError as exc:
                 _log("restore_protected_paths", "chmod restore failed for {}: {}".format(rel, exc))
-            restored.append(rel)
+            # After restoring baseline abs, delete live-only extras for the same
+            # logical key (in-workspace pointer redirect plants on the new side).
+            try:
+                primary_key = str(abs_path.resolve())
+            except OSError:
+                primary_key = str(abs_path)
+            extras_remain = False
+            for candidate in _all_abs_for(rel):
+                try:
+                    ckey = str(candidate.resolve())
+                except OSError:
+                    ckey = str(candidate)
+                if ckey == primary_key:
+                    continue
+                err = _delete_path(candidate)
+                if err:
+                    extras_remain = True
+                    errors.append(
+                        {
+                            "path": rel,
+                            "error": "live redirect plant not cleared: {}".format(err),
+                        }
+                    )
+            if extras_remain:
+                unrestored.append(rel)
+            else:
+                restored.append(rel)
         except OSError as exc:
             _log("restore_protected_paths", "restore failed for {}: {}".format(rel, exc))
             unrestored.append(rel)

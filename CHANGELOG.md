@@ -181,14 +181,16 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
   gitdirs (`vendor/.../.git`), `.git/modules/**`, and in-workspace gitfile
   targets (`gitdir:` under the repo). Logical keys (`.git/HEAD`, hooks, refs)
   resolve to the **actual** absolute gitdir - never write/delete under a
-  gitfile path. Snapshot persists a `git_roots` prefix map so restore/guard
-  still hit the original common dir after a post-run pointer rewrite (live
-  rediscovery cannot override baseline prefixes). Bounded no-symlink discovery
-  fails closed on overflow. External linked-worktree common dirs remain outside
-  full inventory (primary HEAD/config/hooks/refs fingerprint only). SECURITY
-  direct-default item 3 documents the honest limit. Node
-  `parseDiffGitHeaderPaths` dual-condition parity + bytes-safe
-  `git_ignored_paths` land in the same pass.
+  gitfile path. Snapshot persists a `git_roots` prefix map so restore still hits the original
+  common dir after a post-run pointer rewrite. Guard detection unions baseline
+  roots with live discovery (new in-workspace redirect plants fail closed);
+  gitfile pointer content is fingerprinted (external redirect not silent;
+  pointer bytes outside auto-restore). `modules/**` inventoried under every
+  discovered abs gitdir (root/nested free-standing and gitfile targets).
+  Bounded no-symlink discovery fails closed on overflow. External linked
+  common dirs remain outside full inventory. SECURITY direct-default item 3
+  documents the honest limit. Node `parseDiffGitHeaderPaths` dual-condition
+  parity + bytes-safe `git_ignored_paths` land in the same pass.
 - **Codex marketplace root drift (DRY hole):** `tools/gen-manifests.mjs` now
   generates and `--check`-guards BOTH marketplace roots. Previously only
   `.claude-plugin/marketplace.json` (version fields) was covered, so

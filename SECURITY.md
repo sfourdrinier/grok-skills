@@ -167,9 +167,14 @@ gaps to paper over):
    Sensitive set: `config` / `HEAD` / `packed-refs`, `hooks/**`, `refs/**`
    (moved branch or planted hook/ref is reverted or removed). Nested discovery
    is bounded and fail-closed on overflow. Snapshot persists a `git_roots`
-   prefix->actual-gitdir map used by restore/guard even if a gitfile pointer
-   is rewritten after the run (live rediscovery must not override baseline).
-   Gitfile pointer bytes themselves are outside auto-restore. **External**
+   prefix->actual-gitdir map used by restore even if a gitfile pointer is
+   rewritten after the run. After-guard **unions** baseline roots with live
+   discovery so new in-workspace redirect targets and plants still surface as
+   protected-path-write; restore prefers the baseline map and clears live-only
+   extras for the same logical key when possible. `modules/**` is inventoried
+   under every discovered abs gitdir (root/nested free-standing and gitfile
+   targets). Gitfile pointer bytes themselves are outside auto-restore but are
+   content-fingerprinted so an external redirect is not silent. **External**
    linked-worktree common dirs (gitfile target outside the workspace) are
    **not** fully inventoried; only the git-resolved primary HEAD/config/hooks/refs
    fingerprint remains for that case. `.git/index` and `.git/COMMIT_EDITMSG`
