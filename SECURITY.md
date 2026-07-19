@@ -14,9 +14,12 @@ over. It is **not** a complete sandbox against an adversarial model.
   known secret shapes and for exact injected credential values.
 - **Fail-closed defaults** when the platform, sandbox, or stream cannot be
   verified (not when Grok CLI build string differs from last-validated stamp).
-- **Worktree isolation** for `code` when **integration** is `auto` / `review` /
-  `worktree` (external worktree + escape detection). **Not** claimed for
-  **integration=direct** (default) - see [direct-default trust posture](#direct-default-trust-posture-integrationdirect) below.
+- **Worktree isolation** for one-shot `code` when **integration** is `auto` /
+  `review` / `worktree` (external worktree + escape detection), and **always**
+  for the ACP peer channel (external retained worktree for the whole session).
+  **Not** claimed for one-shot **code** `integration=direct` (default live-tree
+  path) - see [direct-default trust posture](#direct-default-trust-posture-integrationdirect)
+  below. Peer `integration=direct` is stop-time apply, not that live-tree path.
 - **Build-gate script integrity** (D1): gate scripts modified by the run are refused.
 
 ### Accepted limits (please read)
@@ -58,51 +61,66 @@ over. It is **not** a complete sandbox against an adversarial model.
   isolated modes always call `handoff --run-id` before apply. Integrate is
   **mode-aware** ([integration-modes.md](plugin/references/integration-modes.md)):
   review never auto-applies; auto may apply a dual-condition-ready patch after
-  revalidation; integration=direct lands source edits live. The plugin never
-  auto-commits, merges, cherry-picks, or pushes. **runMode direct** produces no
-  handoff artifacts by design - the artifacts' value is the isolation evidence
-  that runMode direct cannot attest; use runMode hardened for verified handoff.
+  revalidation; one-shot code `integration=direct` lands source edits live; ACP
+  peer `integration=direct` applies a verified ready patch only at peer-stop
+  (after always-isolated worktree work) and still requires consent. The plugin
+  never auto-commits, merges, cherry-picks, or pushes. **runMode direct**
+  produces no handoff artifacts by design - the artifacts' value is the
+  isolation evidence that runMode direct cannot attest; use runMode hardened for
+  verified handoff and for ACP peer.
 - **ACP peer channel (default; opt out with `GROK_DISABLE_ACP=1`):** the default
-  multi-turn peer path. Peer-stop runs the contract's `requiredValidation` as
+  multi-turn peer path. Peer **always** runs in an external retained worktree
+  (private home + sandbox-to-worktree); prompt-time edits never live-edit the
+  operator checkout. Peer-stop runs the contract's `requiredValidation` as
   **real commands** and sets `integration.ready` only from authoritative,
   non-forgeable command evidence - never a synthesized exit status or a no-op
-  build gate. Integration is applied by **peer-stop itself** per the active
-  integration mode via the **shared auto/peer apply spine** (patch integrity
-  recheck, NUL-safe dirty status, numstat, dirty-overlap, `git apply --check`,
-  apply, reverse-on-failure - see
-  [integration-modes.md](plugin/references/integration-modes.md)), **not** via
-  `/grok:handoff`, which stays code-mode only and still refuses peer runIds.
-  Peer-stop final envelope rewrite is rewrite-before-write/store/finalize:
-  onStdout computes final emitStdout/effectiveCode before first write, then
-  stdout write, then storeJobStdout, then updateJob/finalize, then notify;
-  peer-stop is **not** completion-notification eligible. Progress-chunk
-  redaction is **per-frame**: a secret split across ACP `session/update` frames
-  may partially land in `progress.jsonl` before a full token shape is visible to
-  the scanner (residual risk; not a complete secret firewall). Control-socket
-  payloads and turn envelopes are scanned with the same
-  `assert_no_secret_material` path as stdout envelopes. The opt-out env gate is
-  enforced in the wrapper (not companion-only). `pre_tool_use` may appear as an
-  initialize capability only - the wrapper does not register a deny hook
-  (NON-enforcement; OS sandbox + C6 child pins enforce). Do **not** claim full
-  runtime tool-approval enforcement beyond local CLI parse + initialize probe
-  evidence.
+  build gate. On ready, **peer-stop itself** integrates via the active mode and
+  the **shared auto/peer apply spine** (patch integrity recheck, NUL-safe dirty
+  status, numstat, dirty-overlap, `git apply --check`, apply,
+  reverse-on-failure - see
+  [integration-modes.md](plugin/references/integration-modes.md) ACP peer
+  section): `direct` and `auto` both apply the verified ready patch (`direct`
+  additionally requires per-repo direct consent); `review` / `worktree` retain
+  for manual parent apply. **Not** via `/grok:handoff`, which stays code-mode
+  only and still refuses peer runIds. Peer direct is therefore **stop-time
+  apply**, not one-shot code live-edit direct. Peer-stop final envelope rewrite
+  is rewrite-before-write/store/finalize: onStdout computes final
+  emitStdout/effectiveCode before first write, then stdout write, then
+  storeJobStdout, then updateJob/finalize, then notify; peer-stop is **not**
+  completion-notification eligible. Progress-chunk redaction is **per-frame**: a
+  secret split across ACP `session/update` frames may partially land in
+  `progress.jsonl` before a full token shape is visible to the scanner (residual
+  risk; not a complete secret firewall). Control-socket payloads and turn
+  envelopes are scanned with the same `assert_no_secret_material` path as stdout
+  envelopes. The opt-out env gate is enforced in the wrapper (not
+  companion-only). `pre_tool_use` may appear as an initialize capability only -
+  the wrapper does not register a deny hook (NON-enforcement; OS sandbox + C6
+  child pins enforce). Do **not** claim full runtime tool-approval enforcement
+  beyond local CLI parse + initialize probe evidence.
 
 ### Direct-default trust posture (integration=direct)
 
 Canonical product matrix:
 [plugin/references/integration-modes.md](plugin/references/integration-modes.md).
 **Do not** confuse **integration=direct** (how edits land) with **runMode=direct**
-(installed CLI security posture) - both use the word "direct".
+(installed CLI security posture) - both use the word "direct". Also **do not**
+equate one-shot **code** direct (live tree) with **ACP peer** direct (stop-time
+apply after an always-external worktree).
 
-**integration=direct is the default** for code / implement / peer. Under runMode
-hardened it is **hardened-direct**: private auth home + OS sandbox write-confined
-to the **repo root** (+ private tmp) + secret redaction on the stdout envelope.
+**integration=direct is the default** product name for code / implement / peer
+stop landing prefs. Under runMode hardened, one-shot **code** direct is
+**hardened-direct**: private auth home + OS sandbox write-confined to the
+**repo root** (+ private tmp) + secret redaction on the stdout envelope. ACP
+**peer** keeps isolation on an external worktree for the whole session and only
+lands via stop-time apply when ready + (for direct) consented.
 
-Honest limits (these are deliberate, not temporary gaps to paper over):
+Honest limits for **one-shot code** direct (these are deliberate, not temporary
+gaps to paper over):
 
-1. **Worktree isolation is gone in direct.** Source edits land in the operator
-   checkout live. There is no pre-apply dual-condition gate and no forensic
-   patch required for the edit to exist.
+1. **Worktree isolation is gone in code direct.** Source edits land in the
+   operator checkout live. There is no pre-apply dual-condition gate and no
+   forensic patch required for the edit to exist. (ACP peer always keeps the
+   external worktree during prompts.)
 2. **Private home does not protect the tree.** It isolates Grok credentials /
    config for the child, not your working tree, `.env`, or git objects.
 3. **Sandbox confine ≠ protect `.git` / `.env` inside the repo.** The write
@@ -117,13 +135,15 @@ Honest limits (these are deliberate, not temporary gaps to paper over):
    This is best-effort detection + rollback, not seatbelt subpath prevention.
 4. **Grok can still READ your files** (documented D-SECRETREAD). Write
    confinement is not a read firewall.
-5. **Consent gate:** first direct run without `setup --integration direct`
-   (per target repo) fails closed with a trust summary. Env / userConfig alone
-   never counts as consent.
+5. **Consent gate:** first direct landing without `setup --integration direct`
+   (per target repo) fails closed with a trust summary - for code direct runs
+   and for peer-stop direct apply. Env / userConfig alone never counts as
+   consent.
 
 Choose **integration=auto** or **review** when you want isolation and a verified
-patch before anything lands on the operator tree. Prefer those for untrusted or
-high-risk changes.
+patch before anything lands on the operator tree (one-shot code), or when you
+want peer-stop to retain rather than apply. Prefer those for untrusted or
+high-risk changes. Note ACP peer already isolates prompt-time work either way.
 
 ### Session archives
 

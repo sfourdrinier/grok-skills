@@ -72,9 +72,10 @@ loading, secret scanning, and the fail-closed error model. See
 ## Security model
 
 Trusted-input developer tool. Enforced: write confinement, private auth home,
-redacted single envelope, gate-script integrity; worktree isolation when
-**integration** is auto/review (not for default integration=direct - see
-[integration-modes.md](integration-modes.md) and
+redacted single envelope, gate-script integrity; worktree isolation for one-shot
+code when **integration** is auto/review, and always for the ACP peer channel
+(not for one-shot code integration=direct live-tree - peer direct is stop-time
+apply; see [integration-modes.md](integration-modes.md) and
 [`../../SECURITY.md`](../../SECURITY.md)). Not a sandbox against an adversarial
 model. Full notes:
 [`../../docs/OPEN-SECURITY-DECISIONS.md`](../../docs/OPEN-SECURITY-DECISIONS.md).

@@ -6,9 +6,12 @@
 instead of restating the matrix. Orthogonal to **run mode** (security posture);
 see [Naming: two "direct" axes](#naming-two-direct-axes) below.
 
-Workspace default for code / implement / peer is **`direct`**. First direct run
-in a target repo without recorded consent fails closed with a trust summary;
-accept once via `setup --integration direct` (optionally `--target <repo>`).
+Workspace default for code / implement / peer is **`direct`**. First direct
+landing in a target repo without recorded consent fails closed with a trust
+summary (one-shot code run, or ready peer-stop apply); accept once via
+`setup --integration direct` (optionally `--target <repo>`). For ACP peer,
+`direct` still means stop-time apply after an always-external worktree - not
+live-edit during prompts.
 
 ```bash
 node "$SKILL_BASE/run.mjs" setup --integration direct
@@ -21,11 +24,16 @@ node "$SKILL_BASE/run.mjs" code --integration review --target '...' --base 'HEAD
 `userConfig.integrationMode` / `CLAUDE_PLUGIN_OPTION_INTEGRATIONMODE` is a
 **default hint only** - it does not satisfy consent. Only setup does.
 
-## The three product modes
+## The three product modes (one-shot `code`)
 
-| Mode | Isolation | How changes land | When to use |
-|------|-----------|------------------|-------------|
-| **`direct` (DEFAULT)** | **None** - no external worktree | Grok edits **your real working tree** live (hardened-direct under runMode hardened) | Trusted-input peer implementer (same class as a host subagent editing the checkout) |
+The matrix below is the **one-shot `code` / implement** landing story. ACP
+**peer** always uses an external retained worktree during the session and lands
+only at **peer-stop** - see [ACP peer channel](#acp-peer-channel). Do not read
+peer `integration=direct` as live-edit direct.
+
+| Mode | Isolation (one-shot code) | How changes land (one-shot code) | When to use |
+|------|---------------------------|----------------------------------|-------------|
+| **`direct` (DEFAULT)** | **None** - no external worktree | Grok edits **your real working tree** live (hardened-direct under runMode hardened) | Trusted-input one-shot implementer (same class as a host subagent editing the checkout) |
 | **`auto`** | External git worktree + full dual-condition verification | On dual-condition **ready**, companion **auto-applies** the verified patch to your tree (apply-time revalidation; never half-applies) | Want isolation + verification, then automatic land |
 | **`review`** | External git worktree + patch + handoff manifest | **Never** auto-applies; parent applies manually after ready handoff | Untrusted / review-first changes |
 
@@ -122,40 +130,53 @@ Both axes use the word **direct**. They are **orthogonal**.
 | Axis | Values | Meaning |
 |------|--------|---------|
 | **runMode** (security) | `hardened` (default) \| `direct` | **hardened:** private home + sandbox verification + redaction. **direct:** installed Grok CLI + normal `~/.grok` auth; less isolation; no verified handoff artifacts. Set via `setup --run-mode` or `GROK_SKILLS_MODE`. |
-| **integration** (how edits land) | `direct` (default) \| `auto` \| `review` (`worktree` alias) | **direct:** live tree (hardened-direct when runMode is hardened). **auto:** worktree then apply-on-ready. **review:** worktree + manual parent apply. Set via `setup --integration` or `--integration` on the run. |
+| **integration** (how edits land) | `direct` (default) \| `auto` \| `review` (`worktree` alias) | **One-shot code:** direct = live tree (hardened-direct when runMode is hardened); auto = worktree then apply-on-ready; review = worktree + manual parent apply. **ACP peer:** always external worktree during the session; at peer-stop, direct/auto apply the verified ready patch (direct needs consent), review retains. Set via `setup --integration` or `--integration` on the run / peer-stop. |
 
 Examples:
 
-- `runMode=hardened` + `integration=direct` → **hardened-direct** (default product
-  path): private home + sandbox-to-repo + live source edits + consent.
-- `runMode=hardened` + `integration=review` → isolated worktree, manual apply.
+- `runMode=hardened` + `integration=direct` + one-shot **code** → **hardened-direct**:
+  private home + sandbox-to-repo + live source edits + consent.
+- `runMode=hardened` + `integration=direct` + **ACP peer** → external worktree for
+  the whole session; at ready peer-stop, consented apply of the verified patch
+  (not live-edit during prompts).
+- `runMode=hardened` + `integration=review` → isolated worktree, manual apply
+  (code handoff or peer-stop retain).
 - `runMode=direct` + any integration that needs handoff artifacts → handoff /
-  implement / contract path **refuse** fail-closed (no isolation evidence to
-  attest). Prefer hardened runMode for auto/review handoff.
+  implement / contract / peer path **refuse** fail-closed (no isolation evidence to
+  attest; peer is hardened-only). Prefer hardened runMode for auto/review handoff.
 
 When docs say "direct mode" without a qualifier, prefer **integration=direct**
 for edit-landing, and **runMode=direct** only when discussing installed-CLI
-security posture.
+security posture. When they say peer direct, mean **stop-time apply**, never
+code-style live-tree editing.
 
 ## ACP peer channel
 
 The **default** implementation path for `grok-engineer-coder` is the live
 multi-turn ACP peer (`peer start` / `prompt` / `stop`). One-shot `code` is the
-fallback (`GROK_DISABLE_ACP=1` or peer unavailable).
+fallback (`GROK_DISABLE_ACP=1` or peer unavailable). Peer is **hardened runMode
+only**.
 
-Peer results integrate through the **same** integration modes:
+### Peer isolation is always external
 
-| Mode after peer-stop / ready | Effect |
-|------------------------------|--------|
-| `direct` | Edits already live in the tree (or apply path when applicable) |
-| `auto` | Apply verified patch on ready (revalidated) |
-| `review` | Patch + manifest only; parent applies manually |
+Every peer session creates a **private home + external retained worktree**.
+Prompt-time source edits land in that worktree only. The operator checkout is
+untouched until a ready **peer-stop** apply (if the mode applies). Peer
+`integration=direct` is therefore **not** one-shot code live-edit direct.
+
+### Peer-stop landing matrix
+
+| Mode at peer-stop | Session isolation | On evidence-backed ready | Consent |
+|-------------------|-------------------|--------------------------|---------|
+| **`direct`** | Always external worktree | Companion **applies** the verified ready patch to the target checkout (shared apply spine) | **Required** (`setup --integration direct` for that repo) |
+| **`auto`** | Always external worktree | Companion **applies** the verified ready patch (same spine; no separate code-style live path) | Not required for apply |
+| **`review`** / **`worktree`** | Always external worktree | Patch + handoff manifest **retained**; parent applies manually | N/A |
 
 `peer stop` runs contract `requiredValidation` and the build gate **for real**;
 `integration.ready=true` only from non-forgeable evidence. Peer-stop then applies
-its verified patch **itself** per the active integration mode (above);
-`/grok:handoff --run-id` stays **code-mode only** and refuses peer runIds
-(`handoff-unavailable`), so peer integration never routes through it.
+or retains **itself** per the matrix above; `/grok:handoff --run-id` stays
+**code-mode only** and refuses peer runIds (`handoff-unavailable`), so peer
+integration never routes through it.
 
 Companion completion honesty (parity with `code --integration auto`): peer-stop
 captures the wrapper envelope, runs integration, and attaches the final apply
@@ -173,17 +194,24 @@ peer sessions even when notifications are on.
 
 ## Mode-aware integrate rules (summary)
 
+One-shot **code** (live vs worktree during the run):
+
 | Mode | Auto-apply? | Parent apply? |
 |------|-------------|---------------|
 | `direct` | N/A - edits already live (source); protected-path rollback only | Optional review of live diff; no patch gate required for the edit to exist |
 | `auto` | **Yes**, only after dual-condition ready + apply-time revalidation | Only if auto apply failed or was not used |
 | `review` / `worktree` | **No** | **Yes** - manual after ready handoff (`git apply --check --binary`, then explicit apply) |
 
+**ACP peer** always isolates in an external worktree; at stop, `direct` and
+`auto` both apply the verified ready patch (direct needs consent), while
+`review`/`worktree` retain for manual parent apply - see the peer-stop matrix
+above. Do not summarize peer as "direct = edits already live".
+
 **Never** auto-commit, merge, cherry-pick, or push from this plugin in any mode.
 
 Handoff skill remains **read-only** (never applies). `implement` is **verify-only**
-(code + handoff; does not apply) - for apply-on-ready use `code` / peer with
-`integration=auto`.
+(code + handoff; does not apply) - for apply-on-ready use `code --integration auto`
+or peer-stop with `integration=auto` / consented `direct`.
 
 ## Related
 

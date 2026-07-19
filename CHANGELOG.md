@@ -164,8 +164,10 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 - **review:** worktree + patch + manifest; never auto-applies (manual parent
   apply after ready handoff).
 - **ACP default peer channel** for `grok-engineer-coder` (multi-turn
-  start/prompt/stop); one-shot `code` is the fallback (`GROK_DISABLE_ACP=1`).
-  Peer results integrate via the same modes.
+  start/prompt/stop; always external worktree); one-shot `code` is the fallback
+  (`GROK_DISABLE_ACP=1`). Peer-stop lands via the same mode names with a different
+  isolation story than code direct (stop-time apply for direct/auto; see Fixed
+  residual note).
 - **Docs honesty + DRY:** README top-line pitch matches direct-default;
   SECURITY states trusted-input posture for integration=direct; skills/agents
   link the single integration-modes reference (no bare "never auto-apply"
@@ -342,6 +344,13 @@ already resolved or stale after the re-architecture are noted as such above.
   (not `experimental`); unit coverage asserts the initialize payload.
 - **implementation-handoff checklist:** trailing whitespace removed from the
   parent-apply numbered list (`git diff --check` clean).
+- **Peer integration docs-follow-code:** product surfaces no longer group ACP
+  peer `integration=direct` with one-shot code live-tree direct. Runtime truth:
+  peer always uses an external retained worktree; at ready peer-stop,
+  `direct`/`auto` both apply the verified patch (direct needs consent) and
+  `review` retains. Canonical matrix + peer skill, SECURITY, peer-native design,
+  README/COMPATIBILITY/agents/manifests/manual-smoke updated without rewriting
+  frozen plans/ledger rows.
 
 **Round 2** (the review bot re-scanned each commit and found further issues,
 including regressions in the round-1 fixes): direct git-guard now content-hashes

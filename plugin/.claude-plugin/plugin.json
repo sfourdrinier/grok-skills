@@ -1,7 +1,7 @@
 {
   "name": "grok",
   "version": "2.0.0",
-  "description": "Grok as a peer implementer for Claude Code: default integration=direct lands consented live-tree edits; auto/review are opt-in worktrees; ACP is the default peer channel (runMode direct is a separate installed-home security posture). Review, reason, verify, continue-run, and verified handoff included. See plugin/references/integration-modes.md. Not affiliated with xAI.",
+  "description": "Grok as a peer implementer for Claude Code: default integration=direct lands consented live-tree edits for one-shot code (ACP peer always external worktree; stop-time apply); auto/review are opt-in worktrees; ACP is the default peer channel (runMode direct is a separate installed-home security posture). Review, reason, verify, continue-run, and verified handoff included. See plugin/references/integration-modes.md. Not affiliated with xAI.",
   "author": {
     "name": "Stephane Fourdrinier"
   },
@@ -29,7 +29,7 @@
     "integrationMode": {
       "type": "string",
       "title": "Integration mode",
-      "description": "How edits land (orthogonal to runMode): direct = consented live-tree default; auto/review = opt-in worktrees. userConfig is a hint only - setup consent still required. SSOT: plugin/references/integration-modes.md.",
+      "description": "How edits land (orthogonal to runMode): direct = consented default (one-shot code live-tree; ACP peer stop-time apply after always-external worktree); auto/review = opt-in worktrees. userConfig is a hint only - setup consent still required. SSOT: plugin/references/integration-modes.md.",
       "default": "direct"
     },
     "notificationMode": {

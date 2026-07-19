@@ -119,8 +119,9 @@ Typical session:
 /grok:code --target src/my-lib --base main --task "Fix the off-by-one in the paginator"
 /grok:status --run-id <runId from code envelope>
 /grok:handoff --run-id <runId>
-# Integrate per mode: direct = edits already live; auto = companion may apply;
-# review = parent applies the patch manually after ready (see integration-modes.md)
+# Integrate per mode (one-shot code): direct = edits already live; auto =
+# companion may apply; review = parent applies after ready. ACP peer is always
+# worktree-isolated and lands only at peer-stop (see integration-modes.md).
 /grok:verify --worktree /path/to/retained-worktree --task "Confirm the fix builds and tests pass"
 ```
 
@@ -192,7 +193,7 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 | `/grok:dual-lens` | Adversarial pass, then ordinary review on the same target. |
 | `/grok:reason` | Cold second opinion on files you name. No automatic repo crawl. Web off by default. |
 | `/grok:code` | Implements per **integration mode** (default **direct** = live tree; `auto`/`review` = external worktree off a committed `--base`). Does not commit or push. Optional `--contract-file` (writeScopes + requiredValidation; runMode hardened only). Handoff artifacts under the run dir for isolated modes. See [integration-modes.md](plugin/references/integration-modes.md). |
-| `/grok:peer` | Multi-turn **ACP peer channel** (`start` / `prompt` / `stop`). Default path for `grok-engineer-coder`; one-shot `code` is the fallback (`GROK_DISABLE_ACP=1`). Hardened runMode only. Integrates at `peer stop` via the shared auto/peer apply spine (not via `/grok:handoff`). Final apply envelope rewrite-before-write/store/finalize; **not** completion-notification eligible. Does **not** claim host-level tool-approval enforcement beyond local CLI parse+initialize probe - trusted-input peer channel. See [peer skill](plugin/skills/peer/SKILL.md) + [integration-modes.md](plugin/references/integration-modes.md). |
+| `/grok:peer` | Multi-turn **ACP peer channel** (`start` / `prompt` / `stop`). Default path for `grok-engineer-coder`; one-shot `code` is the fallback (`GROK_DISABLE_ACP=1`). Hardened runMode only. **Always** external retained worktree during the session (not live-edit). At ready `peer stop`, `direct`/`auto` apply the verified patch (direct needs consent); `review` retains. Shared auto/peer apply spine; **not** via `/grok:handoff`. Final apply envelope rewrite-before-write/store/finalize; **not** completion-notification eligible. Does **not** claim host-level tool-approval enforcement beyond local CLI parse+initialize probe - trusted-input peer channel. See [peer skill](plugin/skills/peer/SKILL.md) + [integration-modes.md](plugin/references/integration-modes.md). |
 | `/grok:implement` | **One-call delegate:** `code` then auto-`handoff` on the resulting runId. Relays both envelopes. Exit 0 only when code ok AND handoff dual-condition ready. Hardened runMode only (runMode direct refused). Verify-only (does not apply); for apply-on-ready use `code --integration auto`. |
 | `/grok:handoff` | **Read-only** verified implementation handoff by **`runId` only** (1.6.0+). Dual-condition ready: ready manifest + success envelope + patch rehash. Never applies (read-only). Code-mode only (peer runIds refuse). Notify is not ready. |
 | `/grok:verify` | Pass/fail/inconclusive check on an existing worktree. No `--web`. |
@@ -208,7 +209,7 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 
 | Agent | Role |
 |-------|------|
-| **`grok-engineer-coder`** | Prefer for implementation: features, fixes, refactors. Default multi-turn ACP peer; one-shot `code` fallback. Edits land per [integration mode](plugin/references/integration-modes.md) (default live tree; optional worktree + verify). Host plans/merges; Grok writes. |
+| **`grok-engineer-coder`** | Prefer for implementation: features, fixes, refactors. Default multi-turn ACP peer (always external worktree; stop-time apply for direct/auto); one-shot `code` fallback (default live tree; opt-in auto/review worktrees). See [integration modes](plugin/references/integration-modes.md). Host plans/merges; Grok writes. |
 | **`grok-rescue`** | Second opinion / diagnosis via Grok `reason` (or `code` if target+base are already known). |
 
 - **Claude Code:** agents ship in the plugin (`plugin/agents/`). Reload plugins after install.
@@ -243,14 +244,17 @@ edits land - both axes use the word "direct"; disambiguate in
 
 | Mode | How | What you get | Handoff artifacts |
 |------|-----|----------------|-------------------|
-| **hardened** (default) | omit, or `/grok:setup` with `--run-mode hardened` | Private Grok home, sandbox verification, secret redaction; isolation depends on **integration** mode (worktree for auto/review; live tree for integration=direct). | **Yes** for isolated integration paths - verified patch + handoff manifest under the run dir. |
+| **hardened** (default) | omit, or `/grok:setup` with `--run-mode hardened` | Private Grok home, sandbox verification, secret redaction; isolation depends on channel + **integration** (one-shot code: worktree for auto/review, live tree for code direct; ACP peer: always external worktree, stop-time apply for direct/auto). | **Yes** for isolated paths (code auto/review and all ACP peer sessions) - verified patch + handoff manifest under the run dir. |
 | **direct** | `GROK_SKILLS_MODE=direct` or companion `setup --run-mode direct` | Uses your **installed Grok CLI** and normal `~/.grok` auth - same idea as OpenAI's plugin using your installed Codex. Faster, less isolation. runMode direct does **not** push completion notify in 1.5.0 (job still tracked). `result` accepts `direct-<timestamp>` ids; direct runs are **synchronous** (the companion blocks in the CLI call and records no live child pid), so `cancel` has no process to signal, and `handoff`/`status --run-id`/`implement` refuse with an honest message. | **No** - by design: handoff artifacts' value is the isolation evidence (worktree, sentinel, sandbox verification) that runMode direct cannot attest. |
 
 ### Integration modes (how edits land)
 
-Orthogonal to run mode (security). Default for code/implement is **direct**
-(edit this working tree under hardened-direct), but the first direct run in a
-workspace without recorded consent fails closed with a trust summary. Accept once:
+Orthogonal to run mode (security). Default product name is **direct**. For
+**one-shot code / implement** that means edit this working tree under
+hardened-direct; the first direct run without recorded consent fails closed
+with a trust summary. **ACP peer** always uses an external worktree and only
+applies at ready peer-stop (`direct` still needs that same consent; `auto`
+applies without it; `review` retains). Accept once:
 
 ```bash
 node "$SKILL_BASE/run.mjs" setup --integration direct
@@ -294,16 +298,18 @@ when the manifest says ready, a **success** terminal envelope exists for that
 runId, and the patch re-hashes. Completion **notifications are not ready** -
 they only mean a terminal attempt finished.
 
-Integrate is **mode-aware** (canonical:
+Integrate is **mode-aware** and **channel-aware** (canonical:
 [integration-modes.md](plugin/references/integration-modes.md)):
 
-- **direct:** source edits already live in your tree (protected paths rolled
-  back if touched); no patch gate required for the edit to exist
-- **auto:** companion may auto-apply a dual-condition-ready patch after
+- **code direct:** source edits already live in your tree (protected paths
+  rolled back if touched); no patch gate required for the edit to exist
+- **code auto:** companion may auto-apply a dual-condition-ready patch after
   apply-time revalidation (patch integrity + shared dirty-guard spine)
-- **review:** never auto-applies; parent apply is manual (`git apply --check
-  --binary` then explicit apply)
-- **peer:** integrate at `peer stop` (same spine); handoff refuses peer runIds
+- **code review:** never auto-applies; parent apply is manual (`git apply
+  --check --binary` then explicit apply)
+- **ACP peer:** always external worktree during the session; at ready
+  `peer stop`, `direct`/`auto` apply the verified patch (direct needs consent),
+  `review` retains; handoff refuses peer runIds
 
 This plugin **never** auto-commits, merges, cherry-picks, or pushes in any mode.
 Handoff checklist: [implementation-handoff.md](plugin/references/implementation-handoff.md).

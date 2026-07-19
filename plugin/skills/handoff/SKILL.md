@@ -69,8 +69,9 @@ run-mode does not write verified handoff state; use `setup --run-mode hardened`
 This skill is **read-only** - it never applies. How results land is mode-aware
 (canonical: `plugin/references/integration-modes.md`):
 
-- **direct:** source edits already live; handoff artifacts may be absent on
-  pure live-tree paths; review the working tree diff
+- **code direct:** source edits already live; handoff artifacts may be absent
+  on pure live-tree paths; review the working tree diff (ACP peer is separate:
+  always worktree + stop-time apply - see integration-modes.md)
 - **auto:** companion may auto-apply after dual-condition ready + apply-time
   revalidation (you still may call handoff to observe ready)
 - **review:** never auto-applies; parent apply is manual after ready

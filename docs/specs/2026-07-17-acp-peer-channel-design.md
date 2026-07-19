@@ -117,16 +117,20 @@ complete secret firewall.
 
 ## Integration via the active mode
 
-On peer-stop when ready, the companion integrates per the resolved integration
-mode (setup / `--integration` / userConfig):
+Peer isolation is **always** the external retained worktree created at start
+(prompt-time edits never live-edit the operator checkout). On peer-stop when
+ready, the companion integrates per the resolved integration mode (setup /
+`--integration` / userConfig):
 
 - **direct** (with consent) or **auto**: apply the verified patch to the target
-  (`git apply --check --binary` then `git apply --binary`)
+  (`git apply --check --binary` then `git apply --binary`) via the shared spine
 - **review** or **worktree**: leave patch + manifest; no apply
 
-Consent gate applies for direct (same as code). `peer stop` applies the verified
+Consent gate applies for direct (same setup consent as code, but peer direct is
+stop-time apply - not one-shot code live-edit). `peer stop` applies the verified
 patch itself per integration mode; `/grok:handoff` does NOT accept peer runs
-(code-mode only).
+(code-mode only). Canonical matrix:
+[plugin/references/integration-modes.md](../../plugin/references/integration-modes.md).
 
 Terminal honesty: the companion rewrites the peer-stop stdout envelope with the
 true apply outcome under rewrite-before-write/store/finalize (shared auto

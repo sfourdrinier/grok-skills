@@ -29,19 +29,23 @@ only (no direct run-mode).
 2. `commands[]` carries a real `exitStatus` (never forged)
 
 No contract + no build gate -> honest not-ready with
-`no-authoritative-validation`. Ready peer results integrate via the active
-integration mode (canonical: `plugin/references/integration-modes.md` -
-direct: live tree; auto: apply-on-ready; review: patch + manifest only) -
-applied by `peer stop` itself, at stop time. `/grok:handoff` is code-mode only
+`no-authoritative-validation`. Peer always runs in an **external retained
+worktree** (never live-edit of the operator tree during prompts). Ready results
+integrate only at **`peer stop`**, via the active mode (canonical:
+`plugin/references/integration-modes.md` ACP peer section): **direct** and
+**auto** both apply the verified ready patch to the target checkout (direct
+additionally requires per-repo direct consent); **review** / **worktree** retain
+patch + manifest for manual parent apply. Peer direct is therefore **stop-time
+apply**, not one-shot code live-edit direct. `/grok:handoff` is code-mode only
 and refuses peer runIds (`handoff-unavailable`); peer integration never routes
-through it (see `integration-modes.md`). The companion emits **one** final
-stdout envelope that already includes the apply outcome
-(`response.integration.applied` / `outcome`) under rewrite-before-write/store/finalize
-(onStdout computes final emitStdout/effectiveCode before first write; then write;
-then storeJobStdout; then updateJob/finalize; then notify). Blocked apply is
-`status: failure` + nonzero exit + failed job + identical stored `/grok:result`
-payload (never a raw wrapper success for an unapplied ready peer-stop). Peer-stop
-is **not** completion-notification eligible (see `NOTIFY_ELIGIBLE_MODES`).
+through it. The companion emits **one** final stdout envelope that already
+includes the apply outcome (`response.integration.applied` / `outcome`) under
+rewrite-before-write/store/finalize (onStdout computes final
+emitStdout/effectiveCode before first write; then write; then storeJobStdout;
+then updateJob/finalize; then notify). Blocked apply is `status: failure` +
+nonzero exit + failed job + identical stored `/grok:result` payload (never a
+raw wrapper success for an unapplied ready peer-stop). Peer-stop is **not**
+completion-notification eligible (see `NOTIFY_ELIGIBLE_MODES`).
 
 ## How to run (transparent)
 
@@ -133,7 +137,7 @@ node "$SKILL_BASE/run.mjs" cleanup --run-id '<id>' --confirm
 - Secret redaction applies to progress chunks, turn envelopes, and control-
   socket payloads (same scan as `emit_envelope`).
 - Integrate only per the chosen mode's gate (see
-  `plugin/references/integration-modes.md`: shared dirty-guard apply spine;
-  review never auto-applies; auto may after revalidation + patch integrity;
-  direct lands live). Prefer deriving a contract with shell-free
-  `requiredValidation` so ready can be evidence-backed.
+  `plugin/references/integration-modes.md` ACP peer section: shared dirty-guard
+  apply spine; review/worktree retain; auto and consented direct apply the
+  verified ready patch at stop - not live-edit). Prefer deriving a contract with
+  shell-free `requiredValidation` so ready can be evidence-backed.

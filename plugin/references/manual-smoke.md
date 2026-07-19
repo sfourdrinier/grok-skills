@@ -63,8 +63,10 @@ the Grok CLI is ready.
 The ACP peer channel is the default multi-turn peer path. Opt out (force
 one-shot `code`) with `export GROK_DISABLE_ACP=1`. Spec:
 `docs/specs/2026-07-17-acp-peer-channel-design.md` (Amendments supersede draft).
-Peer-stop applies its verified patch itself per the active `--integration` mode
-(review retains; auto/direct apply); it is not eligible for `/grok:handoff`.
+Peer always runs in an external retained worktree. Peer-stop applies its
+verified patch itself per the active `--integration` mode (review retains;
+auto/direct apply - direct needs consent; peer direct is stop-time apply, not
+live-edit). It is not eligible for `/grok:handoff`.
 
 Live smoke (start -> two prompts -> stop), recorded 2026-07-17
 against grok 0.2.102 on a throwaway git repo (`note.txt` only):
