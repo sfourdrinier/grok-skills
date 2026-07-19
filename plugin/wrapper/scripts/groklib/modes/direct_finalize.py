@@ -600,6 +600,40 @@ def finalize_direct(
     )
 
 
+def _is_git_metadata_relative(rel: str) -> bool:
+    """True for root/nested git metadata paths handled by the git-dir guard."""
+    parts = [p for p in str(rel or "").replace("\\", "/").split("/") if p]
+    return ".git" in parts
+
+
+def _denylist_offenders_when_rediff_untrusted(
+    repo_root: pathlib.Path,
+    protect_snapshot: Optional["direct_protect.ProtectedSnapshot"],
+) -> Set[str]:
+    """Checkout deny-listed paths to restore when the full re-diff is untrusted.
+
+    Git metadata is recovered by the git-dir guard path. This fallback only
+    covers non-git deny paths (``.env``, keys, ...) from the protected snapshot
+    plus live discovery so a Grok-created ``.env`` still rolls back when
+    ``repo_change_fingerprint`` fails after git corruption.
+    """
+    found: Set[str] = set()
+    if protect_snapshot is not None:
+        for rel in protect_snapshot.entries:
+            if path_matches_deny(rel) and not _is_git_metadata_relative(rel):
+                found.add(rel)
+    try:
+        for rel in direct_protect.iter_existing_protected_paths(repo_root):
+            if path_matches_deny(rel) and not _is_git_metadata_relative(rel):
+                found.add(rel)
+    except Exception as exc:
+        _log(
+            "restore_protected_on_abort",
+            "live deny-path enumeration failed after untrusted re-diff: {}".format(exc),
+        )
+    return found
+
+
 def restore_protected_on_abort(
     repo_root: pathlib.Path,
     baseline_fp: FrozenSet[Tuple[str, str]],
@@ -614,21 +648,35 @@ def restore_protected_on_abort(
     the credential/.git writes would be left live. This re-diffs the tree + the
     .git guard and restores every protected offender from the pre-run snapshot.
     When the full changed-set re-diff is unavailable/untrusted, compare protected
-    snapshot entries against disk (and still run the git-dir guard) so deny-listed
-    paths are never silently left dirty with a clean summary.
+    snapshot entries against disk and enumerate live deny paths (and still run
+    the git-dir guard) so deny-listed paths are never silently left dirty with a
+    clean summary.
     Idempotent: after a protected-path-write already restored, the re-diff finds
     nothing to restore. Never raises (returns a summary; logs failures).
     """
     offenders: Set[str] = set()
-    re_diff_ok = False
+    rediff_trusted = True
     try:
         after_fp = worktree_escape.repo_change_fingerprint(repo_root)
         offenders |= {p for p in _changed_paths(baseline_fp, after_fp) if path_matches_deny(p)}
-        re_diff_ok = True
     except Exception as exc:
+        # Full changed-set untrusted (e.g. Grok rewrote .git/HEAD). Fall back to
+        # snapshot/live deny-path enumeration so .env and other deny-listed
+        # checkout files are still restored - not dropped while git-dir recovers.
+        rediff_trusted = False
         _log("restore_protected_on_abort", "changed-set re-diff failed: {}".format(exc))
-        # Re-diff untrusted: compare protected snapshot against disk so deny-listed
-        # checkout files (e.g. .env) are still restored/reported instead of silent clean.
+    try:
+        baseline_roots = None
+        if protect_snapshot is not None and protect_snapshot.git_roots:
+            baseline_roots = protect_snapshot.git_roots
+        after_git = capture_git_dir_guard(repo_root, git_roots=baseline_roots)
+        offenders |= set(_changed_paths(baseline_git_fp, after_git))
+    except Exception as exc:
+        _log("restore_protected_on_abort", "git-dir guard re-scan failed: {}".format(exc))
+
+    if not rediff_trusted:
+        # Precise snapshot-vs-disk diverge when available, plus denylist fallback
+        # covering Grok-created deny paths that were never snapshotted.
         if protect_snapshot is not None:
             try:
                 offenders |= set(
@@ -641,27 +689,17 @@ def restore_protected_on_abort(
                     "restore_protected_on_abort",
                     "snapshot disk compare failed: {}".format(snap_exc),
                 )
-                # Last resort: every snapshotted protected key is suspect.
                 offenders |= {
-                    p for p in protect_snapshot.entries.keys() if path_matches_deny(p)
-                    or direct_protect.is_snapshot_scope(p)
+                    p
+                    for p in protect_snapshot.entries.keys()
+                    if path_matches_deny(p) or direct_protect.is_snapshot_scope(p)
                 }
         else:
             _log(
                 "restore_protected_on_abort",
                 "no snapshot for deny-path fallback after re-diff failure",
             )
-    try:
-        baseline_roots = None
-        if protect_snapshot is not None and protect_snapshot.git_roots:
-            baseline_roots = protect_snapshot.git_roots
-        after_git = capture_git_dir_guard(repo_root, git_roots=baseline_roots)
-        offenders |= set(_changed_paths(baseline_git_fp, after_git))
-    except Exception as exc:
-        _log("restore_protected_on_abort", "git-dir guard re-scan failed: {}".format(exc))
-        # If git guard also fails and re-diff already failed, snapshot compare above
-        # still covers snapshotted sensitive git keys; keep re_diff_ok for logs.
-    if not re_diff_ok:
+        offenders |= _denylist_offenders_when_rediff_untrusted(repo_root, protect_snapshot)
         _log(
             "restore_protected_on_abort",
             "using snapshot/disk compare fallback offenders={}".format(sorted(offenders)),

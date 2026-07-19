@@ -181,8 +181,11 @@ landing. For apply-on-ready use `code --integration auto` (or peer-stop with
 - **Forbidden on continue:** `--target`, `--base`, `--contract-file` (usage-error).
   Target identity, base, and prior contract are derived from the prior run.
 - **Target workspace** for consent / apply is the prior run's durable
-  `run.json` `targetWorkspace` / `repository` (not companion cwd). Missing
-  prior metadata falls back to cwd-scoped default.
+  `run.json` `targetWorkspace` / `repository` (not companion cwd). Relative
+  `targetWorkspace` values (e.g. package `pkg`) resolve against the recorded
+  `repository`, so continuation from outside the original checkout still keys
+  consent/apply on the original repo. Missing prior metadata falls back to
+  cwd-scoped default.
 - **Direct consent exempt** on continue (wrapper reuses retained worktree
   lineage). Effective mode still resolves: `auto` keeps apply-on-ready on the
   **new** run; `review` retains (manual parent apply); product `direct` maps

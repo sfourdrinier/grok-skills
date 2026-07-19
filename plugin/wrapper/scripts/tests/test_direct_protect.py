@@ -877,6 +877,38 @@ class DirectAbortSweepTests(unittest.TestCase):
         self.assertIn("vendor/lib/.git/HEAD", res["restored"])
         self.assertIn(".git/modules/sub/hooks/pre-commit", res["restored"])
 
+    def test_sweep_restores_env_when_rediff_fails_after_git_corruption(self) -> None:
+        # When repo_change_fingerprint fails (e.g. .git/HEAD rewritten mid-flight),
+        # deny-listed checkout paths like .env must still be restored from the
+        # protected snapshot - not skipped because the full changed-set is untrusted.
+        from unittest import mock
+
+        from groklib import worktree_escape
+        from groklib.modes.direct_finalize import restore_protected_on_abort
+
+        (self.repo / ".env").write_text("KEEP=1\n", encoding="utf-8")
+        base_fp, base_git = self._baseline()
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        (self.repo / ".env").write_text("KEEP=1\nLEAK=2\n", encoding="utf-8")
+        # Corrupt git metadata that the git-dir guard can still recover, while the
+        # working-tree fingerprint path is forced to fail closed.
+        head = self.repo / ".git" / "HEAD"
+        original_head = head.read_text(encoding="utf-8")
+        head.write_text("ref: refs/heads/evil\n", encoding="utf-8")
+
+        def _boom(_repo):
+            raise OSError("simulated fingerprint failure after git metadata corruption")
+
+        with mock.patch.object(worktree_escape, "repo_change_fingerprint", side_effect=_boom):
+            res = restore_protected_on_abort(self.repo, base_fp, base_git, snap)
+        self.assertEqual(
+            (self.repo / ".env").read_text(encoding="utf-8"),
+            "KEEP=1\n",
+            ".env must be restored from snapshot when re-diff fails",
+        )
+        self.assertIn(".env", res["restored"])
+        self.assertEqual(head.read_text(encoding="utf-8"), original_head)
+        self.assertIn(".git/HEAD", res["restored"])
 
     def test_sweep_restores_env_when_rediff_fails_after_head_corruption(self) -> None:
         # Re-diff can fail when Grok corrupts .git/HEAD; git-dir guard still restores

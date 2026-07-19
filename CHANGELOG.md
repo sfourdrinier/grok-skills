@@ -355,6 +355,22 @@ post-smoke (see live-smoke ledger).
   non-empty homes still replace; empty process + missing home stays
   pattern-only.
 
+### Fixed (Phase 7 - continue-run relative target / blank peer contract / abort denylist)
+
+- **continue-run relative `targetWorkspace`:** when prior `run.json` records a
+  package-relative `targetWorkspace` (e.g. `pkg`), companion
+  `resolveContinueRunTargetWorkspace` resolves it against recorded
+  `repository`, not companion cwd - so `code --integration auto --continue-run`
+  from outside the original checkout still applies into the original repo.
+- **peer-start blank `--contract-file`:** present-but-blank forms
+  (`--contract-file` empty / `--contract-file=` / whitespace) fail closed as
+  `implementation-contract-invalid` via shared `load_optional_contract_arg`
+  (parity with code/direct); argparse last-wins/equals parsing preserved.
+- **direct abort denylist when re-diff fails:** if
+  `repo_change_fingerprint` fails after git metadata corruption, abort restore
+  still enumerates snapshotted/live non-git deny paths (e.g. `.env`) so they
+  roll back with the git-dir guard instead of being left modified.
+
 ### Fixed (Phase 7 - PR #5 Codex code-review remediation)
 
 Verified each inline review comment against current code (many were already

@@ -15,7 +15,7 @@ from typing import Dict, List, Optional, Tuple
 from groklib import GrokWrapperError, log_stderr
 from groklib import rules
 from groklib import worktree_escape
-from groklib.implementation_contract import assert_target_matches, load_contract_file
+from groklib.implementation_contract import assert_target_matches, load_optional_contract_arg
 from groklib.modes import code as code_mode
 from groklib.modes import code_continue
 from groklib.modes import _shared
@@ -49,16 +49,9 @@ def run(args: argparse.Namespace) -> dict:
 
     repo_root, target_abs, target_relative = _resolve_repo_target(args.target)
     # Optional operator-trusted implementation contract (writeScopes + requiredValidation).
-    contract = None
-    contract_file = getattr(args, "contract_file", None)
-    if contract_file is not None:
-        if not str(contract_file).strip():
-            raise GrokWrapperError(
-                "implementation-contract-invalid",
-                "--contract-file was provided but is empty; omit the flag or pass a path",
-                {"contractFile": contract_file},
-            )
-        contract = load_contract_file(pathlib.Path(str(contract_file).strip()))
+    # Present empty/blank --contract-file is invalid (not "no contract").
+    contract = load_optional_contract_arg(getattr(args, "contract_file", None))
+    if contract is not None:
         cli_target = target_relative if target_relative else "."
         assert_target_matches(contract, cli_target)
 

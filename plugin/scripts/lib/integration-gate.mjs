@@ -38,6 +38,9 @@ export function withExplicitIntegration(args, mode) {
  * Resolve the apply/target workspace for a continue-run. --target is forbidden
  * on the wrapper continuation path, so the companion derives the repo from the
  * prior run's durable metadata (run.json targetWorkspace/repository).
+ * Relative targetWorkspace values (e.g. package "pkg") resolve against the
+ * recorded rec.repository, never companion cwd - operators often continue from
+ * outside the original checkout.
  * Falls back to companion cwd when the prior run is missing or unreadable.
  * @param {string} continueRunId
  * @param {string} cwd companion cwd (fallback when metadata is missing)
@@ -52,12 +55,22 @@ export function resolveContinueRunTargetWorkspace(continueRunId, cwd, env = proc
       const raw = fs.readFileSync(path.join(runsDir, safe, "run.json"), "utf8");
       const rec = JSON.parse(raw);
       if (rec && typeof rec === "object" && !Array.isArray(rec)) {
-        const candidate =
-          (typeof rec.targetWorkspace === "string" && rec.targetWorkspace.trim()) ||
-          (typeof rec.repository === "string" && rec.repository.trim()) ||
-          "";
-        if (candidate) {
-          return resolveTargetWorkspaceRoot(cwd, candidate);
+        const tw =
+          typeof rec.targetWorkspace === "string" && rec.targetWorkspace.trim()
+            ? rec.targetWorkspace.trim()
+            : "";
+        const repo =
+          typeof rec.repository === "string" && rec.repository.trim()
+            ? rec.repository.trim()
+            : "";
+        if (tw) {
+          // Absolute tw uses itself; relative tw is package-relative to the
+          // recorded repository (wrapper targetWorkspace SSOT).
+          const base = repo || cwd;
+          return resolveTargetWorkspaceRoot(base, tw);
+        }
+        if (repo) {
+          return resolveTargetWorkspaceRoot(cwd, repo);
         }
       }
     } catch {

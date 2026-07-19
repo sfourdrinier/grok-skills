@@ -712,5 +712,88 @@ class PeerStartPolicyParityTests(PeerTestBase):
             self.assertNotIn("pre_tool_use deny hook registered", progress_text)
 
 
+class PeerBlankContractFileTests(PeerTestBase):
+    """Present-but-blank --contract-file must fail closed (code/direct parity)."""
+
+    def _start_ns(self, contract_file):
+        return mock.Mock(
+            target=str(self.repo / "pkg"),
+            base=self.base,
+            contract_file=contract_file,
+            model="grok-4.5",
+            web=None,
+            timeout=60,
+            max_turns=None,
+            grok_binary=pathlib.Path("/usr/bin/true"),
+            task="hello",
+            task_file=None,
+        )
+
+    def test_peer_start_empty_contract_file_flag_is_invalid(self) -> None:
+        """Empty --contract-file must not be treated as absent (no silent no-contract)."""
+        ns = self._start_ns("")
+        spawn = mock.Mock(side_effect=AssertionError("must not spawn on blank contract"))
+        with mock.patch.object(peer_mod, "_spawn_acp_child", spawn):
+            with mock.patch.object(peer_mod, "require_probed_platform_for_live", return_value=None):
+                with mock.patch.object(peer_mod, "check_version", return_value="0.0.0"):
+                    with self.assertRaises(GrokWrapperError) as cm:
+                        peer_mod.run_peer_start(ns)
+        self.assertEqual(cm.exception.error_class, "implementation-contract-invalid")
+        self.assertIn("empty", str(cm.exception).lower())
+        spawn.assert_not_called()
+
+    def test_peer_start_whitespace_contract_file_flag_is_invalid(self) -> None:
+        ns = self._start_ns("   ")
+        with mock.patch.object(peer_mod, "require_probed_platform_for_live", return_value=None):
+            with mock.patch.object(peer_mod, "check_version", return_value="0.0.0"):
+                with self.assertRaises(GrokWrapperError) as cm:
+                    peer_mod.run_peer_start(ns)
+        self.assertEqual(cm.exception.error_class, "implementation-contract-invalid")
+
+    def test_peer_start_contract_file_equals_empty_parses_and_rejects(self) -> None:
+        """argparse last-wins/equals form: --contract-file= must surface as empty string."""
+        import grok_agent
+
+        parser = grok_agent._build_parser()
+        args = parser.parse_args(
+            [
+                "peer-start",
+                "--target",
+                "pkg",
+                "--base",
+                "HEAD",
+                "--contract-file=",
+            ]
+        )
+        self.assertEqual(args.contract_file, "")
+        # Last-wins: later empty equals form overrides a prior path.
+        args2 = parser.parse_args(
+            [
+                "peer-start",
+                "--target",
+                str(self.repo / "pkg"),
+                "--base",
+                self.base,
+                "--contract-file",
+                "/tmp/c.json",
+                "--contract-file=",
+            ]
+        )
+        self.assertEqual(args2.contract_file, "")
+        args2.grok_binary = pathlib.Path("/usr/bin/true")
+        args2.web = None
+        args2.timeout = 60
+        args2.max_turns = None
+        args2.model = "grok-4.5"
+        args2.task = "hello"
+        args2.task_file = None
+        with mock.patch.object(peer_mod._shared, "resolve_binary", return_value=pathlib.Path("/usr/bin/true")):
+            with mock.patch.object(peer_mod, "require_probed_platform_for_live", return_value=None):
+                with mock.patch.object(peer_mod, "check_version", return_value="0.0.0"):
+                    with self.assertRaises(GrokWrapperError) as cm:
+                        peer_mod.run_peer_start(args2)
+        self.assertEqual(cm.exception.error_class, "implementation-contract-invalid")
+
+
 if __name__ == "__main__":
     unittest.main()

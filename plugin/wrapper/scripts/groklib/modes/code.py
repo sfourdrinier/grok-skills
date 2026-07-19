@@ -42,7 +42,7 @@ from groklib import GrokWrapperError, log_stderr, runstate
 from groklib import rules
 from groklib import worktree as worktree_mod
 from groklib import worktree_escape
-from groklib.implementation_contract import assert_target_matches, load_contract_file
+from groklib.implementation_contract import assert_target_matches, load_optional_contract_arg
 from groklib.code_handoff_finalize import code_handoff_finalize
 from groklib.projectconfig import ProjectConfig, build_gate_command, install_command, load_project_config
 from groklib.modes import _shared
@@ -689,16 +689,8 @@ def run(args: argparse.Namespace) -> dict:
         # Optional operator-trusted implementation contract (design §14.3). Loaded
         # and validated BEFORE Grok so bad contracts never spawn a model.
         # Present empty/blank --contract-file is invalid (not "no contract").
-        contract = None
-        contract_file = getattr(args, "contract_file", None)
-        if contract_file is not None:
-            if not str(contract_file).strip():
-                raise GrokWrapperError(
-                    "implementation-contract-invalid",
-                    "--contract-file was provided but is empty; omit the flag or pass a path",
-                    {"contractFile": contract_file},
-                )
-            contract = load_contract_file(pathlib.Path(str(contract_file).strip()))
+        contract = load_optional_contract_arg(getattr(args, "contract_file", None))
+        if contract is not None:
             cli_target = target_relative if target_relative else "."
             assert_target_matches(contract, cli_target)
 

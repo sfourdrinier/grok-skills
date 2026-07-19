@@ -224,6 +224,61 @@ test("resolveContinueRunTargetWorkspace reads prior run.json repository", () => 
   fs.rmSync(stateHome, { recursive: true, force: true });
 });
 
+test("resolveContinueRunTargetWorkspace: relative targetWorkspace resolves against rec.repository", () => {
+  // Prior run recorded targetWorkspace as package-relative "pkg". Companion is
+  // invoked from a foreign cwd; resolution must use rec.repository, not cwd.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-continue-rel-"));
+  const foreignCwd = path.join(root, "outside");
+  fs.mkdirSync(foreignCwd, { recursive: true });
+  // Decoy so a buggy cwd-relative resolve would land here instead of original repo.
+  fs.mkdirSync(path.join(foreignCwd, "pkg"), { recursive: true });
+  const originalRepo = path.join(root, "original-repo");
+  fs.mkdirSync(path.join(originalRepo, "pkg"), { recursive: true });
+  // Real git repo so resolveTargetWorkspaceRoot walks to toplevel.
+  const git = (args) => {
+    const r = spawnSync("git", args, { cwd: originalRepo, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stderr);
+  };
+  git(["init"]);
+  git(["config", "user.email", "t@example.com"]);
+  git(["config", "user.name", "t"]);
+  fs.writeFileSync(path.join(originalRepo, "pkg", "a.txt"), "x\n");
+  git(["add", "pkg/a.txt"]);
+  git(["commit", "-m", "seed"]);
+
+  const stateHome = path.join(root, "xdg");
+  const env = {
+    ...process.env,
+    XDG_STATE_HOME: stateHome,
+    CLAUDE_PLUGIN_DATA: path.join(root, "pdata"),
+  };
+  const runId = "20260717T120000Z-a1b2c3";
+  const runDir = path.join(runsDirFor(env), runId);
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(runDir, "run.json"),
+    JSON.stringify({
+      runId,
+      repository: originalRepo,
+      targetWorkspace: "pkg",
+    }) + "\n"
+  );
+
+  const resolved = resolveContinueRunTargetWorkspace(runId, foreignCwd, env);
+  // realpath: macOS /var vs /private/var; git rev-parse may canonicalize.
+  assert.equal(
+    fs.realpathSync(resolved),
+    fs.realpathSync(originalRepo),
+    `relative targetWorkspace must key off rec.repository; got ${resolved}`
+  );
+  assert.notEqual(
+    fs.realpathSync(resolved),
+    fs.realpathSync(foreignCwd),
+    "must not resolve relative targetWorkspace against companion cwd"
+  );
+  fs.rmSync(root, { recursive: true, force: true });
+});
+
 // runHandoff must stamp handoff-consumed via shared last-valid flagValue SSOT
 // (split AND equals). indexOf("--run-id") misses --run-id=<id>.
 test("runHandoff consumed marker parses --run-id split and equals (shared SSOT)", () => {

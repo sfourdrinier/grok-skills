@@ -83,6 +83,11 @@ the external worktree.
 node "$SKILL_BASE/run.mjs" peer start --target '<path>' --base '<rev>' [--contract-file '<path>'] [--model '<id>']
 ```
 
+Optional `--contract-file` is the same operator-trusted writeScopes +
+`requiredValidation` contract as `code`. Present-but-blank forms
+(`--contract-file` empty / `--contract-file=` / empty shell expansion) fail
+closed as `implementation-contract-invalid` - never silent no-contract.
+
 ### peer prompt
 
 Sends one serialized prompt to a running session (one in-flight at a time).

@@ -786,6 +786,85 @@ test("continue-run review retains (no auto apply to prior target)", () => {
   }
 });
 
+test("continue-run auto: relative targetWorkspace resolves apply to original repo from foreign cwd", () => {
+  // run.json may record package-relative targetWorkspace ("pkg"). Continuation
+  // from outside the original repo must still auto-apply into originalRepo/pkg.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-continue-rel-auto-"));
+  const foreignCwd = path.join(root, "outside");
+  fs.mkdirSync(foreignCwd, { recursive: true });
+  // Decoy package path under foreign cwd (wrong target if resolved against cwd).
+  fs.mkdirSync(path.join(foreignCwd, "pkg"), { recursive: true });
+  fs.writeFileSync(path.join(foreignCwd, "pkg", "foo.txt"), "wrong\n");
+
+  const originalRepo = path.join(root, "original-repo");
+  fs.mkdirSync(path.join(originalRepo, "pkg"), { recursive: true });
+  git(originalRepo, ["init"]);
+  git(originalRepo, ["config", "user.email", "test@example.com"]);
+  git(originalRepo, ["config", "user.name", "Test"]);
+  fs.writeFileSync(path.join(originalRepo, "pkg", "foo.txt"), "hello\n");
+  git(originalRepo, ["add", "pkg/foo.txt"]);
+  git(originalRepo, ["commit", "-m", "init"]);
+
+  const file = path.join(originalRepo, "pkg", "foo.txt");
+  const original = fs.readFileSync(file, "utf8");
+  fs.writeFileSync(file, "hello world\n");
+  const diff = spawnSync("git", ["diff", "--binary", "HEAD"], {
+    cwd: originalRepo,
+    encoding: "utf8",
+  });
+  assert.equal(diff.status, 0, diff.stderr);
+  assert.ok(diff.stdout.includes("pkg/foo.txt"), "patch must mention pkg/foo.txt");
+  fs.writeFileSync(file, original);
+
+  const xdg = path.join(root, "xdg");
+  stagePatch(xdg, RUN_ID, diff.stdout);
+  const runDir = path.join(xdg, "grok-skills", "runs", RUN_ID);
+  fs.mkdirSync(runDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(runDir, "run.json"),
+    JSON.stringify({
+      runId: RUN_ID,
+      repository: originalRepo,
+      targetWorkspace: "pkg",
+    }) + "\n"
+  );
+
+  const callsPath = path.join(root, "calls.log");
+  const ready = handoffEnvelope(true);
+  const { env, cleanup } = makeFakeWrapper({
+    code: { stdout: `${codeEnvelope()}\n`, exitCode: 0 },
+    handoff: { stdout: `${ready}\n`, exitCode: 0 },
+  });
+  try {
+    const res = runCompanion(
+      [
+        "code",
+        "--integration",
+        "auto",
+        "--continue-run",
+        RUN_ID,
+        "--task",
+        "continue apply relative",
+      ],
+      { cwd: foreignCwd, env: companionEnv(env, root, xdg, callsPath) }
+    );
+    assert.equal(res.code, 0, `stderr: ${res.stderr}\nstdout: ${res.stdout}`);
+    assert.equal(
+      fs.readFileSync(path.join(originalRepo, "pkg", "foo.txt"), "utf8"),
+      "hello world\n",
+      "original repo/pkg must receive the applied patch"
+    );
+    assert.equal(
+      fs.readFileSync(path.join(foreignCwd, "pkg", "foo.txt"), "utf8"),
+      "wrong\n",
+      "foreign cwd decoy must not be the apply target"
+    );
+  } finally {
+    cleanup();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("continue-run direct maps wrapper worktree lineage without live apply", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-continue-direct-"));
   const companionCwd = path.join(root, "companion-cwd");

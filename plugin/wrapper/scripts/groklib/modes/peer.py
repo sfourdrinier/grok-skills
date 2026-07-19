@@ -44,7 +44,7 @@ from groklib.envelope import (
     redact_secret_value_text,
 )
 from groklib.grokcli import check_version
-from groklib.implementation_contract import assert_target_matches, load_contract_file
+from groklib.implementation_contract import assert_target_matches, load_optional_contract_arg
 from groklib.modes import _shared
 from groklib.modes import peer_control
 from groklib.modes import peer_stop
@@ -514,10 +514,10 @@ def run_peer_start(args: argparse.Namespace) -> dict:
     web_access = resolve_web_access("peer", getattr(args, "web", None))
     timeout = int(getattr(args, "timeout", None) or 900)
 
-    contract = None
-    contract_file = getattr(args, "contract_file", None)
-    if contract_file is not None and str(contract_file).strip():
-        contract = load_contract_file(pathlib.Path(str(contract_file).strip()))
+    # Present empty/blank --contract-file is invalid (not "no contract") - same
+    # SSOT as code/direct (load_optional_contract_arg).
+    contract = load_optional_contract_arg(getattr(args, "contract_file", None))
+    if contract is not None:
         cli_target = target_relative if target_relative else "."
         assert_target_matches(contract, cli_target)
 

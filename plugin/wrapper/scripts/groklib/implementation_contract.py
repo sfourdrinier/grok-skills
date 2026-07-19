@@ -260,6 +260,24 @@ def _assert_no_symlink_components(path: pathlib.Path) -> pathlib.Path:
     return p
 
 
+def load_optional_contract_arg(contract_file: object) -> Optional[dict]:
+    """Load ``--contract-file`` when present; blank/whitespace is invalid (not absent).
+
+    Shared by code/direct/peer-start so present-but-empty forms
+    (``--contract-file`` / ``--contract-file=`` / empty shell expansion) always
+    fail closed as ``implementation-contract-invalid`` rather than silently
+    running without writeScopes / requiredValidation.
+    """
+    if contract_file is None:
+        return None
+    if not str(contract_file).strip():
+        raise _contract_error(
+            "--contract-file was provided but is empty; omit the flag or pass a path",
+            {"contractFile": contract_file},
+        )
+    return load_contract_file(pathlib.Path(str(contract_file).strip()))
+
+
 def load_contract_file(path: pathlib.Path) -> dict:
     """Load and parse a contract file. Rejects non-regular files and symlink escapes."""
     p = pathlib.Path(path)
