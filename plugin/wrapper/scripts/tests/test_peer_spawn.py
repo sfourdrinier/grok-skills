@@ -44,9 +44,11 @@ class SpawnAcpChildTests(unittest.TestCase):
             return _FakeProc()
 
         # peer_process owns Popen; peer.py re-exports the spawn helper.
+        # Mock register so argv/env assertions do not leak FakeProc into the
+        # process-global SIGTERM active-proc registry shared with other tests.
         with mock.patch.object(peer_process.subprocess, "Popen", _fake_popen), mock.patch.object(
             peer_process.platformsupport, "spawn_kwargs_new_group", return_value={}
-        ):
+        ), mock.patch.object(peer_process, "register_active_child"):
             peer_mod._spawn_acp_child(
                 binary=pathlib.Path("/usr/bin/true"),
                 home=home,
@@ -194,18 +196,17 @@ class KillRecordedChildSafetyTests(unittest.TestCase):
             peer_mod._kill_recorded_child(self._doc(12345, "mine"))
             m["kill_process_tree_by_pid"].assert_called_once_with(12345)
 
-    def test_unregisters_stale_active_proc_on_dead_or_identity_mismatch(self):
-        """Fallback kill must drop SIGTERM registry entries without killing unproven pids.
+    def test_recycled_pid_identity_mismatch_never_unregisters_by_pid_scan(self):
+        """Manual counterexample: pid-only unregister after identity mismatch is unsafe.
 
-        peer-stop only has peer.json identity (no resident Popen). Dead children and
-        recycled pids (token mismatch) must still unregister by pid so terminate
-        does not retain a stale handle. Never kill on those paths.
+        peer.json still records the old child (pid X, token original). OS pid X has
+        been recycled to an unrelated live process that is correctly registered for
+        SIGTERM cleanup under a different startToken. kill_recorded_child must not
+        kill and must not drop that live registry handle via a pid-only scan.
         """
-        stale = mock.Mock(pid=777001)
-        dead = mock.Mock(pid=777002)
-
-        # Identity mismatch (live recycled pid): no kill, unregister by recorded pid.
-        with mock.patch.object(grokcli, "_ACTIVE_PROCS", {stale}):
+        recycled_live = mock.Mock(pid=777001)
+        recycled_live.poll = mock.Mock(return_value=None)
+        with mock.patch.object(grokcli, "_ACTIVE_PROCS", {recycled_live}):
             with mock.patch.object(grokcli, "_ACTIVE_PROCS_LOCK", __import__("threading").Lock()):
                 with mock.patch.multiple(
                     peer_process.platformsupport,
@@ -218,26 +219,16 @@ class KillRecordedChildSafetyTests(unittest.TestCase):
                         {"child": {"pid": 777001, "startToken": "original"}}
                     )
                     m["kill_process_tree_by_pid"].assert_not_called()
-                self.assertNotIn(stale, grokcli._ACTIVE_PROCS)
+                self.assertIn(recycled_live, grokcli._ACTIVE_PROCS)
 
-        # Safe terminal (process already dead): unregister by pid, no kill.
-        with mock.patch.object(grokcli, "_ACTIVE_PROCS", {dead}):
-            with mock.patch.object(grokcli, "_ACTIVE_PROCS_LOCK", __import__("threading").Lock()):
-                with mock.patch.multiple(
-                    peer_process.platformsupport,
-                    process_is_alive=mock.Mock(return_value=False),
-                    process_start_token=mock.Mock(return_value="original"),
-                    kill_process_tree_by_pid=mock.DEFAULT,
-                ) as m:
-                    peer_process.kill_recorded_child(
-                        {"child": {"pid": 777002, "startToken": "original"}}
-                    )
-                    m["kill_process_tree_by_pid"].assert_not_called()
-                self.assertNotIn(dead, grokcli._ACTIVE_PROCS)
+    def test_same_group_refusal_never_unregisters_by_pid_scan(self):
+        """Manual counterexample: same-group kill refusal must leave registry fail-safe.
 
-    def test_same_group_refusal_unregisters_stale_active_proc_without_kill(self):
-        """Same-group identity is kill-refused but still drops stale SIGTERM handles."""
+        Without an exact known Popen handle we can prove, pid-scan unregister would
+        drop a possibly live registered process from SIGTERM cleanup.
+        """
         same_group = mock.Mock(pid=777003)
+        same_group.poll = mock.Mock(return_value=None)
         with mock.patch.object(grokcli, "_ACTIVE_PROCS", {same_group}):
             with mock.patch.object(grokcli, "_ACTIVE_PROCS_LOCK", __import__("threading").Lock()):
                 with mock.patch.multiple(
@@ -251,12 +242,17 @@ class KillRecordedChildSafetyTests(unittest.TestCase):
                         {"child": {"pid": 777003, "startToken": "mine"}}
                     )
                     m["kill_process_tree_by_pid"].assert_not_called()
-                self.assertNotIn(same_group, grokcli._ACTIVE_PROCS)
+                self.assertIn(same_group, grokcli._ACTIVE_PROCS)
 
-    def test_getpgid_oserror_unregisters_stale_active_proc_without_kill(self):
-        """getpgid OSError must fail closed (no kill) and still unregister by pid."""
-        stale = mock.Mock(pid=777004)
-        with mock.patch.object(grokcli, "_ACTIVE_PROCS", {stale}):
+    def test_getpgid_oserror_never_unregisters_by_pid_scan(self):
+        """Manual counterexample: getpgid OSError must not pid-scan-unregister.
+
+        Fail closed on kill, and leave the active-proc registry entry so a later
+        SIGTERM path can still attempt cleanup of a possibly live process.
+        """
+        live = mock.Mock(pid=777004)
+        live.poll = mock.Mock(return_value=None)
+        with mock.patch.object(grokcli, "_ACTIVE_PROCS", {live}):
             with mock.patch.object(grokcli, "_ACTIVE_PROCS_LOCK", __import__("threading").Lock()):
                 with mock.patch.multiple(
                     peer_process.platformsupport,
@@ -271,7 +267,55 @@ class KillRecordedChildSafetyTests(unittest.TestCase):
                         {"child": {"pid": 777004, "startToken": "mine"}}
                     )
                     m["kill_process_tree_by_pid"].assert_not_called()
-                self.assertNotIn(stale, grokcli._ACTIVE_PROCS)
+                self.assertIn(live, grokcli._ACTIVE_PROCS)
+
+    def test_confirmed_exited_handle_unregisters_exact_popen(self):
+        """Registry cleanup is allowed for an exact known Popen that has exited."""
+        exited = mock.Mock(pid=777005)
+        exited.poll = mock.Mock(return_value=0)
+        with mock.patch.object(grokcli, "_ACTIVE_PROCS", {exited}):
+            with mock.patch.object(grokcli, "_ACTIVE_PROCS_LOCK", __import__("threading").Lock()):
+                with mock.patch.multiple(
+                    peer_process.platformsupport,
+                    process_is_alive=mock.Mock(return_value=False),
+                    process_start_token=mock.Mock(return_value="original"),
+                    kill_process_tree_by_pid=mock.DEFAULT,
+                ) as m:
+                    peer_process.kill_recorded_child(
+                        {"child": {"pid": 777005, "startToken": "original"}},
+                        proc=exited,
+                    )
+                    m["kill_process_tree_by_pid"].assert_not_called()
+                self.assertNotIn(exited, grokcli._ACTIVE_PROCS)
+
+    def test_identity_mismatch_with_exited_exact_handle_unregisters(self):
+        """Exact handle whose poll() is terminal may drop even when pid token mismatches."""
+        exited = mock.Mock(pid=777006)
+        exited.poll = mock.Mock(return_value=1)
+        with mock.patch.object(grokcli, "_ACTIVE_PROCS", {exited}):
+            with mock.patch.object(grokcli, "_ACTIVE_PROCS_LOCK", __import__("threading").Lock()):
+                with mock.patch.multiple(
+                    peer_process.platformsupport,
+                    process_is_alive=mock.Mock(return_value=True),
+                    process_start_token=mock.Mock(return_value="recycled"),
+                    is_posix=mock.Mock(return_value=True),
+                    kill_process_tree_by_pid=mock.DEFAULT,
+                ) as m:
+                    peer_process.kill_recorded_child(
+                        {"child": {"pid": 777006, "startToken": "original"}},
+                        proc=exited,
+                    )
+                    m["kill_process_tree_by_pid"].assert_not_called()
+                self.assertNotIn(exited, grokcli._ACTIVE_PROCS)
+
+    def test_unregister_active_child_refuses_pid_only_scan(self):
+        """Bare-pid unregister must not scan the shared registry (PID reuse hazard)."""
+        live = mock.Mock(pid=777007)
+        live.poll = mock.Mock(return_value=None)
+        with mock.patch.object(grokcli, "_ACTIVE_PROCS", {live}):
+            with mock.patch.object(grokcli, "_ACTIVE_PROCS_LOCK", __import__("threading").Lock()):
+                peer_process.unregister_active_child(777007)
+                self.assertIn(live, grokcli._ACTIVE_PROCS)
 
 
 class AbortPeerStartTests(unittest.TestCase):

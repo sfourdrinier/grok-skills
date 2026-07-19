@@ -480,9 +480,13 @@ class PeerLifecycleFailClosedTests(PeerTestBase):
                             with mock.patch.object(
                                 peer_process, "unregister_active_child"
                             ) as unreg:
+                                # Confirmed kill with exact known Popen unregisters that handle.
+                                peer_process.kill_recorded_child(doc, proc=fake)
+                                # Without a resident handle, never pid-scan unregister.
                                 peer_process.kill_recorded_child(doc)
-        kill.assert_called_once_with(424299)
-        unreg.assert_called()
+        self.assertEqual(kill.call_count, 2)
+        kill.assert_called_with(424299)
+        unreg.assert_called_once_with(fake)
 
 
 if __name__ == "__main__":

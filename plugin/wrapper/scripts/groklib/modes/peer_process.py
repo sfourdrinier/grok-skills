@@ -71,28 +71,52 @@ def register_active_child(proc: subprocess.Popen) -> None:
     grokcli._register_active_proc(proc)
 
 
-def unregister_active_child(proc_or_pid: Any = None) -> None:
-    """Drop ACP child from the SIGTERM active-process SSOT (best-effort).
+def _handle_conclusively_exited(proc: Any) -> bool:
+    """True only when ``proc`` is a handle whose ``poll()`` reports a terminal status."""
+    if proc is None:
+        return False
+    try:
+        poll = proc.poll()
+    except Exception:
+        return False
+    return poll is not None
 
-    Accepts a ``Popen`` handle or an int pid. Pid form scans the shared registry
-    (needed when peer-stop only has peer.json identity, not the resident handle).
+
+def unregister_active_child(proc: Any = None) -> None:
+    """Drop an exact known ACP child Popen from the SIGTERM active-process SSOT.
+
+    Best-effort. Accepts only a process handle object - never a bare pid. Pid-only
+    registry scans are unsafe under PID reuse: a recycled live process registered
+    under the same numeric pid would be dropped from SIGTERM cleanup. Callers
+    without a resident handle must leave the entry registered so
+    ``terminate_active_processes`` remains fail-safe.
     """
     try:
-        if proc_or_pid is None:
+        if proc is None:
             return
-        if isinstance(proc_or_pid, int) and not isinstance(proc_or_pid, bool):
-            with grokcli._ACTIVE_PROCS_LOCK:
-                victims = [
-                    p
-                    for p in list(grokcli._ACTIVE_PROCS)
-                    if getattr(p, "pid", None) == proc_or_pid
-                ]
-            for proc in victims:
-                grokcli._unregister_active_proc(proc)
+        if isinstance(proc, bool) or isinstance(proc, int):
+            _log(
+                "unregister_active_child",
+                "refusing pid-only unregister for {!r}; leave registered".format(proc),
+            )
             return
-        grokcli._unregister_active_proc(proc_or_pid)
+        grokcli._unregister_active_proc(proc)
     except Exception as exc:  # pragma: no cover - defensive
         _log("unregister_active_child", "unregister failed: {}".format(exc))
+
+
+def _maybe_unregister_known_child(proc: Any) -> None:
+    """Unregister only an exact known handle that is conclusively exited.
+
+    A live handle stays registered so SIGTERM cleanup remains fail-safe when
+    kill_recorded_child refuses to kill (identity mismatch / same-group /
+    getpgid error). Confirmed-kill paths call ``unregister_active_child`` on
+    the exact handle directly.
+    """
+    if proc is None:
+        return
+    if _handle_conclusively_exited(proc):
+        unregister_active_child(proc)
 
 
 def require_process_identity_token(pid: int, *, role: str) -> str:
@@ -221,48 +245,55 @@ def kill_recorded_child(doc: dict, *, proc: Any = None) -> None:
     Fail safe: a kill sends SIGKILL to a whole process group, so unless the
     recorded start-token is present AND still matches the live pid's token, do
     nothing - never kill a pid we cannot prove is our child (it may be recycled
-    to an unrelated process). Best-effort; never raises. When ``proc`` is the
-    live Popen (or after a confirmed pid kill), unregister from the SIGTERM
-    active-process registry so terminate_active_processes does not retain a
-    stale handle.
+    to an unrelated process). Best-effort; never raises.
+
+    Active-process registry cleanup is intentionally stricter than kill: never
+    unregister by bare-pid scan (PID reuse could drop a recycled live process
+    from SIGTERM cleanup). Registry cleanup runs only on an exact known Popen
+    handle that is conclusively exited, or on an exact handle whose identity
+    still matches after a confirmed kill. On identity mismatch, same-group
+    refusal, or getpgid OSError, leave the registry entry when the handle is
+    not proven exited so SIGTERM cleanup remains fail-safe.
     """
     child = doc.get("child") or {}
     child_pid = child.get("pid")
     child_token = child.get("startToken")
     if not isinstance(child_pid, int) or not isinstance(child_token, str) or not child_token:
-        # Missing identity: never kill. Still drop a known resident Popen handle.
-        if proc is not None:
-            unregister_active_child(proc)
+        # Missing identity: never kill. Drop only an exact known exited handle.
+        _maybe_unregister_known_child(proc)
         return
     try:
         if not platformsupport.process_is_alive(child_pid):
-            # Safe terminal path: process already gone. Unregister by pid so fallback
-            # peer-stop (no resident Popen) does not leave a stale SIGTERM entry.
-            unregister_active_child(proc if proc is not None else child_pid)
+            # OS reports the pid gone. Still require an exact known handle that is
+            # conclusively exited before registry cleanup (no pid-only scan).
+            _maybe_unregister_known_child(proc)
             return
         current = platformsupport.process_start_token(child_pid)
         if current is None or current != child_token:
-            # Identity mismatch / recycled pid: never kill the live process, but drop
-            # any active-proc registry entry for the recorded pid (stale handle only).
-            unregister_active_child(proc if proc is not None else child_pid)
+            # Identity mismatch / recycled pid: never kill. Unregister only when
+            # the caller passed an exact handle that has already exited.
+            _maybe_unregister_known_child(proc)
             return
         # Never killpg a process in OUR OWN group: the real ACP child is spawned
         # in a NEW group (spawn_kwargs_new_group), so a same-group pid is either a
         # mis-detached child or a test-recorded pid, and killing its group would
-        # take down the wrapper itself. Still drop any stale SIGTERM registry
-        # handle for the recorded pid so terminate does not retain it.
+        # take down the wrapper itself. Leave the registry entry so SIGTERM can
+        # still attempt cleanup unless the exact handle is already exited.
         if platformsupport.is_posix():
             try:
                 if os.getpgid(child_pid) == os.getpgid(0):
-                    unregister_active_child(proc if proc is not None else child_pid)
+                    _maybe_unregister_known_child(proc)
                     return
             except OSError:
                 # Cannot verify process group safely: fail closed (no kill) and
-                # still unregister by pid so a stale active-proc handle is dropped.
-                unregister_active_child(proc if proc is not None else child_pid)
+                # leave registry unless the exact handle is already exited.
+                _maybe_unregister_known_child(proc)
                 return
         platformsupport.kill_process_tree_by_pid(child_pid)
-        unregister_active_child(proc if proc is not None else child_pid)
+        # Confirmed identity kill on this exact known handle only. Never pid-scan
+        # the shared registry (a recycled pid could steal the cleanup entry).
+        if proc is not None:
+            unregister_active_child(proc)
     except Exception as exc:
         _log("kill_recorded_child", "could not kill child {}: {}".format(child_pid, exc))
 
