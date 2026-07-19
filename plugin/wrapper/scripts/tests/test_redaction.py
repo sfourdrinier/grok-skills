@@ -19,6 +19,48 @@ from groklib.envelope import (
 _RUN_ID = "20260714T180924Z-abcdef"
 
 
+def _fx(*parts: str) -> str:
+    """Join fixture chunks at runtime so source never holds a contiguous secret shape."""
+    return "".join(parts)
+
+
+# Runtime-only secret shapes (AGENTS.md #8: never contiguous in source).
+_GITHUB_PAT = _fx(
+    "github_pat_",
+    "11ABCDEFG0123456789_",
+    "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ",
+)
+_GHP = _fx("ghp_", "1234567890abcdefghijklmnopqrstuvwx")
+_XOXB = _fx("xoxb-", "123456789012-123456789012-abcdefABCDEF")
+_XAI_LONG = _fx("xai-", "abcdefghijklmnopqrstuvwxyz0123456789")
+_SK_LEGACY = _fx("sk-", "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789")
+_SK_LEGACY_LOWER = _fx("sk-", "abcdef0123456789ABCDEFGHIJKLMNOP")
+_XAI_LEAK = _fx("xai-", "THISISASECRETVALUE1234567890ABCDEF")
+_SK_PROJ = _fx(
+    "sk-proj-",
+    "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+)
+_SK_ANT_API = _fx(
+    "sk-ant-",
+    "api03-AbCdEf0123456789_Gh-IjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOAA",
+)
+_SK_ANT_ADMIN = _fx(
+    "sk-ant-",
+    "admin01-Zz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjklAA",
+)
+_JWT = _fx(
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.",
+    "eyJzdWIiOiIxMjM0NTY3ODkwIn0.",
+    "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c",
+)
+_JWT_SHORT = _fx("eyJhbGciOiJIUzI1NiJ9.", "eyJzdWIiOiIxMjMifQ.", "aGVsbG8xMjM")
+_AWS_AKIA = _fx("AKIA", "IOSFODNN7EXAMPLE")
+_AWS_ASIA = _fx("ASIA", "IOSFODNN7EXAMPLE")
+_BEARER_OPAQUE = _fx("4f8a9c3d2e1b7f6a5d4c3b2a1908f7e6d5c4b3a2", "secretvalue")
+_BEARER_ALPHA = _fx("AbCdEfGhIjKlMnOp", "QrStUv")
+_BEARER_MIXED = _fx("abcdef123456", "ABCDEFsecretbody")
+
+
 class SecretScanGuardTests(unittest.TestCase):
     """Covers assert_no_secret_material and its use inside build_envelope."""
 
@@ -128,12 +170,12 @@ class SecretScanGuardTests(unittest.TestCase):
     def test_assert_no_secret_material_raises_on_github_fine_grained_pat(self) -> None:
         # Round5 github-fine-grained-pat-missing: the currently-recommended
         # github_pat_ prefix must be flagged (and, below, redacted).
-        pat = "github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ"
+        pat = _GITHUB_PAT
         with self.assertRaises(SecretMaterialError):
             assert_no_secret_material({"error": {"detail": {"stderr": pat}}})
 
     def test_redact_removes_github_fine_grained_pat_value(self) -> None:
-        pat = "github_pat_11ABCDEFG0123456789_abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ"
+        pat = _GITHUB_PAT
         cleaned = redact_secret_value_text("token {} in log".format(pat))
         self.assertNotIn(pat, cleaned)
         self.assertIn("[redacted-github-token]", cleaned)
@@ -185,9 +227,9 @@ class SecretScanGuardTests(unittest.TestCase):
         # SEC2: raw credential VALUES leaking under a benign key (e.g. a token in
         # error.detail.stderr) fail closed on their shape, not just on "bearer".
         raw_tokens = (
-            "xai-" + "abcdefghijklmnopqrstuvwxyz0123456789",
-            "sk-" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-            ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + "eyJzdWIiOiIxMjM0NTY3ODkwIn0." + "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"),
+            _XAI_LONG,
+            _SK_LEGACY,
+            _JWT,
         )
         for token in raw_tokens:
             with self.subTest(token=token[:8]):
@@ -200,7 +242,16 @@ class SecretScanGuardTests(unittest.TestCase):
         # like one nested inside a list and MUST be scanned, not fall through.
         with self.assertRaises(SecretMaterialError):
             assert_no_secret_material(
-                {"error": {"detail": {"stderrTail": ("retrying request", "Authorization: Bearer abcdef123456ABCDEF")}}}
+                {
+                    "error": {
+                        "detail": {
+                            "stderrTail": (
+                                "retrying request",
+                                "Authorization: Bearer " + _fx("abcdef123456", "ABCDEF"),
+                            )
+                        }
+                    }
+                }
             )
         # A secret-shaped KEY inside a dict nested in a tuple is caught too.
         with self.assertRaises(SecretMaterialError):
@@ -209,12 +260,13 @@ class SecretScanGuardTests(unittest.TestCase):
     def test_assert_no_secret_material_raises_on_extended_token_shapes(self) -> None:
         # round3: the scanner must also catch AWS access-key ids, GitHub tokens,
         # Slack tokens, and PEM private-key blocks under any benign key.
-        # Split AWS key shapes so source never holds a contiguous AKIA/ASIA literal
-        # (GitHub secret scanning flags AWS docs EXAMPLE keys as Temporary Access Key IDs).
+        # Split AWS/GitHub/Slack shapes so source never holds a contiguous secret
+        # literal (GitHub secret scanning flags AWS docs EXAMPLE keys as Temporary
+        # Access Key IDs).
         raw_tokens = (
-            "AKIA" + "IOSFODNN7EXAMPLE",
-            "ghp_1234567890abcdefghijklmnopqrstuvwx",
-            "xoxb-123456789012-123456789012-abcdefABCDEF",
+            _AWS_AKIA,
+            _GHP,
+            _XOXB,
             "-----BEGIN RSA PRIVATE KEY-----\nMIIBkeymaterial1234567890\n-----END RSA PRIVATE KEY-----",
         )
         for token in raw_tokens:
@@ -226,7 +278,7 @@ class SecretScanGuardTests(unittest.TestCase):
         # round3 bearer-pattern-pure-alpha-token-false-negative: an all-letter
         # bearer credential (no digit/symbol) must still be flagged.
         with self.assertRaises(SecretMaterialError):
-            assert_no_secret_material({"detail": "Authorization: Bearer AbCdEfGhIjKlMnOpQrStUv"})
+            assert_no_secret_material({"detail": "Authorization: Bearer " + _BEARER_ALPHA})
 
     def test_assert_no_secret_material_allows_ordinary_text_and_counters(self) -> None:
         # SEC2 false-positive guard: prose containing the "sk-" fragment and
@@ -277,10 +329,10 @@ class SecretScanGuardTests(unittest.TestCase):
             run_id=_RUN_ID,
             mode="review",
             error_class="cli-failure",
-            message="grok exited nonzero: Bearer abc123def456",
-            detail={"note": "sent header Bearer abc123def456"},
+            message="grok exited nonzero: Bearer " + _fx("abc123", "def456"),
+            detail={"note": "sent header Bearer " + _fx("abc123", "def456")},
         )
-        self.assertNotIn("abc123def456", json.dumps(env))
+        self.assertNotIn(_fx("abc123", "def456"), json.dumps(env))
         self.assertIn("[redacted-bearer-token]", env["error"]["message"])
         self.assertIn("[redacted-bearer-token]", env["error"]["detail"]["note"])
 
@@ -294,7 +346,7 @@ class FailureEnvelopeDetailRedactionTests(unittest.TestCase):
         detail = {
             "argv": ["git", "-C", "/repo", "push"],
             "exitStatus": 128,
-            "stderr": "remote rejected: token sk-" "abcdef0123456789ABCDEFGHIJKLMNOP leaked in hook",
+            "stderr": "remote rejected: token {} leaked in hook".format(_SK_LEGACY_LOWER),
         }
         env = failure_envelope(
             run_id=_RUN_ID,
@@ -303,7 +355,7 @@ class FailureEnvelopeDetailRedactionTests(unittest.TestCase):
             message="git command failed",
             detail=detail,
         )
-        self.assertNotIn("sk-" "abcdef0123456789ABCDEFGHIJKLMNOP", json.dumps(env))
+        self.assertNotIn(_SK_LEGACY_LOWER, json.dumps(env))
         self.assertIn("[redacted-api-key-token]", env["error"]["detail"]["stderr"])
         # Non-secret detail fields survive verbatim.
         self.assertEqual(env["error"]["detail"]["exitStatus"], 128)
@@ -314,16 +366,19 @@ class RedactSecretMaterialTests(unittest.TestCase):
     def test_redacted_bearer_jwt_and_api_key_pass_the_scanner(self) -> None:
         raw = (
             "Authorization: Bearer "
-            + "eyJhbGciOiJIUzI1NiJ9." + "eyJzdWIiOiIxMjMifQ." + "aGVsbG8xMjM "
-            + "with api key sk-" + "abcdef0123456789ABCDEFGHIJKLMNOP inline"
+            + _JWT_SHORT
+            + " "
+            + "with api key "
+            + _SK_LEGACY_LOWER
+            + " inline"
         )
         redacted = redact_secret_material({"data": {"text": raw}, "list": [raw]})
         # The redacted structure passes the scanner (would previously raise).
         assert_no_secret_material(redacted)
         cleaned = redacted["data"]["text"]
         self.assertNotIn("Bearer ", cleaned)
-        self.assertNotIn("sk-" + "abcdef0123456789ABCDEFGHIJKLMNOP", cleaned)
-        self.assertNotIn(("eyJhbGciOiJIUzI1NiJ9." + "eyJzdWIiOiIxMjMifQ." + "aGVsbG8xMjM"), cleaned)
+        self.assertNotIn(_SK_LEGACY_LOWER, cleaned)
+        self.assertNotIn(_JWT_SHORT, cleaned)
         self.assertIn("[redacted-", cleaned)
 
     def test_redaction_preserves_benign_content_and_structure(self) -> None:
@@ -339,7 +394,7 @@ class RedactSecretMaterialTests(unittest.TestCase):
         # (non-JWT, non-sk/xai) bearer token must have its CREDENTIAL VALUE
         # removed, not just its "bearer" label -- assert the value substring is
         # gone, and the redacted string then passes the fail-closed scanner.
-        secret_value = "4f8a9c3d2e1b7f6a5d4c3b2a1908f7e6d5c4b3a2secretvalue"
+        secret_value = _BEARER_OPAQUE
         raw = "Authorization: Bearer {}".format(secret_value)
         cleaned = redact_secret_value_text(raw)
         self.assertNotIn(secret_value, cleaned)
@@ -351,10 +406,10 @@ class RedactSecretMaterialTests(unittest.TestCase):
         # The redacted output must not contain any of the source secret VALUES,
         # for every pattern (bearer+value, sk-, xai-, JWT).
         cases = (
-            "Bearer 4f8a9c3d2e1b7f6a5d4c3b2a1908f7e6d5c4b3a2secretvalue",
-            "sk-" "abcdef0123456789ABCDEFGHIJKLMNOP",
-            "xai-" + "abcdefghijklmnopqrstuvwxyz0123456789",
-            ("eyJhbGciOiJIUzI1NiJ9." + "eyJzdWIiOiIxMjMifQ." + "aGVsbG8xMjM"),
+            "Bearer " + _BEARER_OPAQUE,
+            _SK_LEGACY_LOWER,
+            _XAI_LONG,
+            _JWT_SHORT,
         )
         for secret in cases:
             with self.subTest(secret=secret[:10]):
@@ -369,9 +424,9 @@ class RedactSecretMaterialTests(unittest.TestCase):
         # round3: AWS/GitHub/Slack credential VALUES must be removed, and the
         # redacted string then passes the fail-closed scanner.
         cases = (
-            ("aws", "AKIA" + "IOSFODNN7EXAMPLE"),
-            ("github", "ghp_1234567890abcdefghijklmnopqrstuvwx"),
-            ("slack", "xoxb-123456789012-123456789012-abcdefABCDEF"),
+            ("aws", _AWS_AKIA),
+            ("github", _GHP),
+            ("slack", _XOXB),
         )
         for label, secret in cases:
             with self.subTest(label=label):
@@ -398,15 +453,15 @@ class RedactSecretMaterialTests(unittest.TestCase):
         # round3: redact_secret_material recurses into tuples (via the shared
         # tree-walker), so a secret nested in a tuple is masked; the tuple is
         # rebuilt as a JSON-shaped list and the source value is gone entirely.
-        secret = "Authorization: Bearer abcdef123456ABCDEFsecretbody"
+        secret = "Authorization: Bearer " + _BEARER_MIXED
         redacted = redact_secret_material({"stderrTail": ("retry", secret)})
         assert_no_secret_material(redacted)
-        self.assertNotIn("abcdef123456ABCDEFsecretbody", json.dumps(redacted))
+        self.assertNotIn(_BEARER_MIXED, json.dumps(redacted))
 
     def test_redaction_removes_pure_alpha_bearer_value(self) -> None:
         # round3 bearer-pattern-pure-alpha-token-false-negative: the all-letter
         # credential value is removed, and the redacted string passes the scanner.
-        secret = "AbCdEfGhIjKlMnOpQrStUv"
+        secret = _BEARER_ALPHA
         cleaned = redact_secret_value_text("Authorization: Bearer {}".format(secret))
         self.assertNotIn(secret, cleaned)
         self.assertIn("[redacted-bearer-token]", cleaned)
@@ -426,7 +481,7 @@ class RedactSecretMaterialTests(unittest.TestCase):
 class StructuralViolationValueLeakTests(unittest.TestCase):
     """Round4 F1: a structural violation must never embed the raw offending VALUE."""
 
-    _SECRET = "Bearer xai-" "THISISASECRETVALUE1234567890ABCDEF"
+    _SECRET = "Bearer " + _XAI_LEAK
 
     def test_enum_violation_does_not_leak_secret_value(self) -> None:
         # build_envelope logs the violation to stderr AND embeds it in the raised
@@ -438,9 +493,9 @@ class StructuralViolationValueLeakTests(unittest.TestCase):
                 build_envelope(run_id=_RUN_ID, mode="review", status=self._SECRET)
         violations = ctx.exception.detail.get("violations")
         joined = " ".join(violations) if isinstance(violations, list) else ""
-        self.assertNotIn("xai-THISISASECRETVALUE1234567890ABCDEF", joined)
-        self.assertNotIn("xai-THISISASECRETVALUE1234567890ABCDEF", str(ctx.exception))
-        self.assertNotIn("xai-THISISASECRETVALUE1234567890ABCDEF", stderr.getvalue())
+        self.assertNotIn(_XAI_LEAK, joined)
+        self.assertNotIn(_XAI_LEAK, str(ctx.exception))
+        self.assertNotIn(_XAI_LEAK, stderr.getvalue())
         # The redacted placeholder still communicates that a value was present.
         self.assertIn("[redacted-", joined)
 
@@ -449,9 +504,9 @@ class StructuralViolationValueLeakTests(unittest.TestCase):
         with contextlib.redirect_stderr(stderr):
             with self.assertRaises(InvalidEnvelopeError) as ctx:
                 failure_envelope(run_id=_RUN_ID, mode="review", error_class=self._SECRET, message="x")
-        self.assertNotIn("xai-THISISASECRETVALUE1234567890ABCDEF", str(ctx.exception))
-        self.assertNotIn("xai-THISISASECRETVALUE1234567890ABCDEF", str(ctx.exception.detail))
-        self.assertNotIn("xai-THISISASECRETVALUE1234567890ABCDEF", stderr.getvalue())
+        self.assertNotIn(_XAI_LEAK, str(ctx.exception))
+        self.assertNotIn(_XAI_LEAK, str(ctx.exception.detail))
+        self.assertNotIn(_XAI_LEAK, stderr.getvalue())
 
 class ApiKeyPatternTighteningTests(unittest.TestCase):
     """Round4 F2: the api-key pattern must not over-match ordinary kebab identifiers."""
@@ -469,8 +524,8 @@ class ApiKeyPatternTighteningTests(unittest.TestCase):
 
     def test_real_api_keys_still_redacted_and_flagged(self) -> None:
         for key in (
-            "xai-" + "abcdefghijklmnopqrstuvwxyz0123456789",
-            "sk-" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+            _XAI_LONG,
+            _SK_LEGACY,
         ):
             with self.subTest(key=key):
                 cleaned = redact_secret_value_text("token {} here".format(key))
@@ -485,11 +540,11 @@ class ApiKeyPatternTighteningTests(unittest.TestCase):
         # entirely because the hyphen 3-5 chars in broke the {20,} run. All four
         # current provider shapes MUST be caught (value absent), NOT just legacy.
         for key in (
-            "sk-proj-" "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
-            "sk-ant-" "api03-AbCdEf0123456789_Gh-IjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOAA",
-            "sk-ant-" "admin01-Zz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjklAA",
-            "sk-" + "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
-            "xai-" + "abcdefghijklmnopqrstuvwxyz0123456789",
+            _SK_PROJ,
+            _SK_ANT_API,
+            _SK_ANT_ADMIN,
+            _SK_LEGACY,
+            _XAI_LONG,
         ):
             with self.subTest(key=key[:14]):
                 cleaned = redact_secret_value_text("leaked key {} in output".format(key))
@@ -516,7 +571,7 @@ class ApiKeyPatternTighteningTests(unittest.TestCase):
         # round6 aws-ASIA: STS temporary/session creds use the ASIA prefix (the
         # default in CI/CD, Lambda, assumed-role) and MUST be flagged alongside AKIA.
         # Concatenate so the full AKIA/ASIA id never appears as one source literal.
-        for key in ("ASIA" + "IOSFODNN7EXAMPLE", "AKIA" + "IOSFODNN7EXAMPLE"):
+        for key in (_AWS_ASIA, _AWS_AKIA):
             with self.subTest(key=key):
                 cleaned = redact_secret_value_text("AWS_ACCESS_KEY_ID={}".format(key))
                 self.assertNotIn(key, cleaned)

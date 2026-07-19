@@ -37,6 +37,20 @@ import {
 } from "../progress-relay.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
+// AGENTS.md #8: reconstruct secret-shaped fixtures at runtime so source never
+// holds a contiguous token scanners treat as live credentials.
+const fx = (...parts) => parts.join("");
+const SK_LEGACY = fx("sk-", "abcdef0123456789ABCDEFGHIJKLMNOP");
+const XAI_LONG = fx("xai-", "abcdefghijklmnopqrstuvwxyz0123456789");
+const JWT_SHORT = fx("eyJhbGciOiJIUzI1NiJ9.", "eyJzdWIiOiIxMjMifQ.", "aGVsbG8xMjM");
+const BEARER_OPAQUE = fx("4f8a9c3d2e1b7f6a5d4c3b2a1908f7e6d5c4b3a2", "secretvalue");
+const GHP = fx("ghp_", "1234567890abcdefghijklmnopqrstuvwx");
+const XOXB = fx("xoxb-", "123456789012-123456789012-abcdefABCDEF");
+const BEARER_ALPHA = fx("AbCdEfGhIjKlMnOp", "QrStUv");
+const SK_PROJ = fx(
+  "sk-proj-",
+  "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
+);
 const RUNSTATE_PY = path.resolve(
   SCRIPT_DIR,
   "..",
@@ -478,10 +492,10 @@ test("dirdiff-single-candidate: a stable sole candidate is latched after a secon
 
 test("F-RELAY-SECRET: formatProgressLine redacts secret-shaped preview text", () => {
   const secrets = [
-    ["Authorization: Bearer 4f8a9c3d2e1b7f6a5d4c3b2a1908f7e6d5c4b3a2secretvalue", "4f8a9c3d2e1b7f6a5d4c3b2a1908f7e6d5c4b3a2secretvalue"],
-    ["api key sk-abcdef0123456789ABCDEFGHIJKLMNOP here", "sk-abcdef0123456789ABCDEFGHIJKLMNOP"],
-    ["token xai-abcdefghijklmnopqrstuvwxyz0123456789 done", "xai-abcdefghijklmnopqrstuvwxyz0123456789"],
-    ["jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.aGVsbG8xMjM tail", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.aGVsbG8xMjM"],
+    [`Authorization: Bearer ${BEARER_OPAQUE}`, BEARER_OPAQUE],
+    [`api key ${SK_LEGACY} here`, SK_LEGACY],
+    [`token ${XAI_LONG} done`, XAI_LONG],
+    [`jwt ${JWT_SHORT} tail`, JWT_SHORT],
   ];
   for (const [text, secretValue] of secrets) {
     const line = formatProgressLine({ phase: "grok", level: "info", message: "grok streamed text tokens", data: { text } });
@@ -544,14 +558,15 @@ test("F-RELAY-TERMINAL-ESCAPE: formatProgressLine neutralizes control sequences 
 });
 
 test("F-RELAY-SECRET: extended credential shapes (aws/github/slack/pem/pure-alpha bearer) are redacted", () => {
-  // Split AWS key shapes so source never holds a contiguous AKIA/ASIA literal
-  // (GitHub secret scanning flags AWS docs EXAMPLE keys as Temporary Access Key IDs).
+  // Split AWS/GitHub/Slack shapes so source never holds a contiguous secret
+  // literal (GitHub secret scanning flags AWS docs EXAMPLE keys as Temporary
+  // Access Key IDs).
   const secrets = [
-    "AKIA" + "IOSFODNN7EXAMPLE",
-    "ghp_1234567890abcdefghijklmnopqrstuvwx",
-    "xoxb-123456789012-123456789012-abcdefABCDEF",
+    fx("AKIA", "IOSFODNN7EXAMPLE"),
+    GHP,
+    XOXB,
     "-----BEGIN RSA PRIVATE KEY-----\nMIIBkeymaterial1234567890\n-----END RSA PRIVATE KEY-----",
-    "Bearer AbCdEfGhIjKlMnOpQrStUv",
+    `Bearer ${BEARER_ALPHA}`,
   ];
   for (const secret of secrets) {
     const cleaned = redactSecretText(`leaked ${secret} value`);
@@ -654,7 +669,7 @@ test("F1-relay-cross-boundary: renderRunProgress stream-redacts a split secret",
 });
 
 test("F1-relay-cross-boundary: a current OpenAI project key in one event is redacted", () => {
-  const key = "sk-proj-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789";
+  const key = SK_PROJ;
   const [line] = formatProgressLines([
     { phase: "grok", message: "streaming", data: { text: `leaked ${key} here` } },
   ]);
