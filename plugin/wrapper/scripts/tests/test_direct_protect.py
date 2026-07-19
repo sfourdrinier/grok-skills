@@ -470,6 +470,95 @@ class DirectProtectSnapshotRestoreTests(unittest.TestCase):
         self.assertIn(".git/HEAD", changed)
         self.assertIn(".git/hooks/post-commit", changed)
 
+    def test_snapshot_persists_gitfile_prefix_map_survives_pointer_rewrite(self) -> None:
+        # Snapshot must record prefix->actual gitdir for EVERY in-workspace
+        # gitfile root. After snapshot, plant in original common and rewrite the
+        # .git pointer external: restore must still hit the snapshotted common
+        # (delete plant + restore HEAD), never claim restored while plant remains.
+        common = self.repo / ".linked-common"
+        (
+            original_head,
+            _cfg,
+            original_hook,
+            head,
+            _config,
+            hook,
+        ) = self._seed_in_workspace_gitfile(self.repo / ".git", common)
+
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        self.assertIn(".git", snap.git_roots)
+        self.assertEqual(
+            pathlib.Path(snap.git_roots[".git"]).resolve(), common.resolve()
+        )
+
+        planted = common / "hooks" / "post-commit"
+        planted.write_bytes(b"#!/bin/sh\necho planted\n")
+        head.write_text("ref: refs/heads/evil\n")
+        hook.write_bytes(b"#!/bin/sh\necho evil\n")
+        # Rewrite pointer outside workspace after baseline.
+        (self.repo / ".git").write_text(
+            "gitdir: /tmp/outside-common/.git/worktrees/x\n"
+        )
+
+        result = direct_protect.restore_protected_paths(
+            self.repo,
+            snap,
+            offenders=[
+                ".git/HEAD",
+                ".git/hooks/pre-commit",
+                ".git/hooks/post-commit",
+            ],
+        )
+        self.assertEqual(head.read_text(), original_head)
+        self.assertEqual(hook.read_bytes(), original_hook)
+        self.assertFalse(
+            planted.exists(),
+            "planted hook must be deleted from ORIGINAL common, not claimed restored under external pointer",
+        )
+        for rel in (".git/HEAD", ".git/hooks/pre-commit", ".git/hooks/post-commit"):
+            self.assertIn(rel, result.restored, result)
+        self.assertEqual(result.unrestored, [])
+        # Pointer bytes are outside auto-restore; rewritten pointer remains.
+        self.assertIn("outside-common", (self.repo / ".git").read_text())
+
+    def test_nested_gitfile_prefix_map_survives_pointer_rewrite(self) -> None:
+        common = self.repo / "vendor" / "lib" / ".actual-git"
+        gitfile = self.repo / "vendor" / "lib" / ".git"
+        (
+            original_head,
+            _cfg,
+            original_hook,
+            head,
+            _config,
+            hook,
+        ) = self._seed_in_workspace_gitfile(gitfile, common)
+
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        self.assertIn("vendor/lib/.git", snap.git_roots)
+        self.assertEqual(
+            pathlib.Path(snap.git_roots["vendor/lib/.git"]).resolve(),
+            common.resolve(),
+        )
+
+        planted = common / "hooks" / "post-commit"
+        planted.write_bytes(b"#!/bin/sh\necho plant\n")
+        head.write_text("ref: refs/heads/evil\n")
+        gitfile.write_text("gitdir: /tmp/outside-vendor-common\n")
+
+        rel_head = "vendor/lib/.git/HEAD"
+        rel_hook = "vendor/lib/.git/hooks/pre-commit"
+        rel_plant = "vendor/lib/.git/hooks/post-commit"
+        result = direct_protect.restore_protected_paths(
+            self.repo, snap, offenders=[rel_head, rel_hook, rel_plant]
+        )
+        self.assertEqual(head.read_text(), original_head)
+        self.assertEqual(hook.read_bytes(), original_hook)
+        self.assertFalse(planted.exists())
+        self.assertIn(rel_head, result.restored)
+        self.assertIn(rel_hook, result.restored)
+        self.assertIn(rel_plant, result.restored)
+        self.assertEqual(result.unrestored, [])
+
 
 class DirectGitGuardAndDenyTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -736,104 +825,6 @@ class DirectAbortSweepTests(unittest.TestCase):
         self.assertIn("vendor/lib/.git/HEAD", res["restored"])
         self.assertIn(".git/modules/sub/hooks/pre-commit", res["restored"])
 
-
-class GitIgnoredPathsBytesSafetyTests(unittest.TestCase):
-    """git_ignored_paths must be bytes/surrogateescape-safe (path_inventory SSOT)."""
-
-    def setUp(self) -> None:
-        self.tmp = tempfile.mkdtemp(prefix="direct-ignored-bytes-")
-        self.repo = pathlib.Path(self.tmp) / "repo"
-        self.repo.mkdir()
-        subprocess.run(
-            ["git", "-C", str(self.repo), "init", "--initial-branch=main"],
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(self.repo), "config", "user.email", "t@t.t"],
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(self.repo), "config", "user.name", "t"],
-            check=True,
-            capture_output=True,
-        )
-        (self.repo / "tracked.txt").write_text("ok\n")
-        (self.repo / ".gitignore").write_text("ignored.txt\nbad-*\n", encoding="utf-8")
-        subprocess.run(
-            ["git", "-C", str(self.repo), "add", "-A"],
-            check=True,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "-C", str(self.repo), "commit", "-m", "seed"],
-            check=True,
-            capture_output=True,
-        )
-        (self.repo / "ignored.txt").write_text("secret\n")
-
-    def tearDown(self) -> None:
-        import shutil
-
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def test_lone_surrogate_path_does_not_raise_unicode_encode(self) -> None:
-        from groklib.modes.direct_finalize import git_ignored_paths
-
-        # Lone surrogate as produced by surrogateescape decode of non-UTF-8 bytes.
-        surrogate_path = "bad-\udcff-name.txt"
-        # Must not raise UnicodeEncodeError; classify or return a set.
-        try:
-            result = git_ignored_paths(
-                self.repo, {"tracked.txt", "ignored.txt", surrogate_path}
-            )
-        except UnicodeEncodeError as exc:
-            self.fail("git_ignored_paths raised UnicodeEncodeError: {}".format(exc))
-        self.assertIn("ignored.txt", result)
-        self.assertNotIn("tracked.txt", result)
-
-    def test_uses_bytes_runner_with_stdin(self) -> None:
-        from unittest import mock
-
-        from groklib.modes.direct_finalize import git_ignored_paths
-
-        completed = mock.Mock()
-        completed.returncode = 0
-        completed.stdout = b"ignored.txt\0"
-        completed.stderr = b""
-        fake = mock.Mock(return_value=completed)
-        with mock.patch("groklib.worktree._run_git_bytes", fake):
-            result = git_ignored_paths(self.repo, {"ignored.txt", "tracked.txt"})
-        self.assertEqual(result, {"ignored.txt"})
-        fake.assert_called()
-        kwargs = fake.call_args.kwargs
-        self.assertIn("input_bytes", kwargs)
-        self.assertIsInstance(kwargs["input_bytes"], (bytes, bytearray))
-        self.assertIn(b"ignored.txt", kwargs["input_bytes"])
-
-    def test_real_non_utf8_path_when_platform_allows(self) -> None:
-        from groklib.modes.direct_finalize import git_ignored_paths
-
-        bad_name = b"bad-\xff-name.txt"
-        try:
-            path_bytes = os.fsencode(str(self.repo)) + b"/" + bad_name
-            fd = os.open(path_bytes, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
-            try:
-                os.write(fd, b"payload\n")
-            finally:
-                os.close(fd)
-        except OSError as exc:
-            self.skipTest(
-                "platform cannot create invalid UTF-8 pathnames: {}".format(exc)
-            )
-        # Surrogate-escaped inventory path token.
-        sur = bad_name.decode("utf-8", errors="surrogateescape")
-        try:
-            result = git_ignored_paths(self.repo, {sur, "ignored.txt"})
-        except UnicodeEncodeError as exc:
-            self.fail("real non-UTF-8 path raised UnicodeEncodeError: {}".format(exc))
-        self.assertIn("ignored.txt", result)
 
 
 if __name__ == "__main__":

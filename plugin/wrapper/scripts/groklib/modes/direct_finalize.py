@@ -181,15 +181,22 @@ def _resolve_git_dirs(repo_root: pathlib.Path) -> Tuple[pathlib.Path, pathlib.Pa
     return git_dir, common_dir
 
 
-def capture_git_dir_guard(repo_root: pathlib.Path) -> FrozenSet[Tuple[str, str]]:
+def capture_git_dir_guard(
+    repo_root: pathlib.Path,
+    *,
+    git_roots: Optional[object] = None,
+) -> FrozenSet[Tuple[str, str]]:
     """Fingerprint security-relevant git paths (working-tree fingerprint is blind to them).
 
-    Watches sensitive metadata for every workspace gitdir discovered by
-    ``direct_protect.discover_workspace_git_roots`` (root ``.git``, nested
+    Watches sensitive metadata for every workspace gitdir (root ``.git``, nested
     ``vendor/.../.git``, ``.git/modules/**``, and in-workspace linked gitfile
-    targets), each by CONTENT HASH so a same-size ref move is detected. Also
-    fingerprints the git-resolved per-worktree HEAD / common config when the
-    common dir is outside the workspace (linked worktree honesty: external
+    targets), each by CONTENT HASH so a same-size ref move is detected.
+
+    When ``git_roots`` is provided (from a pre-run ``ProtectedSnapshot``), those
+    prefix->abs mappings are used instead of live discovery so a post-run
+    gitfile pointer rewrite cannot hide plants under the original common dir.
+    Also fingerprints the git-resolved per-worktree HEAD / common config when
+    the common dir is outside the workspace (linked worktree honesty: external
     common dirs are not fully inventoried via nested discovery).
 
     Deliberately NOT watched (benign working state git rewrites on ordinary reads
@@ -198,13 +205,22 @@ def capture_git_dir_guard(repo_root: pathlib.Path) -> FrozenSet[Tuple[str, str]]
     fingerprinted: content-addressed and inert until a watched ref points at them.
     """
     pairs: Set[Tuple[str, str]] = set()
-    # Nested + modules + root via shared discovery (fail closed on overflow).
-    for rel, abs_path in direct_protect.iter_sensitive_git_entries(repo_root):
+    # Nested + modules + root via shared discovery / baseline map.
+    for rel, abs_path in direct_protect.iter_sensitive_git_entries(
+        repo_root, git_roots=git_roots
+    ):
         pairs.add((rel, _git_watch_sig(abs_path)))
 
     # Linked worktree: when common/git dirs live outside the workspace, still
     # fingerprint the primary HEAD/config/packed-refs/hooks/refs via rev-parse
     # (under synthetic .git/ keys) so a common-dir ref move is not silent.
+    # Skip when baseline already maps .git (in-workspace gitfile was snapshotted).
+    baseline_has_root = False
+    if git_roots is not None:
+        for pfx, _ in direct_protect._normalize_git_roots(git_roots):
+            if pfx == ".git":
+                baseline_has_root = True
+                break
     git_dir, common_dir = _resolve_git_dirs(repo_root)
     root = pathlib.Path(repo_root)
     try:
@@ -213,7 +229,7 @@ def capture_git_dir_guard(repo_root: pathlib.Path) -> FrozenSet[Tuple[str, str]]
         ).startswith(str(root.resolve()) + os.sep)
     except OSError:
         common_inside = False
-    if not common_inside:
+    if not common_inside and not baseline_has_root:
         pairs.add((".git/HEAD", _git_watch_sig(git_dir / "HEAD")))
         for name in ("config", "packed-refs"):
             pairs.add((".git/" + name, _git_watch_sig(common_dir / name)))
@@ -409,7 +425,11 @@ def _assert_git_dir_untouched(
     protect_snapshot: Optional["direct_protect.ProtectedSnapshot"],
 ) -> None:
     """Fail closed when any watched ``.git/*`` path changed; restore then raise."""
-    after = capture_git_dir_guard(repo_root)
+    # Prefer snapshotted git_roots so pointer rewrite cannot hide original common.
+    baseline_roots = None
+    if protect_snapshot is not None and protect_snapshot.git_roots:
+        baseline_roots = protect_snapshot.git_roots
+    after = capture_git_dir_guard(repo_root, git_roots=baseline_roots)
     git_changed = sorted(_changed_paths(baseline_git_fp, after))
     if not git_changed:
         return
@@ -615,7 +635,10 @@ def restore_protected_on_abort(
     except Exception as exc:
         _log("restore_protected_on_abort", "changed-set re-diff failed: {}".format(exc))
     try:
-        after_git = capture_git_dir_guard(repo_root)
+        baseline_roots = None
+        if protect_snapshot is not None and protect_snapshot.git_roots:
+            baseline_roots = protect_snapshot.git_roots
+        after_git = capture_git_dir_guard(repo_root, git_roots=baseline_roots)
         offenders |= set(_changed_paths(baseline_git_fp, after_git))
     except Exception as exc:
         _log("restore_protected_on_abort", "git-dir guard re-scan failed: {}".format(exc))

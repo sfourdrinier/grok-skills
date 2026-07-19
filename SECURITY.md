@@ -166,14 +166,17 @@ gaps to paper over):
    restore to the **actual** absolute gitdir, never under a gitfile path.
    Sensitive set: `config` / `HEAD` / `packed-refs`, `hooks/**`, `refs/**`
    (moved branch or planted hook/ref is reverted or removed). Nested discovery
-   is bounded and fail-closed on overflow. **External** linked-worktree common
-   dirs (gitfile target outside the workspace) are **not** fully inventoried;
-   only the git-resolved primary HEAD/config/hooks/refs fingerprint remains
-   for that case. `.git/index` and `.git/COMMIT_EDITMSG` are **not guarded**
-   (benign working state git rewrites on ordinary reads like `git status`);
-   loose `.git/objects` are **not tracked** (content-addressed and inert until
-   a watched ref points at them). This is best-effort detection + rollback,
-   not seatbelt subpath prevention.
+   is bounded and fail-closed on overflow. Snapshot persists a `git_roots`
+   prefix->actual-gitdir map used by restore/guard even if a gitfile pointer
+   is rewritten after the run (live rediscovery must not override baseline).
+   Gitfile pointer bytes themselves are outside auto-restore. **External**
+   linked-worktree common dirs (gitfile target outside the workspace) are
+   **not** fully inventoried; only the git-resolved primary HEAD/config/hooks/refs
+   fingerprint remains for that case. `.git/index` and `.git/COMMIT_EDITMSG`
+   are **not guarded** (benign working state git rewrites on ordinary reads
+   like `git status`); loose `.git/objects` are **not tracked**
+   (content-addressed and inert until a watched ref points at them). This is
+   best-effort detection + rollback, not seatbelt subpath prevention.
 4. **Grok can still READ your files** (documented D-SECRETREAD). Write
    confinement is not a read firewall.
 5. **Consent gate:** first direct landing without `setup --integration direct`
