@@ -5,13 +5,15 @@
 # a fail-safe guarded kill of a peer.json-recorded child. Extracted from peer.py
 # to keep it under the 900-line cap; re-imported there under the same names so
 # the existing peer_mod._spawn_acp_child / _kill_recorded_child surface (and the
-# tests that patch it) keep resolving.
+# tests that patch it) keep resolving. Start-only argv assembly lives here so
+# peer.py stays under the line cap while the child pins the same C6 globals
+# (permission/tools/subagents/memory/web) the envelope advertises.
 
 import os
 import pathlib
 import stat
 import subprocess
-from typing import Any, Tuple
+from typing import Any, List, Sequence, Tuple
 
 from groklib import GrokWrapperError, log_stderr
 from groklib import grokcli
@@ -24,6 +26,46 @@ def _log(function: str, message: str) -> None:
     log_stderr("modes.peer_process", function, message)
 
 
+def build_acp_stdio_argv(
+    *,
+    binary: pathlib.Path,
+    model: str,
+    leader_socket: pathlib.Path,
+    policy: Any,
+    tools: Sequence[str],
+    web_access: bool,
+) -> List[str]:
+    """Build ``grok <C6 globals> agent [--model] stdio --leader-socket`` argv.
+
+    Live probe (grok 0.2.104): global flags before ``agent`` are accepted for
+    ``agent stdio`` (``--permission-mode``, ``--tools``, ``--no-subagents``,
+    ``--no-memory``, ``--disable-web-search``, ``--sandbox``). The same flags
+    after ``stdio`` or on ``grok agent`` (without being global) are rejected.
+    Tool expansion uses ``grokcli.effective_tools`` (D-WEB single source) so the
+    child allowlist matches envelope ``policy.tools`` from ``_policy_field``.
+    """
+    argv: List[str] = [str(binary)]
+    # Global C6 pins BEFORE the agent subcommand (not after stdio).
+    if policy is not None and getattr(policy, "profile", None):
+        argv.extend(["--sandbox", policy.profile])
+    argv.extend(["--permission-mode", grokcli.HEADLESS_PERMISSION_MODE])
+    effective = grokcli.effective_tools(tuple(tools), web_access)
+    if effective:
+        argv.extend(["--tools", ",".join(effective)])
+    else:
+        # Fail closed: empty allowlist denies every built-in (same as build_argv).
+        argv.extend(["--disallowed-tools", ",".join(grokcli.ALL_BUILTIN_TOOLS)])
+    argv.append("--no-subagents")
+    argv.append("--no-memory")
+    if not web_access:
+        argv.append("--disable-web-search")
+    argv.append("agent")
+    if model:
+        argv.extend(["--model", model])
+    argv.extend(["stdio", "--leader-socket", str(leader_socket)])
+    return argv
+
+
 def spawn_acp_child(
     *,
     binary: pathlib.Path,
@@ -32,34 +74,26 @@ def spawn_acp_child(
     leader_socket: pathlib.Path,
     model: str,
     policy: Any,
+    tools: Sequence[str],
+    web_access: bool = False,
 ) -> subprocess.Popen:
     """Spawn ``grok agent stdio`` in the private home / worktree cwd.
 
     Uses the SAME minimal child env (HOME/PATH/TMPDIR only, GROK_SANDBOX unset)
-    and the SAME global ``--sandbox <profile>`` selection as code mode
-    (grokcli.build_argv / _minimal_env): copying os.environ leaked operator
-    credentials (DATABASE_URL, SSH_AUTH_SOCK, ...) into the long-lived model
-    process, and omitting --sandbox let the child run under CLI defaults while
-    the envelope advertised OS write-confinement. ``--sandbox`` is a global grok
-    flag (env alias GROK_SANDBOX) and is accepted before the ``agent``
-    subcommand, so the peer child is confined to the same workspace profile.
+    and the SAME global ``--sandbox <profile>`` + C6 tool/permission/web pins as
+    code mode (grokcli.build_argv / _minimal_env): copying os.environ leaked
+    operator credentials into the long-lived model process, and omitting those
+    globals let the child run under CLI defaults while the envelope advertised
+    confinement. Flags are global before ``agent`` (probe-accepted placement).
     """
     env = grokcli._minimal_env(home, binary)
-    # Global --sandbox <profile> BEFORE the agent subcommand (workspace
-    # write-confinement); --model belongs on `grok agent` (not the stdio
-    # subcommand). Unknown flags after `stdio` make the CLI exit 2.
-    argv = [str(binary)]
-    if policy is not None and getattr(policy, "profile", None):
-        argv.extend(["--sandbox", policy.profile])
-    argv.append("agent")
-    if model:
-        argv.extend(["--model", model])
-    argv.extend(
-        [
-            "stdio",
-            "--leader-socket",
-            str(leader_socket),
-        ]
+    argv = build_acp_stdio_argv(
+        binary=binary,
+        model=model,
+        leader_socket=leader_socket,
+        policy=policy,
+        tools=tools,
+        web_access=web_access,
     )
     try:
         proc = subprocess.Popen(

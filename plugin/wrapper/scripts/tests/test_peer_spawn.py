@@ -2,7 +2,9 @@
 #
 # _spawn_acp_child env/argv posture (PR #5 review B1/B2): the long-lived ACP
 # child must run on the minimal C6 env (no operator-credential passthrough) and
-# under the same global --sandbox <profile> confinement as code mode.
+# under the same global --sandbox <profile> confinement as code mode. Peer ACP
+# also pins the C6 tool/permission/web/subagent/memory globals before `agent`
+# (live probe: those flags are accepted on `grok <globals> agent stdio`).
 
 import pathlib
 import shutil
@@ -12,8 +14,11 @@ import unittest
 from unittest import mock
 
 from groklib import GrokWrapperError
+from groklib import grokcli
+from groklib.modes import code as code_mode
 from groklib.modes import peer as peer_mod
 from groklib.modes import peer_process
+from groklib.modes._envelope import _policy_field
 
 
 class _FakeProc:
@@ -25,11 +30,11 @@ class SpawnAcpChildTests(unittest.TestCase):
         self.tmp = tempfile.mkdtemp(prefix="spawn-acp-")
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
 
-    def _spawn(self, policy):
+    def _spawn(self, policy, *, tools=None, web_access=False):
         home = types.SimpleNamespace(home_dir=pathlib.Path(self.tmp) / "home")
-        home.home_dir.mkdir()
+        home.home_dir.mkdir(exist_ok=True)
         worktree = types.SimpleNamespace(path=pathlib.Path(self.tmp) / "wt")
-        worktree.path.mkdir()
+        worktree.path.mkdir(exist_ok=True)
         captured = {}
 
         def _fake_popen(argv, **kwargs):
@@ -38,8 +43,9 @@ class SpawnAcpChildTests(unittest.TestCase):
             captured["cwd"] = kwargs.get("cwd")
             return _FakeProc()
 
-        with mock.patch.object(peer_mod.subprocess, "Popen", _fake_popen), mock.patch.object(
-            peer_mod.platformsupport, "spawn_kwargs_new_group", return_value={}
+        # peer_process owns Popen; peer.py re-exports the spawn helper.
+        with mock.patch.object(peer_process.subprocess, "Popen", _fake_popen), mock.patch.object(
+            peer_process.platformsupport, "spawn_kwargs_new_group", return_value={}
         ):
             peer_mod._spawn_acp_child(
                 binary=pathlib.Path("/usr/bin/true"),
@@ -48,6 +54,8 @@ class SpawnAcpChildTests(unittest.TestCase):
                 leader_socket=pathlib.Path(self.tmp) / "s.sock",
                 model="grok-4.5",
                 policy=policy,
+                tools=tools if tools is not None else code_mode._TOOLS,
+                web_access=web_access,
             )
         return captured
 
@@ -74,6 +82,68 @@ class SpawnAcpChildTests(unittest.TestCase):
     def test_no_sandbox_flag_when_policy_has_no_profile(self) -> None:
         cap = self._spawn(types.SimpleNamespace(profile=None))
         self.assertNotIn("--sandbox", cap["argv"])
+
+    def test_c6_policy_flags_precede_agent_and_match_code_tools(self) -> None:
+        """Peer ACP child must pin the same C6 globals code mode uses (not envelope-only)."""
+        cap = self._spawn(types.SimpleNamespace(profile="workspace"), web_access=False)
+        argv = cap["argv"]
+        agent_i = argv.index("agent")
+        for flag in (
+            "--permission-mode",
+            "--tools",
+            "--no-subagents",
+            "--no-memory",
+            "--disable-web-search",
+        ):
+            self.assertIn(flag, argv, "missing peer ACP pin {}".format(flag))
+            self.assertLess(argv.index(flag), agent_i, "{} must be global before agent".format(flag))
+        self.assertEqual(argv[argv.index("--permission-mode") + 1], grokcli.HEADLESS_PERMISSION_MODE)
+        tools_csv = argv[argv.index("--tools") + 1]
+        tools = tools_csv.split(",")
+        self.assertEqual(tools, grokcli.effective_tools(code_mode._TOOLS, False))
+        for name in code_mode._TOOLS:
+            self.assertIn(name, tools)
+        for web_tool in grokcli.WEB_TOOLS:
+            self.assertNotIn(web_tool, tools)
+        self.assertNotIn("--disallowed-tools", argv)
+
+    def test_web_access_folds_web_tools_and_omits_disable_web_search(self) -> None:
+        cap = self._spawn(types.SimpleNamespace(profile="workspace"), web_access=True)
+        argv = cap["argv"]
+        self.assertNotIn("--disable-web-search", argv)
+        tools = argv[argv.index("--tools") + 1].split(",")
+        self.assertEqual(tools, grokcli.effective_tools(code_mode._TOOLS, True))
+        for web_tool in grokcli.WEB_TOOLS:
+            self.assertIn(web_tool, tools)
+
+    def test_build_acp_stdio_argv_matches_envelope_policy_source(self) -> None:
+        """Child argv tools/web/permission derive from the same config as envelope policy."""
+        tools = code_mode._TOOLS
+        for web_access in (False, True):
+            argv = peer_process.build_acp_stdio_argv(
+                binary=pathlib.Path("/usr/bin/true"),
+                model="grok-4.5",
+                leader_socket=pathlib.Path(self.tmp) / "s.sock",
+                policy=types.SimpleNamespace(profile="workspace"),
+                tools=tools,
+                web_access=web_access,
+            )
+            policy = _policy_field(tools, web_access)
+            self.assertEqual(policy["permissionMode"], grokcli.HEADLESS_PERMISSION_MODE)
+            self.assertEqual(policy["subagents"], False)
+            self.assertEqual(policy["memory"], False)
+            self.assertEqual(policy["webAccess"], web_access)
+            self.assertEqual(policy["tools"], grokcli.effective_tools(tools, web_access))
+            self.assertEqual(argv[argv.index("--tools") + 1].split(","), policy["tools"])
+            self.assertEqual(
+                argv[argv.index("--permission-mode") + 1], policy["permissionMode"]
+            )
+            if web_access:
+                self.assertNotIn("--disable-web-search", argv)
+            else:
+                self.assertIn("--disable-web-search", argv)
+            self.assertIn("--no-subagents", argv)
+            self.assertIn("--no-memory", argv)
 
 
 class KillRecordedChildSafetyTests(unittest.TestCase):

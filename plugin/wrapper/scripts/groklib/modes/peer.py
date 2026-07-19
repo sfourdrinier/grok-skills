@@ -48,10 +48,13 @@ from groklib.grokcli import check_version
 from groklib.implementation_contract import assert_target_matches, load_contract_file
 from groklib.modes import _shared
 from groklib.modes import peer_control
+from groklib.modes import code as code_mode
+from groklib.modes._envelope import _policy_field
 from groklib.modes.peer_process import (
     StartResources as _StartResources,
     abort_peer_start as _abort_peer_start,
     assert_start_parity as _assert_start_parity,
+    build_acp_stdio_argv as _build_acp_stdio_argv,
     kill_recorded_child as _kill_recorded_child,
     spawn_acp_child as _spawn_acp_child,
 )
@@ -66,15 +69,8 @@ from groklib.web_defaults import resolve_web_access
 _assert_peer_uid = peer_control.assert_peer_uid
 _open_control_socket = peer_control.open_control_socket
 
-# Same tool allowlist as code mode (start parity).
-_TOOLS: Tuple[str, ...] = (
-    "read_file",
-    "grep",
-    "list_dir",
-    "search_replace",
-    "write",
-    "run_terminal_command",
-)
+# Same tool allowlist as code mode (start parity; single source: modes.code._TOOLS).
+_TOOLS: Tuple[str, ...] = code_mode._TOOLS
 
 _SENTINEL_PREFIX = ".grok-run-"
 # MAX_PEER_LEASE is separate from MAX_RUN_TIMEOUT; each prompt renews it.
@@ -554,21 +550,28 @@ def run_peer_start(args: argparse.Namespace) -> dict:
             leader_socket=leader_socket,
             model=model,
             policy=policy,
+            tools=_TOOLS,
+            web_access=web_access,
         )
         res.child = child
         acp = AcpClient(child, timeout_seconds=timeout)
         res.acp = acp
         try:
             init = acp.initialize()
-            # Register pre_tool_use deny hook (amendment 6: NON-enforcement; OS sandbox enforces).
+            # Honesty: initialize may advertise pre_tool_use as a capability, but
+            # this wrapper does not register a deny hook (amendment 6 NON-enforcement;
+            # OS sandbox + C6 --tools/--permission-mode pins are the real layers).
             hooks = ((init.get("_meta") or {}).get("x.ai/hooks") or {})
             if "pre_tool_use" in (hooks.get("blockingEvents") or []):
                 progress.safe_emit(
                     "sandbox",
-                    "pre_tool_use deny hook registered (documented NON-enforcement; "
-                    "OS sandbox is the enforcement layer; terminal-command policy: "
-                    "allowlisted only inside worktree write confinement)",
-                    data={"enforcement": "non-enforcement-advisory"},
+                    "pre_tool_use capability detected (not registered; documented "
+                    "NON-enforcement; OS sandbox + C6 tool/permission pins enforce)",
+                    data={
+                        "enforcement": "non-enforcement-advisory",
+                        "hookRegistered": False,
+                        "blockingEvents": list(hooks.get("blockingEvents") or []),
+                    },
                 )
             session = acp.session_new(cwd=str(worktree.path), mcp_servers=[])
             session_id = session.get("sessionId")
@@ -665,13 +668,8 @@ def run_peer_start(args: argparse.Namespace) -> dict:
             worktreeBranch=worktree.branch,
             baseRevision=worktree.base_revision,
             progressStreamPath=str(run_paths.progress_path),
-            policy={
-                "tools": list(_TOOLS),
-                "permissionMode": "auto",
-                "subagents": False,
-                "webAccess": web_access,
-                "memory": False,
-            },
+            # Same policy shape/source as code/direct/worktree (_policy_field).
+            policy=_policy_field(_TOOLS, web_access),
             response={
                 "peer": {
                     "sessionId": session_id,

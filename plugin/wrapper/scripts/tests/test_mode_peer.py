@@ -11,14 +11,18 @@ import tempfile
 import threading
 import time
 import unittest
+from typing import List
 from unittest import mock
 
 import shutil
 from groklib import GrokWrapperError
 from groklib import envelope as envelope_mod
+from groklib import grokcli
 from groklib import platformsupport
 from groklib import runstate
+from groklib.modes import code as code_mode
 from groklib.modes import peer as peer_mod
+from groklib.modes._envelope import _policy_field
 
 from tests import gitfixtures
 from tests.peer_test_base import PeerTestBase, _FakeAcpClient, _FakeChild, _split_bearer_fixture
@@ -551,8 +555,75 @@ class PeerLifecycleTests(PeerTestBase):
         self.assertEqual(ctx.exception.error_class, "acp-failure")
 
 
-if __name__ == "__main__":
-    unittest.main()
+class PeerStartPolicyParityTests(PeerTestBase):
+    """peer-start envelope policy and spawn kwargs must share one effective config."""
+
+    def test_peer_start_envelope_policy_matches_code_tools_and_shared_helper(self) -> None:
+        source = pathlib.Path(self.tmp_root) / "grok" / ".grok"
+        source.mkdir(parents=True)
+        (source / "auth.json").write_text("{}\n", encoding="utf-8")
+
+        ns = mock.Mock(
+            target=str(self.repo / "pkg"),
+            base=self.base,
+            contract_file=None,
+            model="grok-4.5",
+            web=None,
+            timeout=60,
+            max_turns=None,
+            grok_binary=pathlib.Path("/usr/bin/true"),
+            task="hello",
+            task_file=None,
+        )
+
+        running_holder: List[dict] = []
+        spawn_kwargs_holder: List[dict] = []
+
+        def _serve_once(session, running_env, preopened=None):
+            running_holder.append(running_env)
+            if preopened is not None:
+                try:
+                    preopened.close()
+                except Exception:
+                    pass
+            return envelope_mod.build_envelope(
+                run_id=session.run_id,
+                mode="peer-stop",
+                status="success",
+                response={"stopped": True},
+            )
+
+        def _capture_spawn(**kwargs):
+            spawn_kwargs_holder.append(kwargs)
+            return self.fake_child
+
+        with self._patch_spawn_and_acp():
+            with mock.patch.object(peer_mod, "_spawn_acp_child", side_effect=_capture_spawn):
+                with mock.patch.object(peer_mod, "_serve_control_plane", side_effect=_serve_once):
+                    with mock.patch.object(
+                        peer_mod, "require_probed_platform_for_live", return_value=None
+                    ):
+                        with mock.patch.object(peer_mod, "check_version", return_value="0.0.0"):
+                            peer_mod.run_peer_start(ns)
+
+        self.assertEqual(len(running_holder), 1)
+        self.assertEqual(len(spawn_kwargs_holder), 1)
+        policy = running_holder[0]["policy"]
+        expected = _policy_field(code_mode._TOOLS, False)
+        self.assertEqual(policy, expected)
+        self.assertEqual(policy["tools"], grokcli.effective_tools(code_mode._TOOLS, False))
+        self.assertEqual(policy["permissionMode"], grokcli.HEADLESS_PERMISSION_MODE)
+        self.assertFalse(policy["subagents"])
+        self.assertFalse(policy["memory"])
+        self.assertFalse(policy["webAccess"])
+        # Spawn must receive the same tools/web_access the envelope advertises.
+        self.assertEqual(spawn_kwargs_holder[0].get("tools"), code_mode._TOOLS)
+        self.assertEqual(spawn_kwargs_holder[0].get("web_access"), False)
+        # Capability detection is honest: no false "deny hook registered" wording.
+        progress_path = runstate.state_root() / "runs" / running_holder[0]["runId"] / "progress.jsonl"
+        if progress_path.is_file():
+            progress_text = progress_path.read_text(encoding="utf-8")
+            self.assertNotIn("pre_tool_use deny hook registered", progress_text)
 
 
 if __name__ == "__main__":
