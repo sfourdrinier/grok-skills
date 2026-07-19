@@ -213,7 +213,9 @@ def capture_git_dir_guard(
         pairs.add((rel, _git_watch_sig(abs_path)))
 
     # Fingerprint gitfile pointer content so an external (or in-workspace)
-    # redirect is not silent. Pointer bytes remain outside auto-restore.
+    # redirect is not silent. Snapshotted in-workspace markers restore via
+    # direct_protect abs_paths; external/unavailable/live-only redirect
+    # targets stay manual (not auto-cleared).
     for pfx, gitfile in direct_protect.discover_workspace_gitfiles(repo_root):
         pairs.add((pfx, _git_watch_sig(gitfile)))
 

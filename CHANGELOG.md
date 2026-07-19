@@ -184,14 +184,15 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
   gitfile path. Snapshot persists a `git_roots` prefix map so restore still hits the original
   common dir after a post-run pointer rewrite. Guard detection unions baseline
   roots with live discovery (new in-workspace redirect plants fail closed);
-  gitfile pointer content is fingerprinted (external redirect not silent;
-  pointer bytes outside auto-restore). `modules/**` inventoried under every
+  gitfile pointer content is fingerprinted. Snapshotted in-workspace gitfile
+  markers restore as files via `abs_paths` (dedicated store prefix); external
+  common dirs and abandoned/live-only redirect targets stay outside full
+  inventory/auto-clear (manual limits). `modules/**` inventoried under every
   discovered abs gitdir (root/nested free-standing and gitfile targets).
   Submodule aliases retain every logical gitfile prefix even when abs is
   already seen; restore prefers `abs_paths` then baseline roots (marker key
   never maps to target dir). Bounded no-symlink discovery fails closed on
-  overflow. External linked common dirs remain outside full inventory.
-  SECURITY direct-default item 3 documents the honest limit. Node
+  overflow. SECURITY direct-default item 3 documents the honest limit. Node
   `parseDiffGitHeaderPaths` dual-condition parity + bytes-safe
   `git_ignored_paths` land in the same pass.
 - **Codex marketplace root drift (DRY hole):** `tools/gen-manifests.mjs` now
