@@ -221,7 +221,6 @@ export function loadPatchTouchPaths(patchPath, numstatStdout) {
   return { ok: true, paths: [...patchPathSet] };
 }
 
-
 /**
  * After a successful apply, persist the durable marker. If persistence fails,
  * reverse the apply so we never report durable applied success without a marker.
@@ -431,19 +430,12 @@ function applyPatchWithGuards({
 
 /**
  * Shared under-lock apply ladder for auto and peer (one source of truth).
- * Callers keep readiness / consent / target identity / pre-lock integrity gates
- * outside; optional revalidateUnderLock runs after marker heal (auto re-checks
- * patch vs manifest under lock).
+ * Callers keep readiness / consent / target / pre-lock integrity outside.
+ * revalidateUnderLock runs before heal marker write and before apply spine.
  *
- * Ladder under the held apply lock:
- * 1. Matching marker + reverse --check => already-applied
- * 2. Matching marker but tree reverted => clear marker, continue
- * 3. No marker but reverse --check succeeds (crash after apply / marker-persist
- *    reverse-failure left applied tree) => heal durable marker, already-applied
- *    BEFORE dirty guard (applied paths are dirty vs HEAD)
- * 4. Optional revalidateUnderLock
- * 5. applyPatchWithGuards spine
- * 6. finalizeAppliedWithMarker on success
+ * Ladder: matching marker + reverse => already-applied; marker but reverted =>
+ * clear; no marker + reverse => revalidate then heal marker; else revalidate,
+ * applyPatchWithGuards, finalizeAppliedWithMarker.
  *
  * @param {object} opts
  * @returns {{ok: boolean, outcome: string, runId?: string, patchPath?: string, patchSha?: string, reason?: string, overlap?: string[]}}
@@ -481,12 +473,14 @@ export function completeIntegrationApplyUnderLock({
     );
     clearApplyMarker(runId, targetKey, env);
   } else if (treeStillHasAppliedPatch(targetRepo, patchPath)) {
-    // Crash after successful git apply before durable marker (or marker-persist
-    // reverse-failure that left the applied tree) - heal under lock before dirty
-    // guard, else the applied paths look like operator dirty overlap.
+    // Crash-after-apply residue: revalidate under lock BEFORE healing marker.
     stderrLine(
       `${tag} tree already has applied patch without durable marker; healing marker`
     );
+    if (typeof revalidateUnderLock === "function") {
+      const v = revalidateUnderLock();
+      if (v && v.ok === false) return v;
+    }
     const wrote = writeApplyMarker(runId, targetKey, patchSha, env);
     if (wrote) {
       stderrLine(
