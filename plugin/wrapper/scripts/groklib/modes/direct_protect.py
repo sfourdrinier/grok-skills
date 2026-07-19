@@ -506,7 +506,9 @@ def restore_protected_paths(
             # Absent from pre-run index. Only auto-delete paths that would have
             # been snapshotted if they existed (Grok-created .env/.pem/hooks).
             # Other .git/* (e.g. index, bare gitfile pointer) are detect-only.
-            if not is_snapshot_scope(rel):
+            # Use baseline+live git_roots so multi-component / reserved-name
+            # modules/** plants classify by real prefix, not token heuristics.
+            if not is_snapshot_scope(rel, git_roots=merged):
                 unrestored.append(rel)
                 errors.append(
                     {

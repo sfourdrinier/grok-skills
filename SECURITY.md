@@ -118,16 +118,20 @@ over. It is **not** a complete sandbox against an adversarial model.
   covers root `.git`, nested workspace gitdirs (e.g. `vendor/.../.git`),
   `.git/modules/**` (including multi-component module paths such as
   `modules/libs/foo/...`), and in-workspace gitfile targets (config/HEAD/
-  packed-refs, hooks/**, refs/**). A shared suffix classifier decides
-  sensitivity after an arbitrary `modules/**` prefix; ordinary module
-  metadata (index/objects/logs) is not auto-restored. Bounded no-symlink
-  discovery and hooks/refs tree walks fail closed on overflow
-  (`protected-path-write`; never partial inventory). Watched regular git
-  files are stream-hashed (SHA-256, chunked) regardless of size - never a
-  `stat:size:mtime:mode` fallback for oversized hooks. Snapshot/restore/guard
-  use the actual gitdir absolute path for gitfile roots (logical `.git/...`
-  keys never write under the gitfile itself). External linked common dirs
-  stay outside full inventory. Bulk ignored caches stay stat-only.
+  packed-refs, hooks/**, refs/**). Sensitivity under modules/** uses
+  discovered/snapshotted `git_roots` longest-prefix + shared suffix classifier
+  (module path components may be named hooks/refs/objects/logs; token peels
+  are not used). Ordinary module metadata (index/objects/logs) is not
+  auto-restored. Nested gitdir discovery is still bounded
+  (`MAX_NESTED_GIT_DISCOVERY`) and fail-closed on overflow; hooks/refs inventory
+  streams without an artificial file-count cap (real walk/read errors fail
+  closed as `protected-path-write`). Watched regular git files are
+  stream-hashed (SHA-256, chunked) regardless of size - never a
+  `stat:size:mtime:mode` fallback for oversized or unreadable hooks (open/
+  non-ENOENT lstat errors fail closed). Snapshot/restore/guard use the actual
+  gitdir absolute path for gitfile roots (logical `.git/...` keys never write
+  under the gitfile itself). External linked common dirs stay outside full
+  inventory. Bulk ignored caches stay stat-only.
 - **Patch secret denylist scan:** handoff patch generation fails closed on
   secret-shaped material and on exact injected-denylist occurrence in patch
   bytes (not pattern-only). Path inventory uses NUL-safe bytes with
@@ -174,10 +178,11 @@ gaps to paper over):
    restore to the **actual** absolute gitdir, never under a gitfile path.
    Sensitive set: `config` / `HEAD` / `packed-refs`, `hooks/**`, `refs/**`
    after any multi-component `.git/modules/**` path (moved branch or planted
-   hook/ref is reverted or removed). Nested discovery and hooks/refs walks are
-   bounded and fail-closed on overflow (no partial tree inventory). Watched
-   regular files stream-hash in bounded memory (including multi-MiB hooks).
-   Snapshot persists a `git_roots`
+   hook/ref is reverted or removed). Nested gitdir discovery is bounded and
+   fail-closed on overflow; hooks/refs walks stream fully (no artificial file
+   count). Watched regular files stream-hash in bounded memory (including
+   multi-MiB hooks); unreadable watched paths fail closed rather than using a
+   forgeable stat signature. Snapshot persists a `git_roots`
    prefix->actual-gitdir map used by restore even if a gitfile pointer is
    rewritten after the run. After-guard **unions** baseline roots with live
    discovery so new in-workspace redirect targets and plants still surface as

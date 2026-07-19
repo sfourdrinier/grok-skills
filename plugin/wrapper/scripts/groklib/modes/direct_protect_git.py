@@ -4,8 +4,9 @@
 # Single source for nested/modules/in-workspace-gitfile inventory used by
 # snapshot, restore, and git-dir guard. Sensitive-suffix classifier
 # (is_sensitive_git_suffix / is_sensitive_git_relative) covers multi-component
-# .git/modules/** paths; tree walks fail closed on MAX_GIT_TREE_WALK_FILES.
-# Keep snapshot/restore orchestration in direct_protect.py (900-line cap).
+# .git/modules/** paths; hooks/refs walks stream with no artificial file-count
+# cap (real OSError fails closed). Keep snapshot/restore orchestration in
+# direct_protect.py (900-line cap).
 
 from __future__ import annotations
 
@@ -18,46 +19,14 @@ from groklib import GrokWrapperError, log_stderr
 # Explicit sensitive file names under a gitdir (never walk objects).
 _GIT_SNAPSHOT_FILES: Tuple[str, ...] = ("config", "HEAD", "packed-refs")
 _GIT_SNAPSHOT_TREES: Tuple[str, ...] = ("hooks", "refs")
-# Top-level names that terminate a submodule path under modules/** and start a
-# real gitdir-relative path (or ordinary metadata). Used so multi-component
-# module names (modules/libs/foo/HEAD) work without overmatching logs/HEAD.
-_GITDIR_ROOT_ENTRIES = frozenset(
-    {
-        "HEAD",
-        "config",
-        "packed-refs",
-        "index",
-        "description",
-        "COMMIT_EDITMSG",
-        "ORIG_HEAD",
-        "FETCH_HEAD",
-        "MERGE_HEAD",
-        "AUTO_MERGE",
-        "CHERRY_PICK_HEAD",
-        "REVERT_HEAD",
-        "BISECT_LOG",
-        "shallow",
-        "commondir",
-        "gitdir",
-        "hooks",
-        "refs",
-        "objects",
-        "logs",
-        "info",
-        "worktrees",
-        "modules",
-        "rr-cache",
-        "svn",
-        "rebase-merge",
-        "rebase-apply",
-        "sequencer",
-        "cursor",
-    }
-)
 
-# Bound shared with the git-dir guard walk.
+# Historical default for the retired hooks/refs file-count cap (kept as a
+# named constant so tests can assert inventory past this bound still completes).
+# Tree walks no longer truncate or fail-closed on file count; they stream.
 MAX_GIT_TREE_WALK_FILES = 20000
-# Bound nested .git / gitfile discovery so ignored vendor caches cannot stall.
+# Bound nested .git / gitfile discovery so ignored vendor caches cannot stall
+# discovery of real gitdirs (pathological ignored trees). Distinct from the
+# retired per-tree file-count cap on hooks/refs inventory.
 MAX_NESTED_GIT_DISCOVERY = 2000
 
 
@@ -103,7 +72,8 @@ def is_sensitive_git_suffix(parts: Sequence[str]) -> bool:
     ``config`` / ``HEAD`` / ``packed-refs``, or ``hooks/**`` / ``refs/**``
     (at least one child under the tree). Ordinary metadata (``index``,
     ``objects/**``, ``COMMIT_EDITMSG``, ``logs/**``, ``description``) is not
-    sensitive.
+    sensitive. Callers must supply the true gitdir-relative remainder (via a
+    discovered ``git_roots`` prefix), not a guessed peel of ``modules/**``.
     """
     if not parts:
         return False
@@ -115,66 +85,74 @@ def is_sensitive_git_suffix(parts: Sequence[str]) -> bool:
     return False
 
 
-def _module_suffix_is_sensitive(parts_after_modules: Sequence[str]) -> bool:
-    """True when ``parts_after_modules`` is ``<module path>/<sensitive suffix>``.
+def is_sensitive_git_relative(
+    relative: str,
+    *,
+    git_roots: Optional[object] = None,
+) -> bool:
+    """True when ``relative`` is a guarded sensitive path under a known gitdir.
 
-    Module path is one or more components (``libs/foo``). The first component
-    that is a known gitdir root entry (HEAD/config/hooks/refs/logs/objects/...)
-    terminates the module path; the remainder is checked with
-    :func:`is_sensitive_git_suffix`. Nested ``modules/`` is left for the next
-    ``modules`` token rather than treated as a suffix.
-    """
-    if len(parts_after_modules) < 2:
-        return False
-    for i in range(1, len(parts_after_modules)):
-        name = parts_after_modules[i]
-        if name == "modules":
-            # Nested modules/<name>/modules/<name2>/... handled by outer walk.
-            return False
-        if name not in _GITDIR_ROOT_ENTRIES:
-            continue
-        return is_sensitive_git_suffix(parts_after_modules[i:])
-    return False
+    Authority is discovered / snapshotted ``git_roots`` (logical prefix -> abs
+    gitdir), not token-name heuristics: module path components may legitimately
+    be named ``hooks`` / ``refs`` / ``objects`` / ``logs``, so scanning for the
+    first reserved token misclassifies ordinary module metadata.
 
+    When ``git_roots`` is provided, the longest matching prefix wins and the
+    remainder is classified with :func:`is_sensitive_git_suffix`. Without roots,
+    only free-standing under-``.git`` paths (no ``modules/``) and the common
+    single-component ``modules/<name>/...`` layout are classified (legacy tests /
+    callers without discovery). Multi-component or reserved-name modules require
+    ``git_roots``.
 
-def is_sensitive_git_relative(relative: str) -> bool:
-    """True when ``relative`` is a guarded sensitive path under any workspace ``.git``.
-
-    Covers root ``.git``, nested repo/submodule gitdirs (e.g. ``vendor/lib/.git``),
-    and ``.git/modules/**`` (submodule metadata under the superproject). Module
-    path components after ``modules/`` may be multi-level (``modules/libs/foo``);
-    sensitivity is decided by the shared :func:`is_sensitive_git_suffix` once the
-    real gitdir root entry after that prefix is found. Sensitive set:
-    config/HEAD/packed-refs, hooks/**, refs/**. Not sensitive: index,
-    COMMIT_EDITMSG, objects/**, logs/**, and other working-state metadata.
-    """
-    under = _git_rel_parts(relative)
-    if under is None or not under:
-        return False
-    # Root / nested free-standing gitdir: suffix is the whole under-.git path.
-    if is_sensitive_git_suffix(under):
-        return True
-    # Every modules/ token (root modules/ or nested modules/<x>/modules/<y>).
-    for i, part in enumerate(under):
-        if part != "modules":
-            continue
-        if _module_suffix_is_sensitive(under[i + 1 :]):
-            return True
-    return False
-
-
-def is_snapshot_scope(relative: str) -> bool:
-    """True when a protected path is in the pre-run snapshot set if it exists.
-
-    Sensitive git metadata (any workspace ``.git`` / ``.git/modules/**``) plus
-    non-git deny-glob matches (``.env``, keys, ...). ``.git/index`` /
-    ``.git/COMMIT_EDITMSG`` and loose objects are not auto-restored when absent
-    from the snapshot.
+    Sensitive set: config/HEAD/packed-refs, hooks/**, refs/**. Not sensitive:
+    index, COMMIT_EDITMSG, objects/**, logs/**, and other working-state metadata.
     """
     rel = _posix_rel(relative)
     if not rel:
         return False
-    if is_sensitive_git_relative(rel):
+    roots = _normalize_git_roots(git_roots)
+    if roots:
+        for prefix, _abs in sorted(roots, key=lambda item: len(item[0]), reverse=True):
+            pfx = _posix_rel(str(prefix)).rstrip("/")
+            if not pfx:
+                continue
+            if rel == pfx:
+                # Bare logical gitdir key (marker or dir root) is not a file suffix.
+                return False
+            if rel.startswith(pfx + "/"):
+                rest = rel[len(pfx) + 1 :]
+                return is_sensitive_git_suffix(
+                    tuple(p for p in rest.split("/") if p)
+                )
+        return False
+    under = _git_rel_parts(rel)
+    if under is None or not under:
+        return False
+    # Free-standing (root or nested vendor/.../.git without modules prefix).
+    if under[0] != "modules":
+        return is_sensitive_git_suffix(under)
+    # Legacy single-component modules/<name>/... without discovery context.
+    if len(under) >= 3:
+        return is_sensitive_git_suffix(under[2:])
+    return False
+
+
+def is_snapshot_scope(
+    relative: str,
+    *,
+    git_roots: Optional[object] = None,
+) -> bool:
+    """True when a protected path is in the pre-run snapshot set if it exists.
+
+    Sensitive git metadata (any workspace ``.git`` / ``.git/modules/**`` under
+    known ``git_roots``) plus non-git deny-glob matches (``.env``, keys, ...).
+    ``.git/index`` / ``.git/COMMIT_EDITMSG`` and loose objects are not
+    auto-restored when absent from the snapshot.
+    """
+    rel = _posix_rel(relative)
+    if not rel:
+        return False
+    if is_sensitive_git_relative(rel, git_roots=git_roots):
         return True
     if rel == ".git" or "/.git/" in ("/" + rel + "/") or rel.startswith(".git/"):
         # Other .git/* is detect-only (deny matches) without snapshot auto-delete
@@ -190,26 +168,21 @@ def iter_git_tree_entries(
     tree_name: str,
     *,
     rel_prefix: Optional[str] = None,
-    max_files: Optional[int] = None,
 ) -> Iterable[Tuple[str, pathlib.Path]]:
     """Yield ``(<rel_prefix>/<tree>/..., abs path)`` under ``git_dir/<tree>``.
 
     Single inventory for protected snapshot and git-dir guard: recursive,
-    ``followlinks=False``, regular files and symlinks only, bounded by
-    ``max_files`` (defaults to ``MAX_GIT_TREE_WALK_FILES`` at call time).
-    Hitting the bound **fail-closes** with ``protected-path-write`` (never
-    silently returns a partial inventory or relies on an over-cap count
-    sentinel). ``git_dir`` may be the common dir of a linked worktree or a
-    nested repo/module gitdir. ``rel_prefix`` defaults to ``.git``.
+    ``followlinks=False``, regular files and symlinks only. Streams the full
+    tree with no artificial file-count cap (trusted repo input; hooks/refs must
+    be complete). Real ``OSError`` during walk is logged; callers that need
+    fail-closed on resource errors should re-walk with stricter policy.
+    ``git_dir`` may be the common dir of a linked worktree or a nested
+    repo/module gitdir. ``rel_prefix`` defaults to ``.git``.
     """
-    if max_files is None:
-        max_files = MAX_GIT_TREE_WALK_FILES
     root = pathlib.Path(git_dir) / tree_name
     if not root.is_dir():
         return
-    count = 0
     prefix = (rel_prefix or ".git").rstrip("/") + "/" + tree_name + "/"
-    logical_root = (rel_prefix or ".git").rstrip("/")
     try:
         for dirpath, dirnames, filenames in os.walk(str(root), followlinks=False):
             dirnames.sort()
@@ -217,27 +190,20 @@ def iter_git_tree_entries(
                 child = pathlib.Path(dirpath) / fname
                 if not _is_snapshot_candidate(child):
                     continue
-                if count >= max_files:
-                    raise GrokWrapperError(
-                        "protected-path-write",
-                        "git tree walk exceeded bound under {}/{}; fail closed "
-                        "rather than partial inventory".format(
-                            logical_root, tree_name
-                        ),
-                        {
-                            "maxFiles": max_files,
-                            "tree": tree_name,
-                            "relPrefix": logical_root,
-                        },
-                    )
                 rel = prefix + _posix_rel(os.path.relpath(str(child), str(root)))
                 yield rel, child
-                count += 1
     except OSError as exc:
         _log(
             "iter_git_tree_entries",
             "{} walk failed: {}".format(tree_name, exc),
         )
+        raise GrokWrapperError(
+            "protected-path-write",
+            "git tree walk failed under {}/{}; fail closed".format(
+                (rel_prefix or ".git").rstrip("/"), tree_name
+            ),
+            {"tree": tree_name, "error": str(exc)},
+        ) from exc
 
 
 def _read_gitfile_dir(gitfile: pathlib.Path) -> Optional[pathlib.Path]:
@@ -530,7 +496,6 @@ def merge_git_root_pairs(
 def iter_sensitive_git_entries(
     repo_root: pathlib.Path,
     *,
-    max_files_per_tree: Optional[int] = None,
     git_roots: Optional[object] = None,
     also_live: bool = False,
 ) -> Iterable[Tuple[str, pathlib.Path]]:
@@ -543,12 +508,9 @@ def iter_sensitive_git_entries(
     When ``git_roots`` is provided (snapshot baseline), those prefix->abs mappings
     are used. With ``also_live=True``, live discovery is **unioned** so a post-run
     in-workspace pointer redirect's new-side plants are still fingerprinted, while
-    baseline abs paths remain for original common continuity. Tree walks use
-    ``max_files_per_tree`` (default ``MAX_GIT_TREE_WALK_FILES`` at call time) and
-    fail closed on overflow.
+    baseline abs paths remain for original common continuity. Hooks/refs walks
+    stream without an artificial file-count cap.
     """
-    if max_files_per_tree is None:
-        max_files_per_tree = MAX_GIT_TREE_WALK_FILES
     roots = _normalize_git_roots(git_roots)
     if also_live or not roots:
         live = list(discover_workspace_git_roots(repo_root))
@@ -565,7 +527,6 @@ def iter_sensitive_git_entries(
                 pathlib.Path(git_dir),
                 tree,
                 rel_prefix=rel_prefix,
-                max_files=max_files_per_tree,
             ):
                 yield rel, abs_path
 

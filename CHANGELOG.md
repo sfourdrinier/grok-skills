@@ -17,15 +17,21 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 
 - **Nested `.git/modules/**` suffix classifier:** multi-component submodule paths
   (e.g. `modules/libs/foo/hooks/pre-commit`, `modules/a/b/c/refs/heads/x`) are
-  sensitive via a shared `is_sensitive_git_suffix` used by snapshot scope/restore;
-  ordinary module metadata (index/objects/logs) stays non-sensitive.
-- **Git tree walk fail-closed:** `iter_git_tree_entries` hitting
-  `MAX_GIT_TREE_WALK_FILES` raises `protected-path-write` (no partial inventory,
-  no over-cap count sentinel); snapshot + guard callers propagate the same class.
+  sensitive via discovered/snapshotted `git_roots` longest-prefix + shared
+  `is_sensitive_git_suffix` (not reserved-token peels - module names may be
+  `hooks`/`refs`/`objects`/`logs`). Ordinary module metadata stays non-sensitive.
+- **Git tree walk uncapped stream:** hooks/refs inventory no longer truncates or
+  reject-closes on an arbitrary file count (retired artificial 20k bound);
+  streams the full tree. Real walk `OSError` fails closed as
+  `protected-path-write`. Nested gitdir discovery still bounds
+  `MAX_NESTED_GIT_DISCOVERY` (pathological ignored trees), distinct from hooks/refs.
 - **Stream-hash oversized watched git files:** `_git_watch_sig` always
   SHA-256-streams regular files in bounded chunks (never `stat:size:mtime:mode`
   for oversized hooks); same-size rewrite with restored mtime is detected.
   Symlinks record target only; non-regular paths keep a type/stat signature.
+- **Unreadable watched git path fail-closed:** open/read or non-ENOENT lstat
+  errors on a regular watched file raise `protected-path-write` (no stat
+  fallback that would hide a same-size rewrite). True absence stays `absent`.
 
 ### Added (Phase 0 - hygiene, PR6)
 
