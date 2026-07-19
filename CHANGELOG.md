@@ -122,10 +122,11 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 
 - **ACP peer channel** (hardened only; wrapper + companion): `peer
   start|prompt|stop` drive a long-lived `grok agent stdio` (ACP) session with
-  start parity (sandbox capability, tool allowlist, cwd sentinel contract, baseline,
-  no .env) before the first prompt - start verifies the contract and does not plant
-  the sentinel; the model creates it on first prompt. Wrapper-owned 0600 control
-  socket (not a FIFO);
+  start parity (sandbox policy/profile, tool allowlist, no .env, private-home
+  posture, baseline capture) before the first prompt. Start neither plants nor
+  verifies the cwd sentinel; the first prompt instructs the model to create it,
+  and peer-stop requires sentinel proof only when `promptsHandled > 0`.
+  Wrapper-owned 0600 control socket (not a FIFO);
   peer.json records wrapper+child pid/starttime and the start
   `originalBaseline`; run.json records `worktreePath` / lifecycle so
   `cleanup --run-id` can remove the external worktree after peer-stop
@@ -330,11 +331,13 @@ already resolved or stale after the re-architecture are noted as such above.
 
 ### Fixed (Phase 7 - docs/runtime honesty residual)
 
-- **Start parity sentinel honesty:** `plugin/skills/peer/SKILL.md` and the ACP
-  peer-channel design spec now match `peer_process.assert_start_parity` - start
-  requires/verifies the cwd sentinel **contract** but does **not** plant it; the
-  model creates the sentinel on first prompt. Phase 5 changelog wording updated
-  to say "sentinel contract" the same way.
+- **Start parity sentinel honesty:** `plugin/skills/peer/SKILL.md`, the ACP
+  peer-channel design spec, and Phase 5 changelog wording now match
+  `peer_process.assert_start_parity` exactly - start verifies sandbox
+  policy/profile, tools, `.env` absence, and private-home posture; it neither
+  plants nor verifies the cwd sentinel. The first peer prompt instructs the
+  model to create the sentinel; peer-stop requires sentinel proof only when
+  `promptsHandled > 0`.
 - **ACP `clientInfo.version`:** initialize advertises packaging-stable `2.0.0`
   (not `experimental`); unit coverage asserts the initialize payload.
 - **implementation-handoff checklist:** trailing whitespace removed from the

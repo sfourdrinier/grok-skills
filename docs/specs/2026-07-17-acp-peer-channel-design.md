@@ -57,16 +57,18 @@ private-home destroy, terminalize run record.
 
 ## Confinement and isolation (honest parity)
 
-- Start parity (fail closed before first prompt): sandbox profile capability,
-  tool allowlist (or hard-refuse if empty), mcpServers [], web policy,
-  original_baseline + pristine gate scripts captured, no .env copy. Start
-  parity requires/verifies the cwd sentinel **contract** but does **not**
-  plant the sentinel - the model creates `.grok-run-<run-id>` as its mandatory
-  first action on the first peer-prompt (same as code mode; see
-  `peer_process.assert_start_parity`), so stop-time proof is genuine. Child
-  argv pins the same global C6 tool / permission / web / sandbox flags the
-  running envelope advertises (probe-accepted placement before `agent stdio`;
-  see `peer_process.build_acp_stdio_argv`).
+- Start parity (fail closed before first prompt): `peer_process.assert_start_parity`
+  checks sandbox policy/profile, non-empty tool allowlist, no `.env` /
+  `.env.local` in the worktree, and private-home posture (dir + 0700 on POSIX).
+  Broader start also pins mcpServers [], web policy, and captures
+  original_baseline + pristine gate scripts. Start parity neither plants nor
+  verifies the cwd sentinel - the first peer-prompt prepends the sentinel
+  directive so the model creates `.grok-run-<run-id>` as its mandatory first
+  action (same as code mode). Peer-stop requires sentinel proof only when
+  `promptsHandled > 0` (zero-prompt sessions are exempt). Child argv pins the
+  same global C6 tool / permission / web / sandbox flags the running envelope
+  advertises (probe-accepted placement before `agent stdio`; see
+  `peer_process.build_acp_stdio_argv`).
 - Stop: `verify_enforcement` against the private home/policy when possible.
   Failure adds a `sandbox-failure` blocker (forces not-ready).
   Do **not** claim "full code-mode isolation stack" when ACP did not produce
@@ -158,9 +160,11 @@ with `applied=true`. Peer-stop is **not** completion-notification eligible
 1. CONTROL PLANE: wrapper-owned unix domain socket (0600, companion uid only).
 2. CRASH/REAPER: peer.json records wrapper + child pid/starttime; MAX_PEER_LEASE
    separate from MAX_RUN_TIMEOUT; start baseline persisted for crash-stop.
-3. START PARITY: fail closed before first prompt (sandbox capability, tools,
-   mcpServers [], web, sentinel contract (not planted; model creates on first
-   prompt), baseline, no .env).
+3. START PARITY: fail closed before first prompt (sandbox policy/profile,
+   tools, mcpServers [], web, baseline, no .env / private-home posture). The
+   cwd sentinel is neither planted nor verified at start; the first prompt
+   instructs the model to create it, and peer-stop requires proof only when
+   promptsHandled > 0.
 4. REDACTION: control-socket + turn envelopes scanned; multi-frame residual
    risk documented; child stderr dropped or redacted.
 5. HANDOFF: `/grok:handoff` is code-mode only (refuses peer runIds); peer runs
