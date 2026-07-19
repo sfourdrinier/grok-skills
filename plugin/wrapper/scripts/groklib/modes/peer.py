@@ -62,6 +62,7 @@ from groklib.modes.peer_process import (
 )
 from groklib.peer_doc import (
     mark_peer_died_if_allowed,
+    max_prompts_handled,
     patch_lease_expires,
     read_peer_doc_unlocked,
     write_peer_doc_unlocked,
@@ -145,16 +146,11 @@ class PeerSession:
             )
             self.peer_doc["leaseExpiresAt"] = disk.get("leaseExpiresAt", expires)
             if "promptsHandled" in disk:
-                # Finalization / sentinel use max(safe disk, in-memory proposed).
-                disk_n = disk.get("promptsHandled")
-                mem_n = prompts_handled
-                if isinstance(disk_n, (int, float)) and not isinstance(disk_n, bool):
-                    safe = int(disk_n)
-                    if isinstance(mem_n, (int, float)) and not isinstance(mem_n, bool):
-                        safe = max(safe, int(mem_n))
-                    self.peer_doc["promptsHandled"] = safe
-                else:
-                    self.peer_doc["promptsHandled"] = disk_n
+                # Disk already raised via peer_doc.max_prompts_handled SSOT; re-max
+                # with in-memory so a concurrent higher resident count stays visible.
+                self.peer_doc["promptsHandled"] = max_prompts_handled(
+                    prompts_handled, disk.get("promptsHandled")
+                )
         except (OSError, GrokWrapperError) as exc:
             if require_prompts_persist:
                 raise GrokWrapperError(
@@ -184,6 +180,56 @@ def _extract_chunk_text(notification: dict) -> str:
     return ""
 
 
+_NON_PROMPTABLE_LIFECYCLES = frozenset({"stopping", "stopped", "failed", "died"})
+
+
+def _refuse_if_not_promptable(session: PeerSession) -> None:
+    """Fail closed when local or disk lifecycle is already stop/terminal owned."""
+    if getattr(session, "_stop_requested", False):
+        raise GrokWrapperError(
+            "acp-failure",
+            "peer session stop already requested; refusing further prompts",
+            {"runId": session.run_id, "hint": "reattach-unsupported"},
+        )
+    peer_doc = getattr(session, "peer_doc", None) or {}
+    life = peer_doc.get("lifecycle") if isinstance(peer_doc, dict) else None
+    if life in _NON_PROMPTABLE_LIFECYCLES:
+        raise GrokWrapperError(
+            "acp-failure",
+            "peer session lifecycle is {!r}; reattach unsupported - peer-stop then peer-start".format(
+                life
+            ),
+            {"runId": session.run_id, "lifecycle": life, "hint": "reattach-unsupported"},
+        )
+    # Best-effort disk re-check so a concurrent peer-stop claim is not raced by a
+    # resident control prompt that still holds a stale in-memory lifecycle=running.
+    # Unreadable / missing peer.json must NOT refuse the prompt here: local checks
+    # already applied, and start/test fixtures may prompt before peer.json exists.
+    try:
+        disk = read_peer_doc_unlocked(session.run_paths)
+    except Exception:
+        return
+    if not isinstance(disk, dict):
+        return
+    disk_life = disk.get("lifecycle")
+    if disk_life not in _NON_PROMPTABLE_LIFECYCLES:
+        return
+    session.peer_doc["lifecycle"] = disk_life
+    if "stopOwner" in disk:
+        session.peer_doc["stopOwner"] = disk.get("stopOwner")
+    raise GrokWrapperError(
+        "acp-failure",
+        "peer session lifecycle is {!r}; reattach unsupported - peer-stop then peer-start".format(
+            disk_life
+        ),
+        {
+            "runId": session.run_id,
+            "lifecycle": disk_life,
+            "hint": "reattach-unsupported",
+        },
+    )
+
+
 def _handle_prompt(session: PeerSession, task: str) -> dict:
     """Run one serialized session/prompt; relay redacted chunks; return turn envelope."""
     if session._prompt_in_flight or not session._prompt_lock.acquire(blocking=False):
@@ -194,6 +240,7 @@ def _handle_prompt(session: PeerSession, task: str) -> dict:
         )
     session._prompt_in_flight = True
     try:
+        _refuse_if_not_promptable(session)
         # Child liveness
         child = session.child
         if child is not None and getattr(child, "poll", lambda: None)() is not None:

@@ -121,12 +121,10 @@ def patch_lease_expires(
         patched = dict(doc)
         patched["leaseExpiresAt"] = float(lease_expires_at)
         if prompts_handled is not None:
-            proposed = int(prompts_handled)
-            current = doc.get("promptsHandled")
-            if isinstance(current, (int, float)) and not isinstance(current, bool):
-                patched["promptsHandled"] = max(int(current), proposed)
-            else:
-                patched["promptsHandled"] = proposed
+            # Shared SSOT with finalize / sentinel sync (never lower the durable count).
+            patched["promptsHandled"] = max_prompts_handled(
+                prompts_handled, doc.get("promptsHandled")
+            )
         return patched
 
     return mutate_peer_doc(run_paths, _mutator)

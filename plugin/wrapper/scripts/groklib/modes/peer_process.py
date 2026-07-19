@@ -230,17 +230,22 @@ def kill_recorded_child(doc: dict, *, proc: Any = None) -> None:
     child_pid = child.get("pid")
     child_token = child.get("startToken")
     if not isinstance(child_pid, int) or not isinstance(child_token, str) or not child_token:
+        # Missing identity: never kill. Still drop a known resident Popen handle.
         if proc is not None:
             unregister_active_child(proc)
         return
     try:
         if not platformsupport.process_is_alive(child_pid):
-            if proc is not None:
-                unregister_active_child(proc)
+            # Safe terminal path: process already gone. Unregister by pid so fallback
+            # peer-stop (no resident Popen) does not leave a stale SIGTERM entry.
+            unregister_active_child(proc if proc is not None else child_pid)
             return
         current = platformsupport.process_start_token(child_pid)
         if current is None or current != child_token:
-            return  # cannot positively confirm identity; do not kill
+            # Identity mismatch / recycled pid: never kill the live process, but drop
+            # any active-proc registry entry for the recorded pid (stale handle only).
+            unregister_active_child(proc if proc is not None else child_pid)
+            return
         # Never killpg a process in OUR OWN group: the real ACP child is spawned
         # in a NEW group (spawn_kwargs_new_group), so a same-group pid is either a
         # mis-detached child or a test-recorded pid, and killing its group would

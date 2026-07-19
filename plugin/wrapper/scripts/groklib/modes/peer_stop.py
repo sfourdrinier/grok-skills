@@ -534,7 +534,16 @@ def _finalize_and_mark(
         # a later stopper can reclaim after grace (never poison as terminal).
         raise
     marked, durable = _mark_terminal_if_durable(run_paths, env)
-    if marked and durable is not None:
+    if durable is not None:
+        # Durable terminal envelope is SSOT. Lifecycle mark is best-effort alignment
+        # under lock; if mark_peer_lifecycle fails after durable success/failure, still
+        # return the durable envelope and leave reclaimable stopping for later align.
+        # Never invent a missing-durable failure when durable evidence exists.
+        if not marked:
+            _log(
+                "_finalize_and_mark",
+                "durable terminal present but lifecycle mark failed; returning durable",
+            )
         return durable
     # Finalize returned an envelope but durable evidence is missing: do NOT mark
     # peer.json terminal. Prefer returning a failure shape so callers do not treat
