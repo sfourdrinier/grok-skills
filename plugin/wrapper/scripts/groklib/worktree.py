@@ -22,7 +22,7 @@ import tempfile
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from groklib import GrokWrapperError, log_stderr
-from groklib import platformsupport, runstate
+from groklib import path_inventory, platformsupport, runstate
 
 _BRANCH_PREFIX = "grok/code/"
 # Run-bound branches that cleanup may delete (code + opt-in review isolation).
@@ -542,9 +542,8 @@ def verify_external_worktree(wt: ExternalWorktree) -> None:
 
 def diff_summary(wt: ExternalWorktree) -> Tuple[List[str], str]:
     """Return (changed worktree-relative paths incl. untracked, `git diff --stat` text vs base)."""
-    tracked = _git(wt.path, "diff", "--name-only", wt.base_revision).splitlines()
-    untracked = _git(wt.path, "ls-files", "--others", "--exclude-standard").splitlines()
-    changed = sorted({entry for entry in (tracked + untracked) if entry})
+    # path_inventory is the single NUL-safe path lister (default core.quotePath safe).
+    changed = path_inventory.list_working_tree_changed_paths(wt.path, wt.base_revision)
     stat_text = _git(wt.path, "diff", "--stat", wt.base_revision)
     return changed, stat_text
 
@@ -611,7 +610,8 @@ def diff_since_snapshot(wt: ExternalWorktree, entry_tree: str) -> Tuple[List[str
     when it is both gitignored AND under a build-artifact dir, flagging e.g. .env.local.
     """
     exit_tree = capture_worktree_snapshot(wt)
-    names = _git(wt.path, "diff", "--name-only", entry_tree, exit_tree).splitlines()
+    # path_inventory: tree-to-tree --name-only -z (never C-quoted phantom keys).
+    names = path_inventory.list_diff_name_only(wt.path, entry_tree, exit_tree)
     changed = sorted({entry for entry in names if entry})
     stat_text = _git(wt.path, "diff", "--stat", entry_tree, exit_tree)
     return changed, stat_text

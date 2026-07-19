@@ -35,6 +35,32 @@ class RepoChangeFingerprintTests(WorktreeTestBase):
         self.assertIn("a.txt", changed, "a rewrite of an already-dirty file must be detected")
         self.assertNotIn("dirty.txt", changed, "the operator's untouched pre-existing dirt is not flagged")
 
+    def test_fingerprint_uses_real_non_ascii_path_under_default_quotepath(self) -> None:
+        # Default core.quotePath C-quotes non-ASCII names from non-z path listers
+        # (e.g. "caf\303\251.txt"). Fingerprints must key on the real relative path
+        # so rewrite detection and dirty-overlap never miss café.txt.
+        _git(self.repo_root, "config", "core.quotePath", "true")
+        dirty = self.repo_root / "café.txt"
+        dirty.write_text("operator dirt v1\n", encoding="utf-8")
+        before = repo_change_fingerprint(self.repo_root)
+        before_paths = {path for path, _fp in before}
+        self.assertIn("café.txt", before_paths)
+        self.assertFalse(
+            any("\\303" in path or path.startswith('"') for path in before_paths),
+            "must not store C-quoted phantom keys from non-z path listing: {!r}".format(
+                sorted(before_paths)
+            ),
+        )
+
+        dirty.write_text("run-attributable rewrite\n", encoding="utf-8")
+        after = repo_change_fingerprint(self.repo_root)
+        changed = {path for path, _fp in (after - before)}
+        self.assertIn(
+            "café.txt",
+            changed,
+            "rewrite of non-ASCII dirty path must be detected under default quotePath",
+        )
+
 class AssertChangesWithinTests(WorktreeTestBase):
     def test_assert_changes_within_flags_outside_writes(self) -> None:
         wt = self._create()

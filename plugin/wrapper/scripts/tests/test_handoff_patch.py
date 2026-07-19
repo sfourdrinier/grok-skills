@@ -122,6 +122,16 @@ class Phase1PatchTests(unittest.TestCase):
         names = [p["path"] for p in paths]
         self.assertIn("has space.txt", names)
 
+    def test_non_ascii_path_under_default_quotepath(self) -> None:
+        # list_changed_paths must return the real relative path for café.txt under
+        # default core.quotePath (raw -z bytes, never C-quoted phantom keys).
+        _git(self.repo, "config", "core.quotePath", "true")
+        (self.repo / "café.txt").write_text("ok\n", encoding="utf-8")
+        paths = list_changed_paths(self.repo, self.base)
+        names = [p["path"] for p in paths]
+        self.assertIn("café.txt", names)
+        self.assertFalse(any("\\303" in name or name.startswith('"') for name in names))
+
     def test_oversized_patch_fail_closed(self) -> None:
         (self.repo / "big.txt").write_bytes(b"Z" * 2000)
         with mock.patch.dict(os.environ, {"GROK_HANDOFF_PATCH_MAX_BYTES": str(100)}):

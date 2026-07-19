@@ -347,6 +347,27 @@ class DirectModeSecurityTests(DirectModeHarness):
         self.assertIn("dirty.txt", json.dumps(env["error"]))
         self.assertIn("--force", json.dumps(env["error"]))
 
+    def test_dirty_overlap_non_ascii_path_fails_without_force(self) -> None:
+        # Default core.quotePath C-quotes non-ASCII names from non-z path listers.
+        # dirty_paths and the post-run changed set must both use the real relative
+        # path so overlap still blocks without --force (fail closed, not open).
+        repo = self.make_code_repo()
+        self._git(repo, "config", "core.quotePath", "true")
+        dirty = repo / "café.txt"
+        dirty.write_text("operator dirt v1\n", encoding="utf-8")
+
+        def _plant(repo_root: pathlib.Path, _run_id: str) -> None:
+            (repo_root / "café.txt").write_text("grok also touched\n", encoding="utf-8")
+
+        exit_code, out = self.drive_direct(self._direct_argv(), repo_root=repo, plant=_plant)
+        env = json.loads(out)
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(env["error"]["class"], "dirty-path-conflict")
+        overlapping = env["error"].get("detail", {}).get("overlappingPaths") or []
+        self.assertIn("café.txt", overlapping)
+        self.assertFalse(any("\\303" in p or p.startswith('"') for p in overlapping))
+        self.assertIn("--force", json.dumps(env["error"]))
+
     def test_dirty_overlap_allowed_with_force(self) -> None:
         repo = self.make_code_repo()
         dirty = repo / "dirty.txt"
