@@ -41,7 +41,7 @@ function tempCwd() {
 }
 
 const TRUST_SUMMARY_RE =
-  /Direct integration lets Grok edit files in THIS working tree directly/i;
+  /Direct integration is the consented landing default/i;
 const SETUP_CMD_RE = /setup --integration direct/;
 
 test("RED: default code (no consent) refuses with trust summary; wrapper not spawned", () => {

@@ -71,7 +71,8 @@ GROK_RUN handoff --run-id '<runId from the code envelope>'
 Require dual-condition ready (`response.integration.ready`) before any parent
 apply on isolated modes. Integrate is mode-aware
 (`plugin/references/integration-modes.md`: review = manual parent apply; auto
-may apply on ready; direct = live tree). Never commit, merge, or push. Notify
+may apply on ready; one-shot code direct = live tree; ACP peer always external
+worktree with stop-time apply for direct/auto). Never commit, merge, or push. Notify
 is not ready. See `skills/handoff/SKILL.md`.
 
 Never invent target/base. Never `--task "..."`. Single-quote flag values.

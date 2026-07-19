@@ -67,7 +67,7 @@ SANDBOX_PROFILE_BY_MODE: Dict[str, str] = {
     "reason": "read-only",
     "code": "workspace",
     "verify": "workspace",
-    # Experimental ACP peer channel (start parity with code).
+    # Default-on ACP peer channel (start parity with code; opt out GROK_DISABLE_ACP=1).
     "peer": "workspace",
     # Hardened-direct: Grok edits the operator repo root (no worktree).
     "direct": "workspace",

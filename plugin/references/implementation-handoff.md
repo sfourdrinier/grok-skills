@@ -108,26 +108,28 @@ characters; only operator-supplied contract paths reject Windows drive forms.
 Mode-aware integrate (canonical:
 [integration-modes.md](integration-modes.md)):
 
-- **direct:** source edits already live in the operator tree; protected paths
-  rolled back if touched. No patch gate required for the edit to exist.
-- **auto:** companion may auto-apply after dual-condition ready + apply-time
-  revalidation (patch integrity recheck + shared dirty-guard apply spine - see
-  [integration-modes.md](integration-modes.md)). Use this checklist only if
-  apply did not run or failed.
-- **review:** never auto-applies - use the checklist below.
-- **peer:** integrate at `peer stop` via the same spine; `/grok:handoff` refuses
-  peer runIds.
+- **code direct:** source edits already live in the operator tree; protected
+  paths rolled back if touched. No patch gate required for the edit to exist.
+- **code auto:** companion may auto-apply after dual-condition ready +
+  apply-time revalidation (patch integrity recheck + shared dirty-guard apply
+  spine - see [integration-modes.md](integration-modes.md)). Use this checklist
+  only if apply did not run or failed.
+- **code review:** never auto-applies - use the checklist below.
+- **ACP peer:** always external worktree during the session; at ready
+  `peer stop`, `direct`/`auto` apply via the same spine (direct needs consent),
+  `review` retains. `/grok:handoff` refuses peer runIds (code-mode only).
 
 ### Manual apply (review / when auto did not apply)
 
-1. `handoff --run-id` success + ready  
-2. Confirm base still present / ancestry  
-3. Dirty overlap check on target paths (prefer `git status --porcelain -z`)  
-4. Confirm patch bytes/sha still match the handoff manifest  
-5. `git apply --check --binary path/to/implementation.patch`  
-6. Explicit apply only with operator intent  
-7. Re-run project validation on parent  
-8. Record runId + patch sha256  
+1. `handoff --run-id` success + ready
+2. Confirm base still present / ancestry
+3. Dirty overlap inventory on target paths (`git status --porcelain -z`)
+4. Explicit patch integrity recheck: on-disk patch bytes/size/sha still match the
+   handoff manifest (same integrity gate auto/peer re-run before apply)
+5. `git apply --check --binary path/to/implementation.patch`
+6. Explicit apply only with operator intent
+7. Re-run project validation on parent
+8. Record runId + patch sha256
 
 **Never** auto-commit, merge, cherry-pick, or push from this plugin in any mode.
 

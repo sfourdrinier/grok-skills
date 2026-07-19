@@ -63,8 +63,10 @@ the Grok CLI is ready.
 The ACP peer channel is the default multi-turn peer path. Opt out (force
 one-shot `code`) with `export GROK_DISABLE_ACP=1`. Spec:
 `docs/specs/2026-07-17-acp-peer-channel-design.md` (Amendments supersede draft).
-Peer-stop applies its verified patch itself per the active `--integration` mode
-(review retains; auto/direct apply); it is not eligible for `/grok:handoff`.
+Peer always runs in an external retained worktree. Peer-stop applies its
+verified patch itself per the active `--integration` mode (review retains;
+auto/direct apply - direct needs consent; peer direct is stop-time apply, not
+live-edit). It is not eligible for `/grok:handoff`.
 
 Live smoke (start -> two prompts -> stop), recorded 2026-07-17
 against grok 0.2.102 on a throwaway git repo (`note.txt` only):
@@ -72,9 +74,10 @@ against grok 0.2.102 on a throwaway git repo (`note.txt` only):
 ```bash
 export CLAUDE_PLUGIN_ROOT=/absolute/path/to/grok-skills/plugin
 # peer-start (background resident wrapper; one running envelope). ACP is the
-# default channel; pass --integration review to retain the patch for review.
+# default channel. --integration is per-invocation on companion/peer-stop only
+# (peer-start does not persist it); pass it on the stop that determines landing.
 node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" peer start \
-  --target . --base HEAD --integration review
+  --target . --base HEAD
 # Capture runId + socketPath from the running envelope, then:
 node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" peer prompt \
   --run-id '<runId>' --task-file - <<'GROK_TASK'
@@ -84,8 +87,11 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" peer prompt \
   --run-id '<runId>' --task-file - <<'GROK_TASK'
 Reply with exactly: PEER-PONG-2
 GROK_TASK
-# peer-stop finalizes: real validation, then apply per --integration mode.
-node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" peer stop --run-id '<runId>'
+# peer-stop finalizes: real validation, then apply/retain per --integration.
+# review|worktree retain the verified patch; auto/direct apply when ready
+# (direct needs consent). Landing is controlled here, not at peer-start.
+node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" peer stop \
+  --run-id '<runId>' --integration review
 ```
 
 Transcript tail (2026-07-17 live, runId `20260717T110823Z-140ae8`):
@@ -104,9 +110,11 @@ Expect: start `status: running` with `response.peer.sessionId` + `socketPath`;
 each prompt one redacted turn envelope; stop finalizes with
 `implementation-handoff.json` carrying `confinement: "worktree-final-diff-only"`
 (unless a scopes contract was supplied) and private home destroyed. The
-companion rewrites the peer-stop envelope with the real apply outcome before
-stdout/store/job finalize (blocked apply = failure, not raw wrapper success).
-Peer-stop is **not** completion-notification eligible. With
+companion rewrites the peer-stop envelope with the real apply outcome under
+rewrite-before-write/store/finalize (onStdout computes final
+emitStdout/effectiveCode before first write; then write; then storeJobStdout;
+then updateJob/finalize; then notify). Blocked apply = failure, not raw wrapper
+success. Peer-stop is **not** completion-notification eligible. With
 `GROK_DISABLE_ACP=1`, the companion refuses peer modes with a one-line pointer
 to the spec. Control socket lives under the private home (short AF_UNIX path),
 not the run dir.
@@ -119,11 +127,25 @@ not the run dir.
 - [ ] `/grok:reason --task "Reply with exactly: PONG"` → success envelope
 - [ ] `/grok:review --target . --task "list top risks"` → one review envelope (live checkout)
 - [ ] `/grok:review --target . --isolated --task "list risks"` → isolation worktree cleaned after run
-- [ ] `/grok:code --target . --base HEAD --task "trivial helper"` → worktree retained, no auto-commit
-- [ ] Dual-host (Claude + Codex): after code, `/grok:status --run-id <id>` then
-      `/grok:handoff --run-id <id>` → dual-condition ready only when success + patch
-- [ ] Failed code / no changes → handoff ready false; tampered patch → integrity failure
-- [ ] Notify does not replace handoff (integrate only after handoff ready)
+- [ ] `/grok:code` without prior direct consent → refuses direct with trust
+      summary / consent pointer (no silent live-tree edit). Do **not** expect a
+      worktree from the bare **product** default once consent is recorded.
+- [ ] After `/grok:setup --integration direct` (or with recorded consent), bare
+      `/grok:code --target . --base HEAD --task "trivial helper"` → **live-tree**
+      direct (edits already on the operator checkout; no external worktree
+      retained as the landing path; no auto-commit / no auto-push)
+- [ ] Explicit isolation still works: `/grok:code --integration review --target .
+      --base HEAD --task "trivial helper"` (or `--integration worktree` /
+      `auto`) → external worktree retained; review/worktree keep parent apply;
+      auto may apply on verified ready
+- [ ] Dual-host (Claude + Codex): after an isolated code run, `/grok:status
+      --run-id <id>` then `/grok:handoff --run-id <id>` → dual-condition ready
+      only when success + patch (handoff is for retained worktrees; live-tree
+      direct does not produce that isolation evidence path)
+- [ ] Failed isolated code / no changes → handoff ready false; tampered patch →
+      integrity failure
+- [ ] Notify does not replace handoff (integrate only after handoff ready for
+      isolated modes)
 - [ ] `/grok:verify --worktree <path> --task "confirm tests"` → verifier verdict; `--web` refused
 - [ ] `/grok:status --run-id <id>` → prior envelope
 - [ ] Background-style live run with `GROK_COMPANION_EXECUTION_CONTEXT=background` and

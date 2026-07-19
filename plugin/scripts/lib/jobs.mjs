@@ -545,10 +545,12 @@ export function formatDirectIntegrationConsentMsg(opts = {}) {
     ? ` Target workspace: ${targetWorkspace}.`
     : "";
   return (
-    "Direct integration lets Grok edit files in THIS working tree directly (no " +
-    "worktree isolation, no pre-apply review). Protected paths (.git config/HEAD/" +
-    "hooks/refs, .env, and key files) are detected and rolled back if touched, but " +
-    "source edits land live." +
+    "Direct integration is the consented landing default: one-shot code edits " +
+    "THIS working tree live (no worktree isolation, no pre-apply review); ACP " +
+    "peer always uses an external worktree and applies a verified ready patch " +
+    "only at peer-stop. Protected paths (.git config/HEAD/hooks/refs, .env, and " +
+    "key files) are detected and rolled back if touched on code-direct live " +
+    "edits." +
     targetLine +
     " To accept and make direct the default here: /grok:setup --integration direct" +
     targetFlag +

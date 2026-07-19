@@ -122,8 +122,11 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 
 - **ACP peer channel** (hardened only; wrapper + companion): `peer
   start|prompt|stop` drive a long-lived `grok agent stdio` (ACP) session with
-  start parity (sandbox capability, tool allowlist, cwd sentinel, baseline, no
-  .env) before the first prompt. Wrapper-owned 0600 control socket (not a FIFO);
+  start parity (sandbox policy/profile, tool allowlist, no .env, private-home
+  posture, baseline capture) before the first prompt. Start neither plants nor
+  verifies the cwd sentinel; the first prompt instructs the model to create it,
+  and peer-stop requires sentinel proof only when `promptsHandled > 0`.
+  Wrapper-owned 0600 control socket (not a FIFO);
   peer.json records wrapper+child pid/starttime and the start
   `originalBaseline`; run.json records `worktreePath` / lifecycle so
   `cleanup --run-id` can remove the external worktree after peer-stop
@@ -161,8 +164,10 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 - **review:** worktree + patch + manifest; never auto-applies (manual parent
   apply after ready handoff).
 - **ACP default peer channel** for `grok-engineer-coder` (multi-turn
-  start/prompt/stop); one-shot `code` is the fallback (`GROK_DISABLE_ACP=1`).
-  Peer results integrate via the same modes.
+  start/prompt/stop; always external worktree); one-shot `code` is the fallback
+  (`GROK_DISABLE_ACP=1`). Peer-stop lands via the same mode names with a different
+  isolation story than code direct (stop-time apply for direct/auto; see Fixed
+  residual note).
 - **Docs honesty + DRY:** README top-line pitch matches direct-default;
   SECURITY states trusted-input posture for integration=direct; skills/agents
   link the single integration-modes reference (no bare "never auto-apply"
@@ -212,16 +217,19 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 - **Peer-stop completion honesty:** a ready wrapper envelope whose apply is
   blocked (consent-required, dirty-overlap, integrity, etc.) no longer leaves
   stdout / `/grok:result` storage as raw `status: success`. Companion captures
-  wrapper output, runs peer integration, attaches the final outcome via the
+  wrapper output, runs peer integration, and attaches the final outcome via the
   shared auto final-envelope SSOT (`attachIntegrationFinalOutcome` /
-  `buildPeerStopFinalEnvelope`), then emits exactly one final envelope, stores
-  that envelope, and finalizes the job from final envelope + effective code -
-  all before first stdout write. Success apply still one success envelope with
+  `buildPeerStopFinalEnvelope`) under rewrite-before-write/store/finalize:
+  onStdout computes final emitStdout/effectiveCode before first write; then
+  stdout write; then storeJobStdout; then updateJob/finalize; then notify.
+  Exactly one final envelope is emitted and stored; the job is finalized from
+  that envelope + effective code. Success apply still one success envelope with
   `response.integration.applied=true`. Peer-stop remains **outside**
   completion-notification eligibility (`NOTIFY_ELIGIBLE_MODES`); the rewrite
   path does not invent peer toasts.
 - Capture path extracted to `lib/companion-capture.mjs` so the entrypoint stays
-  under the 900-line cap while the rewrite-before-write contract is centralized.
+  under the 900-line cap while the rewrite-before-write/store/finalize contract
+  is centralized.
 
 ### Fixed (Phase 7 - post-round-14 apply / peer / path honesty)
 
@@ -330,6 +338,27 @@ three batches. Two release-blockers were real.
 Every applicable review finding was fixed (no deferrals). Comments that were
 already resolved or stale after the re-architecture are noted as such above.
 
+### Fixed (Phase 7 - docs/runtime honesty residual)
+
+- **Start parity sentinel honesty:** `plugin/skills/peer/SKILL.md`, the ACP
+  peer-channel design spec, and Phase 5 changelog wording now match
+  `peer_process.assert_start_parity` exactly - start verifies sandbox
+  policy/profile, tools, `.env` absence, and private-home posture; it neither
+  plants nor verifies the cwd sentinel. The first peer prompt instructs the
+  model to create the sentinel; peer-stop requires sentinel proof only when
+  `promptsHandled > 0`.
+- **ACP `clientInfo.version`:** initialize advertises packaging-stable `2.0.0`
+  (not `experimental`); unit coverage asserts the initialize payload.
+- **implementation-handoff checklist:** trailing whitespace removed from the
+  parent-apply numbered list (`git diff --check` clean).
+- **Peer integration docs-follow-code:** product surfaces no longer group ACP
+  peer `integration=direct` with one-shot code live-tree direct. Runtime truth:
+  peer always uses an external retained worktree; at ready peer-stop,
+  `direct`/`auto` both apply the verified patch (direct needs consent) and
+  `review` retains. Canonical matrix + peer skill, SECURITY, peer-native design,
+  README/COMPATIBILITY/agents/manifests/manual-smoke updated without rewriting
+  frozen plans/ledger rows.
+
 **Round 2** (the review bot re-scanned each commit and found further issues,
 including regressions in the round-1 fixes): direct git-guard now content-hashes
 watched files (a same-size ref move with restored mtime no longer evades) and
@@ -345,6 +374,26 @@ peer prompts carry the repo rules + contract; peer-prompt failures keep the run
 id; peer-stop fails closed if it cannot persist terminal evidence; the resident
 peer wrapper uses an ignored stderr fd; agent recipes use a valid mktemp template
 and quote the contract path. Suite: wrapper 809, plugin 285.
+
+### Fixed (Phase 7 - code worktree / direct landing docs honesty)
+
+- **Mode-aware code landing docs:** product surfaces no longer claim one-shot
+  `code` always writes only in an external worktree. Truth: consented product
+  default is live-tree `integration=direct` (hardened-direct sandbox-to-repo);
+  bare wrapper still defaults to worktree; auto/review stay external worktrees;
+  ACP peer remains always-worktree with stop-time apply. Updated README Security
+  short section, wrapper `SKILL.md` code section, `authority-policies.md` code
+  row, `modes/code.py` header comments, `manual-smoke.md` scenarios, peer-native
+  design (removed phantom `--integration direct --raw`; runMode is a separate
+  axis only), plus adjacent workflow-patterns / roadmap hardened-mode wording.
+  Preserves recent peer direct stop-time-apply corrections; frozen plans/history
+  untouched.
+- **manual-smoke peer `--integration` placement:** `--integration` is a
+  per-invocation companion flag and peer-start does not persist it. The ACP
+  peer live-smoke recipe now puts `--integration review` on `peer stop` (the
+  command that determines retain vs apply) and omits it from `peer start`.
+  Peer skill / agents already matched product surfaces; only the smoke recipe
+  was wrong.
 
 ### Changed (Phase 0)
 

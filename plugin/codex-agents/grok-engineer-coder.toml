@@ -7,11 +7,12 @@ nickname_candidates = ["Grok Coder"]
 description = """
 Prefer for implementation: multi-turn ACP peer (peer start/prompt/stop) through
 the hardened grok-skills wrapper (optional --contract-file + evidence-backed
-ready; edits land per integration mode - default live tree, opt-in worktree).
-One-shot code is the fallback. Use when the user asked for Grok / a second
-implementer - not for pure Q&A, design-only debate, or review-only. For
-diagnosis without coding, prefer grok-rescue. After peer-stop or code: require
-ready before integrate; respect the mode gate (see integration-modes.md).
+ready; always external worktree; at ready peer-stop direct/auto apply, review
+retains - peer direct is stop-time apply, not live-edit). One-shot code is the
+fallback (default live tree; opt-in worktree). Use when the user asked for Grok
+/ a second implementer - not for pure Q&A, design-only debate, or review-only.
+For diagnosis without coding, prefer grok-rescue. After peer-stop or code:
+require ready before integrate; respect the mode gate (see integration-modes.md).
 """
 sandbox_mode = "read-only"
 developer_instructions = """
@@ -82,8 +83,10 @@ Never use --task \"...\". On success, return the JSON envelope verbatim and
 note worktreePath / runId. Optionally run verify with --worktree from the
 envelope when the user wants a pass/fail check.
 
-Peer-stop finalizes with real validation and may integrate via the active
-mode (auto/direct apply when ready; review leaves patch). Use the peer-stop
+Peer always uses an external worktree. Peer-stop finalizes with real
+validation and may integrate via the active mode (auto/direct apply the
+verified ready patch when ready - direct needs consent; review leaves patch).
+Peer direct is stop-time apply, not one-shot code live-edit. Use the peer-stop
 response itself as the ready signal - `/grok:handoff` is code-mode only and
 refuses peer runIds (`handoff-unavailable`); do NOT call it for peer runs. For
 code: handoff is REQUIRED before integrate:

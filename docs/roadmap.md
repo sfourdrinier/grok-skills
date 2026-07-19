@@ -15,7 +15,7 @@ Unifying idea: Grok as a live second mind you can pull into either harness.
 
 | Mode | Env / flag | Behavior |
 |------|------------|----------|
-| **hardened** (default) | `GROK_SKILLS_MODE=hardened` or omit | Private auth home, OS sandbox verify, worktree isolation, secret redaction, gate-script integrity. |
+| **hardened** (default) | `GROK_SKILLS_MODE=hardened` or omit | Private auth home, OS sandbox verify, mode-aware isolation (worktree for code auto/review and all ACP peer; live tree for consented code direct), secret redaction, gate-script integrity. |
 | **direct** | `GROK_SKILLS_MODE=direct` or companion `--run-mode direct` | Use the **installed Grok CLI** with its normal home/auth (parity with "use your installed Codex"). Faster setup; you accept Grok's own isolation model. |
 
 Setup and skills document both. Hardened stays the default for open-source
@@ -112,10 +112,10 @@ plugin's own contract -> code -> handoff pipeline.
 
 Phase 7 locks product defaults (not a silent flip):
 
-- **integration=direct** = consented live-tree edit landing (setup consent once per repo)
-- **auto / review** = opt-in isolated worktrees (apply-on-ready vs parent apply)
-- **ACP** = default multi-turn peer channel for `grok-engineer-coder` (opt out with `GROK_DISABLE_ACP=1`); one-shot `code` is fallback
-- **runMode direct** remains a **separate** installed-home security posture (orthogonal to integration)
+- **integration=direct** (product default name) = for one-shot code, consented live-tree edit landing (setup consent once per repo); for ACP peer, consented stop-time apply after an always-external worktree
+- **auto / review** = for one-shot code, opt-in isolated worktrees (apply-on-ready vs parent apply); for ACP peer, same stop-time land/retain choice after always-external isolation
+- **ACP** = default multi-turn peer channel for `grok-engineer-coder` (opt out with `GROK_DISABLE_ACP=1`); one-shot `code` is fallback; peer is never live-edit of the operator tree during prompts
+- **runMode direct** remains a **separate** installed-home security posture (orthogonal to integration; peer is hardened-only)
 - **Shared auto/peer apply spine** + peer-stop final-envelope / single-flight lifecycle honesty (see CHANGELOG Phase 7 post-round-14)
 
 Canonical mode matrix (do not restate here): [plugin/references/integration-modes.md](../plugin/references/integration-modes.md).

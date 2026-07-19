@@ -24,8 +24,10 @@ requiredValidation). After Grok, the wrapper writes
 dir for isolated integration paths. Parents must call **`handoff --run-id`**
 before integrating **code-mode** auto/review results; dual-condition ready
 requires ready manifest **and** a success terminal envelope **and** patch
-rehash. Notifications are not ready. Integrate is **mode-aware** (direct lands
-live; auto may apply; review is parent apply) - see
+rehash. Notifications are not ready. Integrate is **mode-aware** and
+**channel-aware** (one-shot code: direct lands live; auto may apply; review is
+parent apply. ACP peer: always external worktree; direct/auto apply at ready
+peer-stop with direct consent; review retains) - see
 `plugin/references/integration-modes.md`. Handoff skill itself never applies.
 Details: `plugin/references/implementation-handoff.md`.
 
@@ -53,9 +55,9 @@ Constants live in `plugin/wrapper/scripts/groklib/implementation_contract.py`
 | Surface | Behavior |
 |---------|----------|
 | **integration default** | Product (companion/skills) defaults to **direct** after per-repo setup consent; bare `python3 …/grok_agent.py code` without `--integration` still defaults to **worktree** (fail-closed isolation for un-consented bare calls). |
-| **ACP peer channel** | Default on for `grok-engineer-coder`. Opt out with `GROK_DISABLE_ACP=1` (one-shot `code` fallback). `GROK_EXPERIMENTAL_ACP` is no longer a hard enable gate (legacy opt-in ignored). |
-| **runMode vs integration** | Orthogonal axes that both use the word "direct". runMode=direct = installed CLI home; integration=direct = live-tree edits. See integration-modes.md. |
-| **handoff vs peer** | `/grok:handoff` remains **code-mode only** and refuses peer runIds (`handoff-unavailable`). Peer integrate runs at `peer stop` via the shared auto/peer apply spine (dirty-status fail-closed + patch integrity). |
+| **ACP peer channel** | Default on for `grok-engineer-coder`. Always external retained worktree during the session. Opt out with `GROK_DISABLE_ACP=1` (one-shot `code` fallback). `GROK_EXPERIMENTAL_ACP` is no longer a hard enable gate (legacy opt-in ignored). |
+| **runMode vs integration** | Orthogonal axes that both use the word "direct". runMode=direct = installed CLI home; integration=direct = edit-landing default name. For one-shot code, integration=direct means live-tree edits; for ACP peer it means stop-time apply of a verified ready patch (still external worktree during prompts). See integration-modes.md. |
+| **handoff vs peer** | `/grok:handoff` remains **code-mode only** and refuses peer runIds (`handoff-unavailable`). Peer integrate runs at `peer stop` via the shared auto/peer apply spine (dirty-status fail-closed + patch integrity): direct and auto both apply when ready (direct needs consent); review retains. |
 | **peer notifications** | Peer-stop is **not** completion-notification eligible (`NOTIFY_ELIGIBLE_MODES` excludes peer modes). |
 | **task / web argv** | Companion last-wins split-or-equals for `--task`/`--task-file` and `--web`/`--no-web` (`companion-args` SSOT). |
 | **Older contracts** | schemaVersion must be 1; missing optional display fields normalize to empty; oversized objective/criteria fail at load (no silent truncation). |
