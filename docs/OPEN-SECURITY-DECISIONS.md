@@ -50,8 +50,13 @@ provenance; this section records the decision taken and exactly what shipped.
   envelope (response text, structured, warnings, error detail; both string values and dict
   keys) with `[redacted-injected-value]` BEFORE emission. This runs IN ADDITION to the
   existing pattern scanner, which is preserved unchanged as the fail-closed last line of
-  defense. Extraction is fail-safe: a malformed/missing `auth.json` degrades to an empty
-  denylist without crashing the run.
+  defense. Extraction is fail-safe and never raises. Trustworthy non-empty extracted values
+  always replace the denylist. When extraction yields nothing (missing/unreadable/malformed
+  home), any existing non-empty denylist is preserved so resident peer-stop finalize cannot
+  wipe valid in-memory secrets after auth is gone; a new empty process with missing home
+  remains pattern-only. Local/crash peer-stop reloads via
+  `register_injected_secrets_from_home` + `AUTH_FILE_NAMES` at the earliest
+  `finalize_peer_session` entry (before patch scan, envelope build, and home destroy).
 
 ## TL;DR - the honest security model
 

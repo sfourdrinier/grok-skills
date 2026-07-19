@@ -188,6 +188,125 @@ class PeerLifecycleFailClosedTests(PeerTestBase):
             self.assertIsNotNone(durable)
             self.assertEqual(durable.get("status"), "failure")
 
+    def test_claim_terminal_without_durable_reclaims_safely(self) -> None:
+        """Poisoned terminal lifecycle without durable envelope must reclaim, not stuck."""
+        home, run_paths, wt, peer_doc, stage, baseline = self._peer_finalize_fixture(
+            plant_sandbox=True
+        )
+        peer_doc = dict(peer_doc)
+        peer_doc["lifecycle"] = "stopped"
+        peer_doc.pop("stopOwner", None)
+        runstate.write_json_atomic(run_paths.run_dir / "peer.json", peer_doc)
+        self.assertIsNone(peer_stop.load_durable_terminal_envelope(run_paths))
+
+        outcome, doc, durable = peer_stop.claim_peer_stop(run_paths)
+        self.assertEqual(outcome, "claimed")
+        self.assertIsNone(durable)
+        self.assertEqual(doc.get("lifecycle"), "stopping")
+        self.assertIn("stopOwner", doc)
+        self.assertEqual((doc.get("stopOwner") or {}).get("pid"), os.getpid())
+
+    def test_terminalize_already_terminal_without_durable_returns_false(self) -> None:
+        """_terminalize_peer_run must not claim success on already-terminal w/o envelope."""
+        from groklib.modes import peer_finalize
+
+        home, run_paths, wt, peer_doc, stage, baseline = self._peer_finalize_fixture(
+            plant_sandbox=True
+        )
+        # Force run.json terminal without writing envelope.json (lifecycle API refuses
+        # completed without persist_terminal_envelope; poison the record directly).
+        rec = runstate.load_run_record(run_paths.run_id)
+        run_json = run_paths.run_dir / "run.json"
+        poisoned = dict(rec)
+        poisoned["lifecycle"] = "completed"
+        poisoned["status"] = "success"
+        poisoned["recordRevision"] = int(rec.get("recordRevision", 0)) + 1
+        run_json.write_text(json.dumps(poisoned), encoding="utf-8")
+        env = self._terminal_success_env(run_paths.run_id)
+        self.assertFalse(
+            peer_finalize._terminalize_peer_run(run_paths, env),
+            "already-terminal without durable envelope must not report durable ok",
+        )
+        self.assertIsNone(peer_stop.load_durable_terminal_envelope(run_paths))
+
+    def test_terminalize_false_does_not_allow_stopped_lifecycle(self) -> None:
+        """When terminalize returns False, peer lifecycle stays reclaimable stopping."""
+        from groklib.modes import peer_finalize
+
+        home, run_paths, wt, peer_doc, stage, baseline = self._peer_finalize_fixture(
+            plant_sandbox=True
+        )
+        peer_doc = dict(peer_doc)
+        peer_doc["lifecycle"] = "stopping"
+        peer_doc["stopOwner"] = {
+            "pid": os.getpid(),
+            "startToken": "owner-term-false",
+            "claimedAt": time.time(),
+        }
+        runstate.write_json_atomic(run_paths.run_dir / "peer.json", peer_doc)
+        returned = self._terminal_success_env(run_paths.run_id)
+
+        with mock.patch(
+            "groklib.modes.peer_finalize.finalize_peer_session",
+            return_value=returned,
+        ):
+            with mock.patch.object(
+                peer_finalize, "_terminalize_peer_run", return_value=False
+            ):
+                env = peer_stop._finalize_and_mark(
+                    run_paths=run_paths,
+                    peer_doc=peer_doc,
+                    home_path=pathlib.Path(peer_doc["homePath"]),
+                    worktree=wt,
+                    contract=None,
+                    original_baseline=baseline,
+                    stage=stage,
+                )
+        after = self._read_peer(run_paths)
+        self.assertNotIn(after.get("lifecycle"), ("stopped", "failed"))
+        self.assertEqual(after.get("lifecycle"), "stopping")
+        self.assertEqual(env.get("status"), "failure")
+
+    def test_durable_restop_no_refinalize(self) -> None:
+        """Durable terminal restop remains idempotent (no re-finalize)."""
+        home, run_paths, wt, peer_doc, stage, baseline = self._peer_finalize_fixture(
+            plant_sandbox=True
+        )
+        terminal = self._terminal_success_env(run_paths.run_id)
+        rec = runstate.load_run_record(run_paths.run_id)
+        rev = int(rec.get("recordRevision", 0))
+        if rec.get("lifecycle") == "created":
+            rec = runstate.set_lifecycle(run_paths, rev, "running")
+            rev = int(rec["recordRevision"])
+        if rec.get("lifecycle") == "running":
+            rec = runstate.set_lifecycle(run_paths, rev, "finalizing")
+            rev = int(rec["recordRevision"])
+        durable = dict(terminal)
+        durable["mode"] = "peer-start"
+        runstate.persist_terminal_envelope(
+            run_paths, rev, durable, lifecycle="completed"
+        )
+        peer_doc = dict(peer_doc)
+        peer_doc["lifecycle"] = "stopped"
+        runstate.write_json_atomic(run_paths.run_dir / "peer.json", peer_doc)
+
+        finalize_calls = []
+
+        def _fake_finalize(**kwargs):
+            finalize_calls.append(1)
+            return terminal
+
+        ns = mock.Mock(run_id=run_paths.run_id)
+        with mock.patch(
+            "groklib.modes.peer_finalize.finalize_peer_session",
+            side_effect=_fake_finalize,
+        ):
+            first = peer_mod.run_peer_stop(ns)
+            second = peer_mod.run_peer_stop(ns)
+        self.assertEqual(first.get("status"), "success")
+        self.assertEqual(second.get("status"), "success")
+        self.assertEqual(finalize_calls, [])
+
     def test_prompts_handled_persist_failure_refuses_acp_prompt(self) -> None:
         """promptsHandled disk persistence is mandatory before ACP prompt (sentinel)."""
         from groklib.progress import ProgressWriter

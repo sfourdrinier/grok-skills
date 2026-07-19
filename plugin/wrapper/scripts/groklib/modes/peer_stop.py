@@ -235,8 +235,9 @@ def claim_peer_stop(
     """Claim exclusive local finalize or return durable terminal.
 
     Returns ``(outcome, peer_doc, durable_env)`` where outcome is:
-      - ``terminal``: durable envelope exists or peer already terminal
-      - ``claimed``: this caller owns stopping; must finalize
+      - ``terminal``: durable envelope exists (peer lifecycle aligned when needed)
+      - ``claimed``: this caller owns stopping; must finalize (includes reclaim of
+        terminal-without-durable poison and abandoned stopping)
       - ``wait``: another live stopper holds stopping (caller should poll)
     """
     # Claim must re-read + patch under one lock with durable-envelope check.
@@ -259,7 +260,23 @@ def claim_peer_stop(
             return "terminal", doc, durable
         life = doc.get("lifecycle")
         if life in _TERMINAL_PEER_LIFECYCLES:
-            return "terminal", doc, None
+            # Terminal-without-durable is poison: reclaim safely so a later stop
+            # can write a loadable envelope instead of refusing forever.
+            _log(
+                "claim_peer_stop",
+                "reclaiming terminal-without-durable lifecycle={!r} for run {}".format(
+                    life, run_paths.run_id
+                ),
+            )
+            owner = _current_stop_owner()
+            doc = _apply_lifecycle_patch(
+                doc,
+                lifecycle="stopping",
+                stop_owner=owner,
+                clear_stop_owner=False,
+            )
+            write_peer_doc_unlocked(run_paths, doc)
+            return "claimed", doc, None
         if life == "stopping":
             if not _can_reclaim_stopping(doc):
                 return "wait", doc, None
@@ -418,6 +435,8 @@ def _return_or_claim_after_wait(
         return "terminal", waited_doc or {}, waited_env
     if waited_outcome == "claimed" and waited_doc is not None:
         return "claimed", waited_doc, None
+    # claim_peer_stop now reclaims terminal-without-durable as "claimed"; a bare
+    # terminal wait outcome without durable should not occur, but fail closed.
     if waited_outcome == "terminal" and waited_env is None:
         raise GrokWrapperError(
             "acp-failure",

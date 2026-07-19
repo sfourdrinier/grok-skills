@@ -285,6 +285,15 @@ post-smoke (see live-smoke ledger).
   fallback kill only on confirmed pid+startToken. Centralized peer.json RMW
   refuses empty stopOwner tokens while PID is alive and refuses peer-prompt for
   non-promptable lifecycles.
+- **Peer durable-terminal reclaim + denylist reload:** terminal `peer.json`
+  without a loadable durable envelope is reclaimable (not forever poison);
+  `_terminalize_peer_run` reports durable success only when envelope evidence
+  exists (already-terminal bare run records return false). Local/crash
+  peer-stop reloads injected exact-value secrets from private-home
+  `auth.json` before patch scan/envelope/destroy; register preserves a
+  non-empty resident denylist when home extraction is empty; trustworthy
+  non-empty homes still replace; empty process + missing home stays
+  pattern-only.
 
 ### Fixed (Phase 7 - PR #5 Codex code-review remediation)
 

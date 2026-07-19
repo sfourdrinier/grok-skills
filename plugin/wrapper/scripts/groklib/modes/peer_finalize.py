@@ -11,7 +11,7 @@ import pathlib
 import tempfile
 from typing import Any, List, Optional
 
-from groklib import GrokWrapperError, log_stderr, runstate
+from groklib import GrokWrapperError, injectedsecrets, log_stderr, runstate
 from groklib.authhome import PrivateHome, destroy_private_home
 from groklib.code_handoff_finalize import code_handoff_finalize
 from groklib.envelope import build_envelope, redact_secret_material
@@ -24,6 +24,7 @@ from groklib.modes._envelope import (
     AUTH_TEARDOWN_FAILED_ERROR_CLASS,
     grok_usage_response_fields,
 )
+from groklib.modes._shared import AUTH_FILE_NAMES
 from groklib.projectconfig import load_project_config
 from groklib.sandbox import policy_for_mode, verify_enforcement
 from groklib.worktree import ExternalWorktree
@@ -152,8 +153,11 @@ def _apply_post_finalize_manifest(
 
 
 def _terminalize_peer_run(run_paths: runstate.RunPaths, envelope: dict) -> bool:
-    """Persist terminal envelope + lifecycle. Returns True on durable persistence
-    (or an already-terminal record), False if it could not be persisted."""
+    """Persist terminal envelope + lifecycle. Returns True only on durable evidence.
+
+    Already-terminal run records still require a loadable durable envelope; a bare
+    lifecycle=completed/failed without envelope.json is NOT durable success.
+    """
     try:
         durable = dict(envelope)
         durable["mode"] = "peer-start"
@@ -172,7 +176,11 @@ def _terminalize_peer_run(run_paths: runstate.RunPaths, envelope: dict) -> bool:
             record = runstate.set_lifecycle(run_paths, rev, "finalizing")
             rev = int(record["recordRevision"])
         if life in ("completed", "failed", "canceled"):
-            return True
+            # Already-terminal is durable only when envelope.json is loadable/valid.
+            from groklib.modes.peer_stop import load_durable_terminal_envelope
+
+            existing = load_durable_terminal_envelope(run_paths)
+            return existing is not None
         runstate.persist_terminal_envelope(
             run_paths, rev, durable, lifecycle=lifecycle
         )
@@ -180,6 +188,23 @@ def _terminalize_peer_run(run_paths: runstate.RunPaths, envelope: dict) -> bool:
     except Exception as exc:
         _log("_terminalize_peer_run", "could not terminalize peer run: {}".format(exc))
         return False
+
+
+def _reload_injected_secrets_from_peer_home(home_path: pathlib.Path) -> None:
+    """Re-register D4(a) exact-value denylist from the peer private home.
+
+    Local/crash peer-stop runs in a *new* process whose in-memory denylist is
+    empty even when auth.json still exists on disk. Resident stop already has the
+    denylist from create_private_home. Must run before patch secret scan and
+    envelope build, and before destroy_private_home.
+
+    SSOT: injectedsecrets.register_injected_secrets_from_home. Trustworthy
+    extracted values replace the denylist; missing/unreadable home does NOT wipe
+    a valid non-empty in-memory denylist (resident fail-closed). New process with
+    empty denylist + missing home remains pattern-only.
+    """
+    grok_dir = home_path / ".grok"
+    injectedsecrets.register_injected_secrets_from_home(grok_dir, AUTH_FILE_NAMES)
 
 
 def _build_gate_runner(
@@ -246,6 +271,10 @@ def finalize_peer_session(
     """
     from groklib import worktree_escape
     from groklib.modes import code as code_mod
+
+    # Earliest entry for local + resident finalize: reload before patch scan,
+    # envelope redaction, and private-home destroy (new-process denylist is empty).
+    _reload_injected_secrets_from_peer_home(home_path)
 
     sentinel_name = peer_doc.get("sentinelName") or (".grok-run-" + run_paths.run_id)
     artifacts_dir = run_paths.run_dir / "artifacts"

@@ -352,6 +352,116 @@ class PeerFinalizeTests(PeerTestBase):
         self.assertIn("originalBaseline", peer_doc)
         self.assertIsInstance(peer_doc["originalBaseline"], dict)
 
+    def test_local_finalize_reloads_injected_denylist_from_private_home(self) -> None:
+        """Crash/local peer-stop in a new process must re-register home auth denylist.
+
+        Opaque non-pattern secrets live only in the private home's auth.json at
+        stop time. A fresh process has an empty in-memory denylist, so finalize
+        must reload from home before patch scan and envelope build (and before
+        home destroy). Pattern scanners alone cannot catch this class of secret.
+        """
+        from groklib import injectedsecrets
+        from groklib.modes import peer_finalize
+
+        # Split fixture token so source never holds a contiguous secret-shaped
+        # literal (AGENTS.md rule 8); value still matches no _SECRET_VALUE_PATTERNS.
+        opaque = "a1b2c3d4e5f6g7h8i9j0" + "k1l2m3n4o5p6q7r8s9t0"
+        self.assertEqual(len(opaque), 40)
+
+        home, run_paths, wt, peer_doc, stage, baseline = self._peer_finalize_fixture(
+            plant_sandbox=True
+        )
+        # Injected auth material that a crash-stop process would still find on disk.
+        (pathlib.Path(home.home_dir) / ".grok" / "auth.json").write_text(
+            json.dumps({"token": opaque}),
+            encoding="utf-8",
+        )
+        # Opaque value also lands in the forensic patch and the answer field.
+        self._plant_worktree_change(
+            wt, path="pkg/leak.txt", text="token=" + opaque + "\n"
+        )
+        stage.result.answer = "echoed " + opaque
+
+        # Simulate a brand-new peer-stop process: empty denylist, home still present.
+        self.addCleanup(injectedsecrets.clear_injected_secret_denylist)
+        injectedsecrets.clear_injected_secret_denylist()
+        self.assertEqual(injectedsecrets.current_injected_secret_denylist(), ())
+
+        with mock.patch.object(peer_finalize, "destroy_private_home", self._fake_destroy_home):
+            result = peer_finalize.finalize_peer_session(
+                run_paths=run_paths,
+                peer_doc=peer_doc,
+                home_path=pathlib.Path(home.home_dir),
+                worktree=wt,
+                contract=None,
+                original_baseline=baseline,
+                stage=stage,
+            )
+
+        # Exact value must not survive the terminal envelope (build_envelope
+        # redacts via the reloaded denylist).
+        envelope_text = json.dumps(result, sort_keys=True)
+        self.assertNotIn(
+            opaque,
+            envelope_text,
+            "local finalize must redact exact injected auth value from envelope",
+        )
+
+        # Patch path: either no implementation.patch, or secret-material blocker
+        # (denylist scan fails closed). Never leave a patch containing the token.
+        patch_path = run_paths.run_dir / "artifacts" / "implementation.patch"
+        if patch_path.is_file():
+            patch_text = patch_path.read_bytes().decode("latin-1")
+            self.assertNotIn(opaque, patch_text)
+        else:
+            manifest = json.loads(
+                (run_paths.run_dir / "implementation-handoff.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            blockers = (manifest.get("integration") or {}).get("blockers") or []
+            kinds = {b.get("kind") for b in blockers if isinstance(b, dict)}
+            self.assertIn(
+                "secret-material",
+                kinds,
+                "opaque injected credential in patch must fail closed when denylist reloaded",
+            )
+
+    def test_resident_finalize_preserves_denylist_when_home_auth_unreadable(self) -> None:
+        """Resident stop: missing/unreadable home must not wipe valid in-memory denylist."""
+        from groklib import injectedsecrets
+        from groklib.modes import peer_finalize
+
+        opaque = "a1b2c3d4e5f6g7h8i9j0" + "k1l2m3n4o5p6q7r8s9t0"
+        home, run_paths, wt, peer_doc, stage, baseline = self._peer_finalize_fixture(
+            plant_sandbox=True
+        )
+        self.addCleanup(injectedsecrets.clear_injected_secret_denylist)
+        injectedsecrets.set_injected_secret_denylist([opaque])
+        # Auth gone/unreadable (home destroyed early / crash race): extraction empty.
+        auth = pathlib.Path(home.home_dir) / ".grok" / "auth.json"
+        if auth.is_file():
+            auth.unlink()
+        stage.result.answer = "echoed " + opaque
+
+        with mock.patch.object(peer_finalize, "destroy_private_home", self._fake_destroy_home):
+            result = peer_finalize.finalize_peer_session(
+                run_paths=run_paths,
+                peer_doc=peer_doc,
+                home_path=pathlib.Path(home.home_dir),
+                worktree=wt,
+                contract=None,
+                original_baseline=baseline,
+                stage=stage,
+            )
+
+        self.assertEqual(
+            injectedsecrets.current_injected_secret_denylist(),
+            (opaque,),
+            "unreadable home must preserve existing non-empty denylist",
+        )
+        self.assertNotIn(opaque, json.dumps(result, sort_keys=True))
+
     def test_peer_stop_terminalizes_and_cleanup_removes_worktree(self) -> None:
         """Finding 4: peer-stop terminalize + cleanup --confirm removes worktree."""
         from groklib.modes import peer_finalize

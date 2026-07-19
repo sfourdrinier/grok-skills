@@ -87,7 +87,13 @@ private-home destroy, terminalize run record.
 - Lifecycle single-flight: peer-stop owns running -> stopping ->
   stopped|failed under `run_lock` with `stopOwner` reclaim; peer.json RMW is
   field-safe (renew_lease / child-death writers cannot clobber stopping /
-  stopOwner).
+  stopOwner). Terminal lifecycle without a loadable durable envelope is
+  reclaimable (not forever poison); already-terminal run records still require
+  durable envelope evidence before `_terminalize_peer_run` reports success.
+  Durable restops stay no-refinalize.
+- Injected denylist on finalize: local/crash peer-stop reloads exact-value
+  secrets from the private home before patch scan / envelope / destroy;
+  resident missing/unreadable home preserves a non-empty in-memory denylist.
 
 ### Residual risk: per-frame progress redaction
 
