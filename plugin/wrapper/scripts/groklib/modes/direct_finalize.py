@@ -52,9 +52,9 @@ from groklib.modes._direct import DirectFinalizeStage
 # Data + match algorithm live in groklib.deny_write /
 # plugin/references/deny-write-globs.json.
 
-# Cap hooks/refs fingerprint walks (SSOT: direct_protect.MAX_GIT_TREE_WALK_FILES)
-# so a pathological tree cannot stall finalize; over-cap still detects
-# add/remove via the count-bearing sentinel.
+# Cap hooks/refs fingerprint walks (SSOT: direct_protect.MAX_GIT_TREE_WALK_FILES).
+# Over-cap fails closed via iter_git_tree_entries (protected-path-write) - never
+# a partial inventory or over-cap count sentinel.
 _MAX_GIT_TREE_FILES = direct_protect.MAX_GIT_TREE_WALK_FILES
 
 
@@ -62,10 +62,10 @@ def _log(function: str, message: str) -> None:
     log_stderr("modes.direct_finalize", function, message)
 
 
-# Hash git files up to this size; above it, fall back to a stat signature (refs,
-# HEAD, config, packed-refs are tiny; a pathological multi-MB hook is the only
-# thing that would hit this).
+# Streaming SHA-256 chunk size for watched git files (bounded memory). Kept as a
+# named constant so tests can size fixtures relative to a multi-MiB rewrite.
 _MAX_GIT_HASH_BYTES = 4 * 1024 * 1024
+_GIT_HASH_CHUNK_BYTES = 1024 * 1024
 
 
 def _git_watch_sig(path: pathlib.Path) -> str:
@@ -73,9 +73,11 @@ def _git_watch_sig(path: pathlib.Path) -> str:
 
     A branch-ref move rewrites one 41-byte SHA line to another with the SAME
     size; stat-only signatures (size:mtime:mode) miss it if mtime is coalesced
-    or restored. Hash the (small) content instead so the set-difference always
-    flips. Symlinks record their target; non-regular / oversized files fall back
-    to a stat signature.
+    or restored. Stream-hash regular files with SHA-256 in bounded memory so
+    same-size rewrites (including multi-MiB hooks) always flip the
+    set-difference - never fall back to stat for oversized protected git
+    files. Symlinks record their target only (no target content read).
+    Non-regular paths use a stat signature (no content open).
     """
     try:
         st = path.lstat()
@@ -86,14 +88,23 @@ def _git_watch_sig(path: pathlib.Path) -> str:
             return "symlink:" + os.readlink(str(path))
         except OSError:
             return "symlink:?"
-    if not stat.S_ISREG(st.st_mode) or st.st_size > _MAX_GIT_HASH_BYTES:
-        return "stat:{}:{}:{}".format(st.st_size, st.st_mtime_ns, stat.S_IMODE(st.st_mode))
+    if not stat.S_ISREG(st.st_mode):
+        return "stat:{}:{}:{}".format(
+            st.st_size, st.st_mtime_ns, stat.S_IMODE(st.st_mode)
+        )
     try:
+        digest = hashlib.sha256()
         with open(str(path), "rb") as handle:
-            digest = hashlib.sha256(handle.read()).hexdigest()
-        return "sha256:{}:{}".format(digest, stat.S_IMODE(st.st_mode))
+            while True:
+                chunk = handle.read(_GIT_HASH_CHUNK_BYTES)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return "sha256:{}:{}".format(digest.hexdigest(), stat.S_IMODE(st.st_mode))
     except OSError:
-        return "stat:{}:{}:{}".format(st.st_size, st.st_mtime_ns, stat.S_IMODE(st.st_mode))
+        return "stat:{}:{}:{}".format(
+            st.st_size, st.st_mtime_ns, stat.S_IMODE(st.st_mode)
+        )
 
 
 def _resolve_git_dirs(repo_root: pathlib.Path) -> Tuple[pathlib.Path, pathlib.Path]:
@@ -213,23 +224,14 @@ def _fingerprint_git_tree(
 ) -> Set[Tuple[str, str]]:
     """Fingerprint ``<rel_prefix>/<tree_name>/**`` via the shared protect inventory.
 
-    Over-cap emits a single count-bearing sentinel so an add/remove past the
-    cap still flips the set-difference, rather than silently going undetected.
+    Over-cap fails closed inside ``iter_git_tree_entries``
+    (``protected-path-write``) - never a partial inventory or count sentinel.
     """
     pairs: Set[Tuple[str, str]] = set()
-    count = 0
     for rel, abs_path in direct_protect.iter_git_tree_entries(
         git_dir, tree_name, rel_prefix=rel_prefix, max_files=_MAX_GIT_TREE_FILES
     ):
         pairs.add((rel, _git_watch_sig(abs_path)))
-        count += 1
-    if count >= _MAX_GIT_TREE_FILES:
-        pairs.add(
-            (
-                "{}/{}/**".format(rel_prefix.rstrip("/"), tree_name),
-                "over-cap:{}".format(count),
-            )
-        )
     return pairs
 
 

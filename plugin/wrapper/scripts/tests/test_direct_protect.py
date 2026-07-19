@@ -9,6 +9,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from groklib.modes import direct_protect
 
@@ -308,6 +309,134 @@ class DirectProtectSnapshotRestoreTests(unittest.TestCase):
             direct_protect.is_sensitive_git_relative("vendor/lib/.git/objects/ab/cd")
         )
 
+    def test_is_sensitive_git_relative_nested_modules_path_suffix(self) -> None:
+        # Multi-component submodule paths under .git/modules/** (not just
+        # modules/<one>); shared suffix classifier must not overmatch ordinary
+        # module metadata (index/objects/logs/description).
+        sensitive = (
+            ".git/modules/libs/foo/hooks/pre-commit",
+            ".git/modules/a/b/c/refs/heads/x",
+            ".git/modules/a/b/config",
+            ".git/modules/a/b/HEAD",
+            ".git/modules/a/b/packed-refs",
+            ".git/modules/a/modules/b/hooks/x",
+            "vendor/pkg/.git/modules/deep/x/y/refs/tags/t",
+        )
+        ordinary = (
+            ".git/modules/libs/foo/index",
+            ".git/modules/a/b/objects/ab/cd",
+            ".git/modules/a/b/COMMIT_EDITMSG",
+            ".git/modules/a/b/logs/HEAD",
+            ".git/modules/a/b/logs/refs/heads/main",
+            ".git/modules/hooks/description",
+            ".git/logs/HEAD",
+            ".git/objects/pack/pack-1.idx",
+            "src/app.py",
+        )
+        for path in sensitive:
+            self.assertTrue(
+                direct_protect.is_sensitive_git_relative(path), path
+            )
+            self.assertTrue(direct_protect.is_snapshot_scope(path), path)
+        for path in ordinary:
+            self.assertFalse(
+                direct_protect.is_sensitive_git_relative(path), path
+            )
+
+    def test_restore_nested_modules_path_planted_and_preexisting(self) -> None:
+        # Preexisting multi-component modules gitdir + newly planted hook/ref.
+        mod = self.repo / ".git" / "modules" / "libs" / "foo"
+        (mod / "hooks").mkdir(parents=True)
+        (mod / "refs" / "heads").mkdir(parents=True)
+        head = mod / "HEAD"
+        head.write_text("ref: refs/heads/main\n")
+        config = mod / "config"
+        config.write_text("[core]\n")
+        preexisting_hook = mod / "hooks" / "pre-commit"
+        preexisting_hook.write_bytes(b"#!/bin/sh\necho good\n")
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        self.assertIn(".git/modules/libs/foo/HEAD", snap.entries)
+        self.assertIn(".git/modules/libs/foo/hooks/pre-commit", snap.entries)
+        self.assertTrue(snap.entries[".git/modules/libs/foo/HEAD"].snapshotted)
+
+        head.write_text("ref: refs/heads/evil\n")
+        preexisting_hook.write_bytes(b"#!/bin/sh\necho evil\n")
+        planted = mod / "hooks" / "post-commit"
+        planted.write_bytes(b"#!/bin/sh\necho plant\n")
+        planted_ref = mod / "refs" / "heads" / "planted"
+        planted_ref.write_text("f" * 40 + "\n")
+
+        result = direct_protect.restore_protected_paths(
+            self.repo,
+            snap,
+            offenders=[
+                ".git/modules/libs/foo/HEAD",
+                ".git/modules/libs/foo/hooks/pre-commit",
+                ".git/modules/libs/foo/hooks/post-commit",
+                ".git/modules/libs/foo/refs/heads/planted",
+            ],
+        )
+        self.assertEqual(head.read_text(), "ref: refs/heads/main\n")
+        self.assertEqual(preexisting_hook.read_bytes(), b"#!/bin/sh\necho good\n")
+        self.assertFalse(planted.exists())
+        self.assertFalse(planted_ref.exists())
+        self.assertIn(".git/modules/libs/foo/HEAD", result.restored)
+        self.assertIn(".git/modules/libs/foo/hooks/pre-commit", result.restored)
+        self.assertIn(".git/modules/libs/foo/hooks/post-commit", result.restored)
+        self.assertIn(".git/modules/libs/foo/refs/heads/planted", result.restored)
+
+    def test_iter_git_tree_entries_fail_closed_on_cap(self) -> None:
+        from groklib import GrokWrapperError
+
+        hooks = self.repo / ".git" / "hooks"
+        for name in ("a", "b", "c"):
+            (hooks / name).write_bytes(b"#!/bin/sh\n")
+        # Exactly at cap is fine; one past must not silently return partial.
+        listed = list(
+            direct_protect.iter_git_tree_entries(
+                self.repo / ".git", "hooks", max_files=3
+            )
+        )
+        self.assertEqual(len(listed), 3)
+        with self.assertRaises(GrokWrapperError) as cm:
+            list(
+                direct_protect.iter_git_tree_entries(
+                    self.repo / ".git", "hooks", max_files=2
+                )
+            )
+        self.assertEqual(cm.exception.error_class, "protected-path-write")
+
+    def test_snapshot_and_guard_propagate_tree_walk_cap(self) -> None:
+        from groklib import GrokWrapperError
+        from groklib.modes import direct_finalize
+
+        hooks = self.repo / ".git" / "hooks"
+        for name in ("h0", "h1", "h2"):
+            (hooks / name).write_bytes(b"x\n")
+        # Snapshot inventory (via iter_sensitive_git_entries) must fail closed.
+        with self.assertRaises(GrokWrapperError) as cm:
+            list(
+                direct_protect.iter_sensitive_git_entries(
+                    self.repo, max_files_per_tree=2
+                )
+            )
+        self.assertEqual(cm.exception.error_class, "protected-path-write")
+        # Live snapshot_protected_paths uses the same walk (call-time default)
+        # and must not return a partial inventory.
+        with mock.patch(
+            "groklib.modes.direct_protect_git.MAX_GIT_TREE_WALK_FILES", 2
+        ):
+            with self.assertRaises(GrokWrapperError) as cm_snap:
+                direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+            self.assertEqual(cm_snap.exception.error_class, "protected-path-write")
+        # Guard fingerprint path (external common tree helper) same class.
+        with self.assertRaises(GrokWrapperError) as cm2:
+            with mock.patch.object(direct_finalize, "_MAX_GIT_TREE_FILES", 2):
+                direct_finalize._fingerprint_git_tree(
+                    self.repo / ".git", "hooks", rel_prefix=".git"
+                )
+        self.assertEqual(cm2.exception.error_class, "protected-path-write")
+
     def test_discovery_fail_closed_on_overflow(self) -> None:
         from groklib import GrokWrapperError
 
@@ -374,6 +503,50 @@ class DirectGitGuardAndDenyTests(unittest.TestCase):
         os.utime(str(ref), ns=(st.st_atime_ns, st.st_mtime_ns))  # restore mtime
         after = capture_git_dir_guard(self.repo)
         self.assertIn(".git/refs/heads/main", _changed_paths(baseline, after))
+
+    def test_guard_detects_oversized_same_size_rewrite_with_restored_mtime(self) -> None:
+        # Oversized protected git files must stream-hash (never stat:size:mtime:mode).
+        # A >4MiB same-size rewrite with restored mtime must still flip the guard.
+        from groklib.modes.direct_finalize import (
+            _MAX_GIT_HASH_BYTES,
+            _git_watch_sig,
+            capture_git_dir_guard,
+            _changed_paths,
+        )
+
+        size = _MAX_GIT_HASH_BYTES + 1024
+        hook = self.repo / ".git" / "hooks" / "big-pre-commit"
+        hook.write_bytes(b"A" * size)
+        st = hook.stat()
+        baseline_sig = _git_watch_sig(hook)
+        self.assertTrue(
+            baseline_sig.startswith("sha256:"),
+            "oversized regular file must stream-hash, got {!r}".format(baseline_sig),
+        )
+        self.assertNotIn("stat:", baseline_sig)
+        baseline = capture_git_dir_guard(self.repo)
+        hook.write_bytes(b"B" * size)  # same size, different content
+        os.utime(str(hook), ns=(st.st_atime_ns, st.st_mtime_ns))
+        after_sig = _git_watch_sig(hook)
+        self.assertTrue(after_sig.startswith("sha256:"))
+        self.assertNotEqual(baseline_sig, after_sig)
+        after = capture_git_dir_guard(self.repo)
+        self.assertIn(".git/hooks/big-pre-commit", _changed_paths(baseline, after))
+
+    def test_git_watch_sig_symlink_and_nonregular(self) -> None:
+        from groklib.modes.direct_finalize import _git_watch_sig
+
+        link = self.repo / ".git" / "hooks" / "link-hook"
+        link.symlink_to("/tmp/not-a-secret-target")
+        self.assertEqual(_git_watch_sig(link), "symlink:/tmp/not-a-secret-target")
+        # Directory is non-regular under the watched tree: not a content read.
+        hooks_dir = self.repo / ".git" / "hooks"
+        sig = _git_watch_sig(hooks_dir)
+        self.assertTrue(sig.startswith("stat:") or sig.startswith("type:"), sig)
+        # Absent path.
+        self.assertEqual(
+            _git_watch_sig(self.repo / ".git" / "hooks" / "missing"), "absent"
+        )
 
     def test_guard_detects_nested_new_hook(self) -> None:
         from groklib.modes.direct_finalize import capture_git_dir_guard, _changed_paths

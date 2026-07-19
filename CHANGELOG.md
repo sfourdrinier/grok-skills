@@ -13,6 +13,20 @@ Phases land as sequential PRs; no tag until the release phase. Most implementati
 is delegated to Grok itself through this plugin's own contract -> code -> handoff
 pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 
+### Fixed (direct protect - nested modules / tree-walk / watch-hash)
+
+- **Nested `.git/modules/**` suffix classifier:** multi-component submodule paths
+  (e.g. `modules/libs/foo/hooks/pre-commit`, `modules/a/b/c/refs/heads/x`) are
+  sensitive via a shared `is_sensitive_git_suffix` used by snapshot scope/restore;
+  ordinary module metadata (index/objects/logs) stays non-sensitive.
+- **Git tree walk fail-closed:** `iter_git_tree_entries` hitting
+  `MAX_GIT_TREE_WALK_FILES` raises `protected-path-write` (no partial inventory,
+  no over-cap count sentinel); snapshot + guard callers propagate the same class.
+- **Stream-hash oversized watched git files:** `_git_watch_sig` always
+  SHA-256-streams regular files in bounded chunks (never `stat:size:mtime:mode`
+  for oversized hooks); same-size rewrite with restored mtime is detected.
+  Symlinks record target only; non-regular paths keep a type/stat signature.
+
 ### Added (Phase 0 - hygiene, PR6)
 
 - `tools/verify.sh` + `tools/checks.sh`: one-command verification gate (both unit
