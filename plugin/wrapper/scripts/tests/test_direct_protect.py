@@ -182,12 +182,55 @@ class DirectProtectSnapshotRestoreTests(unittest.TestCase):
         self.assertFalse(direct_protect.is_snapshot_scope(".git/index"))
         self.assertFalse(direct_protect.is_snapshot_scope(".git/objects/ab/cd"))
 
+    def test_snapshot_includes_nested_hooks(self) -> None:
+        nested = self.repo / ".git" / "hooks" / "vendor" / "pre-commit"
+        nested.parent.mkdir(parents=True)
+        nested.write_bytes(b"#!/bin/sh\necho nested\n")
+        os.chmod(str(nested), 0o755)
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        rel = ".git/hooks/vendor/pre-commit"
+        self.assertIn(rel, snap.entries)
+        self.assertTrue(snap.entries[rel].snapshotted)
+        self.assertEqual((snap.snapshot_dir / rel).read_bytes(), nested.read_bytes())
+
+    def test_restore_reverts_nested_hook_bytes_and_mode(self) -> None:
+        nested = self.repo / ".git" / "hooks" / "vendor" / "pre-commit"
+        nested.parent.mkdir(parents=True)
+        original = b"#!/bin/sh\necho good\n"
+        nested.write_bytes(original)
+        os.chmod(str(nested), 0o755)
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        nested.write_bytes(b"#!/bin/sh\necho evil\n")
+        os.chmod(str(nested), 0o644)
+        rel = ".git/hooks/vendor/pre-commit"
+        result = direct_protect.restore_protected_paths(
+            self.repo, snap, offenders=[rel]
+        )
+        self.assertEqual(nested.read_bytes(), original)
+        self.assertEqual(stat.S_IMODE(os.stat(str(nested)).st_mode), 0o755)
+        self.assertIn(rel, result.restored)
+        self.assertEqual(result.errors, [])
+
+    def test_restore_deletes_created_nested_hook(self) -> None:
+        (self.repo / ".git" / "hooks").mkdir(parents=True, exist_ok=True)
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        nested = self.repo / ".git" / "hooks" / "vendor" / "post-commit"
+        nested.parent.mkdir(parents=True)
+        nested.write_bytes(b"#!/bin/sh\necho planted\n")
+        rel = ".git/hooks/vendor/post-commit"
+        result = direct_protect.restore_protected_paths(
+            self.repo, snap, offenders=[rel]
+        )
+        self.assertFalse(nested.exists())
+        self.assertIn(rel, result.restored)
+
 
 class DirectGitGuardAndDenyTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.mkdtemp(prefix="direct-guard-")
         self.repo = pathlib.Path(self.tmp) / "repo"
         (self.repo / ".git" / "refs" / "heads").mkdir(parents=True)
+        (self.repo / ".git" / "hooks").mkdir(parents=True)
         (self.repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
         (self.repo / ".git" / "refs" / "heads" / "main").write_text("1" * 40 + "\n")
 
@@ -231,6 +274,31 @@ class DirectGitGuardAndDenyTests(unittest.TestCase):
         os.utime(str(ref), ns=(st.st_atime_ns, st.st_mtime_ns))  # restore mtime
         after = capture_git_dir_guard(self.repo)
         self.assertIn(".git/refs/heads/main", _changed_paths(baseline, after))
+
+    def test_guard_detects_nested_new_hook(self) -> None:
+        from groklib.modes.direct_finalize import capture_git_dir_guard, _changed_paths
+
+        baseline = capture_git_dir_guard(self.repo)
+        nested = self.repo / ".git" / "hooks" / "vendor" / "pre-commit"
+        nested.parent.mkdir(parents=True)
+        nested.write_bytes(b"#!/bin/sh\necho planted\n")
+        after = capture_git_dir_guard(self.repo)
+        self.assertIn(".git/hooks/vendor/pre-commit", _changed_paths(baseline, after))
+
+    def test_guard_detects_nested_hook_byte_and_mode_change(self) -> None:
+        from groklib.modes.direct_finalize import capture_git_dir_guard, _changed_paths
+
+        nested = self.repo / ".git" / "hooks" / "vendor" / "pre-commit"
+        nested.parent.mkdir(parents=True)
+        nested.write_bytes(b"#!/bin/sh\necho good\n")
+        os.chmod(str(nested), 0o755)
+        st = nested.stat()
+        baseline = capture_git_dir_guard(self.repo)
+        nested.write_bytes(b"#!/bin/sh\necho evil\n")  # same length
+        os.chmod(str(nested), 0o644)
+        os.utime(str(nested), ns=(st.st_atime_ns, st.st_mtime_ns))
+        after = capture_git_dir_guard(self.repo)
+        self.assertIn(".git/hooks/vendor/pre-commit", _changed_paths(baseline, after))
 
     def test_expanded_deny_globs(self) -> None:
         from groklib.modes.direct_finalize import path_matches_deny
@@ -306,6 +374,45 @@ class DirectAbortSweepTests(unittest.TestCase):
         res = restore_protected_on_abort(self.repo, base_fp, base_git, snap)
         self.assertEqual(ref.read_text(), original)
         self.assertIn(".git/refs/heads/main", res["restored"])
+
+    def test_sweep_restores_same_stat_ignored_env_after_abort(self) -> None:
+        # Gitignored protected .env rewritten at same size with restored mtime must
+        # still be rolled back (content-hash fingerprint), not missed as unchanged.
+        from groklib.modes.direct_finalize import restore_protected_on_abort
+
+        (self.repo / ".gitignore").write_text(".env\n", encoding="utf-8")
+        self._git("add", ".gitignore")
+        self._git("commit", "-m", "ignore env")
+        env = self.repo / ".env"
+        original = b"SECRET=keep-me-xx\n"
+        env.write_bytes(original)
+        os.chmod(str(env), 0o600)
+        base_fp, base_git = self._baseline()
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        st = env.stat()
+        env.write_bytes(b"SECRET=leaked-now\n")
+        os.chmod(str(env), 0o600)
+        os.utime(str(env), ns=(st.st_atime_ns, st.st_mtime_ns))
+        res = restore_protected_on_abort(self.repo, base_fp, base_git, snap)
+        self.assertEqual(env.read_bytes(), original)
+        self.assertIn(".env", res["restored"])
+
+    def test_sweep_restores_nested_hook_after_abort(self) -> None:
+        from groklib.modes.direct_finalize import restore_protected_on_abort
+
+        nested = self.repo / ".git" / "hooks" / "vendor" / "pre-commit"
+        nested.parent.mkdir(parents=True)
+        original = b"#!/bin/sh\necho good\n"
+        nested.write_bytes(original)
+        os.chmod(str(nested), 0o755)
+        base_fp, base_git = self._baseline()
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        nested.write_bytes(b"#!/bin/sh\necho evil\n")
+        os.chmod(str(nested), 0o644)
+        res = restore_protected_on_abort(self.repo, base_fp, base_git, snap)
+        self.assertEqual(nested.read_bytes(), original)
+        self.assertEqual(stat.S_IMODE(os.stat(str(nested)).st_mode), 0o755)
+        self.assertIn(".git/hooks/vendor/pre-commit", res["restored"])
 
     def test_sweep_noop_when_only_source_changed(self) -> None:
         from groklib.modes.direct_finalize import restore_protected_on_abort

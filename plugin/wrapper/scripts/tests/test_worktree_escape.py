@@ -61,6 +61,52 @@ class RepoChangeFingerprintTests(WorktreeTestBase):
             "rewrite of non-ASCII dirty path must be detected under default quotePath",
         )
 
+    def test_fingerprint_detects_same_size_mtime_rewrite_of_ignored_env(self) -> None:
+        # Protected gitignored credentials cannot use size:mtime:mode alone: a
+        # same-length rewrite that restores mtime is invisible to stat signatures
+        # and would leave a silently-leaked .env. Content-hash + mode is required
+        # for deny/snapshot-scope ignored paths; bulk caches stay stat-only.
+        _git(self.repo_root, "config", "core.quotePath", "true")
+        (self.repo_root / ".gitignore").write_text(".env\nnode_modules/\n", encoding="utf-8")
+        _git(self.repo_root, "add", ".gitignore")
+        _git(self.repo_root, "commit", "-q", "-m", "ignore env and caches")
+        env = self.repo_root / ".env"
+        original = b"SECRET=keep-me-xx\n"  # fixed length
+        env.write_bytes(original)
+        os.chmod(str(env), 0o600)
+        st = env.stat()
+        before = repo_change_fingerprint(self.repo_root)
+        self.assertIn(".env", {path for path, _fp in before})
+
+        # Same size, different bytes, restore mtime so a stat-only sig is unchanged.
+        env.write_bytes(b"SECRET=leaked-now\n")
+        os.chmod(str(env), 0o600)
+        os.utime(str(env), ns=(st.st_atime_ns, st.st_mtime_ns))
+        after = repo_change_fingerprint(self.repo_root)
+        changed = {path for path, _fp in (after - before)}
+        self.assertIn(
+            ".env",
+            changed,
+            "same-size+mtime rewrite of protected gitignored .env must be detected",
+        )
+
+        # Bulk ignored caches may still use bounded stat-only signatures.
+        cache_dir = self.repo_root / "node_modules" / "pkg"
+        cache_dir.mkdir(parents=True)
+        cache = cache_dir / "bundle.js"
+        cache.write_bytes(b"// cache v1\n")
+        st_cache = cache.stat()
+        mid = repo_change_fingerprint(self.repo_root)
+        cache.write_bytes(b"// cache v2\n")  # same length
+        os.utime(str(cache), ns=(st_cache.st_atime_ns, st_cache.st_mtime_ns))
+        late = repo_change_fingerprint(self.repo_root)
+        cache_changed = {path for path, _fp in (late - mid)}
+        self.assertNotIn(
+            "node_modules/pkg/bundle.js",
+            cache_changed,
+            "bulk ignored cache same-stat rewrite may stay undetected (stat-only)",
+        )
+
 class AssertChangesWithinTests(WorktreeTestBase):
     def test_assert_changes_within_flags_outside_writes(self) -> None:
         wt = self._create()

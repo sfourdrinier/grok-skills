@@ -6,11 +6,11 @@
 #   - Direct mode does NOT prevent protected writes at the sandbox layer
 #     (workspace profile is whole-root writable). This module rolls back the
 #     COVERED protected set after a run (byte-identical if snapshotted; removed
-#     if Grok created it): .env/keys plus .git config/HEAD/packed-refs/hooks and
-#     .git/refs/** (a moved/created ref is reverted/removed). .git/index and
-#     .git/COMMIT_EDITMSG are NOT guarded (benign working state git rewrites on
-#     ordinary reads); loose .git/objects are not tracked (inert until a watched
-#     ref points at them).
+#     if Grok created it): .env/keys plus .git config/HEAD/packed-refs,
+#     .git/hooks/** and .git/refs/** (a moved/created ref or nested hook is
+#     reverted/removed). .git/index and .git/COMMIT_EDITMSG are NOT guarded
+#     (benign working state git rewrites on ordinary reads); loose .git/objects
+#     are not tracked (inert until a watched ref points at them).
 #   - It does NOT protect against reads (documented D-SECRETREAD gap: Grok can
 #     still read .env / keys inside the repo).
 #   - Over-cap protected files are recorded as unsnapshottable: fail closed with
@@ -34,8 +34,13 @@ DEFAULT_MAX_TOTAL_BYTES = 25 * 1024 * 1024
 
 # Explicit .git file names snapshotted at repo root of ``.git`` (never walk
 # .git/objects: loose objects are content-addressed and inert until a ref points
-# at them; ``.git/refs/**`` IS snapshotted below so a ref move can be rolled back).
+# at them; ``.git/refs/**`` and ``.git/hooks/**`` ARE snapshotted below so a
+# ref/hook move or plant can be rolled back).
 _GIT_SNAPSHOT_FILES: Tuple[str, ...] = ("config", "HEAD", "packed-refs")
+
+# Bound shared with the git-dir guard walk so a pathological hooks/refs tree
+# cannot stall snapshot or finalize (same cap for both inventories).
+MAX_GIT_TREE_WALK_FILES = 20000
 
 
 def _log(function: str, message: str) -> None:
@@ -118,12 +123,13 @@ def _is_snapshot_candidate(path: pathlib.Path) -> bool:
 def is_snapshot_scope(relative: str) -> bool:
     """True when a protected path is in the pre-run snapshot set if it exists.
 
-    ``.git/config``, ``.git/HEAD``, ``.git/packed-refs``, ``.git/hooks/*``, and
-    ``.git/refs/**`` are snapshotted (so a created ref is auto-deleted and a moved
-    ref is byte-restored). ``.git/index`` / ``.git/COMMIT_EDITMSG`` are not guarded
-    (benign working state); loose ``.git/objects`` are not tracked. Any other
-    ``.git/*`` offender is not auto-deleted on restore when absent from the
-    snapshot (it likely existed pre-run without a snapshot).
+    ``.git/config``, ``.git/HEAD``, ``.git/packed-refs``, ``.git/hooks/**``, and
+    ``.git/refs/**`` are snapshotted (so a created ref/hook is auto-deleted and a
+    moved or rewritten one is byte-restored). ``.git/index`` /
+    ``.git/COMMIT_EDITMSG`` are not guarded (benign working state); loose
+    ``.git/objects`` are not tracked. Any other ``.git/*`` offender is not
+    auto-deleted on restore when absent from the snapshot (it likely existed
+    pre-run without a snapshot).
     """
     rel = _posix_rel(relative)
     if not rel:
@@ -141,12 +147,49 @@ def is_snapshot_scope(relative: str) -> bool:
     return path_matches_deny(rel)
 
 
+def iter_git_tree_entries(
+    git_dir: pathlib.Path,
+    tree_name: str,
+    *,
+    max_files: int = MAX_GIT_TREE_WALK_FILES,
+) -> Iterable[Tuple[str, pathlib.Path]]:
+    """Yield ``(.git/<tree>/..., abs path)`` under ``git_dir/<tree>``.
+
+    Single inventory for protected snapshot and git-dir guard: recursive,
+    ``followlinks=False``, regular files and symlinks only, bounded by
+    ``max_files``. ``git_dir`` may be the common dir of a linked worktree.
+    """
+    root = pathlib.Path(git_dir) / tree_name
+    if not root.is_dir():
+        return
+    count = 0
+    prefix = ".git/" + tree_name + "/"
+    try:
+        for dirpath, dirnames, filenames in os.walk(str(root), followlinks=False):
+            dirnames.sort()
+            for fname in sorted(filenames):
+                child = pathlib.Path(dirpath) / fname
+                if not _is_snapshot_candidate(child):
+                    continue
+                rel = prefix + _posix_rel(os.path.relpath(str(child), str(root)))
+                yield rel, child
+                count += 1
+                if count >= max_files:
+                    return
+    except OSError as exc:
+        _log(
+            "iter_git_tree_entries",
+            "{} walk failed: {}".format(tree_name, exc),
+        )
+
+
 def iter_existing_protected_paths(repo_root: pathlib.Path) -> Iterable[str]:
     """Yield repo-relative POSIX paths of existing regular protected files.
 
-    Snapshots ``.git/config``, ``.git/HEAD``, and ``.git/hooks/*`` only - does
-    not walk ``.git/objects``. Other deny-glob matches are found via a bounded
-    walk that prunes ``.git``.
+    Snapshots ``.git/config``, ``.git/HEAD``, ``.git/packed-refs``, recursive
+    ``.git/hooks/**`` and ``.git/refs/**`` (same inventory as the git-dir guard).
+    Does not walk ``.git/objects``. Other deny-glob matches are found via a
+    bounded walk that prunes ``.git``.
     """
     # Late import: direct_finalize imports this module for restore.
     from groklib.modes.direct_finalize import path_matches_deny
@@ -157,25 +200,10 @@ def iter_existing_protected_paths(repo_root: pathlib.Path) -> Iterable[str]:
         candidate = git_dir / name
         if _is_snapshot_candidate(candidate):
             yield ".git/" + name
-    hooks = git_dir / "hooks"
-    if hooks.is_dir():
-        try:
-            for child in sorted(hooks.iterdir()):
-                if _is_snapshot_candidate(child):
-                    yield ".git/hooks/" + child.name
-        except OSError as exc:
-            _log("iter_existing_protected_paths", "hooks walk failed: {}".format(exc))
-    refs = git_dir / "refs"
-    if refs.is_dir():
-        try:
-            for dirpath, dirnames, filenames in os.walk(str(refs), followlinks=False):
-                dirnames.sort()
-                for fname in sorted(filenames):
-                    child = pathlib.Path(dirpath) / fname
-                    if _is_snapshot_candidate(child):
-                        yield ".git/" + _posix_rel(os.path.relpath(str(child), str(git_dir)))
-        except OSError as exc:
-            _log("iter_existing_protected_paths", "refs walk failed: {}".format(exc))
+    for rel, _abs in iter_git_tree_entries(git_dir, "hooks"):
+        yield rel
+    for rel, _abs in iter_git_tree_entries(git_dir, "refs"):
+        yield rel
 
     for dirpath, dirnames, filenames in os.walk(str(root), topdown=True, followlinks=False):
         rel_dir = _posix_rel(os.path.relpath(dirpath, str(root)))

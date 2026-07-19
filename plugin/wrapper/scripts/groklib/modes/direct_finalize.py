@@ -20,11 +20,11 @@
 # SECURITY: direct mode does NOT prevent protected writes at the sandbox layer
 # (workspace is whole-root). The deny scan + git-dir guard + direct_protect
 # snapshot/restore roll back the COVERED protected set to pre-run state
-# (byte-identical or removed-if-created): .env/keys, .git config/HEAD/packed-refs/
-# hooks/refs. .git/index and .git/COMMIT_EDITMSG are NOT guarded (benign working
-# state git rewrites on ordinary reads like `git status`); loose .git/objects are
-# not tracked (content-addressed, inert until a watched ref points at them).
-# Reads of .env/keys are NOT blocked (D-SECRETREAD gap).
+# (byte-identical or removed-if-created): .env/keys, .git config/HEAD/packed-refs,
+# .git/hooks/**, .git/refs/**. .git/index and .git/COMMIT_EDITMSG are NOT guarded
+# (benign working state git rewrites on ordinary reads like `git status`); loose
+# .git/objects are not tracked (content-addressed, inert until a watched ref
+# points at them). Reads of .env/keys are NOT blocked (D-SECRETREAD gap).
 # Backlog: probe seatbelt write-deny subpaths for true prevention.
 
 import fnmatch
@@ -71,9 +71,10 @@ DENY_WRITE_GLOBS: Tuple[str, ...] = (
     "credentials.json",
 )
 
-# Cap the .git/refs fingerprint walk so a pathological ref count cannot stall
-# finalize; over-cap still detects add/remove via the count-bearing sentinel.
-_MAX_GIT_REF_FILES = 20000
+# Cap hooks/refs fingerprint walks (SSOT: direct_protect.MAX_GIT_TREE_WALK_FILES)
+# so a pathological tree cannot stall finalize; over-cap still detects
+# add/remove via the count-bearing sentinel.
+_MAX_GIT_TREE_FILES = direct_protect.MAX_GIT_TREE_WALK_FILES
 
 
 def _log(function: str, message: str) -> None:
@@ -182,8 +183,10 @@ def capture_git_dir_guard(repo_root: pathlib.Path) -> FrozenSet[Tuple[str, str]]
     Watches config/packed-refs/hooks/refs in the COMMON git dir and HEAD in the
     per-worktree git dir (resolved via git, so a linked worktree whose ``.git``
     is a file is handled), each by CONTENT HASH so a same-size ref move is
-    detected. A post-run set-difference surfaces Grok writes the sandbox cannot
-    block (workspace profile is whole-root).
+    detected. Hooks and refs use the same bounded recursive inventory as
+    protected snapshot (``direct_protect.iter_git_tree_entries``). A post-run
+    set-difference surfaces Grok writes the sandbox cannot block (workspace
+    profile is whole-root).
 
     Deliberately NOT watched (benign working state git rewrites on ordinary reads
     like ``git status``, which would otherwise false-positive every real run):
@@ -196,43 +199,26 @@ def capture_git_dir_guard(repo_root: pathlib.Path) -> FrozenSet[Tuple[str, str]]
     pairs.add((".git/HEAD", _git_watch_sig(git_dir / "HEAD")))
     for name in ("config", "packed-refs"):
         pairs.add((".git/" + name, _git_watch_sig(common_dir / name)))
-    hooks = common_dir / "hooks"
-    if hooks.is_dir():
-        try:
-            for child in hooks.iterdir():
-                if child.is_file() or child.is_symlink():
-                    rel = ".git/hooks/" + child.name
-                    pairs.add((rel, _git_watch_sig(child)))
-        except OSError as exc:
-            _log("capture_git_dir_guard", "hooks walk failed: {}".format(exc))
-    pairs |= _fingerprint_git_refs(common_dir)
+    pairs |= _fingerprint_git_tree(common_dir, "hooks")
+    pairs |= _fingerprint_git_tree(common_dir, "refs")
     return frozenset(pairs)
 
 
-def _fingerprint_git_refs(git_dir: pathlib.Path) -> Set[Tuple[str, str]]:
-    """Fingerprint every file under ``<gitdir>/refs`` (bounded by ``_MAX_GIT_REF_FILES``).
+def _fingerprint_git_tree(git_dir: pathlib.Path, tree_name: str) -> Set[Tuple[str, str]]:
+    """Fingerprint ``.git/<tree_name>/**`` via the shared protect inventory.
 
-    Over-cap emits a single count-bearing sentinel so a ref add/remove past the
+    Over-cap emits a single count-bearing sentinel so an add/remove past the
     cap still flips the set-difference, rather than silently going undetected.
     """
-    refs_dir = git_dir / "refs"
     pairs: Set[Tuple[str, str]] = set()
-    if not refs_dir.is_dir():
-        return pairs
     count = 0
-    try:
-        for dirpath, dirnames, filenames in os.walk(str(refs_dir), followlinks=False):
-            dirnames.sort()
-            for fname in sorted(filenames):
-                child = pathlib.Path(dirpath) / fname
-                rel = ".git/refs/" + _posix_rel(os.path.relpath(str(child), str(refs_dir)))
-                pairs.add((rel, _git_watch_sig(child)))
-                count += 1
-                if count >= _MAX_GIT_REF_FILES:
-                    pairs.add((".git/refs/**", "over-cap:{}".format(count)))
-                    return pairs
-    except OSError as exc:
-        _log("_fingerprint_git_refs", "refs walk failed: {}".format(exc))
+    for rel, abs_path in direct_protect.iter_git_tree_entries(
+        git_dir, tree_name, max_files=_MAX_GIT_TREE_FILES
+    ):
+        pairs.add((rel, _git_watch_sig(abs_path)))
+        count += 1
+    if count >= _MAX_GIT_TREE_FILES:
+        pairs.add((".git/{}/**".format(tree_name), "over-cap:{}".format(count)))
     return pairs
 
 
