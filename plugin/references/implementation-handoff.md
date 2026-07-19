@@ -85,6 +85,18 @@ runs/<runId>/
 Git-reported `changedFiles` paths keep colons and backslashes as filename
 characters; only operator-supplied contract paths reject Windows drive forms.
 
+### Path inventory and quoted patch headers (2.0 honesty)
+
+- Wrapper path listings that feed dirty-overlap, escape checks, and handoff
+  inventories use a shared **NUL-safe** `-z` inventory (`path_inventory`) so
+  default `core.quotePath` C-quoting of non-ASCII names cannot invent phantom
+  keys or miss a real rewrite.
+- Handoff path cross-check decodes C-quoted `diff --git` headers via
+  `git_path_quote` (octal + named escapes, a/b sides, `/dev/null`). That decoder
+  is **not** applied to already-raw `-z` inventory values.
+- Companion dirty-guard / numstat parsing uses the same C-style unquote rules so
+  auto and peer apply see one path set.
+
 ## Parent apply checklist
 
 Mode-aware integrate (canonical:
@@ -93,18 +105,24 @@ Mode-aware integrate (canonical:
 - **direct:** source edits already live in the operator tree; protected paths
   rolled back if touched. No patch gate required for the edit to exist.
 - **auto:** companion may auto-apply after dual-condition ready + apply-time
-  revalidation. Use this checklist only if apply did not run or failed.
+  revalidation (patch integrity recheck + shared dirty-guard apply spine - see
+  [integration-modes.md](integration-modes.md)). Use this checklist only if
+  apply did not run or failed.
 - **review:** never auto-applies - use the checklist below.
+- **peer:** integrate at `peer stop` via the same spine; `/grok:handoff` refuses
+  peer runIds.
 
 ### Manual apply (review / when auto did not apply)
 
 1. `handoff --run-id` success + ready  
 2. Confirm base still present / ancestry  
-3. Dirty overlap check on target paths  
-4. `git apply --check --binary path/to/implementation.patch`  
-5. Explicit apply only with operator intent  
-6. Re-run project validation on parent  
-7. Record runId + patch sha256  
+3. Dirty overlap inventory on target paths (`git status --porcelain -z`)  
+4. Explicit patch integrity recheck: on-disk patch bytes/size/sha still match the
+   handoff manifest (same integrity gate auto/peer re-run before apply)  
+5. `git apply --check --binary path/to/implementation.patch`  
+6. Explicit apply only with operator intent  
+7. Re-run project validation on parent  
+8. Record runId + patch sha256  
 
 **Never** auto-commit, merge, cherry-pick, or push from this plugin in any mode.
 

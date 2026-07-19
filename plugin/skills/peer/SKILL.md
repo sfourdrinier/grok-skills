@@ -36,9 +36,12 @@ applied by `peer stop` itself, at stop time. `/grok:handoff` is code-mode only
 and refuses peer runIds (`handoff-unavailable`); peer integration never routes
 through it (see `integration-modes.md`). The companion emits **one** final
 stdout envelope that already includes the apply outcome
-(`response.integration.applied` / `outcome`); blocked apply is `status: failure`
-+ nonzero exit + failed job + identical stored `/grok:result` payload (never a
-raw wrapper success for an unapplied ready peer-stop).
+(`response.integration.applied` / `outcome`) under rewrite-before-write/store/finalize
+(onStdout computes final emitStdout/effectiveCode before first write; then write;
+then storeJobStdout; then updateJob/finalize; then notify). Blocked apply is
+`status: failure` + nonzero exit + failed job + identical stored `/grok:result`
+payload (never a raw wrapper success for an unapplied ready peer-stop). Peer-stop
+is **not** completion-notification eligible (see `NOTIFY_ELIGIBLE_MODES`).
 
 ## How to run (transparent)
 
@@ -109,15 +112,23 @@ node "$SKILL_BASE/run.mjs" cleanup --run-id '<id>' --confirm
 ## Safety notes
 
 - Start parity plants cwd sentinel, private home, tool allowlist, and baseline
-  before spawn (fail closed if unmet). Peer-stop reuses the **start** baseline
-  (never re-captured at stop).
-- `pre_tool_use` deny is registered but documented as **NON-enforcement**; the
-  OS sandbox is the enforcement layer. Peer does **not** claim full code-mode
-  isolation parity when sandbox events are missing - verify_enforcement failure
-  is recorded honestly.
+  before spawn (fail closed if unmet). The ACP child is spawned with the same
+  global C6 tool / permission / web / sandbox pins the running envelope
+  advertises (probe-accepted globals before `agent stdio`). Peer-stop reuses
+  the **start** baseline (never re-captured at stop).
+- `pre_tool_use` may appear as an initialize **capability**; the wrapper does
+  **not** register a deny hook (documented NON-enforcement). OS sandbox + C6
+  pins are the real layers. Peer does **not** claim full code-mode isolation
+  parity when sandbox events are missing - verify_enforcement failure is
+  recorded honestly. Runtime claims beyond local CLI parse+initialize probe
+  evidence are not made.
+- Peer lifecycle is single-flight under `run_lock` with `stopOwner` reclaim:
+  concurrent stop finalizes once; field-safe peer.json RMW refuses clobbering
+  stopping/stopOwner; peer-prompt refuses non-promptable lifecycles.
 - Secret redaction applies to progress chunks, turn envelopes, and control-
   socket payloads (same scan as `emit_envelope`).
 - Integrate only per the chosen mode's gate (see
-  `plugin/references/integration-modes.md`: review never auto-applies; auto may
-  after revalidation; direct lands live). Prefer deriving a contract with
-  shell-free `requiredValidation` so ready can be evidence-backed.
+  `plugin/references/integration-modes.md`: shared dirty-guard apply spine;
+  review never auto-applies; auto may after revalidation + patch integrity;
+  direct lands live). Prefer deriving a contract with shell-free
+  `requiredValidation` so ready can be evidence-backed.

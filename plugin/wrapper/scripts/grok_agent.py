@@ -252,7 +252,7 @@ def _build_parser() -> _Parser:
     handoff = _sub("handoff")
     handoff.add_argument("--run-id", required=True)
 
-    # Experimental ACP peer channel (GROK_EXPERIMENTAL_ACP=1; companion-gated).
+    # ACP peer channel (default; opt out with GROK_DISABLE_ACP=1).
     peer_start = _sub("peer-start")
     peer_start.add_argument("--target", required=True)
     peer_start.add_argument("--base", required=True)

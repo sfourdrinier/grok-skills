@@ -53,9 +53,11 @@ Constants live in `plugin/wrapper/scripts/groklib/implementation_contract.py`
 | Surface | Behavior |
 |---------|----------|
 | **integration default** | Product (companion/skills) defaults to **direct** after per-repo setup consent; bare `python3 …/grok_agent.py code` without `--integration` still defaults to **worktree** (fail-closed isolation for un-consented bare calls). |
-| **ACP peer channel** | Default on for `grok-engineer-coder`. Opt out with `GROK_DISABLE_ACP=1` (one-shot `code` fallback). `GROK_EXPERIMENTAL_ACP` is no longer a hard enable gate. |
+| **ACP peer channel** | Default on for `grok-engineer-coder`. Opt out with `GROK_DISABLE_ACP=1` (one-shot `code` fallback). `GROK_EXPERIMENTAL_ACP` is no longer a hard enable gate (legacy opt-in ignored). |
 | **runMode vs integration** | Orthogonal axes that both use the word "direct". runMode=direct = installed CLI home; integration=direct = live-tree edits. See integration-modes.md. |
-| **handoff vs peer** | `/grok:handoff` remains **code-mode only** and refuses peer runIds (`handoff-unavailable`). Peer integrate runs at `peer stop` per active integration mode. |
+| **handoff vs peer** | `/grok:handoff` remains **code-mode only** and refuses peer runIds (`handoff-unavailable`). Peer integrate runs at `peer stop` via the shared auto/peer apply spine (dirty-status fail-closed + patch integrity). |
+| **peer notifications** | Peer-stop is **not** completion-notification eligible (`NOTIFY_ELIGIBLE_MODES` excludes peer modes). |
+| **task / web argv** | Companion last-wins split-or-equals for `--task`/`--task-file` and `--web`/`--no-web` (`companion-args` SSOT). |
 | **Older contracts** | schemaVersion must be 1; missing optional display fields normalize to empty; oversized objective/criteria fail at load (no silent truncation). |
 
 ## Completion notifications (1.5.0+)

@@ -61,9 +61,33 @@ captured at run start, unless `--force`. Clean-elsewhere is fine.
 1. Code (or peer) runs in an **isolated external worktree**
 2. Full dual-condition verification (ready manifest + success envelope + patch
    rehash - same authority as `/grok:handoff`)
-3. On ready: companion revalidates at apply time (`git apply --check --binary`,
-   then apply). Any failure **stops** and reports partial/blocked honestly
-4. Not-ready: nothing applied; blockers surface on stdout
+3. On ready: companion revalidates at apply time (manifest + patch integrity,
+   then the shared apply spine below). Any failure **stops** and reports
+   partial/blocked honestly
+4. Not-ready or missing/unparseable code envelope: nothing applied; companion
+   emits **one** complete failure envelope (`mode=code`, classified error,
+   `response.integration.applied=false`) - never a partial schema-only object
+   and never invented success
+
+### Shared apply spine (auto + peer)
+
+Canonical ladder for landing a verified patch on the operator tree
+(`plugin/scripts/lib/integrate.mjs`). Auto and ready peer-stop share it; consent
+/ readiness / target identity stay outside the helper:
+
+1. **Patch integrity** - re-verify on-disk `implementation.patch` bytes/size/hash
+   against the revalidated handoff manifest (`verifyPatchAgainstManifest`);
+   mismatch => `patch-integrity-failure` (fail closed)
+2. **Dirty status** - `git status --porcelain -z --untracked-files=all` (NUL-safe).
+   Non-zero / truncated status => `blocked-dirty-status` (no blind apply)
+3. **Patch path list** - `git apply --numstat --binary` with C-style path unquote
+   for default `core.quotePath` non-ASCII names; numstat failure =>
+   `blocked-numstat`
+4. **Dirty overlap** - any patch path already dirty in the operator checkout =>
+   `blocked-dirty-overlap` (operator commits/stashes, then re-runs)
+5. **`git apply --check --binary`** then **`git apply --binary`**; on apply
+   failure reverse with `git apply -R` when possible (`rolled-back` /
+   `manual-needed`)
 
 ### `review`
 
@@ -134,13 +158,18 @@ its verified patch **itself** per the active integration mode (above);
 (`handoff-unavailable`), so peer integration never routes through it.
 
 Companion completion honesty (parity with `code --integration auto`): peer-stop
-captures the wrapper envelope, runs integration, attaches the final apply
+captures the wrapper envelope, runs integration, and attaches the final apply
 outcome (`response.integration.applied` / `outcome`) via the shared final-envelope
-helper, then emits **exactly one** stdout envelope, stores that same envelope for
-`/grok:result`, finalizes the job, and notifies from the final envelope +
-effective exit code. A blocked apply (consent, dirty-overlap, integrity, etc.)
-is `status: failure`, nonzero exit, job failed, target untouched - never a raw
-wrapper `success` for an unapplied ready peer-stop.
+helper under rewrite-before-write/store/finalize: onStdout computes final
+emitStdout/effectiveCode **before** first write; then stdout write; then
+storeJobStdout (same envelope for `/grok:result`); then updateJob/finalize from
+final envelope + effective exit code; then notify. Emits **exactly one** final
+stdout envelope. A blocked apply (consent, dirty-overlap, integrity, etc.) is
+`status: failure`, nonzero exit, job failed, target untouched - never a raw
+wrapper `success` for an unapplied ready peer-stop. **Peer-stop is not
+completion-notification eligible** (`NOTIFY_ELIGIBLE_MODES` is
+review/reason/code/verify/adversarial-review only); do not expect a toast for
+peer sessions even when notifications are on.
 
 ## Mode-aware integrate rules (summary)
 

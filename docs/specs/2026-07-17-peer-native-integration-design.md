@@ -36,7 +36,9 @@ peer channel. The worktree+handoff machinery becomes opt-in, not gone.
   making validation genuine.
 - grok-engineer-coder DEFAULTS to the live multi-turn ACP peer; one-shot code
   is the opt-out fallback.
-- GROK_EXPERIMENTAL_ACP drops from a hard gate to an opt-OUT for one-shot.
+- ACP is default on; opt out of the peer channel with `GROK_DISABLE_ACP=1`
+  (one-shot `code` fallback). `GROK_EXPERIMENTAL_ACP` is no longer a hard gate
+  (legacy opt-in ignored).
 
 ## Sandbox note (design-review target)
 

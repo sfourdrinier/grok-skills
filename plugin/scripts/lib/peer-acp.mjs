@@ -1,6 +1,6 @@
 // plugin/scripts/lib/peer-acp.mjs
 //
-// Experimental ACP peer channel companion helpers (gate + peer-start background).
+// ACP peer channel companion helpers (default on; gate + peer-start background).
 
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -17,10 +17,11 @@ export function isPeerMode(mode) {
   return PEER_MODES.has(mode) || String(mode || "").startsWith("peer-");
 }
 
+/** @deprecated ACP is default; keep for test fixtures that still import the name. */
 export function refusePeerExperimental(mode) {
   process.stderr.write(
-    `[grok-companion] peer mode '${mode}' is experimental and refused unless ` +
-      `GROK_EXPERIMENTAL_ACP=1 (see ${ACP_SPEC_POINTER}).\n`
+    `[grok-companion] peer mode '${mode}' is disabled via GROK_DISABLE_ACP=1 ` +
+      `(see ${ACP_SPEC_POINTER}). Unset GROK_DISABLE_ACP to use the ACP peer channel.\n`
   );
   return 1;
 }

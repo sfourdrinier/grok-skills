@@ -83,19 +83,19 @@ This flow is **code-mode only**: `/grok:handoff` refuses peer runIds. A peer run
 is finalized by `peer stop` itself (use its response as the ready signal); it
 never routes through `/grok:handoff`.
 
-1. Dispatch `/grok:code` with optional `--contract-file`
-2. Wait for terminal status (`/grok:status --run-id` optional)
-3. Run `/grok:handoff --run-id <id>`
-4. Proceed only if envelope status is success and `response.integration.ready`
-5. When `response.contractSummary` is present, check its acceptance criteria against the patch before applying
-6. Verify `patch.sha256` matches on-disk patch
-7. Inspect patch and changed files
-8. Confirm parent base still contains `baseRevision` ancestry as needed
-9. Check dirty overlap on paths you will touch
-10. `git apply --check --binary <patch>`
-11. Explicit `git apply --binary <patch>` (or equivalent) only with operator intent
-12. Re-run relevant validation on the parent checkout
-13. Record `runId` + patch hash in your notes
+Canonical parent-apply checklist (do not fork the algorithm):
+[implementation-handoff.md](../../references/implementation-handoff.md)
+Parent apply checklist. Operator summary:
+
+1. `/grok:handoff --run-id` success + `response.integration.ready`
+2. Confirm parent base still present / ancestry
+3. Dirty overlap check on target paths (`git status --porcelain -z` inventory)
+4. Explicit patch integrity recheck: on-disk patch bytes/size/sha still match the
+   handoff manifest (same integrity gate auto/peer re-run before apply)
+5. `git apply --check --binary <patch>`
+6. Explicit `git apply --binary <patch>` only with operator intent
+7. Re-run project validation on the parent checkout
+8. Record `runId` + patch sha256
 
 ## What this mode never does
 

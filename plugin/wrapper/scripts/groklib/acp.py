@@ -1,7 +1,7 @@
 # wrapper/scripts/groklib/acp.py
 #
-# Experimental ACP (Agent Client Protocol) ndjson JSON-RPC 2.0 client over a
-# child's stdio. Used by the peer channel (GROK_EXPERIMENTAL_ACP). Stdlib only;
+# ACP (Agent Client Protocol) ndjson JSON-RPC 2.0 client over a child's stdio.
+# Used by the default peer channel (opt out with GROK_DISABLE_ACP=1). Stdlib only;
 # frame encode/decode is pure-testable; live I/O kills the child tree on timeout.
 
 from __future__ import annotations

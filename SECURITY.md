@@ -67,15 +67,25 @@ over. It is **not** a complete sandbox against an adversarial model.
   **real commands** and sets `integration.ready` only from authoritative,
   non-forgeable command evidence - never a synthesized exit status or a no-op
   build gate. Integration is applied by **peer-stop itself** per the active
-  integration mode (review retains the worktree patch; auto/direct apply after
-  `git apply --check`, reversing on failure), **not** via `/grok:handoff`, which
-  stays code-mode only and still refuses peer runIds. Progress-chunk redaction is
-  **per-frame**: a secret split across ACP `session/update` frames may partially
-  land in `progress.jsonl` before a full token shape is visible to the scanner
-  (residual risk; not a complete secret firewall). Control-socket payloads and
-  turn envelopes are scanned with the same `assert_no_secret_material` path as
-  stdout envelopes. The opt-out env gate is enforced in the wrapper (not
-  companion-only).
+  integration mode via the **shared auto/peer apply spine** (patch integrity
+  recheck, NUL-safe dirty status, numstat, dirty-overlap, `git apply --check`,
+  apply, reverse-on-failure - see
+  [integration-modes.md](plugin/references/integration-modes.md)), **not** via
+  `/grok:handoff`, which stays code-mode only and still refuses peer runIds.
+  Peer-stop final envelope rewrite is rewrite-before-write/store/finalize:
+  onStdout computes final emitStdout/effectiveCode before first write, then
+  stdout write, then storeJobStdout, then updateJob/finalize, then notify;
+  peer-stop is **not** completion-notification eligible. Progress-chunk
+  redaction is **per-frame**: a secret split across ACP `session/update` frames
+  may partially land in `progress.jsonl` before a full token shape is visible to
+  the scanner (residual risk; not a complete secret firewall). Control-socket
+  payloads and turn envelopes are scanned with the same
+  `assert_no_secret_material` path as stdout envelopes. The opt-out env gate is
+  enforced in the wrapper (not companion-only). `pre_tool_use` may appear as an
+  initialize capability only - the wrapper does not register a deny hook
+  (NON-enforcement; OS sandbox + C6 child pins enforce). Do **not** claim full
+  runtime tool-approval enforcement beyond local CLI parse + initialize probe
+  evidence.
 
 ### Direct-default trust posture (integration=direct)
 
