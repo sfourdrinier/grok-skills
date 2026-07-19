@@ -377,7 +377,14 @@ class PeerConcurrencyResidualTests(PeerTestBase):
             return pid == owner_pid
 
         def _token(pid):
-            return "recycled-different-token" if pid == owner_pid else None
+            # Recycled owner pid has a different token; this process must still
+            # expose a non-empty identity so the reclaim claim can fail closed on
+            # missing tokens rather than poisoning stopOwner.
+            if pid == owner_pid:
+                return "recycled-different-token"
+            if pid == os.getpid():
+                return "reclaimer-token"
+            return None
 
         with mock.patch.object(platformsupport, "process_is_alive", side_effect=_alive):
             with mock.patch.object(platformsupport, "process_start_token", side_effect=_token):
@@ -388,6 +395,7 @@ class PeerConcurrencyResidualTests(PeerTestBase):
         self.assertEqual(doc.get("lifecycle"), "stopping")
         # New claim owner is this process, not the recycled pid.
         self.assertNotEqual((doc.get("stopOwner") or {}).get("startToken"), "original-owner-token")
+        self.assertEqual((doc.get("stopOwner") or {}).get("startToken"), "reclaimer-token")
         self.assertNotEqual((doc.get("stopOwner") or {}).get("pid"), owner_pid)
 
     def test_kill_recorded_wrapper_refuses_wrong_token_pid_reuse(self) -> None:
@@ -413,6 +421,140 @@ class PeerConcurrencyResidualTests(PeerTestBase):
                     attempted = peer_stop.kill_recorded_wrapper(doc)
         self.assertFalse(attempted)
         self.assertEqual(killed, [])
+
+    def test_current_stop_owner_requires_non_empty_identity_token(self) -> None:
+        """Empty/missing local startToken must fail closed before claim writes stopping."""
+        for bad in ("", None):
+            with self.subTest(token=bad):
+                with mock.patch.object(
+                    platformsupport, "process_start_token", return_value=bad
+                ):
+                    with self.assertRaises(GrokWrapperError) as ctx:
+                        peer_stop._current_stop_owner()
+                self.assertEqual(ctx.exception.error_class, "acp-failure")
+
+    def test_claim_peer_stop_refuses_empty_identity_token_without_poisoning(self) -> None:
+        """Claim must not write lifecycle=stopping when local identity token is empty."""
+        home, run_paths, wt, peer_doc, stage, baseline = self._peer_finalize_fixture(
+            plant_sandbox=True
+        )
+        peer_doc = dict(peer_doc)
+        peer_doc["lifecycle"] = "running"
+        peer_doc.pop("stopOwner", None)
+        runstate.write_json_atomic(run_paths.run_dir / "peer.json", peer_doc)
+
+        with mock.patch.object(platformsupport, "process_start_token", return_value=""):
+            with self.assertRaises(GrokWrapperError) as ctx:
+                peer_stop.claim_peer_stop(run_paths)
+        self.assertEqual(ctx.exception.error_class, "acp-failure")
+        after = self._read_peer(run_paths)
+        self.assertEqual(after.get("lifecycle"), "running")
+        self.assertNotIn("stopOwner", after)
+
+    def test_multi_stopper_undurable_failure_reclaim_returns_honest_failure_then_success(
+        self,
+    ) -> None:
+        """Undurable finalize stays reclaimable; second stopper can reclaim after owner dies.
+
+        First stopper returns honest failure (not undurable success) and leaves
+        stopping+stopOwner. After the owner is dead past grace, a second claim
+        finalizes with durable success.
+        """
+        home, run_paths, wt, peer_doc, stage, baseline = self._peer_finalize_fixture(
+            plant_sandbox=True
+        )
+        owner_pid = 555001
+        owner_token = "first-stopper-token"
+        peer_doc = dict(peer_doc)
+        peer_doc["lifecycle"] = "stopping"
+        peer_doc["stopOwner"] = {
+            "pid": owner_pid,
+            "startToken": owner_token,
+            "claimedAt": time.time(),
+        }
+        runstate.write_json_atomic(run_paths.run_dir / "peer.json", peer_doc)
+
+        undurable_success = {
+            "schemaVersion": 1,
+            "runId": run_paths.run_id,
+            "mode": "peer-start",
+            "status": "success",
+            "response": {"peer": {"stopped": True}},
+        }
+
+        # First stopper (current owner path): finalize returns undurable success.
+        with mock.patch(
+            "groklib.modes.peer_finalize.finalize_peer_session",
+            return_value=dict(undurable_success),
+        ):
+            with mock.patch.object(
+                peer_stop, "load_durable_terminal_envelope", return_value=None
+            ):
+                env1 = peer_stop._finalize_and_mark(
+                    run_paths=run_paths,
+                    peer_doc=peer_doc,
+                    home_path=pathlib.Path(peer_doc["homePath"]),
+                    worktree=wt,
+                    contract=None,
+                    original_baseline=baseline,
+                    stage=stage,
+                )
+        self.assertEqual(env1.get("status"), "failure")
+        self.assertEqual(env1.get("error", {}).get("class"), "state-ownership-violation")
+        after1 = self._read_peer(run_paths)
+        self.assertEqual(after1.get("lifecycle"), "stopping")
+        self.assertEqual((after1.get("stopOwner") or {}).get("pid"), owner_pid)
+
+        # Owner dies: second stopper reclaims and durable-finalizes successfully.
+        durable = {
+            "schemaVersion": 1,
+            "runId": run_paths.run_id,
+            "mode": "peer-start",
+            "status": "success",
+            "response": {"peer": {"stopped": True, "reclaimed": True}},
+        }
+
+        def _alive(pid):
+            return False
+
+        def _token(pid):
+            if pid == os.getpid():
+                return "second-stopper-token"
+            return None
+
+        with mock.patch.object(platformsupport, "process_is_alive", side_effect=_alive):
+            with mock.patch.object(platformsupport, "process_start_token", side_effect=_token):
+                with mock.patch.object(peer_stop, "_PEER_STOP_OWNER_GRACE_SECONDS", 0.0):
+                    outcome, claimed, durable_existing = peer_stop.claim_peer_stop(run_paths)
+        self.assertEqual(outcome, "claimed")
+        self.assertIsNone(durable_existing)
+        self.assertEqual(claimed.get("lifecycle"), "stopping")
+        self.assertNotEqual((claimed.get("stopOwner") or {}).get("pid"), owner_pid)
+        self.assertEqual(
+            (claimed.get("stopOwner") or {}).get("startToken"), "second-stopper-token"
+        )
+
+        def _fake_finalize(**kwargs):
+            return dict(durable)
+
+        with mock.patch(
+            "groklib.modes.peer_finalize.finalize_peer_session",
+            side_effect=_fake_finalize,
+        ):
+            with mock.patch.object(
+                peer_stop, "load_durable_terminal_envelope", return_value=durable
+            ):
+                env2 = peer_stop._finalize_and_mark(
+                    run_paths=run_paths,
+                    peer_doc=claimed,
+                    home_path=pathlib.Path(peer_doc["homePath"]),
+                    worktree=wt,
+                    contract=None,
+                    original_baseline=baseline,
+                    stage=stage,
+                )
+        self.assertEqual(env2.get("status"), "success")
+        self.assertEqual(env2.get("runId"), run_paths.run_id)
 
     def test_peer_prompt_fails_closed_for_terminal_and_stopping_lifecycles(self) -> None:
         """peer-prompt must refuse stopping/stopped/failed/died without relying on socket."""

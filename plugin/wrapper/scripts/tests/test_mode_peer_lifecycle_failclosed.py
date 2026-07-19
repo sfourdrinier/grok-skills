@@ -236,6 +236,9 @@ class PeerLifecycleFailClosedTests(PeerTestBase):
         after = self._read_peer(run_paths)
         # Disk must not show a successful prompt count when persist failed closed.
         self.assertEqual(int(after.get("promptsHandled") or 0), 0)
+        # In-memory bump must roll back too: stop must not require the sentinel for a
+        # prompt that never reached ACP.
+        self.assertEqual(int(session.peer_doc.get("promptsHandled") or 0), 0)
 
     def test_serve_oserror_on_accept_tears_down_via_stop(self) -> None:
         """Control accept OSError must leave finally path that stops/tears down."""

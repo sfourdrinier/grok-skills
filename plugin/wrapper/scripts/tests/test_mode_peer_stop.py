@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import socket
 import threading
@@ -96,6 +97,10 @@ class PeerStopLifecycleTests(PeerTestBase):
             return False
 
         def _token(pid):
+            # Dead abandoned owner has no token; reclaimer still needs a non-empty
+            # identity or claim_peer_stop fails closed without writing stopping.
+            if pid == os.getpid():
+                return "reclaimer-stop-token"
             return None
 
         ns = mock.Mock(run_id=run_paths.run_id)
@@ -475,6 +480,8 @@ class PeerStopLifecycleTests(PeerTestBase):
         def _token(pid):
             if pid == wrapper_pid:
                 return wrapper_token
+            if pid == os.getpid():
+                return "fallback-stop-owner-token"
             return None
 
         def _kill_pid(pid):
