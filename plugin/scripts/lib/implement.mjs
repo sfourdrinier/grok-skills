@@ -298,6 +298,98 @@ export function buildAutoFinalEnvelope(result, finalCode, applied) {
 }
 
 /**
+ * SSOT fallback when auto has no handoff envelope: preserve a parseable code
+ * envelope when present, else synthesize a COMPLETE one-stdout failure envelope
+ * (schemaVersion/mode/status/runId/error/response.integration). Never invent
+ * success; never invent a runId (known result/job run id or explicit null).
+ *
+ * @param {{
+ *   codeEnvelope?: object|null,
+ *   runId?: string|null,
+ *   jobId?: string|null,
+ *   codeExit?: number|null,
+ *   codeStdout?: string|null,
+ * }} result
+ * @returns {object}
+ */
+export function buildAutoCodeFallbackEnvelope(result = {}) {
+  const ce =
+    result.codeEnvelope && typeof result.codeEnvelope === "object" ? result.codeEnvelope : null;
+  const knownRunId =
+    sanitizeRunId(result.runId) ||
+    sanitizeRunId(ce?.runId) ||
+    null;
+  const baseResp =
+    ce?.response && typeof ce.response === "object" && !Array.isArray(ce.response)
+      ? ce.response
+      : {};
+  const baseInteg =
+    baseResp.integration && typeof baseResp.integration === "object"
+      ? baseResp.integration
+      : {};
+  const preservedError =
+    ce?.error && typeof ce.error === "object" && typeof ce.error.class === "string"
+      ? ce.error
+      : null;
+  const stdout = typeof result.codeStdout === "string" ? result.codeStdout : "";
+  const exitCode = typeof result.codeExit === "number" ? result.codeExit : null;
+  // Prefer the code leg's classified error when present; otherwise classify the
+  // missing/unparseable stdout (C4: output-missing / output-malformed).
+  const error =
+    preservedError ||
+    (stdout.trim()
+      ? {
+          class: "output-malformed",
+          message:
+            "code leg produced no parseable envelope (stdout corruption or non-JSON wrapper output)",
+          detail: {
+            exitCode,
+            jobId: result.jobId ?? null,
+            stdoutBytes: Buffer.byteLength(stdout, "utf8"),
+          },
+        }
+      : {
+          class: "output-missing",
+          message:
+            "code leg produced no parseable envelope (empty stdout; spawn failure or wrapper crash)",
+          detail: {
+            exitCode,
+            jobId: result.jobId ?? null,
+            stdoutBytes: 0,
+          },
+        });
+  const base = ce
+    ? { ...ce }
+    : {
+        schemaVersion: 1,
+        mode: "code",
+        status: "failure",
+        runId: knownRunId,
+        error,
+        response: null,
+      };
+  // Force honest failure + integration outcome even when the code envelope claimed
+  // success without a usable runId (auto never applied in this branch).
+  base.schemaVersion = typeof base.schemaVersion === "number" ? base.schemaVersion : 1;
+  base.mode = "code";
+  base.status = "failure";
+  base.runId = knownRunId;
+  if (!base.error || typeof base.error !== "object" || typeof base.error.class !== "string") {
+    base.error = error;
+  }
+  base.response = {
+    ...baseResp,
+    integration: {
+      ...baseInteg,
+      ready: false,
+      applied: false,
+      outcome: "not-ready",
+    },
+  };
+  return base;
+}
+
+/**
  * Peer-stop terminal envelope: rewrite the wrapper's ready/success envelope with
  * the real apply outcome BEFORE first stdout write / store / notify.
  * applied is true only for an attempted+ok apply (retained/not-ready stay false).
@@ -387,22 +479,11 @@ export async function runAutoIntegrate(wrapper, rest, runMode, track, {
   if (finalEnvelope) {
     finalEnvelopeText = `${JSON.stringify(finalEnvelope)}\n`;
   } else {
-    // No handoff envelope (no runId / handoff crashed or returned non-JSON) but
-    // finalCode is nonzero: emit an HONEST failure envelope, not the code-leg
-    // success stdout, so a consumer keying on status never sees success for an
-    // auto run that never applied. Carry the code envelope's fields (runId/error).
-    const ce =
-      result.codeEnvelope && typeof result.codeEnvelope === "object" ? result.codeEnvelope : {};
-    finalEnvelopeText = `${JSON.stringify({
-      ...ce,
-      schemaVersion: ce.schemaVersion || 1,
-      mode: "code",
-      status: "failure",
-      response: {
-        ...(ce.response || {}),
-        integration: { ready: false, applied: false, outcome: "not-ready" },
-      },
-    })}\n`;
+    // No handoff envelope (no runId / handoff crashed or returned non-JSON): emit
+    // a COMPLETE one-stdout failure envelope (preserve code envelope when present;
+    // otherwise synthesize classified error + integration applied=false). Never
+    // invent success or hide the original spawn/parse failure.
+    finalEnvelopeText = `${JSON.stringify(buildAutoCodeFallbackEnvelope(result))}\n`;
   }
   if (finalEnvelopeText) {
     process.stdout.write(

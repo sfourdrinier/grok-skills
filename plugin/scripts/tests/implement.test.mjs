@@ -11,7 +11,12 @@ import { test } from "node:test";
 
 import { DIRECT_NO_HANDOFF_MSG } from "../lib/direct-grok.mjs";
 import { setRunMode } from "../lib/jobs.mjs";
-import { runImplementCombo, runHandoffCaptured } from "../lib/implement.mjs";
+import {
+  buildAutoCodeFallbackEnvelope,
+  runAutoIntegrate,
+  runImplementCombo,
+  runHandoffCaptured,
+} from "../lib/implement.mjs";
 import { makeFakeWrapper, readCalls, runCompanion } from "./helpers/fake-wrapper.mjs";
 
 const RUN_ID = "20260716T000000Z-abc123";
@@ -391,4 +396,105 @@ test("continue-run in a direct workspace uses the wrapper, never runDirectGrok",
     cleanup();
     fs.rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+// PR review #discussion_r3609529639: when code --integration auto has no
+// parseable code envelope, emit a COMPLETE failure envelope (schemaVersion,
+// mode=code, status=failure, runId policy, classified error, integration
+// applied=false/outcome) - never a partial schemaVersion/mode/status-only object.
+test("unit: empty codeEnvelope synthesizes a complete auto failure envelope", () => {
+  const env = buildAutoCodeFallbackEnvelope({
+    codeEnvelope: null,
+    runId: null,
+    jobId: "job-empty-code",
+    codeExit: 4,
+    codeStdout: "",
+  });
+  assert.equal(env.schemaVersion, 1);
+  assert.equal(env.mode, "code");
+  assert.equal(env.status, "failure");
+  assert.equal(env.runId, null, "no known run id -> explicit null (not invented)");
+  assert.equal(typeof env.error, "object");
+  assert.equal(typeof env.error.class, "string");
+  assert.ok(env.error.class.length > 0, "classified error class required");
+  assert.equal(typeof env.error.message, "string");
+  assert.ok(env.error.message.length > 0, "error message must surface the spawn/parse failure");
+  assert.equal(env.response?.integration?.applied, false);
+  assert.equal(env.response?.integration?.ready, false);
+  assert.equal(typeof env.response?.integration?.outcome, "string");
+  assert.ok(env.response.integration.outcome.length > 0);
+});
+
+test("unit: unparseable code stdout still synthesizes complete failure (preserves known runId)", () => {
+  const env = buildAutoCodeFallbackEnvelope({
+    codeEnvelope: null,
+    runId: RUN_ID,
+    jobId: null,
+    codeExit: 1,
+    codeStdout: "not-json-at-all\n",
+  });
+  assert.equal(env.schemaVersion, 1);
+  assert.equal(env.mode, "code");
+  assert.equal(env.status, "failure");
+  assert.equal(env.runId, RUN_ID, "known result/job run id must be preserved");
+  assert.equal(typeof env.error?.class, "string");
+  assert.ok(env.error.class.length > 0);
+  assert.equal(env.response?.integration?.applied, false);
+  assert.notEqual(env.status, "success");
+});
+
+test("auto: empty code envelope yields one complete failure envelope on stdout + store", async () => {
+  const finalizeCalls = [];
+  const writes = [];
+  const origWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = (chunk, enc, cb) => {
+    writes.push(String(chunk));
+    if (typeof enc === "function") enc();
+    else if (typeof cb === "function") cb();
+    return true;
+  };
+  let code;
+  try {
+    code = await runAutoIntegrate(
+      "wrapper",
+      ["--integration", "auto", "--target", ".", "--base", "HEAD", "--task", "x"],
+      "hardened",
+      { kind: "code", mode: "code", notifyMode: "code", runMode: "hardened" },
+      {
+        runWithLiveRelay: async () => ({
+          code: 4,
+          stdout: "",
+          jobId: "job-empty-auto",
+        }),
+        stderrLine: () => {},
+        finalizeCombo: async (x) => finalizeCalls.push(x),
+      }
+    );
+  } finally {
+    process.stdout.write = origWrite;
+  }
+  assert.equal(code, 1);
+  const stdout = writes.join("");
+  const envLines = stdout.split("\n").filter((l) => l.trim().startsWith("{"));
+  assert.equal(envLines.length, 1, `one envelope; got: ${stdout}`);
+  const finalEnv = JSON.parse(envLines[0]);
+  assert.equal(finalEnv.schemaVersion, 1);
+  assert.equal(finalEnv.mode, "code");
+  assert.equal(finalEnv.status, "failure");
+  assert.equal(finalEnv.runId, null);
+  assert.equal(typeof finalEnv.error?.class, "string");
+  assert.ok(finalEnv.error.class.length > 0);
+  assert.equal(typeof finalEnv.error?.message, "string");
+  assert.ok(finalEnv.error.message.length > 0);
+  assert.equal(finalEnv.response?.integration?.applied, false);
+  assert.equal(finalEnv.response?.integration?.ready, false);
+  assert.equal(typeof finalEnv.response?.integration?.outcome, "string");
+  // Stored result must be the same complete failure envelope (safe for /grok:result).
+  assert.equal(finalizeCalls.length, 1);
+  assert.equal(finalizeCalls[0].finalCode, 1);
+  const stored = JSON.parse(String(finalizeCalls[0].finalEnvelopeText).trim());
+  assert.equal(stored.status, "failure");
+  assert.equal(typeof stored.error?.class, "string");
+  assert.equal(stored.response?.integration?.applied, false);
+  assert.notEqual(stored.status, "success");
 });
