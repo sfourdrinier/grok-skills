@@ -96,6 +96,71 @@ class PeerConcurrencyResidualTests(PeerTestBase):
         self.assertNotEqual(after.get("lifecycle"), "running")
         self.assertEqual(on_disk.get("lifecycle"), "stopping")
 
+    def test_renew_lease_uses_max_prompts_handled_ssot(self) -> None:
+        """renew_lease / patch_lease_expires raise promptsHandled via peer_doc SSOT."""
+        from groklib import peer_doc as peer_doc_mod
+
+        home, run_paths, wt, peer_doc, stage, baseline = self._peer_finalize_fixture(
+            plant_sandbox=True
+        )
+        on_disk = dict(peer_doc)
+        on_disk["lifecycle"] = "running"
+        on_disk["promptsHandled"] = 4
+        runstate.write_json_atomic(run_paths.run_dir / "peer.json", on_disk)
+
+        mem = dict(peer_doc)
+        mem["lifecycle"] = "running"
+        mem["promptsHandled"] = 7
+        session = peer_mod.PeerSession(
+            run_id=run_paths.run_id,
+            run_paths=run_paths,
+            session_id="sess-1",
+            socket_path=run_paths.run_dir / "peer.sock",
+            acp=mock.Mock(),
+            child=mock.Mock(pid=os.getpid()),
+            home=home,
+            worktree=wt,
+            progress=mock.Mock(),
+            peer_doc=mem,
+            contract=None,
+            original_baseline=baseline,
+            model="grok-4.5",
+            sentinel_name=peer_doc["sentinelName"],
+        )
+
+        with mock.patch.object(runstate, "write_peer_lease"):
+            with mock.patch.object(
+                peer_doc_mod,
+                "max_prompts_handled",
+                wraps=peer_doc_mod.max_prompts_handled,
+            ) as max_ssot:
+                session.renew_lease()
+
+        self.assertTrue(
+            max_ssot.called,
+            "renew_lease must sync promptsHandled via peer_doc.max_prompts_handled",
+        )
+        after = self._read_peer(run_paths)
+        self.assertEqual(after.get("promptsHandled"), 7)
+        self.assertEqual(session.peer_doc.get("promptsHandled"), 7)
+
+        # Disk higher than memory still uses the shared max SSOT.
+        on_disk2 = self._read_peer(run_paths)
+        on_disk2["promptsHandled"] = 11
+        runstate.write_json_atomic(run_paths.run_dir / "peer.json", on_disk2)
+        session.peer_doc["promptsHandled"] = 5
+        with mock.patch.object(runstate, "write_peer_lease"):
+            with mock.patch.object(
+                peer_doc_mod,
+                "max_prompts_handled",
+                wraps=peer_doc_mod.max_prompts_handled,
+            ) as max_ssot2:
+                session.renew_lease()
+        self.assertTrue(max_ssot2.called)
+        after2 = self._read_peer(run_paths)
+        self.assertEqual(after2.get("promptsHandled"), 11)
+        self.assertEqual(session.peer_doc.get("promptsHandled"), 11)
+
     def test_child_death_write_does_not_clobber_stopping_stop_owner(self) -> None:
         """Death lifecycle write racing stop must preserve stopping ownership."""
         home, run_paths, wt, peer_doc, stage, baseline = self._peer_finalize_fixture(
@@ -387,6 +452,46 @@ class PeerConcurrencyResidualTests(PeerTestBase):
                 self.assertEqual(env["runId"], run_paths.run_id)
                 self.assertEqual(env["error"]["class"], "acp-failure")
                 self.assertIn(life, json.dumps(env).lower())
+
+    def test_resident_control_prompt_refuses_disk_stopping_lifecycle(self) -> None:
+        """Resident control prompt re-reads disk lifecycle (defense-in-depth vs stop claim)."""
+        home, run_paths, wt, peer_doc, stage, baseline = self._peer_finalize_fixture(
+            plant_sandbox=True
+        )
+        on_disk = dict(peer_doc)
+        on_disk["lifecycle"] = "stopping"
+        on_disk["stopOwner"] = {
+            "pid": 42,
+            "startToken": "stopper",
+            "claimedAt": time.time(),
+        }
+        runstate.write_json_atomic(run_paths.run_dir / "peer.json", on_disk)
+
+        stale = dict(peer_doc)
+        stale["lifecycle"] = "running"
+        stale.pop("stopOwner", None)
+        session = peer_mod.PeerSession(
+            run_id=run_paths.run_id,
+            run_paths=run_paths,
+            session_id="sess-1",
+            socket_path=run_paths.run_dir / "peer.sock",
+            acp=mock.Mock(session_prompt=mock.Mock(return_value={"stopReason": "end_turn"})),
+            child=mock.Mock(poll=mock.Mock(return_value=None)),
+            home=home,
+            worktree=wt,
+            progress=mock.Mock(),
+            peer_doc=stale,
+            contract=None,
+            original_baseline=baseline,
+            model="grok-4.5",
+            sentinel_name=peer_doc["sentinelName"],
+        )
+        with self.assertRaises(GrokWrapperError) as ctx:
+            peer_mod._handle_prompt(session, "late prompt after stop claim")
+        self.assertEqual(ctx.exception.error_class, "acp-failure")
+        self.assertIn("stopping", str(ctx.exception))
+        session.acp.session_prompt.assert_not_called()
+        self.assertEqual(session.peer_doc.get("lifecycle"), "stopping")
 
 
 if __name__ == "__main__":

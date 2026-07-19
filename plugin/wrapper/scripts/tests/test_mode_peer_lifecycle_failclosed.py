@@ -90,6 +90,63 @@ class PeerLifecycleFailClosedTests(PeerTestBase):
         self.assertEqual(after.get("lifecycle"), "stopping")
         self.assertIn("stopOwner", after)
 
+    def test_finalize_durable_success_survives_lifecycle_mark_failure(self) -> None:
+        """Durable terminal success is returned even if mark_peer_lifecycle raises.
+
+        Never synthesize a missing-durable failure when durable success already
+        exists; leave peer.json reclaimable (stopping + stopOwner) for a later
+        align/reclaim path.
+        """
+        home, run_paths, wt, peer_doc, stage, baseline = self._peer_finalize_fixture(
+            plant_sandbox=True
+        )
+        peer_doc = dict(peer_doc)
+        peer_doc["lifecycle"] = "stopping"
+        peer_doc["stopOwner"] = {
+            "pid": os.getpid(),
+            "startToken": "owner-mark-fail",
+            "claimedAt": time.time(),
+        }
+        runstate.write_json_atomic(run_paths.run_dir / "peer.json", peer_doc)
+
+        durable = self._terminal_success_env(run_paths.run_id)
+
+        def _fake_finalize(**kwargs):
+            return dict(durable)
+
+        with mock.patch(
+            "groklib.modes.peer_finalize.finalize_peer_session",
+            side_effect=_fake_finalize,
+        ):
+            with mock.patch.object(
+                peer_stop, "load_durable_terminal_envelope", return_value=durable
+            ):
+                with mock.patch.object(
+                    peer_stop,
+                    "mark_peer_lifecycle",
+                    side_effect=OSError("peer.json lock poisoned"),
+                ):
+                    env = peer_stop._finalize_and_mark(
+                        run_paths=run_paths,
+                        peer_doc=peer_doc,
+                        home_path=pathlib.Path(peer_doc["homePath"]),
+                        worktree=wt,
+                        contract=None,
+                        original_baseline=baseline,
+                        stage=stage,
+                    )
+
+        self.assertEqual(env.get("status"), "success")
+        self.assertEqual(env.get("runId"), durable.get("runId"))
+        self.assertNotEqual(
+            env.get("error", {}).get("class"),
+            "state-ownership-violation",
+            "must not invent missing-durable failure when durable success exists",
+        )
+        after = self._read_peer(run_paths)
+        self.assertEqual(after.get("lifecycle"), "stopping")
+        self.assertIn("stopOwner", after)
+
     def test_finalize_exception_leaves_reclaimable_stopping_or_minimal_failed(self) -> None:
         """Exception/no durable leaves reclaimable stopping owner or minimal failed."""
         home, run_paths, wt, peer_doc, stage, baseline = self._peer_finalize_fixture(

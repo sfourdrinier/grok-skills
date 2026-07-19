@@ -194,6 +194,47 @@ class KillRecordedChildSafetyTests(unittest.TestCase):
             peer_mod._kill_recorded_child(self._doc(12345, "mine"))
             m["kill_process_tree_by_pid"].assert_called_once_with(12345)
 
+    def test_unregisters_stale_active_proc_on_dead_or_identity_mismatch(self):
+        """Fallback kill must drop SIGTERM registry entries without killing unproven pids.
+
+        peer-stop only has peer.json identity (no resident Popen). Dead children and
+        recycled pids (token mismatch) must still unregister by pid so terminate
+        does not retain a stale handle. Never kill on those paths.
+        """
+        stale = mock.Mock(pid=777001)
+        dead = mock.Mock(pid=777002)
+
+        # Identity mismatch (live recycled pid): no kill, unregister by recorded pid.
+        with mock.patch.object(grokcli, "_ACTIVE_PROCS", {stale}):
+            with mock.patch.object(grokcli, "_ACTIVE_PROCS_LOCK", __import__("threading").Lock()):
+                with mock.patch.multiple(
+                    peer_process.platformsupport,
+                    process_is_alive=mock.Mock(return_value=True),
+                    process_start_token=mock.Mock(return_value="recycled"),
+                    is_posix=mock.Mock(return_value=True),
+                    kill_process_tree_by_pid=mock.DEFAULT,
+                ) as m:
+                    peer_process.kill_recorded_child(
+                        {"child": {"pid": 777001, "startToken": "original"}}
+                    )
+                    m["kill_process_tree_by_pid"].assert_not_called()
+                self.assertNotIn(stale, grokcli._ACTIVE_PROCS)
+
+        # Safe terminal (process already dead): unregister by pid, no kill.
+        with mock.patch.object(grokcli, "_ACTIVE_PROCS", {dead}):
+            with mock.patch.object(grokcli, "_ACTIVE_PROCS_LOCK", __import__("threading").Lock()):
+                with mock.patch.multiple(
+                    peer_process.platformsupport,
+                    process_is_alive=mock.Mock(return_value=False),
+                    process_start_token=mock.Mock(return_value="original"),
+                    kill_process_tree_by_pid=mock.DEFAULT,
+                ) as m:
+                    peer_process.kill_recorded_child(
+                        {"child": {"pid": 777002, "startToken": "original"}}
+                    )
+                    m["kill_process_tree_by_pid"].assert_not_called()
+                self.assertNotIn(dead, grokcli._ACTIVE_PROCS)
+
 
 class AbortPeerStartTests(unittest.TestCase):
     """abort_peer_start tears down every start-time resource, best-effort."""
