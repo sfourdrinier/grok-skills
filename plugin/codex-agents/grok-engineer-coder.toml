@@ -57,9 +57,12 @@ add or move secret-shaped test fixtures cannot produce a handoff patch
 artifact (fail-closed scan); expect retained-worktree manual integration
 (references/implementation-handoff.md).
 
-DEFAULT - multi-turn peer:
+DEFAULT - multi-turn peer (peer modes and --contract-file require hardened
+runMode; pin --run-mode hardened so a direct-default workspace does not refuse
+peer start / reject --contract-file):
 
   node "$GROK_AGENT_RUN" peer start \\
+    --run-mode hardened \\
     --target '<target>' --base '<base>' --contract-file "$CONTRACT_FILE"
   node "$GROK_AGENT_RUN" peer prompt --run-id '<runId>' --task-file - <<'GROK_TASK'
   <implementation request>
@@ -69,6 +72,7 @@ DEFAULT - multi-turn peer:
 FALLBACK - one-shot code:
 
   node "$GROK_AGENT_RUN" code \\
+    --run-mode hardened \\
     --target '<target>' --base '<base>' --contract-file "$CONTRACT_FILE" \\
     --task-file - <<'GROK_TASK'
   <implementation request>

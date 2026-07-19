@@ -251,6 +251,53 @@ class PeerFinalizeTests(PeerTestBase):
         self.assertTrue(all(int(c.get("exitStatus", 1)) == 0 for c in gate_cmds), gate_cmds)
         self.assertIs(result.get("response", {}).get("peer", {}).get("integrationReady"), True)
 
+    def test_peer_finalize_uses_never_build_set_pinned_at_start(self) -> None:
+        """A mid-run .grok-skills.json edit must not change final validation:
+        peer-stop uses the neverBuildWorkspaces captured at START (peer_doc), not
+        a fresh reload of the operator checkout's config."""
+        from groklib.modes import peer_finalize
+
+        pkg = {
+            "name": "peer-gate-fixture",
+            "scripts": {"build": "true", "typecheck": "true"},
+        }
+        (self.repo / "pkg" / "package.json").write_text(json.dumps(pkg), encoding="utf-8")
+        gitfixtures._git(self.repo, ["add", "pkg/package.json"])
+        gitfixtures._git(self.repo, ["commit", "-q", "-m", "add pkg for never-build pin test"])
+        self.base = gitfixtures.head_revision(self.repo)
+
+        home, run_paths, wt, peer_doc, stage, baseline = self._peer_finalize_fixture(
+            plant_sandbox=True
+        )
+        peer_doc["projectPackageManager"] = "npm"
+        peer_doc["targetRelative"] = "pkg"
+        # Pinned at start: run typecheck instead of the full build for this
+        # workspace. There is NO .grok-skills.json in the repo, so a fresh reload
+        # at stop would return an empty never-build set and run build-gate:build.
+        peer_doc["projectNeverBuildWorkspaces"] = {"peer-gate-fixture": ["typecheck"]}
+        self._plant_worktree_change(wt)
+        with mock.patch.object(peer_finalize, "destroy_private_home", self._fake_destroy_home):
+            peer_finalize.finalize_peer_session(
+                run_paths=run_paths,
+                peer_doc=peer_doc,
+                home_path=pathlib.Path(home.home_dir),
+                worktree=wt,
+                contract=None,
+                original_baseline=baseline,
+                stage=stage,
+            )
+        purposes = {
+            str(c.get("purpose"))
+            for c in (stage.acc.commands or [])
+            if str(c.get("purpose") or "").startswith("build-gate:")
+        }
+        self.assertIn("build-gate:typecheck", purposes, purposes)
+        self.assertNotIn(
+            "build-gate:build",
+            purposes,
+            "pinned never-build set (from peer-start) must skip the full build",
+        )
+
     def test_peer_start_records_worktree_on_run_json(self) -> None:
         """Finding 4: peer-start CAS-updates worktreePath/lifecycle like code mode."""
         source = pathlib.Path(self.tmp_root) / "grok" / ".grok"

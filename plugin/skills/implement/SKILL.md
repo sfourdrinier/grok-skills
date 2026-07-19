@@ -48,11 +48,14 @@ blockers surface on stdout. Without a runId, handoff is skipped and the
 combo exits 1.
 
 `implement` itself is **verify-only**: it does not apply, commit, or push (see
-`plugin/references/integration-modes.md`). For **apply-on-verified-ready**, use
-`/grok:code --integration auto` (worktree + handoff + apply-time revalidation).
-In **review**, parent apply stays manual after ready handoff
-(`references/implementation-handoff.md`). In **direct**, source edits land live
-on the code step (when that mode is active).
+`plugin/references/integration-modes.md`). Unlike `/grok:code`, it **always runs
+in an isolated worktree** - even when the workspace's integration mode is
+`direct` or `auto`, `implement` is routed to worktree, so nothing lands in your
+live tree. The edits stay in the retained worktree + handoff artifacts until you
+apply them manually. For **apply-on-verified-ready**, use `/grok:code
+--integration auto` (worktree + handoff + apply-time revalidation); for a live
+edit use `/grok:code` under the direct integration mode. In **review**, parent
+apply stays manual after ready handoff (`references/implementation-handoff.md`).
 Requires hardened **runMode**; runMode direct is refused fail-closed.
 Foreground/background selection: same AskUserQuestion flow as /grok:code.
 

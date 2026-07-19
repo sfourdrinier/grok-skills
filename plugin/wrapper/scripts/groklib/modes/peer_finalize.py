@@ -204,7 +204,16 @@ def _build_gate_runner(
         worktree.path, worktree.base_revision, target_relative
     )
     pm_binary = code_mod._resolve_pm_binary()
-    never_build = project_config.never_build_workspaces
+    # Reuse the build-gate skip set captured at peer-START (never re-read the
+    # operator's possibly-edited .grok-skills.json at stop). Fall back to the
+    # reloaded config only for peer docs written before this field existed.
+    pinned_never_build = peer_doc.get("projectNeverBuildWorkspaces")
+    if pinned_never_build is None:
+        never_build = project_config.never_build_workspaces
+    else:
+        never_build = {
+            name: tuple(scripts) for name, scripts in pinned_never_build.items()
+        }
 
     def _run_build_gate() -> None:
         code_mod._run_build_gate(

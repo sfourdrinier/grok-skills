@@ -325,6 +325,22 @@ export function applyVerifiedPatch({
     };
   }
   const preStatus = git(targetRepo, ["status", "--porcelain", "-z", "--untracked-files=all"]);
+  if (preStatus.code !== 0 || preStatus.error) {
+    // Fail closed: a failed/killed `git status` (e.g. maxBuffer overflow in a
+    // very dirty checkout, or a truncated stdout) yields an incomplete dirty set,
+    // and `git apply --check` alone can pass on a non-conflicting hunk in a dirty
+    // file. Without a trustworthy dirty list we cannot compute overlap - do not
+    // apply blind.
+    stderrLine(
+      `[grok-auto] BLOCKED: git status failed (code=${preStatus.code}); cannot compute dirty overlap`
+    );
+    return {
+      ok: false,
+      outcome: "blocked-dirty-status",
+      reason: "git status failed; cannot compute dirty overlap",
+      runId,
+    };
+  }
 
   // 3a. Dirty-overlap guard: git apply --check can PASS even when the patch
   // touches a file the operator is actively editing (non-conflicting hunks).

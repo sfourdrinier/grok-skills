@@ -627,6 +627,14 @@ def run_peer_start(args: argparse.Namespace) -> dict:
             "webAccess": web_access,
             "pristineScriptsCaptured": pristine_scripts is not None,
             "projectPackageManager": project_config.package_manager,
+            # Pin the build-gate skip set captured at START so a mid-run edit to
+            # .grok-skills.json cannot make peer-stop skip the original build
+            # script (or run a weaker validation set) while still reporting an
+            # evidence-backed ready result. Mirrors projectPackageManager pinning.
+            "projectNeverBuildWorkspaces": {
+                name: list(scripts)
+                for name, scripts in project_config.never_build_workspaces.items()
+            },
         "requireRuleFileParity": bool(project_config.require_rule_file_parity),
         }
         runstate.write_json_atomic(run_paths.run_dir / "peer.json", peer_doc)

@@ -126,9 +126,14 @@ Then add `--contract-file "$CONTRACT_FILE"` to peer start (or code). Rules:
 
 Never `--task "..."`. Always:
 
+Peer modes and `--contract-file` require **hardened** runMode, so the commands
+below pin `--run-mode hardened`: in a workspace whose default is `direct`, peer
+start is refused and `--contract-file` is rejected without it.
+
 ```bash
 # 1. Start the peer session
 GROK_RUN peer start \
+  --run-mode hardened \
   --target '<target>' \
   --base '<base>' \
   --contract-file "$CONTRACT_FILE"
@@ -146,6 +151,7 @@ GROK_RUN peer stop --run-id '<runId>'
 
 ```bash
 GROK_RUN code \
+  --run-mode hardened \
   --target '<target>' \
   --base '<base>' \
   --contract-file "$CONTRACT_FILE" \

@@ -356,7 +356,13 @@ export function runDirectGrok({
     (mode === "verify" ? flagValue(args, "--worktree") : null) ||
     flagValue(args, "--target") ||
     cwd;
-  const web = hasFlag(args, "--web");
+  const webRequested = hasFlag(args, "--web");
+  // Verify MUST stay hermetic: the hardened verify path never accepts --web and
+  // the verify authority requires reproducible, network-free evidence. Force web
+  // off for verify even if --web slipped through, so a direct verify can never
+  // reach live web tools and still emit a normal verify envelope.
+  const web = mode === "verify" ? false : webRequested;
+  const webForcedOff = mode === "verify" && webRequested;
   // Stage the prompt with the shared 0600 helper (private mkdtemp dir): the task
   // text can carry transferred transcripts or pasted credentials, so it must not
   // sit world-readable under /tmp while the installed Grok CLI runs.
@@ -443,11 +449,17 @@ export function runDirectGrok({
     response: { text: responseText },
     warnings: [
       "runMode=direct: used installed Grok CLI without grok-skills private-home isolation or wrapper sandbox verification",
+      ...(webForcedOff
+        ? ["verify stays hermetic: --web ignored (no live web access on the direct verify path)"]
+        : []),
     ],
     error: ok
       ? null
       : {
-          class: "tool-unavailable",
+          // A wall-clock timeout is a distinct remediation from a missing/broken
+          // binary; callers route tool-unavailable as "install/fix grok". Keep
+          // the class aligned with grok.stopReason (and the hardened timeout class).
+          class: timedOut ? "timeout" : "tool-unavailable",
           message: timedOut
             ? `grok CLI exceeded the ${timeoutSeconds}s timeout (runMode=direct); process killed`
             : (result.stderr || "grok exited non-zero").trim().slice(0, 2000),

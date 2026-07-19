@@ -189,6 +189,73 @@ test("runDirectGrok appends web tools to the allowlist only when --web", () => {
   }
 });
 
+test("runDirectGrok forces hermetic verify: --web is ignored (no web tools, --disable-web-search)", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-hermetic-"));
+  try {
+    const fakeGrok = path.join(dir, "fake-grok.sh");
+    // Echo the tool allowlist and whether --disable-web-search was passed.
+    fs.writeFileSync(
+      fakeGrok,
+      `#!/bin/sh\nt=""\ndws=0\nwhile [ $# -gt 0 ]; do\n  if [ "$1" = "--tools" ]; then t="$2"; fi\n  if [ "$1" = "--disable-web-search" ]; then dws=1; fi\n  shift\ndone\nprintf '{"result":"tools=%s dws=%s"}\\n' "$t" "$dws"\n`
+    );
+    fs.chmodSync(fakeGrok, 0o755);
+    const scriptsDir = path.resolve(SCRIPT_DIR, "..", "..", "wrapper", "scripts");
+    const call = (mode, extra) =>
+      JSON.parse(
+        runDirectGrok({
+          mode,
+          args: ["--target", dir, "--task", "check", ...extra],
+          cwd: dir,
+          env: { ...process.env, GROK_AGENT_BINARY: fakeGrok },
+          scriptsDir,
+          python: "python3",
+        }).envelopeText
+      );
+    // verify --web: web tools MUST NOT appear, --disable-web-search MUST be set,
+    // and a warning must record that --web was ignored for hermetic verify.
+    const verifyWeb = call("verify", ["--web"]);
+    assert.doesNotMatch(verifyWeb.response.text, /web_search/, "verify must not allowlist web tools");
+    assert.match(verifyWeb.response.text, /dws=1/, "verify must pass --disable-web-search");
+    assert.equal(verifyWeb.policy.webAccess, false, "verify policy.webAccess must be false");
+    assert.ok(
+      verifyWeb.warnings.some((w) => /hermetic/i.test(w) && /--web ignored/.test(w)),
+      `verify must warn --web ignored: ${JSON.stringify(verifyWeb.warnings)}`
+    );
+    // Non-verify mode with --web is unchanged (web tools enabled).
+    const reasonWeb = call("reason", ["--web"]);
+    assert.match(reasonWeb.response.text, /web_search/, "reason --web still enables web tools");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runDirectGrok classifies a wall-clock timeout as class:timeout (not tool-unavailable)", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-timeout-"));
+  try {
+    const fakeGrok = path.join(dir, "fake-grok.sh");
+    // Sleep past the 1s --timeout so spawnSync kills it (ETIMEDOUT).
+    fs.writeFileSync(fakeGrok, `#!/bin/sh\nsleep 3\nprintf '{"result":"done"}\\n'\n`);
+    fs.chmodSync(fakeGrok, 0o755);
+    const scriptsDir = path.resolve(SCRIPT_DIR, "..", "..", "wrapper", "scripts");
+    const env = JSON.parse(
+      runDirectGrok({
+        mode: "reason",
+        args: ["--target", dir, "--task", "x", "--timeout", "1"],
+        cwd: dir,
+        env: { ...process.env, GROK_AGENT_BINARY: fakeGrok },
+        scriptsDir,
+        python: "python3",
+      }).envelopeText
+    );
+    assert.equal(env.status, "failure");
+    assert.equal(env.error.class, "timeout", "timed-out direct run must classify as timeout");
+    assert.equal(env.error.detail.timedOut, true);
+    assert.equal(env.grok.stopReason, "timeout");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runDirectGrok forwards --max-turns to the installed CLI", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-mt-"));
   try {

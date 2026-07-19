@@ -431,6 +431,33 @@ test("auto dirty-overlap: blocks apply when a patch path is already dirty", () =
   }
 });
 
+test("auto: blocks (fail-closed) when the pre-apply dirty status cannot be read", () => {
+  // A failed/killed `git status` (e.g. maxBuffer overflow in a very dirty tree)
+  // yields an incomplete dirty set, and `git apply --check` alone can pass on a
+  // non-conflicting hunk in a dirty file. Simulate the unreadable status with a
+  // non-git targetRepo (git status exits 128) and assert we block, never apply.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-auto-nostatus-"));
+  const repo = initTargetRepo(path.join(root, "repo"));
+  const xdg = path.join(root, "xdg");
+  stagePatch(xdg, RUN_ID, capturePatchAndRestore(repo));
+  const notARepo = path.join(root, "not-a-repo");
+  fs.mkdirSync(notARepo);
+  try {
+    const res = applyVerifiedPatch({
+      wrapper: "unused",
+      runId: RUN_ID,
+      targetRepo: notARepo,
+      runHandoff: () => ({ code: 0, envelope: { response: { integration: { ready: true } } } }),
+      stderrLine: () => {},
+      env: { XDG_STATE_HOME: xdg },
+    });
+    assert.equal(res.ok, false);
+    assert.equal(res.outcome, "blocked-dirty-status");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("auto re-check flips to not-ready at apply time: no apply; exit 1", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-auto-reval-flip-"));
   const repo = initTargetRepo(path.join(root, "repo"));
