@@ -249,12 +249,17 @@ def kill_recorded_child(doc: dict, *, proc: Any = None) -> None:
         # Never killpg a process in OUR OWN group: the real ACP child is spawned
         # in a NEW group (spawn_kwargs_new_group), so a same-group pid is either a
         # mis-detached child or a test-recorded pid, and killing its group would
-        # take down the wrapper itself.
+        # take down the wrapper itself. Still drop any stale SIGTERM registry
+        # handle for the recorded pid so terminate does not retain it.
         if platformsupport.is_posix():
             try:
                 if os.getpgid(child_pid) == os.getpgid(0):
+                    unregister_active_child(proc if proc is not None else child_pid)
                     return
             except OSError:
+                # Cannot verify process group safely: fail closed (no kill) and
+                # still unregister by pid so a stale active-proc handle is dropped.
+                unregister_active_child(proc if proc is not None else child_pid)
                 return
         platformsupport.kill_process_tree_by_pid(child_pid)
         unregister_active_child(proc if proc is not None else child_pid)

@@ -334,9 +334,15 @@ def _handle_prompt(session: PeerSession, task: str) -> dict:
         # promptsHandled left at 0 would make peer-stop SKIP the mandatory cwd
         # sentinel proof and finalize a mutated worktree unverified. Recording the
         # attempt up front forces sentinel enforcement at stop (fail closed) for
-        # any turn that reached the model. Persist failure refuses the ACP call.
+        # any turn that reached the model. Persist failure refuses the ACP call
+        # and rolls the in-memory bump back so stop does not require a sentinel
+        # for a prompt that never reached the model.
         session.peer_doc["promptsHandled"] = prompts_handled + 1
-        session.renew_lease(require_prompts_persist=True)
+        try:
+            session.renew_lease(require_prompts_persist=True)
+        except Exception:
+            session.peer_doc["promptsHandled"] = prompts_handled
+            raise
         result = session.acp.session_prompt(
             session_id=session.session_id,
             text=prompt_text,

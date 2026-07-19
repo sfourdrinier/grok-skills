@@ -19,7 +19,11 @@ from typing import Any, List, Optional, Tuple
 from groklib import GrokWrapperError, log_stderr, platformsupport, runstate
 from groklib.envelope import validate_envelope
 from groklib.modes import peer_control
-from groklib.modes.peer_process import kill_recorded_child, unregister_active_child
+from groklib.modes.peer_process import (
+    kill_recorded_child,
+    require_process_identity_token,
+    unregister_active_child,
+)
 from groklib.peer_doc import (
     TERMINAL_PEER_LIFECYCLES as _TERMINAL_PEER_LIFECYCLES,
     mutate_peer_doc,
@@ -111,11 +115,17 @@ def load_durable_terminal_envelope(run_paths: runstate.RunPaths) -> Optional[dic
 
 
 def _current_stop_owner() -> dict:
+    """Return this process's stopOwner identity, or fail closed without a token.
+
+    Empty/unavailable startToken must never be written into peer.json: a poisoned
+    empty-token stopping claim cannot be safely distinguished from a live owner
+    (see _stop_owner_is_live) and blocks reclaim forever.
+    """
     pid = os.getpid()
-    token = platformsupport.process_start_token(pid)
+    token = require_process_identity_token(pid, role="stopOwner")
     return {
         "pid": pid,
-        "startToken": token if isinstance(token, str) else "",
+        "startToken": token,
         "claimedAt": time.time(),
     }
 
