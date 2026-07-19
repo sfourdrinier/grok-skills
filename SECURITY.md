@@ -113,12 +113,13 @@ over. It is **not** a complete sandbox against an adversarial model.
 - **Protected content-hash including ignored protected paths + nested git metadata:**
   deny/snapshot scope fingerprints use content+mode for protected paths even
   when gitignored (same-size+mtime rewrite still flips). Sensitive git metadata
-  covers root `.git`, nested workspace gitdirs (e.g. `vendor/.../.git`), and
-  `.git/modules/**` (config/HEAD/packed-refs, hooks/**, refs/**) with bounded
-  no-symlink discovery that fails closed on overflow. Linked-worktree `.git`
-  files are followed only when the target common/per-worktree dir is inside the
-  workspace (external common dirs are not fully inventoried). Bulk ignored
-  caches stay stat-only.
+  covers root `.git`, nested workspace gitdirs (e.g. `vendor/.../.git`),
+  `.git/modules/**`, and in-workspace gitfile targets (config/HEAD/packed-refs,
+  hooks/**, refs/**) with bounded no-symlink discovery that fails closed on
+  overflow. Snapshot/restore/guard use the actual gitdir absolute path for
+  gitfile roots (logical `.git/...` keys never write under the gitfile itself).
+  External linked common dirs stay outside full inventory. Bulk ignored caches
+  stay stat-only.
 - **Patch secret denylist scan:** handoff patch generation fails closed on
   secret-shaped material and on exact injected-denylist occurrence in patch
   bytes (not pattern-only). Path inventory uses NUL-safe bytes with
@@ -158,13 +159,21 @@ gaps to paper over):
 3. **Sandbox confine ≠ protect `.git` / `.env` inside the repo.** The write
    grant is whole-root. A deny-list scan plus **post-run rollback** covers
    `.env` / `.env.*`, key files (`*.pem` / `*.key` / `*.p12` / `*.p8`, SSH keys,
-   `.netrc` / `.npmrc` / `.envrc`), `.git/config`, `.git/HEAD`,
-   `.git/packed-refs`, `.git/hooks/*`, and `.git/refs/**` (a moved branch or a
-   created ref is reverted or removed). `.git/index` and `.git/COMMIT_EDITMSG`
-   are **not guarded** (benign working state git rewrites on ordinary reads like
-   `git status`; changes show in `git status`); loose `.git/objects` are **not
-   tracked** (content-addressed and inert until a watched ref points at them).
-   This is best-effort detection + rollback, not seatbelt subpath prevention.
+   `.netrc` / `.npmrc` / `.envrc`), and sensitive git metadata for every
+   **in-workspace** gitdir: root `.git`, nested workspace gitdirs
+   (e.g. `vendor/.../.git`), `.git/modules/**`, and in-workspace gitfile
+   targets (`gitdir:` under the repo). Logical keys (`.git/HEAD`, hooks, refs)
+   restore to the **actual** absolute gitdir, never under a gitfile path.
+   Sensitive set: `config` / `HEAD` / `packed-refs`, `hooks/**`, `refs/**`
+   (moved branch or planted hook/ref is reverted or removed). Nested discovery
+   is bounded and fail-closed on overflow. **External** linked-worktree common
+   dirs (gitfile target outside the workspace) are **not** fully inventoried;
+   only the git-resolved primary HEAD/config/hooks/refs fingerprint remains
+   for that case. `.git/index` and `.git/COMMIT_EDITMSG` are **not guarded**
+   (benign working state git rewrites on ordinary reads like `git status`);
+   loose `.git/objects` are **not tracked** (content-addressed and inert until
+   a watched ref points at them). This is best-effort detection + rollback,
+   not seatbelt subpath prevention.
 4. **Grok can still READ your files** (documented D-SECRETREAD). Write
    confinement is not a read firewall.
 5. **Consent gate:** first direct landing without `setup --integration direct`

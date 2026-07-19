@@ -325,6 +325,151 @@ class DirectProtectSnapshotRestoreTests(unittest.TestCase):
         roots = direct_protect.discover_workspace_git_roots(self.repo)
         self.assertFalse(any(rel == "linked-wt/.git" for rel, _ in roots))
 
+    def _seed_in_workspace_gitfile(
+        self, gitfile: pathlib.Path, common: pathlib.Path
+    ) -> tuple:
+        """Create gitfile -> in-workspace common with HEAD/config/hook."""
+        import shutil
+
+        # setUp may have created a free-standing .git directory; replace with gitfile.
+        if gitfile.exists() or gitfile.is_symlink():
+            if gitfile.is_dir() and not gitfile.is_symlink():
+                shutil.rmtree(str(gitfile))
+            else:
+                gitfile.unlink()
+        (common / "hooks").mkdir(parents=True, exist_ok=True)
+        head = common / "HEAD"
+        config = common / "config"
+        hook = common / "hooks" / "pre-commit"
+        original_head = "ref: refs/heads/main\n"
+        original_config = "[core]\n\trepositoryformatversion = 0\n"
+        original_hook = b"#!/bin/sh\necho good\n"
+        head.write_text(original_head)
+        config.write_text(original_config)
+        hook.write_bytes(original_hook)
+        os.chmod(str(hook), 0o755)
+        gitfile.parent.mkdir(parents=True, exist_ok=True)
+        # Relative gitdir: target keeps working if the test tree is moved.
+        rel_target = os.path.relpath(str(common), str(gitfile.parent))
+        gitfile.write_text("gitdir: {}\n".format(rel_target))
+        return original_head, original_config, original_hook, head, config, hook
+
+    def test_root_gitfile_in_workspace_common_snapshot_restore(self) -> None:
+        # Root .git is a FILE pointing at an in-workspace common dir. Snapshot and
+        # restore must use the actual gitdir, never repo/.git/<child>.
+        common = self.repo / ".linked-common"
+        (
+            original_head,
+            original_config,
+            original_hook,
+            head,
+            config,
+            hook,
+        ) = self._seed_in_workspace_gitfile(self.repo / ".git", common)
+
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        self.assertIn(".git/HEAD", snap.entries)
+        self.assertTrue(snap.entries[".git/HEAD"].snapshotted, snap.entries[".git/HEAD"])
+        self.assertIn(".git/config", snap.entries)
+        self.assertTrue(snap.entries[".git/config"].snapshotted)
+        self.assertIn(".git/hooks/pre-commit", snap.entries)
+        self.assertTrue(snap.entries[".git/hooks/pre-commit"].snapshotted)
+        self.assertEqual(snap.entries[".git/hooks/pre-commit"].mode, 0o755)
+        # Abs map must point into the common dir, not under the gitfile path.
+        abs_head = pathlib.Path(snap.abs_paths[".git/HEAD"])
+        self.assertEqual(abs_head.resolve(), head.resolve())
+        self.assertFalse(str(abs_head).endswith(str(self.repo / ".git" / "HEAD")))
+
+        head.write_text("ref: refs/heads/evil\n")
+        config.write_text("[core]\n\tevil = 1\n")
+        hook.write_bytes(b"#!/bin/sh\necho evil\n")
+        os.chmod(str(hook), 0o644)
+        planted = common / "hooks" / "post-commit"
+        planted.write_bytes(b"#!/bin/sh\necho planted\n")
+
+        result = direct_protect.restore_protected_paths(
+            self.repo,
+            snap,
+            offenders=[
+                ".git/HEAD",
+                ".git/config",
+                ".git/hooks/pre-commit",
+                ".git/hooks/post-commit",
+            ],
+        )
+        self.assertEqual(head.read_text(), original_head)
+        self.assertEqual(config.read_text(), original_config)
+        self.assertEqual(hook.read_bytes(), original_hook)
+        self.assertEqual(stat.S_IMODE(os.stat(str(hook)).st_mode), 0o755)
+        self.assertFalse(planted.exists())
+        for rel in (
+            ".git/HEAD",
+            ".git/config",
+            ".git/hooks/pre-commit",
+            ".git/hooks/post-commit",
+        ):
+            self.assertIn(rel, result.restored, result)
+        self.assertEqual(result.unrestored, [])
+        self.assertEqual(result.errors, [])
+        # Never materialize a directory tree under the gitfile path.
+        self.assertTrue((self.repo / ".git").is_file())
+
+    def test_nested_vendor_gitfile_in_workspace_target_snapshot_restore(self) -> None:
+        common = self.repo / "vendor" / "lib" / ".actual-git"
+        gitfile = self.repo / "vendor" / "lib" / ".git"
+        (
+            original_head,
+            _cfg,
+            original_hook,
+            head,
+            _config,
+            hook,
+        ) = self._seed_in_workspace_gitfile(gitfile, common)
+
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        rel_head = "vendor/lib/.git/HEAD"
+        rel_hook = "vendor/lib/.git/hooks/pre-commit"
+        self.assertIn(rel_head, snap.entries)
+        self.assertTrue(snap.entries[rel_head].snapshotted)
+        self.assertIn(rel_hook, snap.entries)
+        self.assertTrue(snap.entries[rel_hook].snapshotted)
+        self.assertEqual(
+            pathlib.Path(snap.abs_paths[rel_head]).resolve(), head.resolve()
+        )
+
+        head.write_text("ref: refs/heads/evil\n")
+        hook.write_bytes(b"#!/bin/sh\necho evil\n")
+        os.chmod(str(hook), 0o600)
+        planted = common / "hooks" / "post-commit"
+        planted.write_bytes(b"#!/bin/sh\necho plant\n")
+
+        result = direct_protect.restore_protected_paths(
+            self.repo,
+            snap,
+            offenders=[rel_head, rel_hook, "vendor/lib/.git/hooks/post-commit"],
+        )
+        self.assertEqual(head.read_text(), original_head)
+        self.assertEqual(hook.read_bytes(), original_hook)
+        self.assertEqual(stat.S_IMODE(os.stat(str(hook)).st_mode), 0o755)
+        self.assertFalse(planted.exists())
+        self.assertIn(rel_head, result.restored)
+        self.assertIn(rel_hook, result.restored)
+        self.assertIn("vendor/lib/.git/hooks/post-commit", result.restored)
+        self.assertEqual(result.unrestored, [])
+        self.assertTrue(gitfile.is_file())
+
+    def test_guard_uses_actual_gitfile_target_paths(self) -> None:
+        from groklib.modes.direct_finalize import capture_git_dir_guard, _changed_paths
+
+        common = self.repo / ".linked-common"
+        self._seed_in_workspace_gitfile(self.repo / ".git", common)
+        baseline = capture_git_dir_guard(self.repo)
+        (common / "HEAD").write_text("ref: refs/heads/evil\n")
+        (common / "hooks" / "post-commit").write_bytes(b"#!/bin/sh\necho x\n")
+        changed = _changed_paths(baseline, capture_git_dir_guard(self.repo))
+        self.assertIn(".git/HEAD", changed)
+        self.assertIn(".git/hooks/post-commit", changed)
+
 
 class DirectGitGuardAndDenyTests(unittest.TestCase):
     def setUp(self) -> None:

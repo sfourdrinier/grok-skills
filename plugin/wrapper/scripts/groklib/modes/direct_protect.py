@@ -68,13 +68,20 @@ class ProtectedPathEntry:
 
 @dataclasses.dataclass(frozen=True)
 class ProtectedSnapshot:
-    """Pre-run protected-path index + on-disk byte copies under the run dir."""
+    """Pre-run protected-path index + on-disk byte copies under the run dir.
+
+    ``abs_paths`` maps logical repo-relative keys (e.g. ``.git/HEAD``) to the
+    actual absolute filesystem path snapshotted. Required when ``.git`` is a
+    gitfile pointing at an in-workspace common/per-worktree dir: restore must
+    write the real gitdir, never ``repo_root/.git/<child>`` under the gitfile.
+    """
 
     run_dir: pathlib.Path
     snapshot_dir: pathlib.Path
     entries: Dict[str, ProtectedPathEntry]
     total_bytes: int
     max_total_bytes: int
+    abs_paths: Dict[str, str] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -398,7 +405,12 @@ def iter_sensitive_git_entries(
     *,
     max_files_per_tree: int = MAX_GIT_TREE_WALK_FILES,
 ) -> Iterable[Tuple[str, pathlib.Path]]:
-    """Yield ``(repo_rel, abs_path)`` for every sensitive file under workspace gitdirs."""
+    """Yield ``(logical_rel, abs_path)`` for every sensitive file under workspace gitdirs.
+
+    ``logical_rel`` uses the workspace ``.git`` prefix (e.g. ``.git/HEAD`` or
+    ``vendor/lib/.git/hooks/x``) even when the actual bytes live in a gitfile
+    target directory elsewhere in the workspace.
+    """
     for rel_prefix, git_dir in discover_workspace_git_roots(repo_root):
         for name in _GIT_SNAPSHOT_FILES:
             candidate = git_dir / name
@@ -411,26 +423,69 @@ def iter_sensitive_git_entries(
                 yield rel, abs_path
 
 
-def iter_existing_protected_paths(repo_root: pathlib.Path) -> Iterable[str]:
-    """Yield repo-relative POSIX paths of existing regular protected files.
+def resolve_protected_abs_path(
+    repo_root: pathlib.Path,
+    relative: str,
+    *,
+    git_roots: Optional[Sequence[Tuple[str, pathlib.Path]]] = None,
+) -> pathlib.Path:
+    """Map a logical protected relative path to the actual absolute path.
 
-    Snapshots sensitive git metadata for root ``.git``, nested workspace gitdirs,
-    and ``.git/modules/**`` (same inventory as the git-dir guard). Does not walk
-    ``objects``. Other deny-glob matches are found via a bounded walk that prunes
-    ``.git`` directory contents (discovery handles those).
+    For free-standing ``.git`` directories this is ``repo_root / relative``.
+    For in-workspace gitfiles the logical prefix (``.git`` or
+    ``vendor/lib/.git``) maps onto the discovered absolute gitdir so restore
+    never writes ``repo_root/.git/HEAD`` under a gitfile.
+    """
+    root = pathlib.Path(repo_root)
+    rel = _posix_rel(relative)
+    if not rel:
+        return root
+    roots = list(git_roots) if git_roots is not None else discover_workspace_git_roots(root)
+    # Longest logical prefix wins (nested vendor/lib/.git before .git).
+    for prefix, git_dir in sorted(roots, key=lambda item: len(item[0]), reverse=True):
+        pfx = _posix_rel(prefix).rstrip("/")
+        if not pfx:
+            continue
+        if rel == pfx:
+            return pathlib.Path(git_dir)
+        if rel.startswith(pfx + "/"):
+            return pathlib.Path(git_dir) / rel[len(pfx) + 1 :]
+    return root / rel
+
+
+def iter_existing_protected_paths(repo_root: pathlib.Path) -> Iterable[str]:
+    """Yield logical repo-relative POSIX paths of existing protected files."""
+    for rel, _abs in iter_existing_protected_path_map(repo_root).items():
+        yield rel
+
+
+def iter_existing_protected_path_map(
+    repo_root: pathlib.Path,
+) -> Dict[str, pathlib.Path]:
+    """Map logical protected relative path -> actual absolute path to snapshot.
+
+    Sensitive git metadata uses discovered gitdir abs paths (gitfile-safe).
+    Other deny-glob matches resolve under ``repo_root``. Does not walk
+    ``objects``. Prunes ``.git`` directory names during the deny walk.
     """
     # Late import: direct_finalize imports this module for restore.
     from groklib.modes.direct_finalize import path_matches_deny
 
     root = pathlib.Path(repo_root)
-    for rel, _abs in iter_sensitive_git_entries(root):
-        yield rel
+    mapping: Dict[str, pathlib.Path] = {}
+    git_root_prefixes = {
+        _posix_rel(prefix).rstrip("/")
+        for prefix, _git_dir in discover_workspace_git_roots(root)
+        if _posix_rel(prefix).rstrip("/")
+    }
+    for rel, abs_path in iter_sensitive_git_entries(root):
+        mapping[rel] = abs_path
 
     for dirpath, dirnames, filenames in os.walk(str(root), topdown=True, followlinks=False):
         rel_dir = _posix_rel(os.path.relpath(dirpath, str(root)))
         if rel_dir == ".":
             rel_dir = ""
-        # Never descend into any .git (handled above for the sensitive subset).
+        # Never descend into any .git (sensitive subset already mapped).
         dirnames[:] = [
             d
             for d in dirnames
@@ -445,10 +500,18 @@ def iter_existing_protected_paths(repo_root: pathlib.Path) -> Iterable[str]:
             if not path_matches_deny(rel):
                 continue
             if is_sensitive_git_relative(rel):
-                continue  # already yielded
+                continue
+            if rel in mapping:
+                continue
+            # Do not snapshot the gitfile/gitdir marker itself under a key that
+            # collides with sensitive children (``.git`` / ``vendor/.../.git``):
+            # contents are inventoried via discover + iter_sensitive_git_entries.
+            if rel in git_root_prefixes:
+                continue
             candidate = root / rel
             if _is_snapshot_candidate(candidate):
-                yield rel
+                mapping[rel] = candidate
+    return mapping
 
 
 def snapshot_protected_paths(
@@ -461,7 +524,9 @@ def snapshot_protected_paths(
 
     Directory mode 0700; snapshot files 0600. Paths larger than the remaining
     budget are recorded as unsnapshottable (``snapshotted=False``, reason
-    ``over-cap``) without copying.
+    ``over-cap``) without copying. Sensitive git paths are read from the
+    **actual** gitdir (gitfile targets included), while the snapshot store key
+    remains the logical workspace-relative path.
 
     ``max_total_bytes`` defaults to ``DEFAULT_MAX_TOTAL_BYTES`` at call time
     (so tests can patch the module constant).
@@ -471,11 +536,14 @@ def snapshot_protected_paths(
     snapshot_dir = pathlib.Path(run_dir) / SNAPSHOT_DIR_NAME
     _mkdir_0700(snapshot_dir)
     entries: Dict[str, ProtectedPathEntry] = {}
+    abs_paths: Dict[str, str] = {}
     total = 0
     root = pathlib.Path(repo_root)
 
-    for rel in iter_existing_protected_paths(root):
-        abs_path = root / rel
+    for rel, abs_path in sorted(
+        iter_existing_protected_path_map(root).items(), key=lambda item: item[0]
+    ):
+        abs_paths[rel] = str(abs_path)
         try:
             lst = abs_path.lstat()
         except OSError as exc:
@@ -540,6 +608,7 @@ def snapshot_protected_paths(
     manifest = {
         "maxTotalBytes": max_total_bytes,
         "totalBytes": total,
+        "absPaths": dict(sorted(abs_paths.items())),
         "paths": {
             rel: {
                 "existed": entry.existed,
@@ -577,6 +646,7 @@ def snapshot_protected_paths(
         entries=entries,
         total_bytes=total,
         max_total_bytes=max_total_bytes,
+        abs_paths=abs_paths,
     )
 
 
@@ -587,8 +657,10 @@ def restore_protected_paths(
 ) -> RestoreResult:
     """Restore each offending protected path to its pre-run state.
 
-    - existed + snapshotted -> overwrite with snapshot bytes
-    - did not exist pre-run (absent from index) -> delete if present
+    - existed + snapshotted -> overwrite with snapshot bytes at the **actual**
+      absolute path (gitfile targets included; never under a gitfile path)
+    - did not exist pre-run (absent from index) -> delete if present at the
+      resolved absolute path
     - existed but unsnapshottable -> unrestored with honest over-cap message
     Restore failures are collected in ``errors`` and never swallowed.
     """
@@ -597,12 +669,24 @@ def restore_protected_paths(
     unrestored: List[str] = []
     errors: List[Dict[str, str]] = []
     over_cap = False
+    # Prefer snapshot abs map; fall back to live discovery for planted offenders.
+    git_roots = None
+    try:
+        git_roots = discover_workspace_git_roots(root)
+    except GrokWrapperError as exc:
+        _log("restore_protected_paths", "git root rediscovery failed: {}".format(exc))
+
+    def _abs_for(rel: str) -> pathlib.Path:
+        stored = (snapshot.abs_paths or {}).get(rel)
+        if stored:
+            return pathlib.Path(stored)
+        return resolve_protected_abs_path(root, rel, git_roots=git_roots)
 
     for raw in offenders:
         rel = _posix_rel(raw)
         if not rel:
             continue
-        abs_path = root / rel
+        abs_path = _abs_for(rel)
         entry = snapshot.entries.get(rel)
 
         if entry is None:

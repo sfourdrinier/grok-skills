@@ -156,9 +156,10 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
   `plugin/references/integration-modes.md`.
 - **direct default (hardened-direct):** under runMode hardened, Grok edits the
   operator's real tree with private home + sandbox-to-repo + redaction;
-  protected paths (`.git`/`.env`/keys/hooks) deny-scanned and rolled back
-  best-effort; source edits land live; one-time `setup --integration direct`
-  consent per target repo (env/userConfig alone never counts).
+  protected paths (`.env`/keys + nested/modules/in-workspace-gitfile sensitive
+  git metadata) deny-scanned and rolled back best-effort; source edits land
+  live; one-time `setup --integration direct` consent per target repo
+  (env/userConfig alone never counts).
 - **auto:** isolated worktree + dual-condition ready, then companion
   apply-on-verified-ready with apply-time revalidation (never half-applies).
 - **review:** worktree + patch + manifest; never auto-applies (manual parent
@@ -175,6 +176,16 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 
 ### Fixed / hardened (Phase 7 - final review remediation)
 
+- **Direct protected git scope (nested / modules / in-workspace gitfile):**
+  snapshot, restore, and git-dir guard cover root `.git`, nested workspace
+  gitdirs (`vendor/.../.git`), `.git/modules/**`, and in-workspace gitfile
+  targets (`gitdir:` under the repo). Logical keys (`.git/HEAD`, hooks, refs)
+  resolve to the **actual** absolute gitdir - never write/delete under a
+  gitfile path. Bounded no-symlink discovery fails closed on overflow.
+  External linked-worktree common dirs remain outside full inventory
+  (primary HEAD/config/hooks/refs fingerprint only). SECURITY direct-default
+  item 3 documents the honest limit. Node `parseDiffGitHeaderPaths` dual-
+  condition parity + bytes-safe `git_ignored_paths` land in the same pass.
 - **Codex marketplace root drift (DRY hole):** `tools/gen-manifests.mjs` now
   generates and `--check`-guards BOTH marketplace roots. Previously only
   `.claude-plugin/marketplace.json` (version fields) was covered, so
