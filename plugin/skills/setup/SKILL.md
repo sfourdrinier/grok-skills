@@ -43,6 +43,12 @@ prefs). You should not need a manual setup step after installing the plugin.
 `/hooks`. That is the honest default posture - install alone does not enable those
 hooks. Skills and SessionStart agent materialization still work without hook trust.
 
+**Before promising implementer success on the live tree**, record integration
+consent with `setup --integration direct` **or** choose isolation with
+`setup --integration auto|review`. First direct landing without setup consent
+fails closed. `/grok:implement` always forces worktree + verify-only (never live
+lands). Canonical: `plugin/references/integration-modes.md`.
+
 Raw arguments:
 `$ARGUMENTS`
 

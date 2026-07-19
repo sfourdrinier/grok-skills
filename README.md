@@ -86,11 +86,11 @@ skill names on Codex for later job output.
 | Skills | Slash commands **or** Skill tool: `/grok:review`, `/grok:code`, ... (model invocation enabled) | Skill picker / Skill tool - same skill **names** (`review`, `code`, `setup`, `dual-lens`, ...) |
 | Subagents | Auto-loaded from plugin: `grok-engineer-coder`, `grok-rescue` | Auto-installed on SessionStart into `~/.codex/agents/` (or project `.codex/agents/` with `setup --codex-agents-scope project`; absolute `agents/run.mjs`) |
 | Implement with Grok | Spawn **grok-engineer-coder**, or `/grok:code` | Spawn **grok-engineer-coder** (nickname **Grok Coder**), or run **code** skill |
-| Stop / SubagentStop hooks | Claude hooks (stop gate + handoff nudge) | **Dormant by default** until trusted via `/hooks` (see Codex trust note below) |
+| Stop / SubagentStop hooks | Claude hooks (stop gate + mode-aware handoff nudge) | **Dormant by default** until trusted via `/hooks` (see Codex trust note below) |
 
 Same engine either way: Node companion → hardened Python wrapper → one JSON envelope.
 
-**Codex trust honesty:** on Codex, plugin hooks (the optional stop-review gate **and** the SubagentStop handoff nudge) stay **dormant until you trust them** via `/hooks`. That is the honest default posture - install alone does not enable those hooks. Skills and SessionStart agent materialization still work without hook trust.
+**Codex trust honesty:** on Codex, plugin hooks (the optional stop-review gate **and** the SubagentStop handoff nudge) stay **dormant until you trust them** via `/hooks`. That is the honest default posture - install alone does not enable those hooks. Skills and SessionStart agent materialization still work without hook trust. **SubagentStop is mode-aware:** peer never routes through `/grok:handoff`; code **direct** (edits already live) differs from worktree/auto handoff paths.
 
 ---
 
@@ -241,8 +241,9 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
   `setup --force-codex-agents` (hook failures are non-blocking so they never stall
   host startup). Nicknames: **Grok Coder** / **Grok Rescue**.
 - **Codex hooks stay dormant until trusted:** the stop-review gate and the
-  SubagentStop handoff nudge are skipped on Codex until you approve them via
-  `/hooks`. Skills and agent materialization do not depend on that trust step.
+  mode-aware SubagentStop handoff nudge are skipped on Codex until you approve
+  them via `/hooks` (peer never via handoff; code direct vs worktree handoff
+  differ). Skills and agent materialization do not depend on that trust step.
 - **Transparent skills + agents:** skills use `$SKILL_BASE/run.mjs`; Claude/Codex
   agents use `agents/run.mjs` (self-locating). See
   [plugin-root.md](plugin/references/plugin-root.md).

@@ -78,6 +78,11 @@ This skill is **read-only** - it never applies. How results land is mode-aware
   [integration-modes.md](../../references/integration-modes.md)
 - **review:** never auto-applies; parent apply is manual after ready
 
+Auto/peer apply is companion-owned via the shared apply spine (exclusive lock +
+durable marker; already-applied restop) in
+[integration-modes.md](../../references/integration-modes.md); handoff remains
+read-only and code-mode only.
+
 This plugin **never** auto-commits, merges, cherry-picks, or pushes in any mode.
 
 ### Manual parent apply (review / when auto did not apply)

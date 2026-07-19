@@ -132,8 +132,10 @@ Canonical product matrix:
 equate one-shot **code** direct (live tree) with **ACP peer** direct (stop-time
 apply after an always-external worktree).
 
-**integration=direct is the default** product name for code / implement / peer
-stop landing prefs. Under runMode hardened, one-shot **code** direct is
+**integration=direct is the default** product name for **code** and **peer-stop**
+landing prefs. **`/grok:implement` always forces an isolated worktree +
+verify-only handoff and never lands live**, even when the workspace default is
+direct/auto. Under runMode hardened, one-shot **code** direct is
 **hardened-direct**: private auth home + OS sandbox write-confined to the
 **repo root** (+ private tmp) + secret redaction on the stdout envelope. ACP
 **peer** keeps isolation on an external worktree for the whole session and only

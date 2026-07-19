@@ -139,10 +139,17 @@ node "$SKILL_BASE/run.mjs" cleanup --run-id '<id>' --confirm
 - Peer lifecycle is single-flight under `run_lock` with `stopOwner` reclaim:
   concurrent stop finalizes once; field-safe peer.json RMW refuses clobbering
   stopping/stopOwner; peer-prompt refuses non-promptable lifecycles.
+  **Durable-before-terminal:** restop treats a session terminal only after the
+  durable terminal mark is on disk. **promptsHandled** must persist (fail closed
+  if it cannot). Identity is **pid + startToken** (never reclaim a live wrapper
+  on age alone). Control socket teardown is mandatory at stop; control frames
+  fail closed above the frame byte cap (~4 MiB). Active-proc registry never
+  pid-scan-unregisters on kill refusal (only on confirmed teardown).
 - Secret redaction applies to progress chunks, turn envelopes, and control-
   socket payloads (same scan as `emit_envelope`).
 - Integrate only per the chosen mode's gate (see
   `plugin/references/integration-modes.md` ACP peer section: shared dirty-guard
-  apply spine; review/worktree retain; auto and consented direct apply the
-  verified ready patch at stop - not live-edit). Prefer deriving a contract with
+  apply spine with exclusive apply lock + durable marker + already-applied
+  restop; review/worktree retain; auto and consented direct apply the verified
+  ready patch at stop - not live-edit). Prefer deriving a contract with
   shell-free `requiredValidation` so ready can be evidence-backed.
