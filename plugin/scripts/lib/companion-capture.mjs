@@ -20,6 +20,7 @@ import {
   storeJobStdout,
   updateJob,
 } from "./jobs.mjs";
+import { buildPeerIntegrationFailureEnvelope } from "./implement.mjs";
 import { shouldAttemptTerminalNotify, wrapperChildEnv } from "./notify.mjs";
 import { tryParseEnvelope } from "./render.mjs";
 import { parseRunIdMarker } from "../progress-relay.mjs";
@@ -116,41 +117,17 @@ export function createCaptureAndTrack({
       } catch (err) {
         stderrLine(`[grok-companion] onStdout hook failed: ${err.message}`);
         effectiveCode = 1;
+        // Generalized peer final-envelope SSOT: clear ready signals including
+        // response.peer.integrationReady; never leave raw ready success.
         const raw = tryParseEnvelope(rawStdout);
-        const base =
-          raw && typeof raw === "object"
-            ? { ...raw }
-            : {
-                schemaVersion: 1,
-                mode: mode || "run",
-                status: "failure",
-                runId: null,
-                response: null,
-              };
-        const baseResp =
-          base.response && typeof base.response === "object" ? base.response : {};
-        const baseInteg =
-          baseResp.integration && typeof baseResp.integration === "object"
-            ? baseResp.integration
-            : {};
-        const failEnv = {
-          ...base,
-          schemaVersion: typeof base.schemaVersion === "number" ? base.schemaVersion : 1,
-          status: "failure",
-          error: {
+        const failEnv = buildPeerIntegrationFailureEnvelope(
+          raw,
+          {
             class: "integration-error",
             message: `onStdout hook failed: ${err.message}`,
           },
-          response: {
-            ...baseResp,
-            integration: {
-              ...baseInteg,
-              applied: false,
-              ready: false,
-              outcome: "integration-error",
-            },
-          },
-        };
+          { mode: mode || "run", outcome: "integration-error" }
+        );
         emitStdout = `${JSON.stringify(failEnv)}\n`;
       }
     }

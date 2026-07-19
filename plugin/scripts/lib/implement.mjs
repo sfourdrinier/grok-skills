@@ -280,18 +280,84 @@ export function attachIntegrationFinalOutcome(baseEnvelope, finalCode, applied, 
   if (typeof opts.forceReady === "boolean") {
     integration.ready = opts.forceReady;
   }
+  const response = {
+    ...baseResp,
+    integration,
+  };
+  // When requested (peer final / onStdout failure SSOT), clear peer.integrationReady
+  // on failure so a blocked apply never looks ready downstream.
+  if (
+    finalCode !== 0 &&
+    (opts.clearPeerReady === true || opts.forceReady === false)
+  ) {
+    if (baseResp.peer && typeof baseResp.peer === "object") {
+      response.peer = { ...baseResp.peer, integrationReady: false };
+    } else if (opts.clearPeerReady === true) {
+      response.peer = { integrationReady: false };
+    }
+  }
   const out = {
     ...baseEnvelope,
     status: finalCode === 0 ? "success" : "failure",
-    response: {
-      ...baseResp,
-      integration,
-    },
+    response,
   };
   if (typeof opts.mode === "string" && opts.mode) {
     out.mode = opts.mode;
   }
+  if (opts.error && typeof opts.error === "object") {
+    out.error = opts.error;
+  }
   return out;
+}
+
+/**
+ * SSOT failure envelope for peer-stop / onStdout integration errors: one complete
+ * envelope with applied=false, ready signals cleared, nonzero-path status=failure.
+ * Used by companion-capture onStdout throws and any peer final rewrite that must
+ * not leave raw ready success on stdout/store/notify.
+ *
+ * @param {object|null|undefined} rawEnvelope
+ * @param {{class?: string, message?: string, detail?: object}|string|Error} error
+ * @param {{mode?: string, outcome?: string}} [opts]
+ * @returns {object}
+ */
+export function buildPeerIntegrationFailureEnvelope(rawEnvelope, error, opts = {}) {
+  const errObj =
+    error && typeof error === "object" && typeof error.class === "string"
+      ? error
+      : {
+          class: "integration-error",
+          message:
+            typeof error === "string"
+              ? error
+              : error && typeof error.message === "string"
+                ? error.message
+                : "integration error",
+        };
+  const base =
+    rawEnvelope && typeof rawEnvelope === "object"
+      ? { ...rawEnvelope }
+      : {
+          schemaVersion: 1,
+          mode: opts.mode || "peer-stop",
+          status: "failure",
+          runId: null,
+          response: null,
+        };
+  base.schemaVersion = typeof base.schemaVersion === "number" ? base.schemaVersion : 1;
+  if (typeof opts.mode === "string" && opts.mode) base.mode = opts.mode;
+  const attached = attachIntegrationFinalOutcome(
+    base,
+    1,
+    { ok: false, outcome: opts.outcome || "integration-error" },
+    {
+      forceReady: false,
+      clearPeerReady: true,
+      error: errObj,
+      ...(typeof opts.mode === "string" && opts.mode ? { mode: opts.mode } : {}),
+    }
+  );
+  return attached || { ...base, status: "failure", error: errObj };
 }
 
 /**
@@ -438,6 +504,9 @@ export function buildPeerStopFinalEnvelope(rawEnvelope, finalCode, peerIntegrati
     rawEnvelope?.response?.integration?.ready === true;
   return attachIntegrationFinalOutcome(rawEnvelope, finalCode, applied, {
     readyFallback: ready === true,
+    // Failures clear ready signals (including peer.integrationReady) via SSOT.
+    clearPeerReady: finalCode !== 0,
+    forceReady: finalCode !== 0 ? false : undefined,
   });
 }
 

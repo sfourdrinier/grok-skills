@@ -94,7 +94,9 @@ test("onStdout throw: synthesizes complete failure envelope; nonzero job/store",
   assert.equal(env.status, "failure");
   assert.notEqual(env.status, "success");
   assert.equal(env.response?.integration?.applied, false);
+  assert.equal(env.response?.integration?.ready, false);
   assert.equal(env.response?.integration?.outcome, "integration-error");
+  assert.equal(env.response?.peer?.integrationReady, false, "must clear peer.integrationReady");
   assert.equal(typeof env.error?.class === "string" ? env.error.class : "integration-error", "integration-error");
 
   // Job store must also hold the failure envelope (not raw ready success).

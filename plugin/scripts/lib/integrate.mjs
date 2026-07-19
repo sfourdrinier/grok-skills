@@ -31,6 +31,7 @@ import {
   locateApplyMarker,
   readMatchingApplyMarker,
   writeApplyMarker,
+  clearApplyMarker,
   acquireApplyLock,
 } from "./integrate-apply-state.mjs";
 
@@ -147,6 +148,7 @@ export {
   locateApplyMarker,
   readMatchingApplyMarker,
   writeApplyMarker,
+  clearApplyMarker,
   acquireApplyLock,
 } from "./integrate-apply-state.mjs";
 
@@ -176,6 +178,65 @@ export {
  *   checkStderr?: string,
  * }}
  */
+/**
+ * True when the working tree still contains the applied patch (reverse --check
+ * succeeds). Used so a durable marker cannot claim already-applied after the
+ * operator reverts the patch.
+ * @param {string} targetRepo
+ * @param {string} patchPath
+ * @returns {boolean}
+ */
+function treeStillHasAppliedPatch(targetRepo, patchPath) {
+  const revCheck = git(targetRepo, ["apply", "-R", "--check", "--binary", patchPath]);
+  return revCheck.code === 0 && !revCheck.error;
+}
+
+/**
+ * After a successful apply, persist the durable marker. If persistence fails,
+ * reverse the apply so we never report durable applied success without a marker.
+ * @returns {{ok: boolean, outcome: string, reason?: string, patchPath?: string}}
+ */
+function finalizeAppliedWithMarker({
+  targetRepo,
+  patchPath,
+  runId,
+  targetKey,
+  patchSha,
+  env,
+  stderrLine,
+  logTag,
+  spine,
+}) {
+  const tag = `[${logTag}]`;
+  const wrote = writeApplyMarker(runId, targetKey, patchSha, env);
+  if (wrote) {
+    return { ...spine, runId, patchPath: spine.patchPath || patchPath, patchSha };
+  }
+  stderrLine(
+    `${tag} BLOCKED: applied patch but durable marker write failed; reversing apply`
+  );
+  const rev = git(targetRepo, ["apply", "-R", "--binary", patchPath]);
+  if (rev.code === 0) {
+    clearApplyMarker(runId, targetKey, env);
+    return {
+      ok: false,
+      outcome: "marker-persist-failure",
+      reason: "applied but durable marker write failed; reversed",
+      runId,
+      patchPath,
+      patchSha,
+    };
+  }
+  return {
+    ok: false,
+    outcome: "manual-needed",
+    reason: "applied but durable marker write failed and reverse failed",
+    runId,
+    patchPath,
+    patchSha,
+  };
+}
+
 function applyPatchWithGuards({
   targetRepo,
   patchPath,
@@ -448,16 +509,23 @@ export function applyVerifiedPatch({
   try {
     const prior = readMatchingApplyMarker(runId, targetKey, patchSha, env);
     if (prior.matched) {
+      if (treeStillHasAppliedPatch(targetRepo, patchPath)) {
+        stderrLine(
+          `[grok-auto] already-applied runId=${runId} patchSha=${patchSha} target=${targetKey}`
+        );
+        return {
+          ok: true,
+          outcome: "already-applied",
+          runId,
+          patchPath,
+          patchSha,
+        };
+      }
+      // Marker exists but operator reverted the tree - clear and re-apply.
       stderrLine(
-        `[grok-auto] already-applied runId=${runId} patchSha=${patchSha} target=${targetKey}`
+        `[grok-auto] applied marker present but tree no longer has patch; re-applying`
       );
-      return {
-        ok: true,
-        outcome: "already-applied",
-        runId,
-        patchPath,
-        patchSha,
-      };
+      clearApplyMarker(runId, targetKey, env);
     }
     // Re-verify integrity under lock (artifact can change between pre-lock hash and apply).
     const lockedIntegrity = verifyPatchAgainstManifest(runId, patchPath, env);
@@ -488,7 +556,17 @@ export function applyVerifiedPatch({
       },
     });
     if (spine.ok && spine.outcome === "applied") {
-      writeApplyMarker(runId, targetKey, patchSha, env);
+      return finalizeAppliedWithMarker({
+        targetRepo,
+        patchPath,
+        runId,
+        targetKey,
+        patchSha,
+        env,
+        stderrLine,
+        logTag: "grok-auto",
+        spine,
+      });
     }
     const out = { ...spine, runId };
     if (
@@ -623,10 +701,17 @@ export function maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stder
   try {
     const prior = readMatchingApplyMarker(runId, targetKey, patchSha);
     if (prior.matched) {
+      if (treeStillHasAppliedPatch(repo, patchPath)) {
+        stderrLine(
+          `[grok-peer] already-applied runId=${runId} patchSha=${patchSha} target=${targetKey}`
+        );
+        return { attempted: true, ok: true, outcome: "already-applied" };
+      }
+      // Marker exists but operator reverted the tree - clear and re-apply.
       stderrLine(
-        `[grok-peer] already-applied runId=${runId} patchSha=${patchSha} target=${targetKey}`
+        `[grok-peer] applied marker present but tree no longer has patch; re-applying`
       );
-      return { attempted: true, ok: true, outcome: "already-applied" };
+      clearApplyMarker(runId, targetKey);
     }
     // Re-verify integrity under lock (artifact may change between pre-lock check and apply).
     const lockedIntegrity = verifyPatchAgainstManifest(runId, patchPath);
@@ -646,7 +731,18 @@ export function maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stder
       logTag: "grok-peer",
     });
     if (spine.ok && spine.outcome === "applied") {
-      writeApplyMarker(runId, targetKey, patchSha);
+      const finalized = finalizeAppliedWithMarker({
+        targetRepo: repo,
+        patchPath,
+        runId,
+        targetKey,
+        patchSha,
+        env: process.env,
+        stderrLine,
+        logTag: "grok-peer",
+        spine,
+      });
+      return { attempted: true, ok: finalized.ok, outcome: finalized.outcome };
     }
     return { attempted: true, ok: spine.ok, outcome: spine.outcome };
   } finally {

@@ -506,3 +506,155 @@ try {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("peer-stop restop: applied marker exists but operator reverted patch - not already-applied", () => {
+  // Marker alone is not durable proof: if the operator reverts the patch, restop
+  // must re-apply (or re-block), never claim already-applied over a reverted tree.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-peer-int-revert-"));
+  const repo = initRepo(path.join(root, "repo"));
+  const xdg = path.join(root, "xdg");
+  stagePatch(xdg, RUN_ID, capturePatch(repo));
+  const lines = [];
+  try {
+    const first = withXdg(xdg, () =>
+      maybeIntegratePeerStop(peerStopEnvelope(repo), repo, "auto", ["--target", repo], (l) =>
+        lines.push(l)
+      )
+    );
+    assert.equal(first.ok, true);
+    assert.equal(first.outcome, "applied");
+    assert.equal(fs.readFileSync(path.join(repo, "foo.txt"), "utf8"), "hello world\n");
+    // Operator reverts the applied patch (checkout original content).
+    fs.writeFileSync(path.join(repo, "foo.txt"), "hello\n");
+    git(repo, ["add", "-A"]);
+    // Clean tree matching pre-apply; marker still claims applied.
+    const second = withXdg(xdg, () =>
+      maybeIntegratePeerStop(peerStopEnvelope(repo), repo, "auto", ["--target", repo], (l) =>
+        lines.push(l)
+      )
+    );
+    assert.equal(second.attempted, true);
+    assert.notEqual(
+      second.outcome,
+      "already-applied",
+      "reverted tree must not claim already-applied from a stale marker"
+    );
+    assert.equal(second.ok, true, JSON.stringify(second));
+    assert.equal(second.outcome, "applied");
+    assert.equal(fs.readFileSync(path.join(repo, "foo.txt"), "utf8"), "hello world\n");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("apply lock: abandoned lock is reclaimed; live holder is never stolen", async () => {
+  const {
+    acquireApplyLock,
+    targetIdentityKey,
+  } = await import("../lib/integrate-apply-state.mjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-apply-lock-"));
+  const xdg = path.join(root, "xdg");
+  const prev = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = xdg;
+  const runId = RUN_ID;
+  const targetKey = targetIdentityKey(root);
+  try {
+    // Live holder: second acquire must wait/timeout without reclaiming.
+    const releaseLive = acquireApplyLock(runId, targetKey, process.env, 200);
+    let stole = false;
+    try {
+      acquireApplyLock(runId, targetKey, process.env, 80);
+      stole = true;
+    } catch (err) {
+      assert.match(String(err.message || err), /timeout/i);
+    }
+    assert.equal(stole, false, "must not steal a live holder's lock");
+    releaseLive();
+
+    // Abandoned: write a lock dir with a dead owner (pid 1 with wrong startToken or
+    // a non-existent pid) and old timestamp; reclaim must succeed.
+    const release2 = acquireApplyLock(runId, targetKey, process.env, 200);
+    release2();
+    // Recreate abandoned lock with dead pid owner record.
+    const runsDir = path.join(xdg, "grok-skills", "runs", runId);
+    const lockDir = path.join(runsDir, "apply-locks", `${targetKey}.lock`);
+    fs.mkdirSync(lockDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(lockDir, "owner.json"),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        pid: 999999991,
+        startToken: "dead-token",
+        acquiredAt: new Date(Date.now() - 60_000).toISOString(),
+      })}\n`
+    );
+    const releaseReclaim = acquireApplyLock(runId, targetKey, process.env, 500, {
+      staleMs: 1_000,
+    });
+    assert.equal(typeof releaseReclaim, "function");
+    releaseReclaim();
+
+    // Unknown owner but fresh age: do not reclaim (fail closed; wait/timeout).
+    fs.mkdirSync(lockDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(lockDir, "owner.json"),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        // no pid - unknown
+        acquiredAt: new Date().toISOString(),
+      })}\n`
+    );
+    let reclaimedUnknownFresh = false;
+    try {
+      acquireApplyLock(runId, targetKey, process.env, 80, { staleMs: 60_000 });
+      reclaimedUnknownFresh = true;
+    } catch (err) {
+      assert.match(String(err.message || err), /timeout/i);
+    }
+    assert.equal(reclaimedUnknownFresh, false, "fresh unknown owner must not be stolen");
+  } finally {
+    if (prev === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = prev;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("peer-stop: marker persistence failure after apply cannot report durable applied success", async () => {
+  const { targetIdentityKey, locateApplyMarker } = await import("../lib/integrate-apply-state.mjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-peer-int-marker-"));
+  const repo = initRepo(path.join(root, "repo"));
+  const xdg = path.join(root, "xdg");
+  stagePatch(xdg, RUN_ID, capturePatch(repo));
+  const lines = [];
+  const prev = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = xdg;
+  try {
+    // Occupy the durable marker path with a DIRECTORY so atomic write/rename fails
+    // after a successful git apply. Lock acquisition still works under runs/<id>.
+    const targetKey = targetIdentityKey(repo);
+    const markerPath = locateApplyMarker(RUN_ID, targetKey, process.env);
+    assert.ok(markerPath);
+    fs.mkdirSync(markerPath, { recursive: true });
+    const res = maybeIntegratePeerStop(
+      peerStopEnvelope(repo),
+      repo,
+      "auto",
+      ["--target", repo],
+      (l) => lines.push(l)
+    );
+    assert.equal(res.attempted, true);
+    assert.notEqual(res.outcome, "applied", "must not claim applied without durable marker");
+    assert.notEqual(res.outcome, "already-applied");
+    assert.equal(res.ok, false, JSON.stringify(res));
+    const body = fs.readFileSync(path.join(repo, "foo.txt"), "utf8");
+    if (res.outcome === "marker-persist-failure") {
+      assert.equal(body, "hello\n", "successful reverse after marker fail restores tree");
+    } else {
+      assert.equal(res.outcome, "manual-needed", JSON.stringify({ res, body, lines }));
+    }
+  } finally {
+    if (prev === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = prev;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

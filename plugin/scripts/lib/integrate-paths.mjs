@@ -3,7 +3,87 @@
 // Path decode + patch touch-set helpers for integrate apply (auto + peer).
 // C-quote golden vectors: plugin/references/git-c-quoted-path-vectors.json
 // (parity with Python groklib.git_path_quote). Do not apply C-unquote to
-// NUL-safe -z path inventories (already raw).
+// NUL-safe -z path inventories (already raw). One token decoder is SSOT for
+// both full-token unquote and mid-string parseCQuotedAt.
+
+const C_QUOTE_NAMED = {
+  a: 7,
+  b: 8,
+  t: 9,
+  n: 10,
+  v: 11,
+  f: 12,
+  r: 13,
+  '"': 34,
+  "\\": 92,
+};
+
+/**
+ * Consume one C-quote unit at index i in s.
+ * Returns [byte|null, nextIndex]. byte null means incomplete escape (caller
+ * decides: full-token unquote no-ops trailing `\`; mid-token parse fails closed).
+ * @param {string} s
+ * @param {number} i
+ * @returns {[number|null, number]}
+ */
+function consumeCQuoteUnit(s, i) {
+  if (i >= s.length) return [null, i];
+  if (s[i] !== "\\") return [s.charCodeAt(i) & 0xff, i + 1];
+  const next = s[i + 1];
+  if (next === undefined) return [null, i + 1]; // incomplete trailing `\`
+  if (next >= "0" && next <= "7") {
+    let j = i + 1;
+    let oct = "";
+    while (j < s.length && oct.length < 3 && s[j] >= "0" && s[j] <= "7") {
+      oct += s[j];
+      j += 1;
+    }
+    return [parseInt(oct, 8) & 0xff, j];
+  }
+  if (next in C_QUOTE_NAMED) return [C_QUOTE_NAMED[next], i + 2];
+  return [s.charCodeAt(i + 1) & 0xff, i + 2];
+}
+
+/**
+ * Decode C-quote escape sequences in a body (no surrounding quotes).
+ * Trailing incomplete `\` is a no-op (golden trailing-backslash-noop).
+ * @param {string} body
+ * @returns {number[]} raw bytes
+ */
+function decodeCQuoteBodyBytes(body) {
+  const bytes = [];
+  let i = 0;
+  while (i < body.length) {
+    const [b, next] = consumeCQuoteUnit(body, i);
+    if (b != null) bytes.push(b);
+    i = next;
+  }
+  return bytes;
+}
+
+/**
+ * Parse one C-quoted token at `start` (must be `"`). Returns [decoded, nextIndex]
+ * or [null, start] on failure. Uses the same escape SSOT as unquoteGitPath.
+ * @param {string} s
+ * @param {number} start
+ * @returns {[string|null, number]}
+ */
+function parseCQuotedAt(s, start) {
+  if (start >= s.length || s[start] !== '"') return [null, start];
+  let i = start + 1;
+  const bytes = [];
+  while (i < s.length) {
+    if (s[i] === '"') {
+      return [Buffer.from(bytes).toString("utf8"), i + 1];
+    }
+    if (s[i] === "\\" && s[i + 1] === undefined) return [null, start];
+    const [b, next] = consumeCQuoteUnit(s, i);
+    if (b == null) return [null, start];
+    bytes.push(b);
+    i = next;
+  }
+  return [null, start];
+}
 
 /**
  * Decode one git core.quotePath C-style token (`"..."` with `\\NNN` octal and
@@ -17,41 +97,11 @@
 export function unquoteGitPath(p) {
   const s = String(p).trim();
   if (!(s.startsWith('"') && s.endsWith('"'))) return s;
-  // git core.quotePath C-style: the path is wrapped in "..." with non-ASCII bytes
-  // rendered as \NNN OCTAL (e.g. UTF-8 "é.txt" -> "\303\251.txt") plus the named
-  // escapes \a \b \t \n \v \f \r \" \\. JSON.parse does NOT understand \NNN, so a
-  // UTF-8/special path must be decoded byte-by-byte and re-read as UTF-8, else it
-  // never matches the raw path from `git status --porcelain -z` (dirty guard fails
-  // open on that file).
-  const body = s.slice(1, -1);
-  const named = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, "\\": 92 };
-  const bytes = [];
-  for (let i = 0; i < body.length; i++) {
-    const ch = body[i];
-    if (ch !== "\\") {
-      bytes.push(body.charCodeAt(i) & 0xff);
-      continue;
-    }
-    const next = body[i + 1];
-    if (next >= "0" && next <= "7") {
-      // up to 3 octal digits (git emits 3 for a high byte)
-      let j = i + 1;
-      let oct = "";
-      while (j < body.length && oct.length < 3 && body[j] >= "0" && body[j] <= "7") {
-        oct += body[j];
-        j += 1;
-      }
-      bytes.push(parseInt(oct, 8) & 0xff);
-      i = j - 1;
-    } else if (next in named) {
-      bytes.push(named[next]);
-      i += 1;
-    } else if (next !== undefined) {
-      bytes.push(body.charCodeAt(i + 1) & 0xff);
-      i += 1;
-    }
-  }
-  return Buffer.from(bytes).toString("utf8");
+  // Full-token path form: decode interior via the single escape SSOT. Prefer
+  // balanced parse when possible; otherwise body decode (trailing-`\` golden).
+  const [decoded, next] = parseCQuotedAt(s, 0);
+  if (decoded != null && next === s.length) return decoded;
+  return Buffer.from(decodeCQuoteBodyBytes(s.slice(1, -1))).toString("utf8");
 }
 
 /**
@@ -135,54 +185,6 @@ function stripDiffGitAbPrefix(pathToken) {
   const s = String(pathToken || "");
   if (s.startsWith("a/") || s.startsWith("b/")) return s.slice(2);
   return s;
-}
-
-/**
- * Parse one C-quoted token at `start` (must be `"`). Returns [decoded, nextIndex]
- * or [null, start] on failure. Shared semantics with unquoteGitPath / Python
- * git_path_quote.parse_c_quoted_at.
- * @param {string} s
- * @param {number} start
- * @returns {[string|null, number]}
- */
-function parseCQuotedAt(s, start) {
-  if (start >= s.length || s[start] !== '"') return [null, start];
-  const named = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, "\\": 92 };
-  let i = start + 1;
-  const bytes = [];
-  while (i < s.length) {
-    const ch = s[i];
-    if (ch === '"') {
-      return [Buffer.from(bytes).toString("utf8"), i + 1];
-    }
-    if (ch !== "\\") {
-      bytes.push(s.charCodeAt(i) & 0xff);
-      i += 1;
-      continue;
-    }
-    i += 1;
-    if (i >= s.length) return [null, start];
-    const next = s[i];
-    if (next >= "0" && next <= "7") {
-      let j = i;
-      let oct = "";
-      while (j < s.length && oct.length < 3 && s[j] >= "0" && s[j] <= "7") {
-        oct += s[j];
-        j += 1;
-      }
-      bytes.push(parseInt(oct, 8) & 0xff);
-      i = j;
-      continue;
-    }
-    if (next in named) {
-      bytes.push(named[next]);
-      i += 1;
-      continue;
-    }
-    bytes.push(s.charCodeAt(i) & 0xff);
-    i += 1;
-  }
-  return [null, start];
 }
 
 /**

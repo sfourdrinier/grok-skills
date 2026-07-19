@@ -215,6 +215,8 @@ test("unit: attachIntegrationFinalOutcome + buildPeerStopFinalEnvelope share the
   });
   assert.equal(blocked.status, "failure");
   assert.equal(blocked.response.integration.applied, false);
+  assert.equal(blocked.response.integration.ready, false);
+  assert.equal(blocked.response.peer.integrationReady, false);
   assert.equal(blocked.response.integration.outcome, "blocked-dirty-overlap");
 
   const applied = buildPeerStopFinalEnvelope(base, 0, {

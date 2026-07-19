@@ -3,13 +3,19 @@
 // Exclusive per-(runId, target) apply lock + durable applied marker keyed by
 // verified patch sha + target identity. Used by integrate.mjs so concurrent
 // dual peer-stop cannot reverse a winner and sequential restop is idempotent.
-// Lock uses atomic mkdir (safe-state pattern; no third-party deps).
+// Lock uses atomic mkdir (safe-state pattern; no third-party deps) with owner
+// pid/startToken/timestamp so abandoned locks reclaim without stealing a live
+// holder. Marker writes are atomic (tmp + rename) and return durable success.
 
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
 import { runsDirFor, safeRunIdForRunsDir } from "../progress-relay.mjs";
+
+/** Default: abandoned locks older than this may be reclaimed when owner is dead/unknown. */
+export const APPLY_LOCK_STALE_MS = 30_000;
 
 /**
  * Stable short identity for a target workspace (realpath hash).
@@ -69,7 +75,23 @@ export function readMatchingApplyMarker(runId, targetKey, patchSha, env = proces
 }
 
 /**
- * Write durable applied marker (private 0600). Best-effort; never throws out.
+ * Clear a non-authoritative applied marker (operator-reverted tree). Best-effort.
+ * @returns {boolean}
+ */
+export function clearApplyMarker(runId, targetKey, env = process.env) {
+  const markerPath = locateApplyMarker(runId, targetKey, env);
+  if (!markerPath) return false;
+  try {
+    fs.unlinkSync(markerPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Write durable applied marker (private 0600) via tmp + rename. Returns false
+ * when the marker is not durably on disk - callers must not claim applied.
  * @returns {boolean}
  */
 export function writeApplyMarker(runId, targetKey, patchSha, env = process.env) {
@@ -83,16 +105,25 @@ export function writeApplyMarker(runId, targetKey, patchSha, env = process.env) 
       targetKey,
       appliedAt: new Date().toISOString(),
     };
-    fs.writeFileSync(markerPath, `${JSON.stringify(body)}\n`, {
+    const tmp = `${markerPath}.${process.pid}.${Date.now()}.tmp`;
+    fs.writeFileSync(tmp, `${JSON.stringify(body)}\n`, {
       encoding: "utf8",
       mode: 0o600,
     });
+    try {
+      fs.chmodSync(tmp, 0o600);
+    } catch {
+      /* best-effort */
+    }
+    fs.renameSync(tmp, markerPath);
     try {
       fs.chmodSync(markerPath, 0o600);
     } catch {
       /* best-effort */
     }
-    return true;
+    // Re-read to prove durable presence (rename can succeed into a broken mount).
+    const verify = readMatchingApplyMarker(runId, targetKey, patchSha, env);
+    return verify.matched === true;
   } catch {
     return false;
   }
@@ -105,35 +136,177 @@ function sleepMs(ms) {
 }
 
 /**
- * Exclusive per-(runId, target) apply lock via atomic mkdir (existing safe-state
- * pattern; no third-party deps). Returns release() or throws on timeout.
+ * Process start identity token (pid-reuse safe). Null when unobtainable.
+ * @param {number} pid
+ * @returns {string|null}
+ */
+export function processStartToken(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    // macOS/Linux: lstart is stable for a process instance; recycled pids differ.
+    const r = spawnSync("ps", ["-p", String(pid), "-o", "lstart="], {
+      encoding: "utf8",
+    });
+    if (r.status !== 0) return null;
+    const token = String(r.stdout || "").trim();
+    return token || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * @param {number} pid
+ * @returns {boolean}
+ */
+export function processIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM: process exists but we cannot signal it - treat as alive (fail closed).
+    if (err && err.code === "EPERM") return true;
+    return false;
+  }
+}
+
+/**
+ * Classify lock owner from owner.json: alive | dead | unknown.
+ * @param {object|null} owner
+ * @returns {"alive"|"dead"|"unknown"}
+ */
+export function classifyLockOwner(owner) {
+  if (!owner || typeof owner !== "object") return "unknown";
+  const pid = owner.pid;
+  if (!Number.isInteger(pid) || pid <= 0) return "unknown";
+  if (!processIsAlive(pid)) return "dead";
+  const stored = owner.startToken;
+  if (typeof stored === "string" && stored) {
+    const current = processStartToken(pid);
+    if (current != null && current !== stored) return "dead"; // pid reused
+  }
+  return "alive";
+}
+
+function readOwnerDoc(lockDir) {
+  try {
+    const doc = JSON.parse(fs.readFileSync(path.join(lockDir, "owner.json"), "utf8"));
+    return doc && typeof doc === "object" ? doc : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeOwnerDoc(lockDir) {
+  const pid = process.pid;
+  const body = {
+    schemaVersion: 1,
+    pid,
+    startToken: processStartToken(pid),
+    acquiredAt: new Date().toISOString(),
+  };
+  fs.writeFileSync(path.join(lockDir, "owner.json"), `${JSON.stringify(body)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+}
+
+/**
+ * Whether an existing lockDir is reclaimable under bounded stale policy.
+ * Live holders are never reclaimed. Dead owners reclaim. Unknown owners only
+ * reclaim once age exceeds staleMs (never steal a fresh unknown lock).
+ * @param {string} lockDir
+ * @param {number} staleMs
+ * @param {() => number} [nowFn]
+ * @returns {boolean}
+ */
+export function isApplyLockReclaimable(lockDir, staleMs = APPLY_LOCK_STALE_MS, nowFn = Date.now) {
+  const owner = readOwnerDoc(lockDir);
+  const liveness = classifyLockOwner(owner);
+  if (liveness === "alive") return false;
+  let ageMs = Number.POSITIVE_INFINITY;
+  const acquiredAt = owner?.acquiredAt;
+  if (typeof acquiredAt === "string" && acquiredAt) {
+    const t = Date.parse(acquiredAt);
+    if (Number.isFinite(t)) ageMs = Math.max(0, nowFn() - t);
+  } else {
+    try {
+      const st = fs.statSync(lockDir);
+      ageMs = Math.max(0, nowFn() - st.mtimeMs);
+    } catch {
+      ageMs = Number.POSITIVE_INFINITY;
+    }
+  }
+  if (liveness === "dead") {
+    // Dead owners reclaim after a short settle (or immediately when age unknown).
+    return ageMs >= Math.min(staleMs, 1_000) || !Number.isFinite(ageMs);
+  }
+  // unknown: only past full stale budget
+  return ageMs >= staleMs;
+}
+
+function tryReclaimLockDir(lockDir, staleMs) {
+  if (!isApplyLockReclaimable(lockDir, staleMs)) return false;
+  try {
+    fs.rmSync(lockDir, { recursive: true, force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Exclusive per-(runId, target) apply lock via atomic mkdir + owner record.
+ * Returns release() or throws on timeout. Abandoned locks with dead/stale owners
+ * are reclaimed; live holders are never stolen.
+ *
  * @param {string} runId
  * @param {string} targetKey
  * @param {NodeJS.ProcessEnv} [env]
  * @param {number} [timeoutMs]
+ * @param {{staleMs?: number}} [opts]
  * @returns {() => void}
  */
-export function acquireApplyLock(runId, targetKey, env = process.env, timeoutMs = 30_000) {
+export function acquireApplyLock(
+  runId,
+  targetKey,
+  env = process.env,
+  timeoutMs = 30_000,
+  opts = {}
+) {
   const runsDir = runsDirFor(env);
   const safe = safeRunIdForRunsDir(runId, runsDir);
   if (!safe || !targetKey) {
     throw new Error("apply lock requires safe runId and targetKey");
   }
+  const staleMs =
+    typeof opts.staleMs === "number" && opts.staleMs >= 0 ? opts.staleMs : APPLY_LOCK_STALE_MS;
   const lockDir = path.join(runsDir, safe, "apply-locks", `${targetKey}.lock`);
   fs.mkdirSync(path.dirname(lockDir), { recursive: true, mode: 0o700 });
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     try {
       fs.mkdirSync(lockDir);
+      try {
+        writeOwnerDoc(lockDir);
+      } catch {
+        // Owner record is best-effort; missing owner makes lock "unknown" for reclaim.
+      }
       return () => {
         try {
-          fs.rmdirSync(lockDir);
+          fs.rmSync(lockDir, { recursive: true, force: true });
         } catch {
-          /* best-effort release */
+          try {
+            fs.rmdirSync(lockDir);
+          } catch {
+            /* best-effort release */
+          }
         }
       };
     } catch (err) {
       if (!err || err.code !== "EEXIST") throw err;
+      tryReclaimLockDir(lockDir, staleMs);
       sleepMs(15);
     }
   }
