@@ -4,13 +4,13 @@
     "name": "Stephane Fourdrinier"
   },
   "metadata": {
-    "description": "Use Grok as a coding assistant from Claude Code through a hardened, sandboxed wrapper. Not affiliated with xAI.",
+    "description": "Grok as a peer implementer agent for Claude Code: delegate code to an isolated worktree, iterate with continue-run, integrate through verified handoff. Review, reason, and verify included. Not affiliated with xAI.",
     "version": "2.0.0"
   },
   "plugins": [
     {
       "name": "grok",
-      "description": "Grok review, reason, code, and verify via a self-contained sandboxed wrapper.",
+      "description": "Grok as a peer implementer agent for Claude Code: delegate code to an isolated worktree, iterate with continue-run, integrate through verified handoff. Review, reason, and verify included. Not affiliated with xAI.",
       "version": "2.0.0",
       "author": {
         "name": "Stephane Fourdrinier"
@@ -21,7 +21,11 @@
         "grok",
         "xai",
         "code-review",
-        "agent"
+        "agent",
+        "sandbox",
+        "peer-agent",
+        "implementation-handoff",
+        "worktree"
       ]
     }
   ]

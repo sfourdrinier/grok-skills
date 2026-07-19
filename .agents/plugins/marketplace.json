@@ -7,7 +7,7 @@
     {
       "name": "grok",
       "displayName": "Grok Skills",
-      "description": "Hardened Grok companion for review, reason, code, and verify \u2014 private auth home, OS sandbox, isolated worktrees, one JSON result envelope.",
+      "description": "Grok as a peer implementer agent for Codex / ChatGPT: delegate code to an isolated worktree, iterate with continue-run, integrate through verified handoff. Review, reason, and verify included. Not affiliated with xAI.",
       "source": {
         "source": "local",
         "path": "./plugin"

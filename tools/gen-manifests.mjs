@@ -1,11 +1,18 @@
 #!/usr/bin/env node
 // tools/gen-manifests.mjs
 //
-// Single-source generator for dual-host plugin manifests and Claude marketplace
-// version fields. Reads plugin/manifest.source.json and WRITES:
+// Single-source generator for dual-host plugin manifests and BOTH marketplace
+// roots. Reads plugin/manifest.source.json and WRITES:
 //   - plugin/.claude-plugin/plugin.json
 //   - plugin/.codex-plugin/plugin.json
-//   - .claude-plugin/marketplace.json (metadata.version + plugins[].version only)
+//   - .claude-plugin/marketplace.json  (Claude marketplace root)
+//   - .agents/plugins/marketplace.json (Codex marketplace root)
+//
+// For the marketplace roots the generator sources every shared FACT that would
+// otherwise drift by hand - version (where the schema carries one), the per-host
+// rendered description, keywords, and displayName - while preserving each root's
+// host-specific structure/key order. Both roots are guarded so Codex marketplace
+// metadata cannot go stale while the check passes.
 //
 // Deterministic key order, 2-space indent, trailing newline. --check exits 1 on
 // drift without writing (CI / pre-commit / tools/checks.sh). Install stays
@@ -26,6 +33,7 @@ const SOURCE_REL = "plugin/manifest.source.json";
 const CLAUDE_PLUGIN_REL = "plugin/.claude-plugin/plugin.json";
 const CODEX_PLUGIN_REL = "plugin/.codex-plugin/plugin.json";
 const MARKETPLACE_REL = ".claude-plugin/marketplace.json";
+const CODEX_MARKETPLACE_REL = ".agents/plugins/marketplace.json";
 
 function readJson(abs) {
   return JSON.parse(fs.readFileSync(abs, "utf8"));
@@ -104,27 +112,55 @@ function buildCodexManifest(src) {
 }
 
 /**
- * Only version fields are generated for marketplace; everything else is
- * preserved from the committed file so non-version metadata stays hand-owned.
+ * Claude marketplace root: source version, per-host description, and keywords
+ * from manifest.source.json; preserve everything else (owner, source path,
+ * license, marketplace name) and the committed key order.
  */
-function buildMarketplace(existing, version) {
+function buildClaudeMarketplace(existing, src) {
   const next = structuredClone(existing);
+  const description = renderDescription(src.descriptionTemplate, src.claude.hostName);
   if (!next.metadata || typeof next.metadata !== "object") {
-    throw new Error("marketplace.json missing metadata object");
+    throw new Error(`${MARKETPLACE_REL} missing metadata object`);
   }
-  next.metadata.version = version;
+  next.metadata.version = src.version;
+  next.metadata.description = description;
   if (!Array.isArray(next.plugins)) {
-    throw new Error("marketplace.json missing plugins array");
+    throw new Error(`${MARKETPLACE_REL} missing plugins array`);
   }
   for (const entry of next.plugins) {
-    entry.version = version;
+    entry.version = src.version;
+    entry.description = description;
+    entry.keywords = [...src.keywords];
+  }
+  return next;
+}
+
+/**
+ * Codex marketplace root (.agents): no version/keywords in this schema, so
+ * source the drift-prone facts it DOES carry - displayName and the per-host
+ * rendered description - and preserve its host-specific structure (source
+ * object, policy, category, icon) and key order.
+ */
+function buildCodexMarketplace(existing, src) {
+  const next = structuredClone(existing);
+  const description = renderDescription(src.descriptionTemplate, src.codex.hostName);
+  if (!next.interface || typeof next.interface !== "object") {
+    throw new Error(`${CODEX_MARKETPLACE_REL} missing interface object`);
+  }
+  next.interface.displayName = src.displayName;
+  if (!Array.isArray(next.plugins)) {
+    throw new Error(`${CODEX_MARKETPLACE_REL} missing plugins array`);
+  }
+  for (const entry of next.plugins) {
+    entry.displayName = src.displayName;
+    entry.description = description;
   }
   return next;
 }
 
 function plannedOutputs(src) {
   const marketplacePath = path.join(REPO_ROOT, MARKETPLACE_REL);
-  const marketplaceExisting = readJson(marketplacePath);
+  const codexMarketplacePath = path.join(REPO_ROOT, CODEX_MARKETPLACE_REL);
   return [
     {
       rel: CLAUDE_PLUGIN_REL,
@@ -139,7 +175,12 @@ function plannedOutputs(src) {
     {
       rel: MARKETPLACE_REL,
       abs: marketplacePath,
-      body: formatJson(buildMarketplace(marketplaceExisting, src.version)),
+      body: formatJson(buildClaudeMarketplace(readJson(marketplacePath), src)),
+    },
+    {
+      rel: CODEX_MARKETPLACE_REL,
+      abs: codexMarketplacePath,
+      body: formatJson(buildCodexMarketplace(readJson(codexMarketplacePath), src)),
     },
   ];
 }

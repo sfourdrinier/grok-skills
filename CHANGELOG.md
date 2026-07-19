@@ -170,6 +170,14 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 
 ### Fixed / hardened (Phase 7 - final review remediation)
 
+- **Codex marketplace root drift (DRY hole):** `tools/gen-manifests.mjs` now
+  generates and `--check`-guards BOTH marketplace roots. Previously only
+  `.claude-plugin/marketplace.json` (version fields) was covered, so
+  `.agents/plugins/marketplace.json` stayed hand-owned and its description
+  drifted to stale pre-2.0 wording while the guard reported OK. Both roots now
+  source description/keywords/displayName from `plugin/manifest.source.json`;
+  new parity tests prove the Codex root is guarded and the retired wording
+  cannot reappear.
 - **direct-mode `.git/index` false-positive (dogfood-caught):** the git-dir
   guard no longer treats `.git/index` / `.git/COMMIT_EDITMSG` as protected-path
   writes. git rewrites the index on ordinary reads (`git status`), so guarding

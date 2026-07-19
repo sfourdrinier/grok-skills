@@ -37,7 +37,9 @@ Keep these **identical** to `X.Y.Z`:
 | `.claude-plugin/marketplace.json` | `metadata.version` **and** `plugins[].version` |
 
 `.agents/plugins/marketplace.json` has no version field (local path source);
-no bump required unless you add one later.
+no bump required unless you add one later. Its description/displayName are
+generated from `plugin/manifest.source.json` by `tools/gen-manifests.mjs` (same
+guard as the Claude marketplace root), so edit the source, not the file.
 
 ### 3. Verify
 

@@ -22,6 +22,7 @@ const REPO_ROOT = path.resolve(HERE, "../../..");
 const CLAUDE_PLUGIN = "plugin/.claude-plugin/plugin.json";
 const CODEX_PLUGIN = "plugin/.codex-plugin/plugin.json";
 const CLAUDE_MARKETPLACE = ".claude-plugin/marketplace.json";
+const CODEX_MARKETPLACE = ".agents/plugins/marketplace.json";
 const CHANGELOG = "CHANGELOG.md";
 const GEN_MANIFESTS = path.join(REPO_ROOT, "tools", "gen-manifests.mjs");
 
@@ -118,6 +119,85 @@ test("packaging versions match RELEASE.md surfaces (plugin + Claude marketplace)
   // .agents/plugins/marketplace.json has NO version field - do not assert one.
 });
 
+test("both marketplace roots source description/keywords from the single manifest source", () => {
+  const claudePlugin = readJson(CLAUDE_PLUGIN);
+  const codexPlugin = readJson(CODEX_PLUGIN);
+  const claudeMkt = readJson(CLAUDE_MARKETPLACE);
+  const codexMkt = readJson(CODEX_MARKETPLACE);
+
+  // Marketplace descriptions are the generated per-host plugin descriptions, so
+  // they cannot drift by hand (the pre-2.0 wording gap that survived the old
+  // version-only guard).
+  assert.equal(
+    claudeMkt.metadata?.description,
+    claudePlugin.description,
+    "Claude marketplace metadata.description must equal the generated Claude plugin description"
+  );
+  assert.equal(
+    claudeMkt.plugins?.[0]?.description,
+    claudePlugin.description,
+    "Claude marketplace plugin description must equal the generated Claude plugin description"
+  );
+  assert.equal(
+    codexMkt.plugins?.[0]?.description,
+    codexPlugin.description,
+    "Codex marketplace plugin description must equal the generated Codex plugin description"
+  );
+
+  assert.ok(
+    setsEqual(
+      new Set(claudeMkt.plugins?.[0]?.keywords),
+      new Set(claudePlugin.keywords)
+    ),
+    "Claude marketplace keywords must match the Claude plugin keyword set"
+  );
+
+  // Regression guard: none of the retired hand-wording may reappear in either root.
+  const blob = JSON.stringify(claudeMkt) + JSON.stringify(codexMkt);
+  for (const stale of [
+    "coding assistant from Claude Code",
+    "self-contained sandboxed wrapper",
+    "Hardened Grok companion",
+  ]) {
+    assert.ok(!blob.includes(stale), `retired marketplace wording must be gone: "${stale}"`);
+  }
+});
+
+test("gen-manifests --check exits 1 when the Codex marketplace root drifts", () => {
+  // The old guard only covered the Claude marketplace root; the Codex root
+  // (.agents/plugins/marketplace.json) could go stale while --check passed.
+  // This proves it is now guarded.
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "gen-manifests-codex-drift-"));
+  try {
+    for (const rel of [
+      "plugin/manifest.source.json",
+      CLAUDE_PLUGIN,
+      CODEX_PLUGIN,
+      CLAUDE_MARKETPLACE,
+      CODEX_MARKETPLACE,
+    ]) {
+      const dst = path.join(tmpRoot, rel);
+      fs.mkdirSync(path.dirname(dst), { recursive: true });
+      fs.copyFileSync(path.join(REPO_ROOT, rel), dst);
+    }
+    const codexCopy = path.join(tmpRoot, CODEX_MARKETPLACE);
+    const original = fs.readFileSync(codexCopy, "utf8");
+    fs.writeFileSync(
+      codexCopy,
+      original.replace(/"description": "[^"]*"/, '"description": "stale hand-wording"'),
+      "utf8"
+    );
+    const result = spawnSync(process.execPath, [GEN_MANIFESTS, "--check"], {
+      encoding: "utf8",
+      env: { ...process.env, GEN_MANIFESTS_ROOT: tmpRoot },
+    });
+    assert.equal(result.status, 1, "codex marketplace drift must exit 1");
+    assert.match(result.stderr, /\.agents\/plugins\/marketplace\.json/);
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
 test("CHANGELOG has a section for the manifest version or the 2.0.0 unreleased heading", () => {
   const claude = readJson(CLAUDE_PLUGIN);
   const version = claude.version;
@@ -162,6 +242,7 @@ test("gen-manifests --check exits 1 when a generated file drifts", () => {
       CLAUDE_PLUGIN,
       CODEX_PLUGIN,
       CLAUDE_MARKETPLACE,
+      CODEX_MARKETPLACE,
     ]) {
       const dst = path.join(tmpRoot, rel);
       fs.mkdirSync(path.dirname(dst), { recursive: true });
