@@ -11,6 +11,7 @@ from groklib.implementation_handoff import (
     compute_integration_ready,
     dual_condition_ready,
     enforce_ready_evidence_guard,
+    paths_from_git_patch,
     primary_error_from_blockers,
     ready_evidence_guard_errors,
     validate_implementation_handoff,
@@ -19,6 +20,17 @@ from groklib.implementation_handoff import (
     NO_AUTHORITATIVE_VALIDATION_KIND,
     _STEP_ORDER,
 )
+
+
+def _git_c_quote_path_body(path: str) -> str:
+    """Encode a path the way git core.quotePath does inside a quoted token body."""
+    out = []
+    for byte in path.encode("utf-8"):
+        if byte >= 0x80 or byte < 0x20 or byte in (0x22, 0x5C):
+            out.append("\\%03o" % byte)
+        else:
+            out.append(chr(byte))
+    return "".join(out)
 
 
 def _mini_patch(*paths: str) -> bytes:
@@ -37,6 +49,27 @@ def _mini_patch(*paths: str) -> bytes:
             "+new\n".format(path)
         )
     return "".join(parts).encode("utf-8")
+
+
+def _mini_patch_c_quoted(*paths: str) -> bytes:
+    """Minimal patch whose ``diff --git`` headers use git C-style quoting (non-ASCII)."""
+    if not paths:
+        paths = ("café.txt",)
+    parts = []
+    for path in paths:
+        body = _git_c_quote_path_body(path)
+        # Real git wraps the whole a/... and b/... tokens: "a/caf\303\251.txt"
+        header = 'diff --git "a/{0}" "b/{0}"\n'.format(body)
+        parts.append(
+            header
+            + "index 1111111..2222222 100644\n"
+            + '--- "a/{0}"\n'.format(body)
+            + '+++ "b/{0}"\n'.format(body)
+            + "@@ -1 +1 @@\n"
+            + "-old\n"
+            + "+new\n"
+        )
+    return "".join(parts).encode("ascii")
 
 class ValidateHandoffTests(unittest.TestCase):
     def _doc(self, **overrides):
@@ -454,6 +487,64 @@ class ValidateHandoffTests(unittest.TestCase):
                 ),
                 blockers,
             )
+
+    def test_paths_from_git_patch_decodes_c_quoted_non_ascii_and_spaces(self) -> None:
+        cafe = "café.txt"
+        space = "path with space.txt"
+        # Git C-quotes non-ASCII (octal UTF-8 bytes); spaces stay unquoted.
+        quoted = _mini_patch_c_quoted(cafe)
+        unquoted_space = _mini_patch(space)
+        self.assertEqual(paths_from_git_patch(quoted), {cafe})
+        self.assertEqual(paths_from_git_patch(unquoted_space), {space})
+        # Both a/ and b/ sides of a rename-style header with mixed quoting.
+        mixed = (
+            'diff --git "a/{0}" b/{1}\n'.format(_git_c_quote_path_body(cafe), space)
+        ).encode("ascii")
+        self.assertEqual(paths_from_git_patch(mixed), {cafe, space})
+        # /dev/null must not appear as a changed path (delete/create headers).
+        delete_header = (
+            'diff --git "a/{0}" "b/{0}"\n'
+            "deleted file mode 100644\n"
+            '--- "a/{0}"\n'
+            "+++ /dev/null\n".format(_git_c_quote_path_body(cafe))
+        ).encode("ascii")
+        self.assertEqual(paths_from_git_patch(delete_header), {cafe})
+
+    def test_dual_condition_ready_with_c_quoted_patch_headers(self) -> None:
+        """Ready handoff must not false-downgrade when git C-quotes patch paths."""
+        cafe = "café.txt"
+        space = "path with space.txt"
+        doc = self._doc()
+        doc["changedFiles"] = [
+            {"path": cafe, "status": "modified", "oldPath": None},
+            {"path": space, "status": "added", "oldPath": None},
+        ]
+        # Real-world mixed: non-ASCII C-quoted, space-path unquoted.
+        patch_bytes = _mini_patch_c_quoted(cafe) + _mini_patch(space)
+        with tempfile.TemporaryDirectory() as tmp:
+            p = pathlib.Path(tmp) / "implementation.patch"
+            p.write_bytes(patch_bytes)
+            doc["patch"]["sha256"] = hashlib.sha256(patch_bytes).hexdigest()
+            doc["patch"]["bytes"] = len(patch_bytes)
+            ready, blockers = dual_condition_ready(
+                manifest=doc,
+                envelope={
+                    "status": "success",
+                    "runId": doc["runId"],
+                    "mode": "code",
+                    "baseRevision": doc["baseRevision"],
+                    "changedFiles": [cafe, space],
+                },
+                patch_abs=p,
+            )
+            self.assertTrue(
+                ready,
+                "quoted non-ASCII + space paths must not false-downgrade dual-condition ready: {}".format(
+                    blockers
+                ),
+            )
+            self.assertEqual(blockers, [])
+
 
 class CommandEvidenceTests(unittest.TestCase):
     def test_tails_and_hashes(self) -> None:

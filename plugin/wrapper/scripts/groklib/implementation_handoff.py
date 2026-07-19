@@ -22,6 +22,7 @@ from groklib.envelope import (
     redact_secret_value_text,
     SecretMaterialError,
 )
+from groklib.git_path_quote import parse_diff_git_header_paths
 from groklib.implementation_contract import (
     normalize_git_repo_path,
     objective_criteria_bound_errors,
@@ -441,29 +442,28 @@ def enforce_ready_evidence_guard(
 
 
 # git-binary-full-index-v1 (and plain unified) path headers.
-_DIFF_GIT_A_B = re.compile(
-    rb"^diff --git a/(.+?) b/(.+?)\s*$",
-    re.MULTILINE,
-)
-
-
-def _unquote_git_path(raw: str) -> str:
-    """Strip optional surrounding double quotes from a git path token."""
-    if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
-        return raw[1:-1]
-    return raw
+# Git may C-quote either side under default core.quotePath, e.g.
+#   diff --git "a/caf\303\251.txt" "b/caf\303\251.txt"
+# Unquoted paths can contain spaces:
+#   diff --git a/path with space.txt b/path with space.txt
+# C-unquote SSOT: git_path_quote (never path_inventory / -z payloads).
+_DIFF_GIT_PREFIX = b"diff --git "
 
 
 def paths_from_git_patch(patch_bytes: bytes) -> set:
-    """Extract repo-relative paths named by ``diff --git a/... b/...`` headers."""
+    """Extract repo-relative paths named by ``diff --git`` headers (quoted or plain)."""
     found: set = set()
-    for match in _DIFF_GIT_A_B.finditer(patch_bytes):
-        for group in (match.group(1), match.group(2)):
-            try:
-                text = group.decode("utf-8", errors="surrogateescape")
-            except Exception:
-                continue
-            path = _unquote_git_path(text)
+    for raw_line in patch_bytes.splitlines():
+        if not raw_line.startswith(_DIFF_GIT_PREFIX):
+            continue
+        try:
+            rest = raw_line[len(_DIFF_GIT_PREFIX) :].decode("utf-8", errors="surrogateescape")
+        except Exception:
+            continue
+        parsed = parse_diff_git_header_paths(rest)
+        if not parsed:
+            continue
+        for path in parsed:
             if path and path != "/dev/null":
                 found.add(path)
     return found
