@@ -153,35 +153,10 @@ export {
 } from "./integrate-apply-state.mjs";
 
 /**
- * Shared dirty-guard + apply spine used by both auto and peer.
- * Status fail-closed, numstat fail-closed, dirty-overlap, apply --check,
- * apply, reverse rollback. Callers keep readiness / consent / target identity /
- * patch-integrity gates outside this helper.
- *
- * Published outcomes: blocked-dirty-status, blocked-numstat, blocked-dirty-overlap,
- * blocked-apply-check, applied, rolled-back, manual-needed.
- *
- * @param {object} opts
- * @param {string} opts.targetRepo absolute target workspace root
- * @param {string} opts.patchPath absolute path to the patch file
- * @param {(line: string) => void} opts.stderrLine
- * @param {string} [opts.logTag="grok"] prefix tag without brackets (e.g. "grok-auto")
- * @param {(ctx: {preStatus: string, postStatus: string}) => void} [opts.onApplied]
- * @returns {{
- *   ok: boolean,
- *   outcome: string,
- *   reason?: string,
- *   patchPath?: string,
- *   overlap?: string[],
- *   preStatus?: string,
- *   postStatus?: string,
- *   checkStderr?: string,
- * }}
- */
-/**
  * True when the working tree still contains the applied patch (reverse --check
  * succeeds). Used so a durable marker cannot claim already-applied after the
- * operator reverts the patch.
+ * operator reverts the patch, and so a crash after apply (no marker yet) can
+ * heal under lock before the dirty-overlap guard.
  * @param {string} targetRepo
  * @param {string} patchPath
  * @returns {boolean}
@@ -189,6 +164,42 @@ export {
 function treeStillHasAppliedPatch(targetRepo, patchPath) {
   const revCheck = git(targetRepo, ["apply", "-R", "--check", "--binary", patchPath]);
   return revCheck.code === 0 && !revCheck.error;
+}
+
+/**
+ * Union numstat destinations with diff --git / rename-copy headers.
+ * Fail closed when the patch cannot be read/parsed after numstat succeeded:
+ * numstat alone is destination-biased on pure renames, so a header gap would
+ * fail the dirty-overlap guard open on a dirty SOURCE.
+ *
+ * @param {string} patchPath
+ * @param {string} numstatStdout
+ * @returns {{ok: true, paths: string[]} | {ok: false, outcome: string, reason: string}}
+ */
+export function loadPatchTouchPaths(patchPath, numstatStdout) {
+  const patchPathSet = new Set(parseNumstatPaths(numstatStdout));
+  let patchBytes;
+  try {
+    patchBytes = fs.readFileSync(patchPath);
+  } catch {
+    return {
+      ok: false,
+      outcome: "blocked-patch-headers",
+      reason: "patch header read failed after numstat; cannot compute full dirty touch set",
+    };
+  }
+  try {
+    for (const p of pathsFromGitPatch(patchBytes)) {
+      patchPathSet.add(p);
+    }
+  } catch {
+    return {
+      ok: false,
+      outcome: "blocked-patch-headers",
+      reason: "patch header parse failed after numstat; cannot compute full dirty touch set",
+    };
+  }
+  return { ok: true, paths: [...patchPathSet] };
 }
 
 /**
@@ -237,6 +248,32 @@ function finalizeAppliedWithMarker({
   };
 }
 
+/**
+ * Shared dirty-guard + apply spine used by both auto and peer.
+ * Status fail-closed, numstat fail-closed, header-union fail-closed, dirty-overlap,
+ * apply --check, apply, reverse rollback. Callers keep readiness / consent /
+ * target identity / patch-integrity gates outside this helper.
+ *
+ * Published outcomes: blocked-dirty-status, blocked-numstat, blocked-patch-headers,
+ * blocked-dirty-overlap, blocked-apply-check, applied, rolled-back, manual-needed.
+ *
+ * @param {object} opts
+ * @param {string} opts.targetRepo absolute target workspace root
+ * @param {string} opts.patchPath absolute path to the patch file
+ * @param {(line: string) => void} opts.stderrLine
+ * @param {string} [opts.logTag="grok"] prefix tag without brackets (e.g. "grok-auto")
+ * @param {(ctx: {preStatus: string, postStatus: string}) => void} [opts.onApplied]
+ * @returns {{
+ *   ok: boolean,
+ *   outcome: string,
+ *   reason?: string,
+ *   patchPath?: string,
+ *   overlap?: string[],
+ *   preStatus?: string,
+ *   postStatus?: string,
+ *   checkStderr?: string,
+ * }}
+ */
 function applyPatchWithGuards({
   targetRepo,
   patchPath,
@@ -280,17 +317,21 @@ function applyPatchWithGuards({
     };
   }
   // numstat is destination-biased on pure renames; union diff --git / rename-copy
-  // from/to sides so a dirty SOURCE cannot fail the overlap guard open.
-  const patchPathSet = new Set(parseNumstatPaths(numstat.stdout));
-  try {
-    for (const p of pathsFromGitPatch(fs.readFileSync(patchPath))) {
-      patchPathSet.add(p);
-    }
-  } catch {
-    // Patch unreadable here is unexpected (numstat just opened it); keep numstat
-    // set and continue - integrity gates already ran for peer/auto callers.
+  // from/to sides so a dirty SOURCE cannot fail the overlap guard open. Header
+  // read/parse failure after successful numstat fails closed (never numstat-only).
+  const touch = loadPatchTouchPaths(patchPath, numstat.stdout);
+  if (!touch.ok) {
+    stderrLine(
+      `${tag} BLOCKED: ${touch.reason || "cannot read patch headers after numstat"}`
+    );
+    return {
+      ok: false,
+      outcome: touch.outcome,
+      reason: touch.reason,
+      patchPath,
+    };
   }
-  const patchPaths = [...patchPathSet];
+  const patchPaths = touch.paths;
   const overlap = patchPaths.filter((p) => dirtyPaths.has(p)).sort();
   if (overlap.length > 0) {
     stderrLine(
@@ -366,6 +407,127 @@ function applyPatchWithGuards({
     preStatus: preStatus.stdout,
     postStatus: postStatus.stdout,
   };
+}
+
+/**
+ * Shared under-lock apply ladder for auto and peer (one source of truth).
+ * Callers keep readiness / consent / target identity / pre-lock integrity gates
+ * outside; optional revalidateUnderLock runs after marker heal (auto re-checks
+ * patch vs manifest under lock).
+ *
+ * Ladder under the held apply lock:
+ * 1. Matching marker + reverse --check => already-applied
+ * 2. Matching marker but tree reverted => clear marker, continue
+ * 3. No marker but reverse --check succeeds (crash after apply / marker-persist
+ *    reverse-failure left applied tree) => heal durable marker, already-applied
+ *    BEFORE dirty guard (applied paths are dirty vs HEAD)
+ * 4. Optional revalidateUnderLock
+ * 5. applyPatchWithGuards spine
+ * 6. finalizeAppliedWithMarker on success
+ *
+ * @param {object} opts
+ * @returns {{ok: boolean, outcome: string, runId?: string, patchPath?: string, patchSha?: string, reason?: string, overlap?: string[]}}
+ */
+export function completeIntegrationApplyUnderLock({
+  targetRepo,
+  patchPath,
+  runId,
+  targetKey,
+  patchSha,
+  env = process.env,
+  stderrLine = (line) => process.stderr.write(`${line}\n`),
+  logTag = "grok",
+  onApplied,
+  revalidateUnderLock,
+} = {}) {
+  const tag = `[${logTag}]`;
+  const prior = readMatchingApplyMarker(runId, targetKey, patchSha, env);
+  if (prior.matched) {
+    if (treeStillHasAppliedPatch(targetRepo, patchPath)) {
+      stderrLine(
+        `${tag} already-applied runId=${runId} patchSha=${patchSha} target=${targetKey}`
+      );
+      return {
+        ok: true,
+        outcome: "already-applied",
+        runId,
+        patchPath,
+        patchSha,
+      };
+    }
+    // Marker exists but operator reverted the tree - clear and re-apply.
+    stderrLine(
+      `${tag} applied marker present but tree no longer has patch; re-applying`
+    );
+    clearApplyMarker(runId, targetKey, env);
+  } else if (treeStillHasAppliedPatch(targetRepo, patchPath)) {
+    // Crash after successful git apply before durable marker (or marker-persist
+    // reverse-failure that left the applied tree) - heal under lock before dirty
+    // guard, else the applied paths look like operator dirty overlap.
+    stderrLine(
+      `${tag} tree already has applied patch without durable marker; healing marker`
+    );
+    const wrote = writeApplyMarker(runId, targetKey, patchSha, env);
+    if (wrote) {
+      stderrLine(
+        `${tag} already-applied runId=${runId} patchSha=${patchSha} target=${targetKey}`
+      );
+      return {
+        ok: true,
+        outcome: "already-applied",
+        runId,
+        patchPath,
+        patchSha,
+      };
+    }
+    stderrLine(
+      `${tag} BLOCKED: applied tree lacks durable marker and marker heal failed`
+    );
+    return {
+      ok: false,
+      outcome: "marker-persist-failure",
+      reason: "tree has applied patch but durable marker write failed",
+      runId,
+      patchPath,
+      patchSha,
+    };
+  }
+
+  if (typeof revalidateUnderLock === "function") {
+    const v = revalidateUnderLock();
+    if (v && v.ok === false) return v;
+  }
+
+  const spine = applyPatchWithGuards({
+    targetRepo,
+    patchPath,
+    stderrLine,
+    logTag,
+    onApplied,
+  });
+  if (spine.ok && spine.outcome === "applied") {
+    return finalizeAppliedWithMarker({
+      targetRepo,
+      patchPath,
+      runId,
+      targetKey,
+      patchSha,
+      env,
+      stderrLine,
+      logTag,
+      spine,
+    });
+  }
+  const out = { ...spine, runId };
+  if (
+    spine.outcome !== "blocked-dirty-status" &&
+    spine.outcome !== "blocked-numstat" &&
+    spine.outcome !== "blocked-patch-headers"
+  ) {
+    out.patchPath = spine.patchPath || patchPath;
+    out.patchSha = patchSha;
+  }
+  return out;
 }
 
 /**
@@ -488,8 +650,8 @@ export function applyVerifiedPatch({
     };
   }
 
-  // 3. Exclusive per-(runId, target) apply lock + durable marker (idempotent restop).
-  // Under lock: re-check marker/integrity, then shared dirty-guard + apply spine.
+  // 3. Exclusive per-(runId, target) apply lock + shared under-lock ladder.
+  // Policy/integrity gates stay above; lock body is completeIntegrationApplyUnderLock.
   // Never reverse another winner; rollback only mid-apply failure of this holder.
   const targetKey = targetIdentityKey(targetRepo);
   let releaseLock = null;
@@ -507,44 +669,13 @@ export function applyVerifiedPatch({
     };
   }
   try {
-    const prior = readMatchingApplyMarker(runId, targetKey, patchSha, env);
-    if (prior.matched) {
-      if (treeStillHasAppliedPatch(targetRepo, patchPath)) {
-        stderrLine(
-          `[grok-auto] already-applied runId=${runId} patchSha=${patchSha} target=${targetKey}`
-        );
-        return {
-          ok: true,
-          outcome: "already-applied",
-          runId,
-          patchPath,
-          patchSha,
-        };
-      }
-      // Marker exists but operator reverted the tree - clear and re-apply.
-      stderrLine(
-        `[grok-auto] applied marker present but tree no longer has patch; re-applying`
-      );
-      clearApplyMarker(runId, targetKey, env);
-    }
-    // Re-verify integrity under lock (artifact can change between pre-lock hash and apply).
-    const lockedIntegrity = verifyPatchAgainstManifest(runId, patchPath, env);
-    if (!lockedIntegrity.ok) {
-      stderrLine(
-        `[grok-auto] BLOCKED: patch integrity check failed under lock for ${runId}: ${lockedIntegrity.reason}`
-      );
-      return {
-        ok: false,
-        outcome: "patch-integrity-failure",
-        reason: lockedIntegrity.reason || "patch integrity check failed",
-        runId,
-        patchPath,
-        patchSha,
-      };
-    }
-    const spine = applyPatchWithGuards({
+    return completeIntegrationApplyUnderLock({
       targetRepo,
       patchPath,
+      runId,
+      targetKey,
+      patchSha,
+      env,
       stderrLine,
       logTag: "grok-auto",
       onApplied: ({ preStatus, postStatus }) => {
@@ -554,29 +685,25 @@ export function applyVerifiedPatch({
             `post-status:\n${postStatus || "(clean)"}`
         );
       },
+      revalidateUnderLock: () => {
+        // Re-verify integrity under lock (artifact can change between pre-lock hash and apply).
+        const lockedIntegrity = verifyPatchAgainstManifest(runId, patchPath, env);
+        if (!lockedIntegrity.ok) {
+          stderrLine(
+            `[grok-auto] BLOCKED: patch integrity check failed under lock for ${runId}: ${lockedIntegrity.reason}`
+          );
+          return {
+            ok: false,
+            outcome: "patch-integrity-failure",
+            reason: lockedIntegrity.reason || "patch integrity check failed",
+            runId,
+            patchPath,
+            patchSha,
+          };
+        }
+        return { ok: true };
+      },
     });
-    if (spine.ok && spine.outcome === "applied") {
-      return finalizeAppliedWithMarker({
-        targetRepo,
-        patchPath,
-        runId,
-        targetKey,
-        patchSha,
-        env,
-        stderrLine,
-        logTag: "grok-auto",
-        spine,
-      });
-    }
-    const out = { ...spine, runId };
-    if (
-      spine.outcome !== "blocked-dirty-status" &&
-      spine.outcome !== "blocked-numstat"
-    ) {
-      out.patchPath = spine.patchPath || patchPath;
-      out.patchSha = patchSha;
-    }
-    return out;
   } finally {
     if (typeof releaseLock === "function") releaseLock();
   }
@@ -687,8 +814,9 @@ export function maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stder
     );
     return { attempted: true, ok: false, outcome: "patch-integrity-failure" };
   }
-  // Exclusive per-(runId, target) apply lock + durable marker so concurrent dual
-  // peer-stop cannot reverse a winner, and sequential restop is idempotent.
+  // Exclusive per-(runId, target) apply lock + shared under-lock ladder with auto.
+  // Concurrent dual peer-stop cannot reverse a winner; sequential restop is
+  // idempotent; crash-after-apply heals the durable marker under lock.
   const patchSha = sha256File(patchPath);
   const targetKey = targetIdentityKey(repo);
   let releaseLock = null;
@@ -699,52 +827,35 @@ export function maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stder
     return { attempted: true, ok: false, outcome: "blocked-apply-lock" };
   }
   try {
-    const prior = readMatchingApplyMarker(runId, targetKey, patchSha);
-    if (prior.matched) {
-      if (treeStillHasAppliedPatch(repo, patchPath)) {
-        stderrLine(
-          `[grok-peer] already-applied runId=${runId} patchSha=${patchSha} target=${targetKey}`
-        );
-        return { attempted: true, ok: true, outcome: "already-applied" };
-      }
-      // Marker exists but operator reverted the tree - clear and re-apply.
-      stderrLine(
-        `[grok-peer] applied marker present but tree no longer has patch; re-applying`
-      );
-      clearApplyMarker(runId, targetKey);
-    }
-    // Re-verify integrity under lock (artifact may change between pre-lock check and apply).
-    const lockedIntegrity = verifyPatchAgainstManifest(runId, patchPath);
-    if (!lockedIntegrity.ok) {
-      stderrLine(
-        `[grok-peer] BLOCKED: patch integrity check failed under lock for ${runId}: ${lockedIntegrity.reason}`
-      );
-      return { attempted: true, ok: false, outcome: "patch-integrity-failure" };
-    }
-    // Shared dirty-guard + apply spine with auto: status fail-closed, numstat
-    // fail-closed, dirty-overlap, apply --check, apply, reverse rollback.
-    // Rollback only undoes THIS holder's mid-apply failure (never another winner).
-    const spine = applyPatchWithGuards({
+    const finalized = completeIntegrationApplyUnderLock({
       targetRepo: repo,
       patchPath,
+      runId,
+      targetKey,
+      patchSha,
+      env: process.env,
       stderrLine,
       logTag: "grok-peer",
+      revalidateUnderLock: () => {
+        // Re-verify integrity under lock (artifact may change between pre-lock check and apply).
+        const lockedIntegrity = verifyPatchAgainstManifest(runId, patchPath);
+        if (!lockedIntegrity.ok) {
+          stderrLine(
+            `[grok-peer] BLOCKED: patch integrity check failed under lock for ${runId}: ${lockedIntegrity.reason}`
+          );
+          return {
+            ok: false,
+            outcome: "patch-integrity-failure",
+            reason: lockedIntegrity.reason || "patch integrity check failed",
+            runId,
+            patchPath,
+            patchSha,
+          };
+        }
+        return { ok: true };
+      },
     });
-    if (spine.ok && spine.outcome === "applied") {
-      const finalized = finalizeAppliedWithMarker({
-        targetRepo: repo,
-        patchPath,
-        runId,
-        targetKey,
-        patchSha,
-        env: process.env,
-        stderrLine,
-        logTag: "grok-peer",
-        spine,
-      });
-      return { attempted: true, ok: finalized.ok, outcome: finalized.outcome };
-    }
-    return { attempted: true, ok: spine.ok, outcome: spine.outcome };
+    return { attempted: true, ok: finalized.ok, outcome: finalized.outcome };
   } finally {
     if (typeof releaseLock === "function") releaseLock();
   }

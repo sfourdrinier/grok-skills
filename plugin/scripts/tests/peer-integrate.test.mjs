@@ -658,3 +658,125 @@ test("peer-stop: marker persistence failure after apply cannot report durable ap
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("peer-stop restop: crash after apply before marker heals durable marker as already-applied", () => {
+  // Crash window: git apply succeeded, process died before writeApplyMarker.
+  // reverse --check succeeds (tree has patch) but no marker exists. Restop must
+  // heal the durable marker under lock and return already-applied BEFORE the
+  // dirty-overlap guard (applied paths look dirty vs HEAD).
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-peer-int-orphan-apply-"));
+  const repo = initRepo(path.join(root, "repo"));
+  const xdg = path.join(root, "xdg");
+  const patchBody = capturePatch(repo);
+  stagePatch(xdg, RUN_ID, patchBody);
+  const lines = [];
+  try {
+    // Simulate crash-after-apply: land the patch with no marker write.
+    const patchPath = path.join(
+      xdg,
+      "grok-skills",
+      "runs",
+      RUN_ID,
+      "artifacts",
+      "implementation.patch"
+    );
+    const applied = spawnSync("git", ["apply", "--binary", patchPath], {
+      cwd: repo,
+      encoding: "utf8",
+    });
+    assert.equal(applied.status, 0, applied.stderr);
+    assert.equal(fs.readFileSync(path.join(repo, "foo.txt"), "utf8"), "hello world\n");
+    // reverse --check proves the tree still has the patch; no marker on disk.
+    const revCheck = spawnSync("git", ["apply", "-R", "--check", "--binary", patchPath], {
+      cwd: repo,
+      encoding: "utf8",
+    });
+    assert.equal(revCheck.status, 0, "precondition: reverse --check must succeed");
+
+    const second = withXdg(xdg, () =>
+      maybeIntegratePeerStop(peerStopEnvelope(repo), repo, "auto", ["--target", repo], (l) =>
+        lines.push(l)
+      )
+    );
+    assert.equal(second.attempted, true);
+    assert.equal(second.ok, true, JSON.stringify({ second, lines }));
+    assert.equal(
+      second.outcome,
+      "already-applied",
+      "orphan applied tree must heal marker and report already-applied, not dirty-block"
+    );
+    assert.equal(fs.readFileSync(path.join(repo, "foo.txt"), "utf8"), "hello world\n");
+    assert.ok(
+      lines.some((l) => /heal|already-applied/i.test(l)),
+      lines.join("\n")
+    );
+    // Durable marker must now exist for a subsequent restop.
+    const third = withXdg(xdg, () =>
+      maybeIntegratePeerStop(peerStopEnvelope(repo), repo, "auto", ["--target", repo], (l) =>
+        lines.push(l)
+      )
+    );
+    assert.equal(third.outcome, "already-applied");
+    assert.equal(third.ok, true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("peer-stop restop: marker-persist reverse-failure leaving applied tree heals on restop", async () => {
+  // After marker-persist-failure, reverse can also fail and leave the applied
+  // tree without a durable marker (manual-needed). A later restop must heal the
+  // marker and return already-applied instead of dirty-overlap blocking.
+  const {
+    targetIdentityKey,
+    locateApplyMarker,
+    clearApplyMarker,
+  } = await import("../lib/integrate-apply-state.mjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-peer-int-persist-orphan-"));
+  const repo = initRepo(path.join(root, "repo"));
+  const xdg = path.join(root, "xdg");
+  stagePatch(xdg, RUN_ID, capturePatch(repo));
+  const lines = [];
+  try {
+    // First apply succeeds and writes a marker.
+    const first = withXdg(xdg, () =>
+      maybeIntegratePeerStop(peerStopEnvelope(repo), repo, "auto", ["--target", repo], (l) =>
+        lines.push(l)
+      )
+    );
+    assert.equal(first.ok, true);
+    assert.equal(first.outcome, "applied");
+    // Simulate marker-persist reverse-failure residue: applied tree, no marker.
+    clearApplyMarker(RUN_ID, targetIdentityKey(repo), { XDG_STATE_HOME: xdg });
+    const markerPath = locateApplyMarker(RUN_ID, targetIdentityKey(repo), {
+      XDG_STATE_HOME: xdg,
+    });
+    assert.ok(markerPath);
+    assert.equal(fs.existsSync(markerPath), false, "precondition: marker cleared");
+    assert.equal(fs.readFileSync(path.join(repo, "foo.txt"), "utf8"), "hello world\n");
+
+    const second = withXdg(xdg, () =>
+      maybeIntegratePeerStop(peerStopEnvelope(repo), repo, "auto", ["--target", repo], (l) =>
+        lines.push(l)
+      )
+    );
+    assert.equal(second.attempted, true);
+    assert.equal(second.ok, true, JSON.stringify({ second, lines }));
+    assert.equal(second.outcome, "already-applied");
+    assert.equal(fs.readFileSync(path.join(repo, "foo.txt"), "utf8"), "hello world\n");
+    assert.equal(fs.existsSync(markerPath), true, "heal must write durable marker");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("unit: loadPatchTouchPaths fails closed when patch header read fails after numstat", async () => {
+  const { loadPatchTouchPaths } = await import("../lib/integrate.mjs");
+  const res = loadPatchTouchPaths(
+    path.join(os.tmpdir(), `grok-missing-patch-${process.pid}-${Date.now()}.patch`),
+    "1\t1\tfoo.txt\n"
+  );
+  assert.equal(res.ok, false);
+  assert.equal(res.outcome, "blocked-patch-headers");
+  assert.match(String(res.reason || ""), /header|numstat|touch/i);
+});
