@@ -168,16 +168,13 @@ function treeStillHasAppliedPatch(targetRepo, patchPath) {
 
 /**
  * Union numstat destinations with diff --git / rename-copy headers.
- * Fail closed when the patch cannot be read/parsed after numstat succeeded:
- * numstat alone is destination-biased on pure renames, so a header gap would
- * fail the dirty-overlap guard open on a dirty SOURCE.
- *
- * @param {string} patchPath
- * @param {string} numstatStdout
+ * Non-empty numstat makes headers load-bearing: empty/unparseable headers and
+ * uncorroborated simple numstat paths fail closed (no numstat-only fallback).
  * @returns {{ok: true, paths: string[]} | {ok: false, outcome: string, reason: string}}
  */
 export function loadPatchTouchPaths(patchPath, numstatStdout) {
-  const patchPathSet = new Set(parseNumstatPaths(numstatStdout));
+  const numstatPaths = parseNumstatPaths(numstatStdout);
+  const patchPathSet = new Set(numstatPaths);
   let patchBytes;
   try {
     patchBytes = fs.readFileSync(patchPath);
@@ -188,10 +185,9 @@ export function loadPatchTouchPaths(patchPath, numstatStdout) {
       reason: "patch header read failed after numstat; cannot compute full dirty touch set",
     };
   }
+  let headerPaths;
   try {
-    for (const p of pathsFromGitPatch(patchBytes)) {
-      patchPathSet.add(p);
-    }
+    headerPaths = pathsFromGitPatch(patchBytes);
   } catch {
     return {
       ok: false,
@@ -199,8 +195,32 @@ export function loadPatchTouchPaths(patchPath, numstatStdout) {
       reason: "patch header parse failed after numstat; cannot compute full dirty touch set",
     };
   }
+  if (numstatPaths.length > 0) {
+    if (!headerPaths || headerPaths.size === 0) {
+      return {
+        ok: false,
+        outcome: "blocked-patch-headers",
+        reason:
+          "patch headers empty/unparseable after non-empty numstat; cannot compute full dirty touch set",
+      };
+    }
+    // Skip synthetic raw "a => b" fields kept by parseNumstatPaths for resilience.
+    for (const p of numstatPaths) {
+      if (!p || p.includes(" => ") || p.includes("{")) continue;
+      if (!headerPaths.has(p)) {
+        return {
+          ok: false,
+          outcome: "blocked-patch-headers",
+          reason:
+            "numstat path not corroborated by patch headers (rename/copy destination or touch gap)",
+        };
+      }
+    }
+  }
+  for (const p of headerPaths) patchPathSet.add(p);
   return { ok: true, paths: [...patchPathSet] };
 }
+
 
 /**
  * After a successful apply, persist the durable marker. If persistence fails,
