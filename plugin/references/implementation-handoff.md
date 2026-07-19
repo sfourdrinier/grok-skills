@@ -108,6 +108,9 @@ characters; only operator-supplied contract paths reject Windows drive forms.
 - Auto/peer apply-time patch integrity recheck is best-effort under trusted
   local state (manifest bytes/size/hash via `verifyPatchAgainstManifest`); it
   is not an atomic TOCTOU guarantee against hostile concurrent substitution.
+  Post-stat hash/read failures return structured `{ok:false, reason:"patch unreadable"}`
+  so auto/peer finalize `patch-integrity-failure` (or pre-hash
+  `blocked-patch-unreadable`) instead of throwing.
   Canonical under-lock ladder (exclusive lock, durable marker, heal under
   revalidate, `marker-persist-failure`): [integration-modes.md](integration-modes.md)
   Shared apply spine.

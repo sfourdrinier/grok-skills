@@ -438,8 +438,12 @@ remains release-gated.
 
 - **Exclusive apply lock + durable marker (auto + peer):** per-`(runId,
   targetKey)` atomic mkdir lock + durable `owner.json` (`pid`/`startToken`/
-  `acquiredAt`); reclaim only positively dead owners after settle; ownerless /
-  unknown never age-reclaim; owner write fail removes lock dir and fails closed.
+  `acquiredAt`); reclaim only positively dead owners after settle via
+  owner-atomic rename/tombstone + identity recheck (replacement locks restored,
+  never deleted); ownerless / unknown never age-reclaim; owner write fail
+  removes lock dir and fails closed. Patch integrity recheck catches post-stat
+  hash/read races as structured `patch unreadable` (auto/peer finalize
+  `patch-integrity-failure`, never throw).
   Durable `integration-applied-<targetKey>.json` (patchSha + targetKey; tmp +
   rename + re-read). Under-lock ladder: matching marker + reverse-check =>
   already-applied; marker but reverted tree => clear + reapply; no marker but

@@ -244,6 +244,201 @@ test("apply lock: owner-write failure removes mkdir; ownerless never age-reclaim
   }
 });
 
+test("apply lock: reclaim is owner-atomic; replacement lock survives race", async () => {
+  // TOCTOU: after a stale checker decides reclaim is OK, a fresh owner can replace
+  // the lock before delete. Reclaim must rename/tombstone only the observed owner
+  // identity and restore on mismatch - never rmSync a replacement.
+  const {
+    acquireApplyLock,
+    tryReclaimLockDir,
+    isApplyLockReclaimable,
+    targetIdentityKey,
+  } = await import("../lib/integrate-apply-state.mjs");
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-apply-lock-race-"));
+  const xdg = path.join(root, "xdg");
+  const prev = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = xdg;
+  const runId = RUN_ID;
+  const targetKey = targetIdentityKey(root);
+  const runsDir = path.join(xdg, "grok-skills", "runs", runId);
+  const lockDir = path.join(runsDir, "apply-locks", `${targetKey}.lock`);
+  try {
+    fs.mkdirSync(lockDir, { recursive: true });
+    const deadOwner = {
+      schemaVersion: 1,
+      pid: 999999991,
+      startToken: "dead-token-stale",
+      acquiredAt: new Date(Date.now() - 60_000).toISOString(),
+    };
+    fs.writeFileSync(
+      path.join(lockDir, "owner.json"),
+      `${JSON.stringify(deadOwner)}\n`
+    );
+    assert.equal(
+      isApplyLockReclaimable(lockDir, 1_000),
+      true,
+      "precondition: dead owner is reclaimable"
+    );
+
+    let paused = false;
+    const reclaimed = tryReclaimLockDir(lockDir, 1_000, {
+      afterObserve: () => {
+        paused = true;
+        // Fresh holder replaces the stale lock while the reclaimer is paused.
+        fs.rmSync(lockDir, { recursive: true, force: true });
+        fs.mkdirSync(lockDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(lockDir, "owner.json"),
+          `${JSON.stringify({
+            schemaVersion: 1,
+            pid: process.pid,
+            startToken: "fresh-live-owner",
+            acquiredAt: new Date().toISOString(),
+          })}\n`
+        );
+      },
+    });
+    assert.equal(paused, true, "race hook must run after observe");
+    assert.equal(reclaimed, false, "must not reclaim after owner identity changed");
+    assert.equal(fs.existsSync(lockDir), true, "replacement lock dir must remain");
+    const survivor = JSON.parse(
+      fs.readFileSync(path.join(lockDir, "owner.json"), "utf8")
+    );
+    assert.equal(survivor.startToken, "fresh-live-owner");
+    assert.equal(survivor.pid, process.pid);
+
+    // Live/unknown still fail closed (no steal via reclaim).
+    assert.equal(isApplyLockReclaimable(lockDir, 1_000), false);
+    assert.equal(tryReclaimLockDir(lockDir, 1_000), false);
+    assert.equal(fs.existsSync(path.join(lockDir, "owner.json")), true);
+
+    // Dead owner reclaim still works (positive identity, no race).
+    fs.rmSync(lockDir, { recursive: true, force: true });
+    fs.mkdirSync(lockDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(lockDir, "owner.json"),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        pid: 999999992,
+        startToken: "dead-token-ok",
+        acquiredAt: new Date(Date.now() - 60_000).toISOString(),
+      })}\n`
+    );
+    assert.equal(tryReclaimLockDir(lockDir, 1_000), true);
+    assert.equal(fs.existsSync(lockDir), false, "dead owner lock removed");
+
+    // acquireApplyLock still reclaims dead and writes durable self owner.
+    fs.mkdirSync(lockDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(lockDir, "owner.json"),
+      `${JSON.stringify({
+        schemaVersion: 1,
+        pid: 999999993,
+        startToken: "dead-for-acquire",
+        acquiredAt: new Date(Date.now() - 60_000).toISOString(),
+      })}\n`
+    );
+    const release = acquireApplyLock(runId, targetKey, process.env, 500, {
+      staleMs: 1_000,
+    });
+    assert.equal(typeof release, "function");
+    const selfOwner = JSON.parse(
+      fs.readFileSync(path.join(lockDir, "owner.json"), "utf8")
+    );
+    assert.equal(selfOwner.pid, process.pid);
+    release();
+  } finally {
+    if (prev === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = prev;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("verifyPatchAgainstManifest: post-stat hash/read failure is structured (not throw)", async () => {
+  const { verifyPatchAgainstManifest, applyVerifiedPatch } = await import(
+    "../lib/integrate.mjs"
+  );
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-patch-stat-race-"));
+  const xdg = path.join(root, "xdg");
+  const repo = initRepo(path.join(root, "repo"));
+  const patchBody = capturePatch(repo);
+  stagePatch(xdg, RUN_ID, patchBody);
+  const patchPath = path.join(
+    xdg,
+    "grok-skills",
+    "runs",
+    RUN_ID,
+    "artifacts",
+    "implementation.patch"
+  );
+  const prev = process.env.XDG_STATE_HOME;
+  process.env.XDG_STATE_HOME = xdg;
+  const realRead = fs.readFileSync;
+  const realStat = fs.statSync;
+  try {
+    // After a successful size stat, the next read of the patch fails (unlink/EIO).
+    let sawPatchStat = false;
+    fs.statSync = function patchedStat(p, ...rest) {
+      const st = realStat.call(this, p, ...rest);
+      if (String(p) === patchPath) sawPatchStat = true;
+      return st;
+    };
+    fs.readFileSync = function patchedRead(p, ...rest) {
+      if (String(p) === patchPath && sawPatchStat) {
+        const e = new Error("ENOENT injected post-stat");
+        e.code = "ENOENT";
+        throw e;
+      }
+      return realRead.call(this, p, ...rest);
+    };
+
+    let threw = false;
+    let result;
+    try {
+      result = verifyPatchAgainstManifest(RUN_ID, patchPath, process.env);
+    } catch {
+      threw = true;
+    }
+    assert.equal(threw, false, "must not throw on post-stat hash failure");
+    assert.equal(result?.ok, false);
+    assert.equal(result?.reason, "patch unreadable");
+
+    // Auto apply path: pre-verify hash race is blocked-patch-unreadable; either
+    // structured blocked outcome must finalize (never throw).
+    sawPatchStat = false;
+    let applyThrew = false;
+    let unit;
+    try {
+      unit = applyVerifiedPatch({
+        wrapper: "unused",
+        runId: RUN_ID,
+        targetRepo: repo,
+        env: process.env,
+        runHandoff: () => ({
+          code: 0,
+          envelope: { response: { integration: { ready: true } } },
+        }),
+        stderrLine: () => {},
+      });
+    } catch {
+      applyThrew = true;
+    }
+    assert.equal(applyThrew, false, "applyVerifiedPatch must not throw on hash race");
+    assert.equal(unit?.ok, false, JSON.stringify(unit));
+    assert.ok(
+      unit?.outcome === "blocked-patch-unreadable" ||
+        unit?.outcome === "patch-integrity-failure",
+      `expected structured blocked outcome, got ${unit?.outcome}`
+    );
+  } finally {
+    fs.readFileSync = realRead;
+    fs.statSync = realStat;
+    if (prev === undefined) delete process.env.XDG_STATE_HOME;
+    else process.env.XDG_STATE_HOME = prev;
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("heal/already-applied: revalidateUnderLock before marker on orphan apply (wrong-sha)", async () => {
   // Crash-after-apply heal must call revalidateUnderLock before writing the durable
   // marker. Wrong-sha / tamper fails closed without claiming already-applied.

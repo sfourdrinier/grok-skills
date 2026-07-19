@@ -5,8 +5,10 @@
 // dual peer-stop cannot reverse a winner and sequential restop is idempotent.
 // Lock uses atomic mkdir (safe-state pattern; no third-party deps) with durable
 // owner pid/startToken/timestamp. Reclaim requires positive dead/mismatched
-// owner identity - never ownerless age alone. Owner write failure removes the
-// mkdir. Marker writes are atomic (tmp + rename) and return durable success.
+// owner identity - never ownerless age alone - and is owner-atomic (rename to
+// tombstone + identity recheck; replacement locks are restored, never deleted).
+// Owner write failure removes the mkdir. Marker writes are atomic (tmp + rename)
+// and return durable success.
 
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -200,6 +202,21 @@ function readOwnerDoc(lockDir) {
 }
 
 /**
+ * Stable owner identity for reclaim recheck (pid + startToken + acquiredAt).
+ * Null when the doc lacks a positive pid identity (unknown/ownerless).
+ * @param {object|null} owner
+ * @returns {string|null}
+ */
+function ownerIdentityKey(owner) {
+  if (!owner || typeof owner !== "object") return null;
+  const pid = owner.pid;
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const startToken = typeof owner.startToken === "string" ? owner.startToken : "";
+  const acquiredAt = typeof owner.acquiredAt === "string" ? owner.acquiredAt : "";
+  return `${pid}\n${startToken}\n${acquiredAt}`;
+}
+
+/**
  * Write owner.json and re-read to prove durable presence. Throws on any failure.
  * @param {string} lockDir
  */
@@ -267,14 +284,62 @@ export function isApplyLockReclaimable(lockDir, staleMs = APPLY_LOCK_STALE_MS, n
   return ageMs >= Math.min(staleMs, 1_000) || !Number.isFinite(ageMs);
 }
 
-function tryReclaimLockDir(lockDir, staleMs) {
+/**
+ * Owner-atomic stale-lock reclaim. Observes the dead owner identity, renames the
+ * lock dir to a private tombstone, rechecks that the moved owner still matches the
+ * observed identity, then deletes only that tombstone. If another process replaces
+ * the lock between observe and rename, the recheck fails and the replacement is
+ * restored (never deleted). Live/unknown remain non-reclaimable via
+ * isApplyLockReclaimable. `opts.afterObserve` is a test race hook only.
+ *
+ * @param {string} lockDir
+ * @param {number} staleMs
+ * @param {{afterObserve?: (ctx: {owner: object, lockDir: string}) => void}} [opts]
+ * @returns {boolean}
+ */
+export function tryReclaimLockDir(lockDir, staleMs, opts = {}) {
   if (!isApplyLockReclaimable(lockDir, staleMs)) return false;
+  const observed = readOwnerDoc(lockDir);
+  const observedKey = ownerIdentityKey(observed);
+  // Positive dead identity is mandatory; never tombstone an unknown/ownerless lock.
+  if (!observedKey || classifyLockOwner(observed) !== "dead") return false;
+
+  if (typeof opts.afterObserve === "function") {
+    try {
+      opts.afterObserve({ owner: observed, lockDir });
+    } catch {
+      /* test hooks must not break reclaim fail-closed path */
+    }
+  }
+
+  const tombstone = `${lockDir}.reclaim.${process.pid}.${Date.now()}.${Math.random()
+    .toString(16)
+    .slice(2, 10)}`;
   try {
-    fs.rmSync(lockDir, { recursive: true, force: true });
-    return true;
+    fs.renameSync(lockDir, tombstone);
   } catch {
     return false;
   }
+
+  const moved = readOwnerDoc(tombstone);
+  const movedKey = ownerIdentityKey(moved);
+  // Recheck identity (and dead liveness) on the exact directory we renamed so a
+  // replacement lock is restored instead of deleted.
+  if (movedKey !== observedKey || classifyLockOwner(moved) !== "dead") {
+    try {
+      fs.renameSync(tombstone, lockDir);
+    } catch {
+      /* leave tombstone; better than destroying a live/unknown replacement */
+    }
+    return false;
+  }
+
+  try {
+    fs.rmSync(tombstone, { recursive: true, force: true });
+  } catch {
+    /* lock name is free even if tombstone cleanup lags */
+  }
+  return true;
 }
 
 function removeLockDirBestEffort(lockDir) {
@@ -292,9 +357,11 @@ function removeLockDirBestEffort(lockDir) {
 /**
  * Exclusive per-(runId, target) apply lock via atomic mkdir + durable owner record.
  * Returns release() or throws on timeout / owner-write failure. Abandoned locks
- * with positive dead owner identity are reclaimed; live holders and ownerless /
- * unknown locks are never stolen on age alone. If mkdir succeeds but owner.json
- * cannot be written and re-read, the lock dir is removed and acquire fails closed.
+ * with positive dead owner identity are reclaimed owner-atomically (observe
+ * identity, rename to tombstone, recheck, then delete); live holders and
+ * ownerless / unknown locks are never stolen on age alone. If mkdir succeeds but
+ * owner.json cannot be written and re-read, the lock dir is removed and acquire
+ * fails closed.
  *
  * @param {string} runId
  * @param {string} targetKey

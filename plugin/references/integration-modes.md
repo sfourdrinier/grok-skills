@@ -105,7 +105,11 @@ Per `(runId, targetKey)`:
    dir and fails closed (never leaves an ownerless lock that could be
    age-stolen).
 2. **Reclaim** - only a **positively dead** owner (dead pid or pid-reuse via
-   mismatched startToken) after a short settle may be reclaimed. **Ownerless /
+   mismatched startToken) after a short settle may be reclaimed, and reclaim is
+   **owner-atomic**: observe the owner identity, rename the lock dir to a private
+   tombstone, recheck the moved identity, then delete only that tombstone.
+   If another process replaced the lock between observe and rename, the recheck
+   fails and the replacement is restored (never deleted). **Ownerless /
    unknown / unreadable** locks are **never** age-reclaimed - acquire waits or
    times out (manual cleanup if a lock is abandoned without a durable owner).
 3. **Marker** - durable `integration-applied-<targetKey>.json` keyed by

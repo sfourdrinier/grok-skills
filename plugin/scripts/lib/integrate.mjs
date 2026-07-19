@@ -113,7 +113,16 @@ export function verifyPatchAgainstManifest(runId, patchPath, env = process.env) 
   if (actualBytes !== expectedBytes) {
     return { ok: false, reason: `patch bytes ${actualBytes} != manifest ${expectedBytes}` };
   }
-  if (sha256File(patchPath).toLowerCase() !== expectedSha.toLowerCase()) {
+  // Stat then hash is a TOCTOU window: the patch can vanish or become unreadable
+  // after size check. Catch all hash/read failures as structured integrity failure
+  // so auto/peer finalize patch-integrity-failure instead of throwing.
+  let actualSha;
+  try {
+    actualSha = sha256File(patchPath);
+  } catch {
+    return { ok: false, reason: "patch unreadable" };
+  }
+  if (actualSha.toLowerCase() !== expectedSha.toLowerCase()) {
     return { ok: false, reason: "patch sha256 does not match manifest" };
   }
   return { ok: true };
