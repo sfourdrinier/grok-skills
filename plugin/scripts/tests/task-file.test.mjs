@@ -41,6 +41,53 @@ test("extractTask prefers --task-file path content over --task", () => {
   }
 });
 
+test("extractTask last-wins for duplicate --task (split and equals)", () => {
+  // Wrapper argparse last-wins; first-wins would silently run the wrong task.
+  assert.equal(
+    extractTask(["code", "--task", "first", "--task", "second", "--target", "."]),
+    "second"
+  );
+  assert.equal(
+    extractTask(["code", "--task=first", "--task=second", "--target", "."]),
+    "second"
+  );
+  assert.equal(
+    extractTask(["code", "--task", "first", "--task=second", "--target", "."]),
+    "second"
+  );
+});
+
+test("extractTask last-wins for duplicate --task-file and still outranks --task", () => {
+  const a = stageTaskFile("file-a");
+  const b = stageTaskFile("file-b");
+  try {
+    assert.equal(
+      extractTask(["code", "--task-file", a.taskPath, "--task-file", b.taskPath]),
+      "file-b",
+      "last --task-file must win"
+    );
+    assert.equal(
+      extractTask([
+        "code",
+        `--task-file=${a.taskPath}`,
+        "--task",
+        "inline-should-lose",
+        `--task-file=${b.taskPath}`,
+      ]),
+      "file-b",
+      "last task-file still outranks any --task (cross-flag policy)"
+    );
+    // Cross-flag policy preserved: even a later --task loses to any real task-file.
+    assert.equal(
+      extractTask(["code", "--task-file", a.taskPath, "--task", "later-inline"]),
+      "file-a"
+    );
+  } finally {
+    a.cleanup();
+    b.cleanup();
+  }
+});
+
 test("extractTask returns empty for missing file or stdin sentinel", () => {
   assert.equal(extractTask(["code", "--task-file", "-"]), "");
   assert.equal(extractTask(["code", "--task-file", "/no/such/path-xyz"]), "");
@@ -104,6 +151,67 @@ test("stageStdinTaskFile returns null when argv has no --task-file - sentinel", 
   assert.equal(stageStdinTaskFile(["code", "--task-file", "/tmp/x"]), null);
   assert.equal(stageStdinTaskFile(["code", "--task-file=/tmp/x"]), null);
   assert.equal(stageStdinTaskFile(["code", "--task", "inline"]), null);
+});
+
+test("stageStdinTaskFile last-wins: later real path clears earlier stdin sentinel", () => {
+  // When the LAST --task-file is a real path, an earlier stdin sentinel must not
+  // trigger staging (returns null; no process.stdin read).
+  assert.equal(
+    stageStdinTaskFile(["code", "--task-file", "-", "--task-file", "/tmp/real-task.md"]),
+    null
+  );
+  assert.equal(
+    stageStdinTaskFile(["code", "--task-file=-", "--task-file=/tmp/real-task.md"]),
+    null
+  );
+  assert.equal(
+    stageStdinTaskFile(["code", "--task-file", "-", "--task-file=/tmp/real-task.md"]),
+    null
+  );
+});
+
+test("stageStdinTaskFile last-wins: later stdin sentinel stages over earlier path", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "grok-stdin-last-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-stdin-lastcwd-"));
+  const prior = path.join(tmp, "prior.md");
+  fs.writeFileSync(prior, "PRIOR_SHOULD_NOT_WIN\n");
+  const payload = "last-wins stdin sentinel body";
+  const echoBody = `import sys
+args = sys.argv[1:]
+path = None
+for i, a in enumerate(args):
+    if a == "--task-file" and i + 1 < len(args):
+        path = args[i + 1]
+    if a.startswith("--task-file="):
+        path = a.split("=", 1)[1]
+if not path:
+    sys.stderr.write("missing --task-file\\n")
+    sys.exit(2)
+with open(path, "r", encoding="utf-8") as f:
+    sys.stdout.write(f.read())
+sys.exit(0)
+`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-fake-echo-last-"));
+  const wrapperPath = path.join(dir, "grok_agent.py");
+  fs.writeFileSync(wrapperPath, echoBody, { mode: 0o600 });
+  try {
+    const res = runCompanion(["reason", "--task-file", prior, "--task-file", "-"], {
+      env: {
+        GROK_AGENT_WRAPPER: wrapperPath,
+        GROK_ALLOW_WRAPPER_OVERRIDE: "1",
+        TMPDIR: tmp,
+      },
+      cwd,
+      stdin: payload,
+    });
+    assert.equal(res.code, 0, res.stderr);
+    assert.equal(res.stdout.trim(), payload);
+    assert.doesNotMatch(res.stdout, /PRIOR_SHOULD_NOT_WIN/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(tmp, { recursive: true, force: true });
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("stageStdinTaskFile happy path: stdin bytes staged and content matches end to end", () => {

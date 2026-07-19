@@ -12,6 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { flagValue, resolveWebFlag } from "./companion-args.mjs";
 import { extractTask, stageTaskFile } from "./task-file.mjs";
 
 /** Honest refusal when handoff artifacts are requested for a direct-mode run. */
@@ -74,26 +75,11 @@ function resolveGrokBinary(env = process.env) {
   return "grok";
 }
 
-function flagValue(args, name) {
-  // Accept BOTH `--name value` and `--name=value`, last-wins (matches the
-  // wrapper's argparse and the consent parser), so runMode=direct executes
-  // against the same --target the consent gate was keyed on (review).
-  const eq = name + "=";
-  let val = null;
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a === name && args[i + 1] !== undefined) {
-      // Do not consume a following FLAG as the value (parity with parseTargetFlag).
-      val = String(args[i + 1]).startsWith("-") ? null : args[i + 1];
-    } else if (typeof a === "string" && a.startsWith(eq)) {
-      val = a.slice(eq.length);
-    }
-  }
-  return val;
-}
-
 function hasFlag(args, name) {
-  return args.includes(name);
+  // Presence of the bare split form only (used for wrapper-only flags like
+  // --isolated that have no equals-value payload). Web resolution uses
+  // resolveWebFlag (equals-aware, last-wins with --no-web).
+  return Array.isArray(args) && args.includes(name);
 }
 
 // Per-mode default run timeouts (seconds). MIRRORS grok_agent.py _add_run_opts()
@@ -356,7 +342,10 @@ export function runDirectGrok({
     (mode === "verify" ? flagValue(args, "--worktree") : null) ||
     flagValue(args, "--target") ||
     cwd;
-  const webRequested = hasFlag(args, "--web");
+  // Equals-aware last-wins --web/--no-web (single source: companion-args).
+  // null => default off for direct (no per-mode default table on this path).
+  const webFlag = resolveWebFlag(args);
+  const webRequested = webFlag === true;
   // Verify MUST stay hermetic: the hardened verify path never accepts --web and
   // the verify authority requires reproducible, network-free evidence. Force web
   // off for verify even if --web slipped through, so a direct verify can never

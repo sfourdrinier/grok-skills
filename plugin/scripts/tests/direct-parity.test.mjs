@@ -189,6 +189,59 @@ test("runDirectGrok appends web tools to the allowlist only when --web", () => {
   }
 });
 
+test("runDirectGrok web flag last-wins both orders (split and equals); verify stays hermetic", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-weblast-"));
+  try {
+    const fakeGrok = path.join(dir, "fake-grok.sh");
+    // Echo tools + disable-web-search so both on/off are observable.
+    fs.writeFileSync(
+      fakeGrok,
+      `#!/bin/sh\nt=""\ndws=0\nwhile [ $# -gt 0 ]; do\n  if [ "$1" = "--tools" ]; then t="$2"; fi\n  if [ "$1" = "--disable-web-search" ]; then dws=1; fi\n  shift\ndone\nprintf '{"result":"tools=%s dws=%s"}\\n' "$t" "$dws"\n`
+    );
+    fs.chmodSync(fakeGrok, 0o755);
+    const scriptsDir = path.resolve(SCRIPT_DIR, "..", "..", "wrapper", "scripts");
+    const call = (mode, extra) =>
+      JSON.parse(
+        runDirectGrok({
+          mode,
+          args: ["--target", dir, "--task", "check", ...extra],
+          cwd: dir,
+          env: { ...process.env, GROK_AGENT_BINARY: fakeGrok },
+          scriptsDir,
+          python: "python3",
+        }).envelopeText
+      );
+    // --web then --no-web => off (last wins).
+    const webThenNo = call("reason", ["--web", "--no-web"]);
+    assert.doesNotMatch(webThenNo.response.text, /web_search/, webThenNo.response.text);
+    assert.match(webThenNo.response.text, /dws=1/);
+    assert.equal(webThenNo.policy.webAccess, false);
+    // --no-web then --web => on (last wins).
+    const noThenWeb = call("reason", ["--no-web", "--web"]);
+    assert.match(noThenWeb.response.text, /web_search/, noThenWeb.response.text);
+    assert.match(noThenWeb.response.text, /dws=0/);
+    assert.equal(noThenWeb.policy.webAccess, true);
+    // Equals forms of both orders.
+    const eqOff = call("reason", ["--web=1", "--no-web=1"]);
+    assert.equal(eqOff.policy.webAccess, false);
+    assert.doesNotMatch(eqOff.response.text, /web_search/);
+    const eqOn = call("reason", ["--no-web=", "--web="]);
+    assert.equal(eqOn.policy.webAccess, true);
+    assert.match(eqOn.response.text, /web_search/);
+    // Verify remains hermetic even when last flag is --web.
+    const verifyLastWeb = call("verify", ["--no-web", "--web"]);
+    assert.equal(verifyLastWeb.policy.webAccess, false);
+    assert.doesNotMatch(verifyLastWeb.response.text, /web_search/);
+    assert.match(verifyLastWeb.response.text, /dws=1/);
+    assert.ok(
+      verifyLastWeb.warnings.some((w) => /hermetic/i.test(w) && /--web ignored/.test(w)),
+      `verify must still warn --web ignored: ${JSON.stringify(verifyLastWeb.warnings)}`
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("runDirectGrok forces hermetic verify: --web is ignored (no web tools, --disable-web-search)", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-hermetic-"));
   try {

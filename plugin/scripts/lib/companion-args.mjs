@@ -1,13 +1,56 @@
 // plugin/scripts/lib/companion-args.mjs
 //
 // Pure argv flag-stripping for the companion entrypoint (extracted to keep
-// grok-companion.mjs under the 900-line cap).
+// grok-companion.mjs under the 900-line cap). Also owns the single last-wins
+// split-or-equals value parser used by direct-mode and task-file extraction
+// (parity with the wrapper's argparse and parseTargetFlag).
 
 /** True if `args` contains `name` in split (`--x`) OR equals (`--x=v`) form.
  *  Presence check parity with the wrapper's argparse (which accepts both). */
 export function hasFlagOrEquals(args, name) {
   const eq = name + "=";
-  return args.some((a) => a === name || (typeof a === "string" && a.startsWith(eq)));
+  return Array.isArray(args) && args.some((a) => a === name || (typeof a === "string" && a.startsWith(eq)));
+}
+
+/**
+ * Last-wins value for `--name value` or `--name=value` (argparse parity).
+ * Does not consume a following flag as the value. Returns null when absent.
+ * @param {string[]|null|undefined} args
+ * @param {string} name e.g. "--task"
+ * @returns {string|null}
+ */
+export function flagValue(args, name) {
+  if (!Array.isArray(args) || typeof name !== "string" || !name) return null;
+  const eq = name + "=";
+  let val = null;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === name && args[i + 1] !== undefined) {
+      // Do not consume a following FLAG as the value (parity with parseTargetFlag).
+      val = String(args[i + 1]).startsWith("-") ? null : args[i + 1];
+    } else if (typeof a === "string" && a.startsWith(eq)) {
+      val = a.slice(eq.length);
+    }
+  }
+  return val;
+}
+
+/**
+ * Resolve explicit --web / --no-web. Last occurrence wins (split or equals).
+ * Returns true when --web last, false when --no-web last, null when neither.
+ * Prefix-safe: `--web-search` does not count as `--web`.
+ * @param {string[]|null|undefined} args
+ * @returns {boolean|null}
+ */
+export function resolveWebFlag(args) {
+  if (!Array.isArray(args)) return null;
+  let last = null;
+  for (const a of args) {
+    if (typeof a !== "string") continue;
+    if (a === "--web" || a.startsWith("--web=")) last = true;
+    else if (a === "--no-web" || a.startsWith("--no-web=")) last = false;
+  }
+  return last;
 }
 
 export function stripFlags(args) {
@@ -75,4 +118,3 @@ export function stripFlags(args) {
   }
   return { args: out, pretty, runMode, integration, jsonOut, base, resume, fresh, noNotify };
 }
-
