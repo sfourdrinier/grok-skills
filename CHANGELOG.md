@@ -6,17 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
-## [2.0.0] - 2026-07-17
+## [2.0.0] - 2026-07-19
 
 Peer-agent integration release (plan: docs/superpowers/plans/2026-07-16-peer-agent-integration.md).
-Phases land as sequential PRs; no tag until the release phase. Most implementation
-is delegated to Grok itself through this plugin's own contract -> code -> handoff
-pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
+Merged via PR #5 onto `main`. Most implementation was delegated to Grok through
+this plugin's own contract -> code -> handoff pipeline; live evidence in
+docs/checklists/2.0-live-smoke-ledger.md. Public tag: `v2.0.0` (see docs/RELEASE.md).
 
-**Shipping branch:** `feat/2.0-peer-agent` (PR #5). Maintainer still owns annotated
-`v2.0.0` tag + dual-host installed-host post-smoke per `docs/RELEASE.md`.
-
-**Post-2.0 engineering backlog (not blocking tag):** DRY consolidation of dual
+**Post-2.0 engineering backlog (not a release blocker):** DRY consolidation of dual
 sources - [issue #6](https://github.com/sfourdrinier/grok-skills/issues/6)
 (TDD, no-regression PR). Do not grow known dual constants/helpers while open.
 
