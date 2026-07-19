@@ -15,6 +15,7 @@ from typing import Any, Dict, Optional
 
 from groklib import GrokWrapperError, log_stderr, platformsupport, runstate
 from groklib.envelope import assert_no_secret_material, redact_secret_material
+from groklib.peer_doc import mark_peer_died_if_allowed
 
 _SOCKET_BACKLOG = 4
 _CONTROL_ACCEPT_TIMEOUT = 1.0
@@ -262,14 +263,15 @@ def serve_until_stop(
             except socket.timeout:
                 child = session.child
                 if child is not None and getattr(child, "poll", lambda: None)() is not None:
-                    session.peer_doc["lifecycle"] = "died"
                     try:
-                        from groklib import runstate
-
-                        runstate.write_json_atomic(
-                            session.run_paths.run_dir / "peer.json", session.peer_doc
-                        )
-                    except OSError:
+                        disk, applied = mark_peer_died_if_allowed(session.run_paths)
+                        if applied:
+                            session.peer_doc["lifecycle"] = "died"
+                        else:
+                            session.peer_doc["lifecycle"] = disk.get(
+                                "lifecycle", session.peer_doc.get("lifecycle")
+                            )
+                    except (OSError, GrokWrapperError):
                         pass
                 continue
             with conn:

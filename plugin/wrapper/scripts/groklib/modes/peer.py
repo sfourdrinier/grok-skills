@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import pathlib
 import stat
@@ -58,6 +57,12 @@ from groklib.modes.peer_process import (
     build_acp_stdio_argv as _build_acp_stdio_argv,
     kill_recorded_child as _kill_recorded_child,
     spawn_acp_child as _spawn_acp_child,
+)
+from groklib.peer_doc import (
+    mark_peer_died_if_allowed,
+    patch_lease_expires,
+    read_peer_doc_unlocked,
+    write_peer_doc_unlocked,
 )
 from groklib.modes.review import _resolve_target as _resolve_repo_target
 from groklib.platformsupport import require_probed_platform_for_live
@@ -114,10 +119,26 @@ class PeerSession:
             child_start_token=self.peer_doc["child"].get("startToken"),
             lease_seconds=MAX_PEER_LEASE_SECONDS,
         )
-        self.peer_doc["leaseExpiresAt"] = time.time() + MAX_PEER_LEASE_SECONDS
+        expires = time.time() + MAX_PEER_LEASE_SECONDS
+        # In-memory only for resident bookkeeping; disk is field-patched under lock
+        # so a stale whole-doc write cannot reopen dual-finalize over stopping.
+        self.peer_doc["leaseExpiresAt"] = expires
+        prompts_handled = self.peer_doc.get("promptsHandled")
         try:
-            runstate.write_json_atomic(self.run_paths.run_dir / "peer.json", self.peer_doc)
-        except OSError as exc:
+            disk = patch_lease_expires(
+                self.run_paths,
+                expires,
+                prompts_handled=(
+                    int(prompts_handled)
+                    if isinstance(prompts_handled, (int, float))
+                    and not isinstance(prompts_handled, bool)
+                    else None
+                ),
+            )
+            self.peer_doc["leaseExpiresAt"] = disk.get("leaseExpiresAt", expires)
+            if "promptsHandled" in disk:
+                self.peer_doc["promptsHandled"] = disk["promptsHandled"]
+        except (OSError, GrokWrapperError) as exc:
             _log("renew_lease", "could not refresh peer.json: {}".format(exc))
 
 
@@ -149,10 +170,16 @@ def _handle_prompt(session: PeerSession, task: str) -> dict:
         # Child liveness
         child = session.child
         if child is not None and getattr(child, "poll", lambda: None)() is not None:
-            session.peer_doc["lifecycle"] = "died"
             try:
-                runstate.write_json_atomic(session.run_paths.run_dir / "peer.json", session.peer_doc)
-            except OSError:
+                disk, applied = mark_peer_died_if_allowed(session.run_paths)
+                if applied:
+                    session.peer_doc["lifecycle"] = "died"
+                else:
+                    # Stop/terminal ownership wins; mirror disk lifecycle for locals.
+                    session.peer_doc["lifecycle"] = disk.get(
+                        "lifecycle", session.peer_doc.get("lifecycle")
+                    )
+            except (OSError, GrokWrapperError):
                 pass
             raise GrokWrapperError(
                 "acp-failure",
@@ -375,15 +402,9 @@ def _load_peer_doc(run_id: str) -> Tuple[runstate.RunPaths, dict]:
             {"runId": run_id},
         )
     try:
-        doc = json.loads(peer_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise GrokWrapperError(
-            "acp-failure",
-            "peer.json unreadable: {}".format(exc),
-            {"runId": run_id},
-        ) from exc
-    if not isinstance(doc, dict):
-        raise GrokWrapperError("acp-failure", "peer.json is not an object")
+        doc = read_peer_doc_unlocked(paths)
+    except GrokWrapperError:
+        raise
     return paths, doc
 
 
@@ -591,7 +612,10 @@ def run_peer_start(args: argparse.Namespace) -> dict:
             },
         "requireRuleFileParity": bool(project_config.require_rule_file_parity),
         }
-        runstate.write_json_atomic(run_paths.run_dir / "peer.json", peer_doc)
+        # Initial peer.json create (run dir exclusive to this start; no concurrent
+        # stop/lease writers yet). Still route through the shared write helper.
+        with runstate.run_lock(run_paths):
+            write_peer_doc_unlocked(run_paths, peer_doc)
         runstate.write_peer_lease(
             home.home_dir,
             child_pid=child_pid,
@@ -709,7 +733,8 @@ def _run_peer_prompt_body(args: argparse.Namespace, run_id: str) -> dict:
     task = _shared.resolve_task_text(args)
     paths, doc = _load_peer_doc(str(run_id))
     lifecycle = doc.get("lifecycle")
-    if lifecycle in ("died", "stopped"):
+    # Fail closed for non-promptable lifecycles explicitly (do not rely on socket).
+    if lifecycle in ("stopping", "stopped", "failed", "died"):
         raise GrokWrapperError(
             "acp-failure",
             "peer session lifecycle is {!r}; reattach unsupported - peer-stop then peer-start".format(
@@ -723,10 +748,9 @@ def _run_peer_prompt_body(args: argparse.Namespace, run_id: str) -> dict:
     child_token = child.get("startToken")
     if isinstance(child_pid, int):
         if not platformsupport.process_is_alive(child_pid):
-            doc["lifecycle"] = "died"
             try:
-                runstate.write_json_atomic(paths.run_dir / "peer.json", doc)
-            except OSError:
+                mark_peer_died_if_allowed(paths)
+            except (OSError, GrokWrapperError):
                 pass
             raise GrokWrapperError(
                 "acp-failure",
@@ -736,10 +760,9 @@ def _run_peer_prompt_body(args: argparse.Namespace, run_id: str) -> dict:
         if isinstance(child_token, str):
             current = platformsupport.process_start_token(child_pid)
             if current is not None and current != child_token:
-                doc["lifecycle"] = "died"
                 try:
-                    runstate.write_json_atomic(paths.run_dir / "peer.json", doc)
-                except OSError:
+                    mark_peer_died_if_allowed(paths)
+                except (OSError, GrokWrapperError):
                     pass
                 raise GrokWrapperError(
                     "acp-failure",

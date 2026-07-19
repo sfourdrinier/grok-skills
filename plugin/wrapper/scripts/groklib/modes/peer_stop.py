@@ -20,13 +20,18 @@ from groklib import GrokWrapperError, log_stderr, platformsupport, runstate
 from groklib.envelope import validate_envelope
 from groklib.modes import peer_control
 from groklib.modes.peer_process import kill_recorded_child
+from groklib.peer_doc import (
+    TERMINAL_PEER_LIFECYCLES as _TERMINAL_PEER_LIFECYCLES,
+    mutate_peer_doc,
+    read_peer_doc_unlocked,
+    write_peer_doc_unlocked,
+)
 from groklib.progress import ProgressWriter
 
 _PEER_STOP_CLAIM_POLL_SECONDS = 0.05
 _PEER_STOP_CLAIM_WAIT_SECONDS = 30.0
 # Grace before reclaiming a stopping claim whose owner is dead/unverified.
 _PEER_STOP_OWNER_GRACE_SECONDS = 2.0
-_TERMINAL_PEER_LIFECYCLES = frozenset({"stopped", "failed"})
 _CLAIMABLE_PEER_LIFECYCLES = frozenset({"running", "died", None})
 
 
@@ -104,25 +109,6 @@ def load_durable_terminal_envelope(run_paths: runstate.RunPaths) -> Optional[dic
     return raw
 
 
-def _read_peer_doc_unlocked(run_paths: runstate.RunPaths) -> dict:
-    peer_path = run_paths.run_dir / "peer.json"
-    try:
-        doc = json.loads(peer_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        raise GrokWrapperError(
-            "acp-failure",
-            "peer.json unreadable during stop claim: {}".format(exc),
-            {"runId": run_paths.run_id},
-        ) from exc
-    if not isinstance(doc, dict):
-        raise GrokWrapperError("acp-failure", "peer.json is not an object")
-    return doc
-
-
-def _write_peer_doc_unlocked(run_paths: runstate.RunPaths, doc: dict) -> None:
-    runstate.write_json_atomic(run_paths.run_dir / "peer.json", doc)
-
-
 def _current_stop_owner() -> dict:
     pid = os.getpid()
     token = platformsupport.process_start_token(pid)
@@ -134,16 +120,29 @@ def _current_stop_owner() -> dict:
 
 
 def _stop_owner_is_live(owner: Any) -> bool:
-    """True only when stopOwner pid is alive with matching startToken."""
+    """True when stopOwner must be treated as still holding the claim.
+
+    Fail closed:
+      - missing/empty/unavailable startToken while PID is alive => live (do not steal)
+      - unreadable current token while PID is alive => live
+      - exception during probe => live
+    PID reuse with a *wrong* non-empty stored token is not live (safe reclaim).
+    """
     if not isinstance(owner, dict):
         return False
     pid = owner.get("pid")
-    token = owner.get("startToken")
-    if not isinstance(pid, int) or not isinstance(token, str) or not token:
+    if not isinstance(pid, int) or isinstance(pid, bool):
         return False
     try:
         if not platformsupport.process_is_alive(pid):
             return False
+    except Exception:
+        return True
+    token = owner.get("startToken")
+    # Alive PID with missing/empty token: never treat as safely dead.
+    if not isinstance(token, str) or not token:
+        return True
+    try:
         current = platformsupport.process_start_token(pid)
         if current is None:
             # Alive but token unreadable: treat as possibly live (never steal).
@@ -176,23 +175,20 @@ def _can_reclaim_stopping(doc: dict) -> bool:
     return age >= float(_PEER_STOP_OWNER_GRACE_SECONDS)
 
 
-def _patch_lifecycle_fields(
-    run_paths: runstate.RunPaths,
+def _apply_lifecycle_patch(
+    doc: dict,
     *,
     lifecycle: str,
     stop_owner: Optional[dict],
     clear_stop_owner: bool,
 ) -> dict:
-    """Re-read peer.json under lock; patch only lifecycle/stop ownership fields."""
-    # Caller must already hold run_lock.
-    doc = _read_peer_doc_unlocked(run_paths)
+    """Patch lifecycle/stop ownership on a re-read copy (preserve other fields)."""
     patched = dict(doc)
     patched["lifecycle"] = lifecycle
     if clear_stop_owner:
         patched.pop("stopOwner", None)
     elif stop_owner is not None:
         patched["stopOwner"] = dict(stop_owner)
-    _write_peer_doc_unlocked(run_paths, patched)
     return patched
 
 
@@ -209,14 +205,17 @@ def mark_peer_lifecycle(
     written as a whole document (prevents clobbering concurrent field updates).
     """
     del base_doc  # never trust a stale whole-doc write
-    with runstate.run_lock(run_paths):
-        clear_owner = lifecycle in _TERMINAL_PEER_LIFECYCLES
-        return _patch_lifecycle_fields(
-            run_paths,
+    clear_owner = lifecycle in _TERMINAL_PEER_LIFECYCLES
+
+    def _mutator(doc: dict) -> dict:
+        return _apply_lifecycle_patch(
+            doc,
             lifecycle=lifecycle,
             stop_owner=None,
             clear_stop_owner=clear_owner,
         )
+
+    return mutate_peer_doc(run_paths, _mutator)
 
 
 def claim_peer_stop(
@@ -229,21 +228,23 @@ def claim_peer_stop(
       - ``claimed``: this caller owns stopping; must finalize
       - ``wait``: another live stopper holds stopping (caller should poll)
     """
+    # Claim must re-read + patch under one lock with durable-envelope check.
     with runstate.run_lock(run_paths):
         durable = load_durable_terminal_envelope(run_paths)
-        doc = _read_peer_doc_unlocked(run_paths)
+        doc = read_peer_doc_unlocked(run_paths)
         if durable is not None:
             life = doc.get("lifecycle")
             if life not in _TERMINAL_PEER_LIFECYCLES:
                 terminal_life = (
                     "stopped" if durable.get("status") == "success" else "failed"
                 )
-                doc = _patch_lifecycle_fields(
-                    run_paths,
+                doc = _apply_lifecycle_patch(
+                    doc,
                     lifecycle=terminal_life,
                     stop_owner=None,
                     clear_stop_owner=True,
                 )
+                write_peer_doc_unlocked(run_paths, doc)
             return "terminal", doc, durable
         life = doc.get("lifecycle")
         if life in _TERMINAL_PEER_LIFECYCLES:
@@ -265,12 +266,13 @@ def claim_peer_stop(
                 "claiming stop from unexpected lifecycle {!r}".format(life),
             )
         owner = _current_stop_owner()
-        doc = _patch_lifecycle_fields(
-            run_paths,
+        doc = _apply_lifecycle_patch(
+            doc,
             lifecycle="stopping",
             stop_owner=owner,
             clear_stop_owner=False,
         )
+        write_peer_doc_unlocked(run_paths, doc)
         return "claimed", doc, None
 
 
