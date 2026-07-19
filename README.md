@@ -266,11 +266,14 @@ edits land - both axes use the word "direct"; disambiguate in
 ### Integration modes (how edits land)
 
 Orthogonal to run mode (security). Default product name is **direct**. For
-**one-shot code / implement** that means edit this working tree under
-hardened-direct; the first direct run without recorded consent fails closed
-with a trust summary. **ACP peer** always uses an external worktree and only
-applies at ready peer-stop (`direct` still needs that same consent; `auto`
-applies without it; `review` retains). Accept once:
+**one-shot code** that means edit this working tree under hardened-direct;
+the first direct run without recorded consent fails closed with a trust
+summary. **`/grok:implement` always forces an isolated worktree + verify-only
+handoff** and never lands live (even when the workspace default is
+direct/auto) - see [integration-modes.md](plugin/references/integration-modes.md).
+**ACP peer** always uses an external worktree and only applies at ready
+peer-stop (`direct` still needs that same consent; `auto` applies without it;
+`review` retains). Accept once:
 
 ```bash
 node "$SKILL_BASE/run.mjs" setup --integration direct

@@ -31,8 +31,9 @@ use `--task-file -` with a single-quoted heredoc.
 
 <!-- plugin/skills/implement.md -->
 
-Run a full delegate cycle in one call: Grok `code` (per active integration
-mode - see `plugin/references/integration-modes.md`), then an automatic
+Run a full delegate cycle in one call: Grok `code` with the code leg **always
+forced to an isolated worktree** regardless of the active integration
+preference (see `plugin/references/integration-modes.md`), then an automatic
 `/grok:handoff` verification on the resulting runId. Relay BOTH envelopes
 verbatim, in order. Integration readiness comes from the SECOND (handoff)
 envelope only.
