@@ -225,6 +225,152 @@ export function parseNumstatPaths(numstatOutput) {
 }
 
 /**
+ * Shared dirty-guard + apply spine used by both auto and peer.
+ * Status fail-closed, numstat fail-closed, dirty-overlap, apply --check,
+ * apply, reverse rollback. Callers keep readiness / consent / target identity /
+ * patch-integrity gates outside this helper.
+ *
+ * Published outcomes: blocked-dirty-status, blocked-numstat, blocked-dirty-overlap,
+ * blocked-apply-check, applied, rolled-back, manual-needed.
+ *
+ * @param {object} opts
+ * @param {string} opts.targetRepo absolute target workspace root
+ * @param {string} opts.patchPath absolute path to the patch file
+ * @param {(line: string) => void} opts.stderrLine
+ * @param {string} [opts.logTag="grok"] prefix tag without brackets (e.g. "grok-auto")
+ * @param {(ctx: {preStatus: string, postStatus: string}) => void} [opts.onApplied]
+ * @returns {{
+ *   ok: boolean,
+ *   outcome: string,
+ *   reason?: string,
+ *   patchPath?: string,
+ *   overlap?: string[],
+ *   preStatus?: string,
+ *   postStatus?: string,
+ *   checkStderr?: string,
+ * }}
+ */
+function applyPatchWithGuards({
+  targetRepo,
+  patchPath,
+  stderrLine,
+  logTag = "grok",
+  onApplied,
+} = {}) {
+  const tag = `[${logTag}]`;
+  // Fail closed: a failed/killed `git status` (e.g. maxBuffer overflow in a
+  // very dirty checkout, or a truncated stdout) yields an incomplete dirty set,
+  // and `git apply --check` alone can pass on a non-conflicting hunk in a dirty
+  // file. Without a trustworthy dirty list we cannot compute overlap - do not
+  // apply blind. (64 MB maxBuffer via git() - same helper auto and peer use.)
+  const preStatus = git(targetRepo, ["status", "--porcelain", "-z", "--untracked-files=all"]);
+  if (preStatus.code !== 0 || preStatus.error) {
+    stderrLine(
+      `${tag} BLOCKED: git status failed (code=${preStatus.code}); cannot compute dirty overlap`
+    );
+    return {
+      ok: false,
+      outcome: "blocked-dirty-status",
+      reason: "git status failed; cannot compute dirty overlap",
+    };
+  }
+
+  // Dirty-overlap guard: git apply --check can PASS even when the patch
+  // touches a file the operator is actively editing (non-conflicting hunks).
+  // Auto/peer apply to the live tree must NOT entangle Grok's changes into a
+  // dirty file - block before apply (operator commits/stashes, then re-runs).
+  const dirtyPaths = parseDirtyStatusPaths(preStatus.stdout);
+  const numstat = git(targetRepo, ["apply", "--numstat", "--binary", patchPath]);
+  if (numstat.code !== 0) {
+    // Fail closed: without the patch's path list we cannot compute dirty overlap,
+    // and `git apply --check` alone can pass on a non-conflicting hunk in a dirty
+    // file. Do not apply blind.
+    stderrLine(`${tag} BLOCKED: git apply --numstat failed; cannot verify dirty overlap`);
+    return {
+      ok: false,
+      outcome: "blocked-numstat",
+      reason: "numstat failed; cannot compute dirty overlap",
+    };
+  }
+  const patchPaths = parseNumstatPaths(numstat.stdout);
+  const overlap = patchPaths.filter((p) => dirtyPaths.has(p)).sort();
+  if (overlap.length > 0) {
+    stderrLine(
+      `${tag} BLOCKED: patch overlaps already-dirty path(s): ${overlap.join(", ")}. ` +
+        `Commit or stash them, then re-run. No apply attempted.`
+    );
+    return {
+      ok: false,
+      outcome: "blocked-dirty-overlap",
+      reason: "patch touches paths already dirty in the operator checkout",
+      patchPath,
+      overlap,
+      preStatus: preStatus.stdout,
+    };
+  }
+
+  // Precondition: git apply --check --binary (tree may have moved since run).
+  const check = git(targetRepo, ["apply", "--check", "--binary", patchPath]);
+  if (check.code !== 0) {
+    stderrLine(
+      `${tag} BLOCKED: git apply --check failed (target tree moved since run). ` +
+        `PARTIAL/blocked - no apply attempted. pre-status:\n${preStatus.stdout || "(clean)"}`
+    );
+    if (check.stderr) stderrLine(check.stderr.trimEnd());
+    return {
+      ok: false,
+      outcome: "blocked-apply-check",
+      reason: "git apply --check failed; target tree incompatible with patch",
+      patchPath,
+      preStatus: preStatus.stdout,
+      checkStderr: check.stderr,
+    };
+  }
+
+  // Apply. On failure mid-apply, attempt reverse to restore.
+  const apply = git(targetRepo, ["apply", "--binary", patchPath]);
+  if (apply.code !== 0) {
+    const detail = (apply.stderr || apply.stdout || "").trim();
+    stderrLine(`${tag} apply failed; attempting reverse (git apply -R) to restore`);
+    if (detail) stderrLine(detail);
+    const rev = git(targetRepo, ["apply", "-R", "--binary", patchPath]);
+    if (rev.code === 0) {
+      stderrLine(`${tag} rolled-back via git apply -R; target restored`);
+      return {
+        ok: false,
+        outcome: "rolled-back",
+        reason: "git apply failed; reverse succeeded",
+        patchPath,
+      };
+    }
+    stderrLine(
+      `${tag} reverse also failed; MANUAL-NEEDED - inspect target tree for partial apply` +
+        (detail ? `: ${detail}` : "")
+    );
+    return {
+      ok: false,
+      outcome: "manual-needed",
+      reason: "git apply failed and reverse failed",
+      patchPath,
+    };
+  }
+
+  const postStatus = git(targetRepo, ["status", "--short", "--untracked-files=all"]);
+  if (typeof onApplied === "function") {
+    onApplied({ preStatus: preStatus.stdout, postStatus: postStatus.stdout });
+  } else {
+    stderrLine(`${tag} applied ${patchPath} to ${targetRepo}`);
+  }
+  return {
+    ok: true,
+    outcome: "applied",
+    patchPath,
+    preStatus: preStatus.stdout,
+    postStatus: postStatus.stdout,
+  };
+}
+
+/**
  * Apply-time revalidation + git apply to the operator target tree.
  * Caller supplies runHandoff (typically runHandoffCaptured) to avoid import cycles.
  *
@@ -324,126 +470,32 @@ export function applyVerifiedPatch({
       runId,
     };
   }
-  const preStatus = git(targetRepo, ["status", "--porcelain", "-z", "--untracked-files=all"]);
-  if (preStatus.code !== 0 || preStatus.error) {
-    // Fail closed: a failed/killed `git status` (e.g. maxBuffer overflow in a
-    // very dirty checkout, or a truncated stdout) yields an incomplete dirty set,
-    // and `git apply --check` alone can pass on a non-conflicting hunk in a dirty
-    // file. Without a trustworthy dirty list we cannot compute overlap - do not
-    // apply blind.
-    stderrLine(
-      `[grok-auto] BLOCKED: git status failed (code=${preStatus.code}); cannot compute dirty overlap`
-    );
-    return {
-      ok: false,
-      outcome: "blocked-dirty-status",
-      reason: "git status failed; cannot compute dirty overlap",
-      runId,
-    };
-  }
 
-  // 3a. Dirty-overlap guard: git apply --check can PASS even when the patch
-  // touches a file the operator is actively editing (non-conflicting hunks).
-  // Auto-apply to the live tree must NOT entangle Grok's changes into a dirty
-  // file - block before apply (operator commits/stashes, then re-runs).
-  const dirtyPaths = parseDirtyStatusPaths(preStatus.stdout);
-  const numstat = git(targetRepo, ["apply", "--numstat", "--binary", patchPath]);
-  if (numstat.code !== 0) {
-    // Fail closed: without the patch's path list we cannot compute dirty overlap,
-    // and `git apply --check` alone can pass on a non-conflicting hunk in a dirty
-    // file. Do not apply blind.
-    stderrLine(`[grok-auto] BLOCKED: git apply --numstat failed; cannot verify dirty overlap`);
-    return {
-      ok: false,
-      outcome: "blocked-numstat",
-      reason: "numstat failed; cannot compute dirty overlap",
-      runId,
-    };
-  }
-  const patchPaths = parseNumstatPaths(numstat.stdout);
-  const overlap = patchPaths.filter((p) => dirtyPaths.has(p)).sort();
-  if (overlap.length > 0) {
-    stderrLine(
-      `[grok-auto] BLOCKED: patch overlaps already-dirty path(s): ${overlap.join(", ")}. ` +
-        `Commit or stash them, then re-run. No apply attempted.`
-    );
-    return {
-      ok: false,
-      outcome: "blocked-dirty-overlap",
-      reason: "patch touches paths already dirty in the operator checkout",
-      runId,
-      patchPath,
-      patchSha,
-      overlap,
-      preStatus: preStatus.stdout,
-    };
-  }
-
-  // 3. Precondition: git apply --check --binary (tree may have moved since run).
-  const check = git(targetRepo, ["apply", "--check", "--binary", patchPath]);
-  if (check.code !== 0) {
-    stderrLine(
-      `[grok-auto] BLOCKED: git apply --check failed (target tree moved since run). ` +
-        `PARTIAL/blocked - no apply attempted. pre-status:\n${preStatus.stdout || "(clean)"}`
-    );
-    if (check.stderr) stderrLine(check.stderr.trimEnd());
-    return {
-      ok: false,
-      outcome: "blocked-apply-check",
-      reason: "git apply --check failed; target tree incompatible with patch",
-      runId,
-      patchPath,
-      patchSha,
-      preStatus: preStatus.stdout,
-      checkStderr: check.stderr,
-    };
-  }
-
-  // 4. Apply. On failure mid-apply, attempt reverse to restore.
-  const apply = git(targetRepo, ["apply", "--binary", patchPath]);
-  if (apply.code !== 0) {
-    stderrLine(`[grok-auto] apply failed; attempting reverse (git apply -R) to restore`);
-    if (apply.stderr) stderrLine(apply.stderr.trimEnd());
-    const rev = git(targetRepo, ["apply", "-R", "--binary", patchPath]);
-    if (rev.code === 0) {
-      stderrLine(`[grok-auto] rolled-back via git apply -R; target restored`);
-      return {
-        ok: false,
-        outcome: "rolled-back",
-        reason: "git apply failed; reverse succeeded",
-        runId,
-        patchPath,
-        patchSha,
-      };
-    }
-    stderrLine(
-      `[grok-auto] reverse also failed; MANUAL-NEEDED - inspect target tree for partial apply`
-    );
-    return {
-      ok: false,
-      outcome: "manual-needed",
-      reason: "git apply failed and reverse failed",
-      runId,
-      patchPath,
-      patchSha,
-    };
-  }
-
-  const postStatus = git(targetRepo, ["status", "--short", "--untracked-files=all"]);
-  stderrLine(
-    `[grok-auto] APPLIED runId=${runId} patchSha=${patchSha}\n` +
-      `pre-status:\n${preStatus.stdout || "(clean)"}\n` +
-      `post-status:\n${postStatus.stdout || "(clean)"}`
-  );
-  return {
-    ok: true,
-    outcome: "applied",
-    runId,
+  // 3. Shared dirty-guard + apply spine (status / numstat / overlap / --check /
+  // apply / reverse). Auto-only fields (runId, patchSha, APPLIED log) are layered
+  // on top of the shared outcome.
+  const spine = applyPatchWithGuards({
+    targetRepo,
     patchPath,
-    patchSha,
-    preStatus: preStatus.stdout,
-    postStatus: postStatus.stdout,
-  };
+    stderrLine,
+    logTag: "grok-auto",
+    onApplied: ({ preStatus, postStatus }) => {
+      stderrLine(
+        `[grok-auto] APPLIED runId=${runId} patchSha=${patchSha}\n` +
+          `pre-status:\n${preStatus || "(clean)"}\n` +
+          `post-status:\n${postStatus || "(clean)"}`
+      );
+    },
+  });
+  const out = { ...spine, runId };
+  if (
+    spine.outcome !== "blocked-dirty-status" &&
+    spine.outcome !== "blocked-numstat"
+  ) {
+    out.patchPath = spine.patchPath || patchPath;
+    out.patchSha = patchSha;
+  }
+  return out;
 }
 
 // --- Peer-stop integration (Task 7.4, extracted from grok-companion.mjs to
@@ -561,56 +613,16 @@ export function maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stder
     );
     return { attempted: true, ok: false, outcome: "patch-integrity-failure" };
   }
-  // Reuse the module git() helper (64 MB maxBuffer): the default 1 MB buffer
-  // would truncate a large `git status`/`--numstat`, making the dirty-overlap
-  // guard below see empty input and FAIL OPEN (apply anyway). Same helper the
-  // auto path uses.
-  const g = (a) => git(repo, a);
-  // Dirty-overlap guard (same as the auto path): git apply --check can pass when
-  // the patch touches an already-dirty file with non-conflicting hunks, silently
-  // entangling Grok's changes with the operator's edits.
-  const preStatus = g(["status", "--porcelain", "-z", "--untracked-files=all"]);
-  const dirtyPaths = parseDirtyStatusPaths(preStatus.stdout || "");
-  const numstat = g(["apply", "--numstat", "--binary", patchPath]);
-  if (numstat.code !== 0) {
-    // Fail closed (same as the auto path): no path list means no dirty-overlap
-    // check, and git apply --check alone can pass on a dirty file.
-    stderrLine("[grok-peer] BLOCKED: git apply --numstat failed; cannot verify dirty overlap");
-    return { attempted: true, ok: false, outcome: "blocked-numstat" };
-  }
-  const patchPaths = parseNumstatPaths(numstat.stdout || "");
-  const overlap = patchPaths.filter((p) => dirtyPaths.has(p)).sort();
-  if (overlap.length > 0) {
-    stderrLine(
-      `[grok-peer] BLOCKED: patch overlaps already-dirty path(s): ${overlap.join(", ")}. ` +
-        `Commit or stash them, then re-run. No apply attempted.`
-    );
-    return { attempted: true, ok: false, outcome: "blocked-dirty-overlap" };
-  }
-  // Peer-stop already ran real validation, so we do not re-run handoff; still
-  // guard the apply with git apply --check (TOCTOU: the tree may have moved).
-  const check = g(["apply", "--check", "--binary", patchPath]);
-  if (check.code !== 0) {
-    stderrLine(`[grok-peer] git apply --check failed: ${(check.stderr || check.stdout || "").trim()}`);
-    return { attempted: true, ok: false, outcome: "blocked-apply-check" };
-  }
-  const apply = g(["apply", "--binary", patchPath]);
-  if (apply.code !== 0) {
-    const detail = (apply.stderr || apply.stdout || "").trim();
-    // Never leave a half-applied tree: reverse (git apply -R) like the auto path.
-    const rev = g(["apply", "-R", "--binary", patchPath]);
-    if (rev.code === 0) {
-      stderrLine(`[grok-peer] git apply failed; rolled back via -R: ${detail}`);
-      return { attempted: true, ok: false, outcome: "rolled-back" };
-    }
-    stderrLine(
-      `[grok-peer] git apply failed AND reverse failed; MANUAL-NEEDED ` +
-        `(inspect ${repo} for partial apply): ${detail}`
-    );
-    return { attempted: true, ok: false, outcome: "manual-needed" };
-  }
-  stderrLine(`[grok-peer] applied ${patchPath} to ${repo}`);
-  return { attempted: true, ok: true, outcome: "applied" };
+  // Shared dirty-guard + apply spine with auto: status fail-closed, numstat
+  // fail-closed, dirty-overlap, apply --check, apply, reverse rollback. Peer
+  // readiness / consent / target identity / integrity stay outside (above).
+  const spine = applyPatchWithGuards({
+    targetRepo: repo,
+    patchPath,
+    stderrLine,
+    logTag: "grok-peer",
+  });
+  return { attempted: true, ok: spine.ok, outcome: spine.outcome };
 }
 
 /**

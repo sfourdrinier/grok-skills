@@ -229,6 +229,46 @@ test("peer-stop: a malformed patch (numstat fails) blocks fail-closed", () => {
   }
 });
 
+test("peer-stop: blocks (fail-closed) when pre-apply git status fails nonzero", () => {
+  // A failed/killed `git status` yields an incomplete dirty set. `git apply`
+  // (and --check/--numstat) does not require a repo, so a non-git target with
+  // matching file bytes would still apply if we ignore the status failure.
+  // Simulate unreadable status with a non-git repository path (status exits 128)
+  // and assert blocked-dirty-status, !ok, nonzero exit, target bytes unchanged.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-peer-int-nostatus-"));
+  const donor = initRepo(path.join(root, "donor"));
+  const xdg = path.join(root, "xdg");
+  stagePatch(xdg, RUN_ID, capturePatch(donor));
+  // Non-git target with the same base file content the patch expects.
+  const notARepo = path.join(root, "not-a-repo");
+  fs.mkdirSync(notARepo);
+  fs.writeFileSync(path.join(notARepo, "foo.txt"), "hello\n");
+  const lines = [];
+  try {
+    const res = withXdg(xdg, () =>
+      maybeIntegratePeerStop(
+        peerStopEnvelope(notARepo),
+        notARepo,
+        "auto",
+        ["--target", notARepo],
+        (l) => lines.push(l)
+      )
+    );
+    assert.equal(res.outcome, "blocked-dirty-status");
+    assert.equal(res.attempted, true);
+    assert.equal(res.ok, false, "status failure must report !ok so the command fails");
+    assert.equal(peerStopExitCode(0, res), 1);
+    assert.equal(
+      fs.readFileSync(path.join(notARepo, "foo.txt"), "utf8"),
+      "hello\n",
+      "target must be untouched when git status fails"
+    );
+    assert.ok(lines.some((l) => /status failed|dirty status|BLOCKED/i.test(l)), lines.join("\n"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("peer-stop: a patch tampered after validation is refused (integrity check)", () => {
   // The manifest records the ORIGINAL sha/bytes; if the patch on disk is swapped
   // after peer-stop validation, the companion apply must fail closed, not apply.
