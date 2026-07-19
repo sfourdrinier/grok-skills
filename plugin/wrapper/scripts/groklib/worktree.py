@@ -89,31 +89,54 @@ def _git_env(env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
 
 
 def _run_git_bytes(
-    repo: pathlib.Path, args: Sequence[str], env: Optional[Dict[str, str]] = None
+    repo: pathlib.Path,
+    args: Sequence[str],
+    env: Optional[Dict[str, str]] = None,
+    input_bytes: Optional[bytes] = None,
 ) -> "subprocess.CompletedProcess":
     """Run git in ``repo`` capturing raw stdout/stderr bytes (no text decode).
 
     SSOT for callers that must preserve non-UTF-8 path bytes (path_inventory -z
-    inventories, binary patches). Text-mode ``_run_git`` is a thin decode wrapper
-    over this. Raises GrokWrapperError("worktree-failure") only when git cannot
-    be executed; non-zero exits are returned to the caller.
+    inventories, binary patches, check-ignore --stdin -z). Optional
+    ``input_bytes`` is written to stdin as raw bytes (never text-encoded).
+    Text-mode ``_run_git`` is a thin decode wrapper over this. Raises
+    GrokWrapperError("worktree-failure") only when git cannot be executed;
+    non-zero exits are returned to the caller. ``UnicodeEncodeError`` on argv
+    construction is classified as worktree-failure (surrogate path tokens must
+    use bytes stdin, not str argv).
     """
-    argv = [
-        "git",
-        "-c",
-        "core.hooksPath={}".format(_EMPTY_GIT_HOOKS),
-        "-C",
-        str(repo),
-    ] + [str(arg) for arg in args]
+    try:
+        argv = [
+            "git",
+            "-c",
+            "core.hooksPath={}".format(_EMPTY_GIT_HOOKS),
+            "-C",
+            str(repo),
+        ] + [str(arg) for arg in args]
+    except UnicodeEncodeError as exc:
+        _log("_run_git_bytes", "argv encode failed: {}".format(exc))
+        raise GrokWrapperError(
+            "worktree-failure",
+            "git argv could not be encoded: {}".format(exc),
+            {"error": str(exc)},
+        ) from exc
     try:
         return subprocess.run(
             argv,
+            input=input_bytes,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=_git_env(env),
             timeout=_GIT_TIMEOUT_SECONDS,
             check=False,
         )
+    except UnicodeEncodeError as exc:
+        _log("_run_git_bytes", "UnicodeEncodeError: {}".format(exc))
+        raise GrokWrapperError(
+            "worktree-failure",
+            "git path encoding failed: {}".format(exc),
+            {"argv": argv, "error": str(exc)},
+        ) from exc
     except (OSError, subprocess.SubprocessError) as exc:
         _log("_run_git_bytes", "git could not be executed: {}: {}".format(argv, exc))
         raise GrokWrapperError(

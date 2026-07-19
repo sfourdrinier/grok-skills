@@ -6,6 +6,8 @@
 // NUL-safe -z path inventories (already raw). One token decoder is SSOT for
 // both full-token unquote and mid-string parseCQuotedAt.
 
+import fs from "node:fs";
+
 const C_QUOTE_NAMED = {
   a: 7,
   b: 8,
@@ -188,6 +190,43 @@ function stripDiffGitAbPrefix(pathToken) {
 }
 
 /**
+ * All reconstructible unquoted a/... b/... splits (parity with Python
+ * git_path_quote._unquoted_split_candidates).
+ * @param {string} rest
+ * @returns {Array<[string, string]>}
+ */
+function unquotedSplitCandidates(rest) {
+  const out = [];
+  let start = 0;
+  while (true) {
+    const sep = rest.indexOf(" b/", start);
+    if (sep < 0) break;
+    const left = rest.slice(0, sep);
+    const right = rest.slice(sep + 1); // keep leading b/
+    if (left.startsWith("a/") && right.startsWith("b/")) out.push([left, right]);
+    start = sep + 1;
+  }
+  return out;
+}
+
+/**
+ * Unique dual-condition unquoted pair, else null (fail closed).
+ * Preference: exactly one equal strip(a)==strip(b); else exactly one candidate.
+ * @param {string} rest
+ * @returns {[string, string]|null}
+ */
+function chooseUnquotedPair(rest) {
+  const candidates = unquotedSplitCandidates(rest);
+  if (!candidates.length) return null;
+  const equal = candidates.filter(
+    ([a, b]) => stripDiffGitAbPrefix(a) === stripDiffGitAbPrefix(b)
+  );
+  if (equal.length === 1) return equal[0];
+  if (candidates.length === 1) return candidates[0];
+  return null;
+}
+
+/**
  * Next `diff --git` path token (decoded, still with a/b prefix) and new index.
  * Parity with Python git_path_quote.next_diff_git_token.
  * @param {string} s
@@ -201,24 +240,50 @@ function nextDiffGitToken(s, i, isFirst) {
   if (i >= n) return [null, i];
   if (s[i] === '"') return parseCQuotedAt(s, i);
   if (isFirst) {
-    const sepB = s.indexOf(" b/", i);
-    if (sepB >= 0) return [s.slice(i, sepB), sepB];
-    const sepQ = s.indexOf(' "', i);
-    if (sepQ >= 0) return [s.slice(i, sepQ), sepQ];
-    return [null, i];
+    // Unquoted first side ends at the space before a quoted second side, or
+    // via dual-condition chooseUnquotedPair when both sides are unquoted.
+    const qsep = s.indexOf(' "', i);
+    if (qsep >= 0) return [s.slice(i, qsep), qsep];
+    const pair = chooseUnquotedPair(s.slice(i));
+    if (pair == null) return [null, i];
+    const aRaw = pair[0];
+    return [aRaw, i + aRaw.length];
   }
   return [s.slice(i).replace(/\s+$/, ""), n];
 }
 
 /**
  * Parse path pair after `diff --git ` into repo-relative paths (no a/b).
+ * Dual-condition unquoted separator logic matches Python git_path_quote.
+ * Malformed / ambiguous input returns null (fail closed).
  * @param {string} rest
  * @returns {[string, string]|null}
  */
 export function parseDiffGitHeaderPaths(rest) {
-  const [aRaw, i] = nextDiffGitToken(rest, 0, true);
+  const s = String(rest || "");
+  if (!s.trim()) return null;
+  let i = 0;
+  while (i < s.length && (s[i] === " " || s[i] === "\t")) i += 1;
+  if (i >= s.length) return null;
+
+  // Fully unquoted rest: dual-condition selector is the SSOT.
+  if (s[i] !== '"') {
+    // Mixed: unquoted first, quoted second -> nextDiffGitToken path.
+    if (s.slice(i).includes(' "')) {
+      const [aRaw, j] = nextDiffGitToken(s, i, true);
+      if (aRaw == null) return null;
+      const [bRaw] = nextDiffGitToken(s, j, false);
+      if (bRaw == null) return null;
+      return [stripDiffGitAbPrefix(aRaw), stripDiffGitAbPrefix(bRaw)];
+    }
+    const pair = chooseUnquotedPair(s.slice(i));
+    if (pair == null) return null;
+    return [stripDiffGitAbPrefix(pair[0]), stripDiffGitAbPrefix(pair[1])];
+  }
+
+  const [aRaw, j] = nextDiffGitToken(s, i, true);
   if (aRaw == null) return null;
-  const [bRaw] = nextDiffGitToken(rest, i, false);
+  const [bRaw] = nextDiffGitToken(s, j, false);
   if (bRaw == null) return null;
   return [stripDiffGitAbPrefix(aRaw), stripDiffGitAbPrefix(bRaw)];
 }
@@ -229,20 +294,24 @@ export function parseDiffGitHeaderPaths(rest) {
  * the dirty-overlap guard from failing open on a dirty rename SOURCE.
  * Uses the same C-quote decode as unquoteGitPath / golden vectors.
  * @param {string|Buffer} patchBytes
- * @returns {Set<string>}
+ * @returns {{paths: Set<string>, diffGitLines: number, parsedDiffGit: number}}
  */
-export function pathsFromGitPatch(patchBytes) {
+export function pathsFromGitPatchDetailed(patchBytes) {
   const text = Buffer.isBuffer(patchBytes)
     ? patchBytes.toString("utf8")
     : String(patchBytes || "");
   const found = new Set();
+  let diffGitLines = 0;
+  let parsedDiffGit = 0;
   const add = (p) => {
     if (typeof p === "string" && p && p !== "/dev/null") found.add(p);
   };
   for (const rawLine of text.split(/\r?\n/)) {
     if (rawLine.startsWith("diff --git ")) {
+      diffGitLines += 1;
       const pair = parseDiffGitHeaderPaths(rawLine.slice("diff --git ".length));
       if (pair) {
+        parsedDiffGit += 1;
         add(pair[0]);
         add(pair[1]);
       }
@@ -255,5 +324,79 @@ export function pathsFromGitPatch(patchBytes) {
       }
     }
   }
-  return found;
+  return { paths: found, diffGitLines, parsedDiffGit };
+}
+
+/**
+ * Repo-relative touch set from patch headers (compat wrapper).
+ * @param {string|Buffer} patchBytes
+ * @returns {Set<string>}
+ */
+export function pathsFromGitPatch(patchBytes) {
+  return pathsFromGitPatchDetailed(patchBytes).paths;
+}
+
+/**
+ * Union numstat destinations with diff --git / rename-copy headers.
+ * Non-empty numstat makes headers load-bearing; unparseable/ambiguous
+ * diff --git lines fail closed even with empty numstat (no wrong first-sep).
+ * @param {string} patchPath
+ * @param {string} numstatStdout
+ * @returns {{ok: true, paths: string[]} | {ok: false, outcome: string, reason: string}}
+ */
+export function loadPatchTouchPaths(patchPath, numstatStdout) {
+  const numstatPaths = parseNumstatPaths(numstatStdout);
+  const patchPathSet = new Set(numstatPaths);
+  let patchBytes;
+  try {
+    patchBytes = fs.readFileSync(patchPath);
+  } catch {
+    return {
+      ok: false,
+      outcome: "blocked-patch-headers",
+      reason: "patch header read failed after numstat; cannot compute full dirty touch set",
+    };
+  }
+  let detailed;
+  try {
+    detailed = pathsFromGitPatchDetailed(patchBytes);
+  } catch {
+    return {
+      ok: false,
+      outcome: "blocked-patch-headers",
+      reason: "patch header parse failed after numstat; cannot compute full dirty touch set",
+    };
+  }
+  const headerPaths = detailed.paths;
+  if (detailed.diffGitLines > 0 && detailed.parsedDiffGit < detailed.diffGitLines) {
+    return {
+      ok: false,
+      outcome: "blocked-patch-headers",
+      reason:
+        "patch headers malformed/ambiguous (unparseable diff --git); cannot compute full dirty touch set",
+    };
+  }
+  if (numstatPaths.length > 0) {
+    if (!headerPaths || headerPaths.size === 0) {
+      return {
+        ok: false,
+        outcome: "blocked-patch-headers",
+        reason:
+          "patch headers empty/unparseable after non-empty numstat; cannot compute full dirty touch set",
+      };
+    }
+    for (const p of numstatPaths) {
+      if (!p || p.includes(" => ") || p.includes("{")) continue;
+      if (!headerPaths.has(p)) {
+        return {
+          ok: false,
+          outcome: "blocked-patch-headers",
+          reason:
+            "numstat path not corroborated by patch headers (rename/copy destination or touch gap)",
+        };
+      }
+    }
+  }
+  for (const p of headerPaths) patchPathSet.add(p);
+  return { ok: true, paths: [...patchPathSet] };
 }

@@ -110,10 +110,15 @@ over. It is **not** a complete sandbox against an adversarial model.
   yields an empty denylist (pattern scan still runs); denylist always cleared
   in `finally`. Direct OS sandbox limits are unchanged (write confinement to
   repo root + private tmp; not a read firewall).
-- **Protected content-hash including ignored protected paths + nested hooks:**
+- **Protected content-hash including ignored protected paths + nested git metadata:**
   deny/snapshot scope fingerprints use content+mode for protected paths even
-  when gitignored (same-size+mtime rewrite still flips); nested `.git/hooks/**`
-  remain in the protected set. Bulk ignored caches stay stat-only.
+  when gitignored (same-size+mtime rewrite still flips). Sensitive git metadata
+  covers root `.git`, nested workspace gitdirs (e.g. `vendor/.../.git`), and
+  `.git/modules/**` (config/HEAD/packed-refs, hooks/**, refs/**) with bounded
+  no-symlink discovery that fails closed on overflow. Linked-worktree `.git`
+  files are followed only when the target common/per-worktree dir is inside the
+  workspace (external common dirs are not fully inventoried). Bulk ignored
+  caches stay stat-only.
 - **Patch secret denylist scan:** handoff patch generation fails closed on
   secret-shaped material and on exact injected-denylist occurrence in patch
   bytes (not pattern-only). Path inventory uses NUL-safe bytes with

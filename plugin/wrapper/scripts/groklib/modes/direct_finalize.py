@@ -20,11 +20,14 @@
 # SECURITY: direct mode does NOT prevent protected writes at the sandbox layer
 # (workspace is whole-root). The deny scan + git-dir guard + direct_protect
 # snapshot/restore roll back the COVERED protected set to pre-run state
-# (byte-identical or removed-if-created): .env/keys, .git config/HEAD/packed-refs,
-# .git/hooks/**, .git/refs/**. .git/index and .git/COMMIT_EDITMSG are NOT guarded
-# (benign working state git rewrites on ordinary reads like `git status`); loose
-# .git/objects are not tracked (content-addressed, inert until a watched ref
-# points at them). Reads of .env/keys are NOT blocked (D-SECRETREAD gap).
+# (byte-identical or removed-if-created): .env/keys, sensitive git metadata for
+# root .git, nested workspace gitdirs (vendor/.../.git), and .git/modules/**
+# (config/HEAD/packed-refs, hooks/**, refs/**). Linked-worktree .git files are
+# followed only when the common/per-worktree dir is inside the workspace.
+# .git/index and .git/COMMIT_EDITMSG are NOT guarded (benign working state git
+# rewrites on ordinary reads like `git status`); loose .git/objects are not
+# tracked (content-addressed, inert until a watched ref points at them). Reads
+# of .env/keys are NOT blocked (D-SECRETREAD gap).
 # Backlog: probe seatbelt write-deny subpaths for true prevention.
 
 import fnmatch
@@ -94,14 +97,15 @@ def _posix_rel(path: str) -> str:
 
 
 def path_matches_deny(path: str) -> bool:
-    """True when a repo-relative path matches DENY_WRITE_GLOBS (or is under .git)."""
+    """True when a repo-relative path matches DENY_WRITE_GLOBS or any workspace .git."""
     norm = _posix_rel(path)
     if not norm:
         return False
-    parts = norm.split("/")
-    if parts[0] == ".git":
+    parts = [p for p in norm.split("/") if p]
+    # Any path component named .git (root, nested vendor repo, submodule gitdir).
+    if ".git" in parts:
         return True
-    base = parts[-1]
+    base = parts[-1] if parts else ""
     for pattern in DENY_WRITE_GLOBS:
         if fnmatch.fnmatch(norm, pattern) or fnmatch.fnmatch(base, pattern):
             return True
@@ -180,32 +184,51 @@ def _resolve_git_dirs(repo_root: pathlib.Path) -> Tuple[pathlib.Path, pathlib.Pa
 def capture_git_dir_guard(repo_root: pathlib.Path) -> FrozenSet[Tuple[str, str]]:
     """Fingerprint security-relevant git paths (working-tree fingerprint is blind to them).
 
-    Watches config/packed-refs/hooks/refs in the COMMON git dir and HEAD in the
-    per-worktree git dir (resolved via git, so a linked worktree whose ``.git``
-    is a file is handled), each by CONTENT HASH so a same-size ref move is
-    detected. Hooks and refs use the same bounded recursive inventory as
-    protected snapshot (``direct_protect.iter_git_tree_entries``). A post-run
-    set-difference surfaces Grok writes the sandbox cannot block (workspace
-    profile is whole-root).
+    Watches sensitive metadata for every workspace gitdir discovered by
+    ``direct_protect.discover_workspace_git_roots`` (root ``.git``, nested
+    ``vendor/.../.git``, ``.git/modules/**``, and in-workspace linked gitfile
+    targets), each by CONTENT HASH so a same-size ref move is detected. Also
+    fingerprints the git-resolved per-worktree HEAD / common config when the
+    common dir is outside the workspace (linked worktree honesty: external
+    common dirs are not fully inventoried via nested discovery).
 
     Deliberately NOT watched (benign working state git rewrites on ordinary reads
     like ``git status``, which would otherwise false-positive every real run):
     ``.git/index`` and ``.git/COMMIT_EDITMSG``. Loose ``.git/objects`` are not
     fingerprinted: content-addressed and inert until a watched ref points at them.
     """
-    git_dir, common_dir = _resolve_git_dirs(repo_root)
     pairs: Set[Tuple[str, str]] = set()
-    # HEAD is per-worktree; config/packed-refs are shared (common dir).
-    pairs.add((".git/HEAD", _git_watch_sig(git_dir / "HEAD")))
-    for name in ("config", "packed-refs"):
-        pairs.add((".git/" + name, _git_watch_sig(common_dir / name)))
-    pairs |= _fingerprint_git_tree(common_dir, "hooks")
-    pairs |= _fingerprint_git_tree(common_dir, "refs")
+    # Nested + modules + root via shared discovery (fail closed on overflow).
+    for rel, abs_path in direct_protect.iter_sensitive_git_entries(repo_root):
+        pairs.add((rel, _git_watch_sig(abs_path)))
+
+    # Linked worktree: when common/git dirs live outside the workspace, still
+    # fingerprint the primary HEAD/config/packed-refs/hooks/refs via rev-parse
+    # (under synthetic .git/ keys) so a common-dir ref move is not silent.
+    git_dir, common_dir = _resolve_git_dirs(repo_root)
+    root = pathlib.Path(repo_root)
+    try:
+        common_inside = common_dir.resolve() == (root / ".git").resolve() or str(
+            common_dir.resolve()
+        ).startswith(str(root.resolve()) + os.sep)
+    except OSError:
+        common_inside = False
+    if not common_inside:
+        pairs.add((".git/HEAD", _git_watch_sig(git_dir / "HEAD")))
+        for name in ("config", "packed-refs"):
+            pairs.add((".git/" + name, _git_watch_sig(common_dir / name)))
+        pairs |= _fingerprint_git_tree(common_dir, "hooks", rel_prefix=".git")
+        pairs |= _fingerprint_git_tree(common_dir, "refs", rel_prefix=".git")
     return frozenset(pairs)
 
 
-def _fingerprint_git_tree(git_dir: pathlib.Path, tree_name: str) -> Set[Tuple[str, str]]:
-    """Fingerprint ``.git/<tree_name>/**`` via the shared protect inventory.
+def _fingerprint_git_tree(
+    git_dir: pathlib.Path,
+    tree_name: str,
+    *,
+    rel_prefix: str = ".git",
+) -> Set[Tuple[str, str]]:
+    """Fingerprint ``<rel_prefix>/<tree_name>/**`` via the shared protect inventory.
 
     Over-cap emits a single count-bearing sentinel so an add/remove past the
     cap still flips the set-difference, rather than silently going undetected.
@@ -213,12 +236,17 @@ def _fingerprint_git_tree(git_dir: pathlib.Path, tree_name: str) -> Set[Tuple[st
     pairs: Set[Tuple[str, str]] = set()
     count = 0
     for rel, abs_path in direct_protect.iter_git_tree_entries(
-        git_dir, tree_name, max_files=_MAX_GIT_TREE_FILES
+        git_dir, tree_name, rel_prefix=rel_prefix, max_files=_MAX_GIT_TREE_FILES
     ):
         pairs.add((rel, _git_watch_sig(abs_path)))
         count += 1
     if count >= _MAX_GIT_TREE_FILES:
-        pairs.add((".git/{}/**".format(tree_name), "over-cap:{}".format(count)))
+        pairs.add(
+            (
+                "{}/{}/**".format(rel_prefix.rstrip("/"), tree_name),
+                "over-cap:{}".format(count),
+            )
+        )
     return pairs
 
 
@@ -231,52 +259,65 @@ def _changed_paths(
     return added_or_changed | removed_or_changed
 
 
+def _fsencode_path_token(path: str) -> bytes:
+    """Encode a path token for git stdin (surrogateescape-safe)."""
+    if isinstance(path, bytes):
+        return path
+    try:
+        return os.fsencode(path)
+    except (UnicodeEncodeError, TypeError, ValueError):
+        return path.encode("utf-8", errors="surrogateescape")
+
+
 def git_ignored_paths(repo_root: pathlib.Path, paths: Set[str]) -> Set[str]:
     """Return the subset of ``paths`` that git considers ignored under ``repo_root``.
 
-    Batch ``git check-ignore --stdin -z`` over the candidate set (NUL-separated
-    path stream). Empty ``paths`` or none-ignored (git exit 1) returns an empty
-    set. Non-probe failures fail closed as worktree-failure. Used to derive
-    source_changed for scope + dirty-overlap while the deny scan keeps the full
-    changed-set.
+    Batch ``git check-ignore --stdin -z`` over the candidate set via the shared
+    worktree bytes git runner (SSOT with path_inventory). Path tokens are
+    ``os.fsencode`` / surrogateescape-encoded so lone-surrogate inventory paths
+    never raise ``UnicodeEncodeError`` on text-mode stdin. Empty ``paths`` or
+    none-ignored (git exit 1) returns an empty set. Non-probe failures fail
+    closed as worktree-failure. Used to derive source_changed for scope +
+    dirty-overlap while the deny scan keeps the full changed-set.
     """
     if not paths:
         return set()
     # NUL-separated stdin matches git check-ignore --stdin -z contract.
-    payload = "\0".join(sorted(paths)) + "\0"
-    argv = [
-        "git",
-        "-c",
-        "core.hooksPath={}".format(worktree_mod._EMPTY_GIT_HOOKS),
-        "-C",
-        str(repo_root),
-        "check-ignore",
-        "--stdin",
-        "-z",
-    ]
     try:
-        completed = subprocess.run(
-            argv,
-            input=payload,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            encoding="utf-8",
+        payload = b"\0".join(_fsencode_path_token(p) for p in sorted(paths)) + b"\0"
+    except (UnicodeEncodeError, UnicodeError) as exc:
+        _log("git_ignored_paths", "path encode failed: {}".format(exc))
+        raise GrokWrapperError(
+            "worktree-failure",
+            "could not encode changed paths for git check-ignore: {}".format(exc),
+            {"error": str(exc)},
+        ) from exc
+    args = ("check-ignore", "--stdin", "-z")
+    try:
+        completed = worktree_mod._run_git_bytes(
+            repo_root,
+            args,
             env=worktree_mod._git_env(),
-            timeout=worktree_mod._GIT_TIMEOUT_SECONDS,
-            check=False,
+            input_bytes=payload,
         )
+    except GrokWrapperError:
+        raise
     except (OSError, subprocess.SubprocessError) as exc:
         _log("git_ignored_paths", "check-ignore could not be executed: {}".format(exc))
         raise GrokWrapperError(
             "worktree-failure",
             "git check-ignore could not be executed: {}".format(exc),
-            {"argv": argv},
+            {"argv": ["git", "-C", str(repo_root)] + list(args)},
         ) from exc
     # git check-ignore: 0 = one or more ignored, 1 = none ignored, 128 = fatal.
     if completed.returncode == 1:
         return set()
     if completed.returncode != 0:
-        stderr = (completed.stderr or "").strip()
+        stderr_raw = completed.stderr or b""
+        if isinstance(stderr_raw, bytes):
+            stderr = stderr_raw.decode("utf-8", errors="replace").strip()
+        else:
+            stderr = str(stderr_raw).strip()
         _log(
             "git_ignored_paths",
             "check-ignore failed exit={}: {}".format(completed.returncode, stderr),
@@ -286,7 +327,13 @@ def git_ignored_paths(repo_root: pathlib.Path, paths: Set[str]) -> Set[str]:
             "git check-ignore failed while classifying changed paths",
             {"exitStatus": completed.returncode, "stderr": stderr},
         )
-    return {part for part in completed.stdout.split("\0") if part}
+    stdout = completed.stdout or b""
+    if isinstance(stdout, str):
+        return {part for part in stdout.split("\0") if part}
+    # Decode ignored paths with surrogateescape (path_inventory SSOT).
+    from groklib import path_inventory
+
+    return set(path_inventory.decode_nul_paths(stdout))
 
 
 def _source_changed_paths(repo_root: pathlib.Path, changed: Set[str]) -> Set[str]:

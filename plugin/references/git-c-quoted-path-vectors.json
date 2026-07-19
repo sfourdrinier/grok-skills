@@ -97,57 +97,57 @@
       "id": "both-unquoted",
       "rest": "a/foo.txt b/foo.txt",
       "expected": ["foo.txt", "foo.txt"],
-      "appliesTo": ["python"]
+      "appliesTo": ["python", "node"]
     },
     {
       "id": "both-c-quoted-cafe",
       "rest": "\"a/caf\\303\\251.txt\" \"b/caf\\303\\251.txt\"",
       "expected": ["café.txt", "café.txt"],
-      "appliesTo": ["python"]
+      "appliesTo": ["python", "node"]
     },
     {
       "id": "mixed-first-quoted-second-unquoted-spaces",
       "rest": "\"a/caf\\303\\251.txt\" b/path with space.txt",
       "expected": ["café.txt", "path with space.txt"],
-      "appliesTo": ["python"]
+      "appliesTo": ["python", "node"]
     },
     {
       "id": "mixed-first-unquoted-second-quoted",
       "rest": "a/old.txt \"b/caf\\303\\251.txt\"",
       "expected": ["old.txt", "café.txt"],
-      "appliesTo": ["python"]
+      "appliesTo": ["python", "node"]
     },
     {
       "id": "escaped-quote-in-quoted-side",
       "rest": "\"a/quote\\\"here.txt\" \"b/quote\\\"here.txt\"",
       "expected": ["quote\"here.txt", "quote\"here.txt"],
-      "appliesTo": ["python"]
+      "appliesTo": ["python", "node"]
     },
     {
       "id": "unquoted-literal-space-b-slash-same-path",
       "rest": "a/x b/y.txt b/x b/y.txt",
       "expected": ["x b/y.txt", "x b/y.txt"],
-      "appliesTo": ["python"],
+      "appliesTo": ["python", "node"],
       "note": "Real git emits unquoted a/<path> b/<path> even when path contains literal ' b/'. Dual-condition parser must prefer the equal strip(a)==strip(b) separator, not the first ' b/' substring."
     },
     {
       "id": "unquoted-literal-space-b-slash-rename",
       "rest": "a/x b/y.txt b/z b/w.txt",
       "expected": null,
-      "appliesTo": ["python"],
+      "appliesTo": ["python", "node"],
       "note": "Ambiguous unquoted rename with ' b/' in both sides has multiple reconstructible splits; fail closed rather than guess."
     },
     {
       "id": "unquoted-spaces-no-b-slash-in-path",
       "rest": "a/my dir/f.txt b/my dir/f.txt",
       "expected": ["my dir/f.txt", "my dir/f.txt"],
-      "appliesTo": ["python"]
+      "appliesTo": ["python", "node"]
     },
     {
       "id": "unquoted-first-quoted-second-with-literal-b-slash",
       "rest": "a/x b/y.txt \"b/x b/y.txt\"",
       "expected": ["x b/y.txt", "x b/y.txt"],
-      "appliesTo": ["python"],
+      "appliesTo": ["python", "node"],
       "note": "Second side C-quoted: first-side end is the space before the opening quote (not first ' b/')."
     }
   ],
@@ -156,7 +156,7 @@
       "id": "delete-header-paths-exclude-dev-null",
       "patchText": "diff --git \"a/caf\\303\\251.txt\" \"b/caf\\303\\251.txt\"\ndeleted file mode 100644\n--- \"a/caf\\303\\251.txt\"\n+++ /dev/null\n",
       "expectedPaths": ["café.txt"],
-      "appliesTo": ["python"],
+      "appliesTo": ["python", "node"],
       "note": "paths_from_git_patch excludes literal /dev/null; C-quoted sides still decode"
     },
     {
@@ -164,7 +164,7 @@
       "rest": "a/foo.txt b/foo.txt",
       "expectedRaw": ["foo.txt", "foo.txt"],
       "expectedFiltered": ["foo.txt"],
-      "appliesTo": ["python"],
+      "appliesTo": ["python", "node"],
       "note": "Real git keeps a/ b/ on diff --git even for deletes; /dev/null lives on ---/+++ lines (covered by delete-header-paths-exclude-dev-null). Parser still strips a/b; filter drops empty only."
     }
   ],
@@ -173,14 +173,14 @@
       "id": "diff-header-missing-b-side",
       "rest": "a/only-one-side",
       "expected": null,
-      "appliesTo": ["python"],
+      "appliesTo": ["python", "node"],
       "note": "parse_diff_git_header_paths returns null when second side cannot be parsed"
     },
     {
       "id": "diff-header-empty",
       "rest": "",
       "expected": null,
-      "appliesTo": ["python"]
+      "appliesTo": ["python", "node"]
     }
   ]
 }

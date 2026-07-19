@@ -20,11 +20,8 @@ import {
 } from "./jobs.mjs";
 import { resolveTargetWorkspaceRoot, parseTargetFlag } from "./git-context.mjs";
 import {
-  unquoteGitPath,
+  loadPatchTouchPaths,
   parseDirtyStatusPaths,
-  parseNumstatPaths,
-  parseDiffGitHeaderPaths,
-  pathsFromGitPatch,
 } from "./integrate-paths.mjs";
 import {
   targetIdentityKey,
@@ -142,6 +139,8 @@ export {
   parseNumstatPaths,
   parseDiffGitHeaderPaths,
   pathsFromGitPatch,
+  pathsFromGitPatchDetailed,
+  loadPatchTouchPaths,
 } from "./integrate-paths.mjs";
 export {
   targetIdentityKey,
@@ -164,61 +163,6 @@ export {
 function treeStillHasAppliedPatch(targetRepo, patchPath) {
   const revCheck = git(targetRepo, ["apply", "-R", "--check", "--binary", patchPath]);
   return revCheck.code === 0 && !revCheck.error;
-}
-
-/**
- * Union numstat destinations with diff --git / rename-copy headers.
- * Non-empty numstat makes headers load-bearing: empty/unparseable headers and
- * uncorroborated simple numstat paths fail closed (no numstat-only fallback).
- * @returns {{ok: true, paths: string[]} | {ok: false, outcome: string, reason: string}}
- */
-export function loadPatchTouchPaths(patchPath, numstatStdout) {
-  const numstatPaths = parseNumstatPaths(numstatStdout);
-  const patchPathSet = new Set(numstatPaths);
-  let patchBytes;
-  try {
-    patchBytes = fs.readFileSync(patchPath);
-  } catch {
-    return {
-      ok: false,
-      outcome: "blocked-patch-headers",
-      reason: "patch header read failed after numstat; cannot compute full dirty touch set",
-    };
-  }
-  let headerPaths;
-  try {
-    headerPaths = pathsFromGitPatch(patchBytes);
-  } catch {
-    return {
-      ok: false,
-      outcome: "blocked-patch-headers",
-      reason: "patch header parse failed after numstat; cannot compute full dirty touch set",
-    };
-  }
-  if (numstatPaths.length > 0) {
-    if (!headerPaths || headerPaths.size === 0) {
-      return {
-        ok: false,
-        outcome: "blocked-patch-headers",
-        reason:
-          "patch headers empty/unparseable after non-empty numstat; cannot compute full dirty touch set",
-      };
-    }
-    // Skip synthetic raw "a => b" fields kept by parseNumstatPaths for resilience.
-    for (const p of numstatPaths) {
-      if (!p || p.includes(" => ") || p.includes("{")) continue;
-      if (!headerPaths.has(p)) {
-        return {
-          ok: false,
-          outcome: "blocked-patch-headers",
-          reason:
-            "numstat path not corroborated by patch headers (rename/copy destination or touch gap)",
-        };
-      }
-    }
-  }
-  for (const p of headerPaths) patchPathSet.add(p);
-  return { ok: true, paths: [...patchPathSet] };
 }
 
 /**

@@ -224,6 +224,107 @@ class DirectProtectSnapshotRestoreTests(unittest.TestCase):
         self.assertFalse(nested.exists())
         self.assertIn(rel, result.restored)
 
+    def test_snapshot_includes_nested_vendor_gitdir(self) -> None:
+        nested_git = self.repo / "vendor" / "lib" / ".git"
+        (nested_git / "hooks").mkdir(parents=True)
+        (nested_git / "HEAD").write_text("ref: refs/heads/main\n")
+        (nested_git / "config").write_text("[core]\n\trepositoryformatversion = 0\n")
+        hook = nested_git / "hooks" / "pre-commit"
+        hook.write_bytes(b"#!/bin/sh\necho nested-repo\n")
+        os.chmod(str(hook), 0o755)
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        rel_hook = "vendor/lib/.git/hooks/pre-commit"
+        rel_head = "vendor/lib/.git/HEAD"
+        self.assertIn(rel_hook, snap.entries)
+        self.assertIn(rel_head, snap.entries)
+        self.assertTrue(snap.entries[rel_hook].snapshotted)
+
+    def test_restore_nested_vendor_hook_and_head(self) -> None:
+        nested_git = self.repo / "vendor" / "lib" / ".git"
+        (nested_git / "hooks").mkdir(parents=True)
+        head = nested_git / "HEAD"
+        original_head = "ref: refs/heads/main\n"
+        head.write_text(original_head)
+        (nested_git / "config").write_text("[core]\n")
+        hook = nested_git / "hooks" / "pre-commit"
+        original_hook = b"#!/bin/sh\necho good\n"
+        hook.write_bytes(original_hook)
+        os.chmod(str(hook), 0o755)
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        # Plant evil hook + rewrite HEAD (live nested-repo attack).
+        hook.write_bytes(b"#!/bin/sh\necho evil\n")
+        head.write_text("ref: refs/heads/evil\n")
+        planted = nested_git / "hooks" / "post-commit"
+        planted.write_bytes(b"#!/bin/sh\necho planted\n")
+        result = direct_protect.restore_protected_paths(
+            self.repo,
+            snap,
+            offenders=[
+                "vendor/lib/.git/hooks/pre-commit",
+                "vendor/lib/.git/HEAD",
+                "vendor/lib/.git/hooks/post-commit",
+            ],
+        )
+        self.assertEqual(hook.read_bytes(), original_hook)
+        self.assertEqual(head.read_text(), original_head)
+        self.assertFalse(planted.exists())
+        self.assertIn("vendor/lib/.git/hooks/pre-commit", result.restored)
+        self.assertIn("vendor/lib/.git/HEAD", result.restored)
+        self.assertIn("vendor/lib/.git/hooks/post-commit", result.restored)
+
+    def test_snapshot_and_restore_root_modules_hook(self) -> None:
+        mod_hooks = self.repo / ".git" / "modules" / "sub" / "hooks"
+        mod_hooks.mkdir(parents=True)
+        (self.repo / ".git" / "modules" / "sub" / "HEAD").write_text(
+            "ref: refs/heads/main\n"
+        )
+        (self.repo / ".git" / "modules" / "sub" / "config").write_text("[core]\n")
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        planted = mod_hooks / "pre-commit"
+        planted.write_bytes(b"#!/bin/sh\necho modules-plant\n")
+        rel = ".git/modules/sub/hooks/pre-commit"
+        self.assertTrue(direct_protect.is_snapshot_scope(rel))
+        result = direct_protect.restore_protected_paths(
+            self.repo, snap, offenders=[rel]
+        )
+        self.assertFalse(planted.exists())
+        self.assertIn(rel, result.restored)
+
+    def test_is_sensitive_git_relative_covers_nested_and_modules(self) -> None:
+        self.assertTrue(
+            direct_protect.is_sensitive_git_relative("vendor/lib/.git/hooks/pre-commit")
+        )
+        self.assertTrue(
+            direct_protect.is_sensitive_git_relative("vendor/lib/.git/HEAD")
+        )
+        self.assertTrue(
+            direct_protect.is_sensitive_git_relative(".git/modules/sub/hooks/x")
+        )
+        self.assertTrue(direct_protect.is_sensitive_git_relative(".git/config"))
+        self.assertFalse(
+            direct_protect.is_sensitive_git_relative("vendor/lib/.git/index")
+        )
+        self.assertFalse(
+            direct_protect.is_sensitive_git_relative("vendor/lib/.git/objects/ab/cd")
+        )
+
+    def test_discovery_fail_closed_on_overflow(self) -> None:
+        from groklib import GrokWrapperError
+
+        # Tiny bound must fail closed rather than silently skip nested gitdirs.
+        with self.assertRaises(GrokWrapperError) as cm:
+            direct_protect.discover_workspace_git_roots(self.repo, max_discovery=0)
+        self.assertEqual(cm.exception.error_class, "protected-path-write")
+
+    def test_gitfile_outside_workspace_not_inventoried(self) -> None:
+        # Honest linked-worktree limit: gitfile pointing outside workspace is not
+        # walked as nested protected content (common dir often lives outside).
+        linked = self.repo / "linked-wt"
+        linked.mkdir()
+        (linked / ".git").write_text("gitdir: /tmp/outside-common/.git/worktrees/x\n")
+        roots = direct_protect.discover_workspace_git_roots(self.repo)
+        self.assertFalse(any(rel == "linked-wt/.git" for rel, _ in roots))
+
 
 class DirectGitGuardAndDenyTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -309,6 +410,41 @@ class DirectGitGuardAndDenyTests(unittest.TestCase):
             self.assertTrue(path_matches_deny(p), p)
         for p in ("src/app.py", "README.md", "package.json"):
             self.assertFalse(path_matches_deny(p), p)
+
+    def test_deny_covers_nested_git_and_modules(self) -> None:
+        from groklib.modes.direct_finalize import path_matches_deny
+
+        for p in (
+            "vendor/lib/.git/hooks/pre-commit",
+            "vendor/lib/.git/HEAD",
+            ".git/modules/sub/hooks/pre-commit",
+            ".git/modules/sub/config",
+        ):
+            self.assertTrue(path_matches_deny(p), p)
+
+    def test_guard_detects_nested_vendor_hook_and_modules_plant(self) -> None:
+        from groklib.modes.direct_finalize import capture_git_dir_guard, _changed_paths
+
+        nested_git = self.repo / "vendor" / "lib" / ".git"
+        (nested_git / "hooks").mkdir(parents=True)
+        (nested_git / "HEAD").write_text("ref: refs/heads/main\n")
+        (nested_git / "config").write_text("[core]\n")
+        (self.repo / ".git" / "modules" / "sub").mkdir(parents=True)
+        (self.repo / ".git" / "modules" / "sub" / "HEAD").write_text(
+            "ref: refs/heads/main\n"
+        )
+        (self.repo / ".git" / "modules" / "sub" / "hooks").mkdir(parents=True)
+        baseline = capture_git_dir_guard(self.repo)
+        (nested_git / "hooks" / "pre-commit").write_bytes(b"#!/bin/sh\necho evil\n")
+        (nested_git / "HEAD").write_text("ref: refs/heads/evil\n")
+        (self.repo / ".git" / "modules" / "sub" / "hooks" / "pre-commit").write_bytes(
+            b"#!/bin/sh\necho modules\n"
+        )
+        after = capture_git_dir_guard(self.repo)
+        changed = _changed_paths(baseline, after)
+        self.assertIn("vendor/lib/.git/hooks/pre-commit", changed)
+        self.assertIn("vendor/lib/.git/HEAD", changed)
+        self.assertIn(".git/modules/sub/hooks/pre-commit", changed)
 
 
 class DirectAbortSweepTests(unittest.TestCase):
@@ -423,6 +559,136 @@ class DirectAbortSweepTests(unittest.TestCase):
         res = restore_protected_on_abort(self.repo, base_fp, base_git, snap)
         self.assertEqual(res["restored"], [])
         self.assertEqual((self.repo / "src" / "app.py").read_text(), "print('edited')\n")
+
+    def test_sweep_restores_nested_vendor_and_modules_after_abort(self) -> None:
+        from groklib.modes.direct_finalize import restore_protected_on_abort
+
+        nested_git = self.repo / "vendor" / "lib" / ".git"
+        (nested_git / "hooks").mkdir(parents=True)
+        head = nested_git / "HEAD"
+        original_head = "ref: refs/heads/main\n"
+        head.write_text(original_head)
+        (nested_git / "config").write_text("[core]\n")
+        hook = nested_git / "hooks" / "pre-commit"
+        original_hook = b"#!/bin/sh\necho good\n"
+        hook.write_bytes(original_hook)
+        mod_hooks = self.repo / ".git" / "modules" / "sub" / "hooks"
+        mod_hooks.mkdir(parents=True)
+        (self.repo / ".git" / "modules" / "sub" / "HEAD").write_text(
+            "ref: refs/heads/main\n"
+        )
+        base_fp, base_git = self._baseline()
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        hook.write_bytes(b"#!/bin/sh\necho evil\n")
+        head.write_text("ref: refs/heads/evil\n")
+        planted = mod_hooks / "pre-commit"
+        planted.write_bytes(b"#!/bin/sh\necho modules-plant\n")
+        res = restore_protected_on_abort(self.repo, base_fp, base_git, snap)
+        self.assertEqual(hook.read_bytes(), original_hook)
+        self.assertEqual(head.read_text(), original_head)
+        self.assertFalse(planted.exists())
+        self.assertIn("vendor/lib/.git/hooks/pre-commit", res["restored"])
+        self.assertIn("vendor/lib/.git/HEAD", res["restored"])
+        self.assertIn(".git/modules/sub/hooks/pre-commit", res["restored"])
+
+
+class GitIgnoredPathsBytesSafetyTests(unittest.TestCase):
+    """git_ignored_paths must be bytes/surrogateescape-safe (path_inventory SSOT)."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.mkdtemp(prefix="direct-ignored-bytes-")
+        self.repo = pathlib.Path(self.tmp) / "repo"
+        self.repo.mkdir()
+        subprocess.run(
+            ["git", "-C", str(self.repo), "init", "--initial-branch=main"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(self.repo), "config", "user.email", "t@t.t"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(self.repo), "config", "user.name", "t"],
+            check=True,
+            capture_output=True,
+        )
+        (self.repo / "tracked.txt").write_text("ok\n")
+        (self.repo / ".gitignore").write_text("ignored.txt\nbad-*\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(self.repo), "add", "-A"],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(self.repo), "commit", "-m", "seed"],
+            check=True,
+            capture_output=True,
+        )
+        (self.repo / "ignored.txt").write_text("secret\n")
+
+    def tearDown(self) -> None:
+        import shutil
+
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_lone_surrogate_path_does_not_raise_unicode_encode(self) -> None:
+        from groklib.modes.direct_finalize import git_ignored_paths
+
+        # Lone surrogate as produced by surrogateescape decode of non-UTF-8 bytes.
+        surrogate_path = "bad-\udcff-name.txt"
+        # Must not raise UnicodeEncodeError; classify or return a set.
+        try:
+            result = git_ignored_paths(
+                self.repo, {"tracked.txt", "ignored.txt", surrogate_path}
+            )
+        except UnicodeEncodeError as exc:
+            self.fail("git_ignored_paths raised UnicodeEncodeError: {}".format(exc))
+        self.assertIn("ignored.txt", result)
+        self.assertNotIn("tracked.txt", result)
+
+    def test_uses_bytes_runner_with_stdin(self) -> None:
+        from unittest import mock
+
+        from groklib.modes.direct_finalize import git_ignored_paths
+
+        completed = mock.Mock()
+        completed.returncode = 0
+        completed.stdout = b"ignored.txt\0"
+        completed.stderr = b""
+        fake = mock.Mock(return_value=completed)
+        with mock.patch("groklib.worktree._run_git_bytes", fake):
+            result = git_ignored_paths(self.repo, {"ignored.txt", "tracked.txt"})
+        self.assertEqual(result, {"ignored.txt"})
+        fake.assert_called()
+        kwargs = fake.call_args.kwargs
+        self.assertIn("input_bytes", kwargs)
+        self.assertIsInstance(kwargs["input_bytes"], (bytes, bytearray))
+        self.assertIn(b"ignored.txt", kwargs["input_bytes"])
+
+    def test_real_non_utf8_path_when_platform_allows(self) -> None:
+        from groklib.modes.direct_finalize import git_ignored_paths
+
+        bad_name = b"bad-\xff-name.txt"
+        try:
+            path_bytes = os.fsencode(str(self.repo)) + b"/" + bad_name
+            fd = os.open(path_bytes, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            try:
+                os.write(fd, b"payload\n")
+            finally:
+                os.close(fd)
+        except OSError as exc:
+            self.skipTest(
+                "platform cannot create invalid UTF-8 pathnames: {}".format(exc)
+            )
+        # Surrogate-escaped inventory path token.
+        sur = bad_name.decode("utf-8", errors="surrogateescape")
+        try:
+            result = git_ignored_paths(self.repo, {sur, "ignored.txt"})
+        except UnicodeEncodeError as exc:
+            self.fail("real non-UTF-8 path raised UnicodeEncodeError: {}".format(exc))
+        self.assertIn("ignored.txt", result)
 
 
 if __name__ == "__main__":
