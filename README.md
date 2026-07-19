@@ -192,8 +192,9 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 | `/grok:dual-lens` | Adversarial pass, then ordinary review on the same target. |
 | `/grok:reason` | Cold second opinion on files you name. No automatic repo crawl. Web off by default. |
 | `/grok:code` | Implements per **integration mode** (default **direct** = live tree; `auto`/`review` = external worktree off a committed `--base`). Does not commit or push. Optional `--contract-file` (writeScopes + requiredValidation; runMode hardened only). Handoff artifacts under the run dir for isolated modes. See [integration-modes.md](plugin/references/integration-modes.md). |
+| `/grok:peer` | Multi-turn **ACP peer channel** (`start` / `prompt` / `stop`). Default path for `grok-engineer-coder`; one-shot `code` is the fallback (`GROK_DISABLE_ACP=1`). Hardened runMode only. Integrates at `peer stop` per active integration mode (not via `/grok:handoff`). Does **not** claim host-level tool-approval enforcement - trusted-input peer channel. See [peer skill](plugin/skills/peer/SKILL.md) + [integration-modes.md](plugin/references/integration-modes.md). |
 | `/grok:implement` | **One-call delegate:** `code` then auto-`handoff` on the resulting runId. Relays both envelopes. Exit 0 only when code ok AND handoff dual-condition ready. Hardened runMode only (runMode direct refused). Verify-only (does not apply); for apply-on-ready use `code --integration auto`. |
-| `/grok:handoff` | **Read-only** verified implementation handoff by **`runId` only** (1.6.0+). Dual-condition ready: ready manifest + success envelope + patch rehash. Never applies (read-only). Notify is not ready. |
+| `/grok:handoff` | **Read-only** verified implementation handoff by **`runId` only** (1.6.0+). Dual-condition ready: ready manifest + success envelope + patch rehash. Never applies (read-only). Code-mode only (peer runIds refuse). Notify is not ready. |
 | `/grok:verify` | Pass/fail/inconclusive check on an existing worktree. No `--web`. |
 | `/grok:debate` | Two opposing Grok reason passes + synthesis on a topic. |
 | `/grok:status` | Jobs table, or read-only wrapper status with `--run-id` (or a bare runId - the companion translates; lifecycle projection; exit 1 can mean a failed target). |
@@ -355,13 +356,24 @@ For `code`, look for `worktreePath` / `changedFiles` in the envelope. For `verif
 
 ### Direct wrapper (no plugin)
 
-Same engine the plugin shells to:
+Same engine the plugin shells to. **Defaults differ from the product companion:**
+the companion/skills default to **integration=direct** after per-repo setup
+consent; a bare wrapper `code` call without `--integration` intentionally
+defaults to **worktree** (fail-closed isolation) so an un-consented bare call
+cannot silently edit the live tree. Pass `--integration direct` only when you
+mean the live-tree posture.
 
 ```bash
 python3 plugin/wrapper/scripts/grok_agent.py preflight
 python3 plugin/wrapper/scripts/grok_agent.py review \
   --target src/my-lib \
   --task-file task.md
+# bare code: worktree isolation by default
+python3 plugin/wrapper/scripts/grok_agent.py code \
+  --target src/my-lib --base HEAD --task-file task.md
+# explicit live-tree (same as product after consent):
+python3 plugin/wrapper/scripts/grok_agent.py code \
+  --integration direct --target src/my-lib --task-file task.md
 ```
 
 ---

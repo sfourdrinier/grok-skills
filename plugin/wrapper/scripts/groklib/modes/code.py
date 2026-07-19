@@ -610,9 +610,13 @@ def _validate_code_cli_shape(args: argparse.Namespace) -> Optional[str]:
 def run(args: argparse.Namespace) -> dict:
     """Resolve the target/base (or continue a prior run), then drive the lifecycle.
 
-    ``--integration`` defaults to ``direct`` (hardened-direct: edit the real tree).
-    ``worktree`` keeps the prior isolated-worktree posture. ``--continue-run``
-    always uses the worktree lineage (continuation reuses a retained worktree).
+    Bare-wrapper default for ``--integration`` is ``worktree`` (fail-closed
+    isolation when the flag is omitted). The product companion/skills pass
+    ``--integration direct`` explicitly only after per-repo setup consent, so
+    the *product* default is consented live-tree edits while a bare
+    ``python3 …/grok_agent.py code`` call cannot silently edit the operator
+    checkout. ``--continue-run`` always uses the worktree lineage (reuses a
+    retained worktree).
     """
     continue_id = _validate_code_cli_shape(args)
     # Bare wrapper default is the SAFE worktree; the companion passes explicit

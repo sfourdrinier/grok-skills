@@ -21,10 +21,42 @@ run. `--base` alone is framing only (live checkout). Direct mode rejects
 `code` may take optional `--contract-file` (operator-trusted writeScopes +
 requiredValidation). After Grok, the wrapper writes
 `implementation-handoff.json` + `artifacts/implementation.patch` under the run
-dir. Parents must call **`handoff --run-id`** before integrate; dual-condition
-ready requires ready manifest **and** a success terminal envelope **and** patch
-rehash. Notifications are not ready. No auto-apply. See
-`plugin/references/implementation-handoff.md`.
+dir for isolated integration paths. Parents must call **`handoff --run-id`**
+before integrating **code-mode** auto/review results; dual-condition ready
+requires ready manifest **and** a success terminal envelope **and** patch
+rehash. Notifications are not ready. Integrate is **mode-aware** (direct lands
+live; auto may apply; review is parent apply) - see
+`plugin/references/integration-modes.md`. Handoff skill itself never applies.
+Details: `plugin/references/implementation-handoff.md`.
+
+## Implementation contract load-time caps (2.0.0+)
+
+Operator contracts are validated **before** Grok spawns
+(`implementation-contract-invalid` fail-closed). Load-time invariants:
+
+| Cap / rule | Value |
+|------------|-------|
+| `schemaVersion` | must be **1** (only version accepted) |
+| `objective` | max **2000** characters when present |
+| `acceptanceCriteria` | max **32** items; each item max **500** chars after strip |
+| `writeScopes` | non-empty array of `{kind: file\|subtree, path}` |
+| `requiredValidation` | optional array; when present each entry needs non-empty string `argv[]` (no embedded NUL) |
+| Path normalization | operator paths reject Windows drive forms; Git-reported paths keep colons/backslashes as filename characters |
+
+Constants live in `plugin/wrapper/scripts/groklib/implementation_contract.py`
+(`OBJECTIVE_MAX_CHARS`, `ACCEPTANCE_CRITERIA_MAX_ITEMS`,
+`ACCEPTANCE_CRITERION_MAX_CHARS`) and are mirrored on handoff
+`contractSummary` so a tampered manifest cannot push multi-MB display fields.
+
+## Migration compatibility (2.0.0 peer-native)
+
+| Surface | Behavior |
+|---------|----------|
+| **integration default** | Product (companion/skills) defaults to **direct** after per-repo setup consent; bare `python3 …/grok_agent.py code` without `--integration` still defaults to **worktree** (fail-closed isolation for un-consented bare calls). |
+| **ACP peer channel** | Default on for `grok-engineer-coder`. Opt out with `GROK_DISABLE_ACP=1` (one-shot `code` fallback). `GROK_EXPERIMENTAL_ACP` is no longer a hard enable gate. |
+| **runMode vs integration** | Orthogonal axes that both use the word "direct". runMode=direct = installed CLI home; integration=direct = live-tree edits. See integration-modes.md. |
+| **handoff vs peer** | `/grok:handoff` remains **code-mode only** and refuses peer runIds (`handoff-unavailable`). Peer integrate runs at `peer stop` per active integration mode. |
+| **Older contracts** | schemaVersion must be 1; missing optional display fields normalize to empty; oversized objective/criteria fail at load (no silent truncation). |
 
 ## Completion notifications (1.5.0+)
 

@@ -16,6 +16,22 @@ operator-contract-trusted-no-os-sandbox
 Contract `requiredValidation` runs with `shell=False` and cwd confined to the
 worktree. There is **no** OS filesystem sandbox claim for those argv.
 
+## Contract load-time caps (fail closed before Grok)
+
+Validated by `validate_contract` /
+`plugin/wrapper/scripts/groklib/implementation_contract.py` at load
+(`implementation-contract-invalid`). Do not restate elsewhere; COMPATIBILITY
+summarizes migration.
+
+| Cap / rule | Value |
+|------------|-------|
+| `schemaVersion` | **1** only |
+| `objective` | max **2000** chars (`OBJECTIVE_MAX_CHARS`) |
+| `acceptanceCriteria` | max **32** items; each max **500** chars after strip |
+| `writeScopes` | required non-empty when a contract is present |
+| `requiredValidation` | optional; present non-array fails closed; argv tokens must not contain NUL |
+| Compatibility | optional display fields normalize empty; oversized fields **refuse** (no truncation); only schemaVersion 1 is accepted |
+
 ## Artifact layout
 
 Under the C2 state root for a code run:

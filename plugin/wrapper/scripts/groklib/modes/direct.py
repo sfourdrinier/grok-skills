@@ -1,10 +1,12 @@
 # wrapper/scripts/groklib/modes/direct.py
 #
-# `code --integration direct` (default): Grok edits the operator's real repo
-# working tree under private auth home + sandbox write-confined to the repo root
-# + post-run deny/scope/dirty guards. No external worktree. See modes/_direct.py
-# for the security honesty statement (no isolation, no rollback; deny scan is
-# post-run best-effort).
+# `code --integration direct`: Grok edits the operator's real repo working tree
+# under private auth home + sandbox write-confined to the repo root + post-run
+# deny/scope/dirty guards. No external worktree. Product companion default after
+# per-repo consent; bare wrapper still defaults to --integration worktree when
+# the flag is omitted (fail-closed). See modes/_direct.py for the security
+# honesty statement (no isolation, no full rollback; deny scan is post-run
+# best-effort).
 
 import argparse
 import pathlib

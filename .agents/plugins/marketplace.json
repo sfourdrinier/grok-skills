@@ -7,7 +7,7 @@
     {
       "name": "grok",
       "displayName": "Grok Skills",
-      "description": "Grok as a peer implementer agent for Codex / ChatGPT: delegate code to an isolated worktree, iterate with continue-run, integrate through verified handoff. Review, reason, and verify included. Not affiliated with xAI.",
+      "description": "Grok as a peer implementer for Codex / ChatGPT: default integration=direct lands consented live-tree edits; auto/review are opt-in worktrees; ACP is the default peer channel (runMode direct is a separate installed-home security posture). Review, reason, verify, continue-run, and verified handoff included. See plugin/references/integration-modes.md. Not affiliated with xAI.",
       "source": {
         "source": "local",
         "path": "./plugin"

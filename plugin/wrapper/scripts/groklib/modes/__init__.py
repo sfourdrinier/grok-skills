@@ -4,7 +4,9 @@
 # handler takes the parsed argparse.Namespace and returns a validated C4
 # envelope dict (never printing anything itself; the entrypoint is the sole
 # stdout writer). Hardened-direct is NOT a subcommand: it is reached via
-# `code --integration direct` (default) inside modes.code.run.
+# `code --integration direct` inside modes.code.run. The bare wrapper defaults
+# `--integration` to worktree (fail-closed); the product companion passes
+# direct only after per-repo consent.
 
 import argparse
 from typing import Callable, Dict

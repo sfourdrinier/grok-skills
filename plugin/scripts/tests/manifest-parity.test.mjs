@@ -158,9 +158,47 @@ test("both marketplace roots source description/keywords from the single manifes
     "coding assistant from Claude Code",
     "self-contained sandboxed wrapper",
     "Hardened Grok companion",
+    // Phase 7 peer-native: marketplace must not claim isolated-worktree-only landing.
+    "delegate code to an isolated worktree",
+    "Delegate code into isolated git worktrees",
   ]) {
     assert.ok(!blob.includes(stale), `retired marketplace wording must be gone: "${stale}"`);
   }
+
+  // Phase 7 honesty: product default is consented live-tree edit landing; auto/review
+  // are opt-in worktrees; ACP is the default peer channel; runMode direct is separate.
+  for (const desc of [
+    claudePlugin.description,
+    codexPlugin.description,
+    claudeMkt.metadata?.description,
+    claudeMkt.plugins?.[0]?.description,
+    codexMkt.plugins?.[0]?.description,
+  ]) {
+    assert.equal(typeof desc, "string");
+    assert.match(
+      desc,
+      /integration=direct|live-tree|this tree|working tree/i,
+      `description must state integration=direct / live-tree default: ${desc}`
+    );
+    assert.match(
+      desc,
+      /auto|review/,
+      `description must mention opt-in auto/review worktrees: ${desc}`
+    );
+    assert.match(desc, /\bACP\b/, `description must name ACP as peer channel: ${desc}`);
+  }
+  const codexLong = codexPlugin.interface?.longDescription || "";
+  assert.match(
+    codexLong,
+    /integration=direct|live-tree|this tree|working tree/i,
+    "Codex longDescription must state consented live-tree default"
+  );
+  assert.match(codexLong, /\bACP\b/, "Codex longDescription must name ACP");
+  assert.match(
+    codexLong,
+    /runMode|run mode|installed Grok|installed CLI/i,
+    "Codex longDescription must separate runMode direct (installed-home posture)"
+  );
 });
 
 test("gen-manifests --check exits 1 when the Codex marketplace root drifts", () => {
