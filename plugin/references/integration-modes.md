@@ -102,16 +102,15 @@ Per `(runId, targetKey)`:
 1. **Lock** - atomic mkdir
    `runs/<id>/apply-locks/<targetKey>.lock` plus a durable `owner.json`
    (`pid`, `startToken`, `acquiredAt`). Owner write failure removes the lock
-   dir and fails closed (never leaves an ownerless lock that could be
-   age-stolen).
-2. **Reclaim** - only a **positively dead** owner (dead pid or pid-reuse via
-   mismatched startToken) after a short settle may be reclaimed, and reclaim is
-   **owner-atomic**: observe the owner identity, rename the lock dir to a private
-   tombstone, recheck the moved identity, then delete only that tombstone.
-   If another process replaced the lock between observe and rename, the recheck
-   fails and the replacement is restored (never deleted). **Ownerless /
-   unknown / unreadable** locks are **never** age-reclaimed - acquire waits or
-   times out (manual cleanup if a lock is abandoned without a durable owner).
+   dir and fails closed (never leaves an ownerless lock behind).
+2. **No automatic reclaim** - Node stdlib cannot safely CAS an in-place lock
+   directory without a generation-specific exclusive name. Rename/tombstone
+   reclaim can displace a live replacement under three contenders, so acquire
+   **never** renames or deletes an existing lock dir. Live, dead, ownerless, and
+   unknown holders all wait or **time out** with owner diagnostics
+   (`liveness` / `pid` / `acquiredAt` / `looksAbandoned`). Abandoned locks need
+   **holder release or operator cleanup**, then retry. Correctness beats
+   automatic reclaim.
 3. **Marker** - durable `integration-applied-<targetKey>.json` keyed by
    `patchSha` + `targetKey` (tmp + rename, then re-read to prove presence).
 

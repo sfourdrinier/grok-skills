@@ -4,11 +4,13 @@
 // verified patch sha + target identity. Used by integrate.mjs so concurrent
 // dual peer-stop cannot reverse a winner and sequential restop is idempotent.
 // Lock uses atomic mkdir (safe-state pattern; no third-party deps) with durable
-// owner pid/startToken/timestamp. Reclaim requires positive dead/mismatched
-// owner identity - never ownerless age alone - and is owner-atomic (rename to
-// tombstone + identity recheck; replacement locks are restored, never deleted).
-// Owner write failure removes the mkdir. Marker writes are atomic (tmp + rename)
-// and return durable success.
+// owner pid/startToken/timestamp. Automatic stale reclaim is intentionally
+// disabled: Node stdlib cannot CAS an in-place lock directory without a
+// generation-specific exclusive name, and rename/tombstone reclaim can displace
+// a live replacement under three contenders. Abandoned locks time out with
+// owner diagnostics; operator cleanup / holder release is required. Owner write
+// failure removes the mkdir. Marker writes are atomic (tmp + rename) and return
+// durable success.
 
 import { createHash } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -17,7 +19,10 @@ import path from "node:path";
 
 import { runsDirFor, safeRunIdForRunsDir } from "../progress-relay.mjs";
 
-/** Default settle budget before a positively dead owner lock may be reclaimed. */
+/**
+ * Age threshold for diagnostic "looks abandoned" classification only.
+ * Automatic reclaim is disabled - this never authorizes deleting a lock.
+ */
 export const APPLY_LOCK_STALE_MS = 30_000;
 
 /**
@@ -202,21 +207,6 @@ function readOwnerDoc(lockDir) {
 }
 
 /**
- * Stable owner identity for reclaim recheck (pid + startToken + acquiredAt).
- * Null when the doc lacks a positive pid identity (unknown/ownerless).
- * @param {object|null} owner
- * @returns {string|null}
- */
-function ownerIdentityKey(owner) {
-  if (!owner || typeof owner !== "object") return null;
-  const pid = owner.pid;
-  if (!Number.isInteger(pid) || pid <= 0) return null;
-  const startToken = typeof owner.startToken === "string" ? owner.startToken : "";
-  const acquiredAt = typeof owner.acquiredAt === "string" ? owner.acquiredAt : "";
-  return `${pid}\n${startToken}\n${acquiredAt}`;
-}
-
-/**
  * Write owner.json and re-read to prove durable presence. Throws on any failure.
  * @param {string} lockDir
  */
@@ -250,10 +240,9 @@ function writeOwnerDoc(lockDir) {
 }
 
 /**
- * Whether an existing lockDir is reclaimable under bounded stale policy.
- * Live holders are never reclaimed. Dead owners (positive mismatched/dead
- * identity) may reclaim after a short settle. Unknown / ownerless locks are
- * never reclaimed on age alone - reclaim requires positive dead identity.
+ * Diagnostic only: true when owner identity looks positively dead and past the
+ * settle age. Does **not** authorize reclaim - acquire never deletes/renames an
+ * existing lock based on this signal. Unknown / ownerless / live => false.
  * @param {string} lockDir
  * @param {number} staleMs
  * @param {() => number} [nowFn]
@@ -264,7 +253,7 @@ export function isApplyLockReclaimable(lockDir, staleMs = APPLY_LOCK_STALE_MS, n
   const liveness = classifyLockOwner(owner);
   if (liveness === "alive") return false;
   if (liveness !== "dead") {
-    // unknown / ownerless / unreadable: never reclaim on age alone
+    // unknown / ownerless / unreadable: never treat as reclaimable on age alone
     return false;
   }
   let ageMs = Number.POSITIVE_INFINITY;
@@ -280,66 +269,51 @@ export function isApplyLockReclaimable(lockDir, staleMs = APPLY_LOCK_STALE_MS, n
       ageMs = Number.POSITIVE_INFINITY;
     }
   }
-  // Dead owners reclaim after a short settle (or immediately when age unknown).
   return ageMs >= Math.min(staleMs, 1_000) || !Number.isFinite(ageMs);
 }
 
 /**
- * Owner-atomic stale-lock reclaim. Observes the dead owner identity, renames the
- * lock dir to a private tombstone, rechecks that the moved owner still matches the
- * observed identity, then deletes only that tombstone. If another process replaces
- * the lock between observe and rename, the recheck fails and the replacement is
- * restored (never deleted). Live/unknown remain non-reclaimable via
- * isApplyLockReclaimable. `opts.afterObserve` is a test race hook only.
+ * Automatic stale-lock reclaim is intentionally disabled.
  *
- * @param {string} lockDir
- * @param {number} staleMs
- * @param {{afterObserve?: (ctx: {owner: object, lockDir: string}) => void}} [opts]
- * @returns {boolean}
+ * Rename/tombstone reclaim can still displace a live replacement under three
+ * contenders (A observes dead D; B replaces; A renames B to tombstone; C takes
+ * the free name; A cannot safely restore). Node stdlib has no portable CAS for
+ * in-place directory ownership without a generation-specific exclusive name.
+ * Correctness beats automatic reclaim: always return false; never rename/delete
+ * lockDir. Abandoned locks require holder release or operator cleanup.
+ *
+ * @param {string} _lockDir
+ * @param {number} [_staleMs]
+ * @param {object} [_opts]
+ * @returns {false}
  */
-export function tryReclaimLockDir(lockDir, staleMs, opts = {}) {
-  if (!isApplyLockReclaimable(lockDir, staleMs)) return false;
-  const observed = readOwnerDoc(lockDir);
-  const observedKey = ownerIdentityKey(observed);
-  // Positive dead identity is mandatory; never tombstone an unknown/ownerless lock.
-  if (!observedKey || classifyLockOwner(observed) !== "dead") return false;
+export function tryReclaimLockDir(_lockDir, _staleMs, _opts = {}) {
+  return false;
+}
 
-  if (typeof opts.afterObserve === "function") {
-    try {
-      opts.afterObserve({ owner: observed, lockDir });
-    } catch {
-      /* test hooks must not break reclaim fail-closed path */
-    }
+/**
+ * Human-readable holder diagnostics for timeout / blocked-lock messages.
+ * @param {string} lockDir
+ * @returns {string}
+ */
+export function formatApplyLockDiag(lockDir) {
+  const owner = readOwnerDoc(lockDir);
+  if (!owner) {
+    return (
+      "holder=unknown/unreadable; automatic reclaim disabled - " +
+      "release the holder or remove the lock dir after confirming it is abandoned"
+    );
   }
-
-  const tombstone = `${lockDir}.reclaim.${process.pid}.${Date.now()}.${Math.random()
-    .toString(16)
-    .slice(2, 10)}`;
-  try {
-    fs.renameSync(lockDir, tombstone);
-  } catch {
-    return false;
-  }
-
-  const moved = readOwnerDoc(tombstone);
-  const movedKey = ownerIdentityKey(moved);
-  // Recheck identity (and dead liveness) on the exact directory we renamed so a
-  // replacement lock is restored instead of deleted.
-  if (movedKey !== observedKey || classifyLockOwner(moved) !== "dead") {
-    try {
-      fs.renameSync(tombstone, lockDir);
-    } catch {
-      /* leave tombstone; better than destroying a live/unknown replacement */
-    }
-    return false;
-  }
-
-  try {
-    fs.rmSync(tombstone, { recursive: true, force: true });
-  } catch {
-    /* lock name is free even if tombstone cleanup lags */
-  }
-  return true;
+  const liveness = classifyLockOwner(owner);
+  const pid = Number.isInteger(owner.pid) ? owner.pid : "?";
+  const acquiredAt =
+    typeof owner.acquiredAt === "string" && owner.acquiredAt ? owner.acquiredAt : "?";
+  const abandoned = isApplyLockReclaimable(lockDir) ? "yes" : "no";
+  return (
+    `holder liveness=${liveness} pid=${pid} acquiredAt=${acquiredAt} ` +
+    `looksAbandoned=${abandoned}; automatic reclaim disabled - ` +
+    "release the holder or remove the lock dir after confirming it is abandoned"
+  );
 }
 
 function removeLockDirBestEffort(lockDir) {
@@ -356,12 +330,12 @@ function removeLockDirBestEffort(lockDir) {
 
 /**
  * Exclusive per-(runId, target) apply lock via atomic mkdir + durable owner record.
- * Returns release() or throws on timeout / owner-write failure. Abandoned locks
- * with positive dead owner identity are reclaimed owner-atomically (observe
- * identity, rename to tombstone, recheck, then delete); live holders and
- * ownerless / unknown locks are never stolen on age alone. If mkdir succeeds but
+ * Returns release() or throws on timeout / owner-write failure. Existing locks
+ * (live, dead, or unknown) are **never** reclaimed in place - acquire waits for
+ * holder release or times out with owner diagnostics. If mkdir succeeds but
  * owner.json cannot be written and re-read, the lock dir is removed and acquire
- * fails closed.
+ * fails closed. `opts.staleMs` is accepted for API compatibility but unused
+ * (reclaim is disabled).
  *
  * @param {string} runId
  * @param {string} targetKey
@@ -377,13 +351,12 @@ export function acquireApplyLock(
   timeoutMs = 30_000,
   opts = {}
 ) {
+  void opts; // staleMs retained for callers; automatic reclaim is disabled
   const runsDir = runsDirFor(env);
   const safe = safeRunIdForRunsDir(runId, runsDir);
   if (!safe || !targetKey) {
     throw new Error("apply lock requires safe runId and targetKey");
   }
-  const staleMs =
-    typeof opts.staleMs === "number" && opts.staleMs >= 0 ? opts.staleMs : APPLY_LOCK_STALE_MS;
   const lockDir = path.join(runsDir, safe, "apply-locks", `${targetKey}.lock`);
   fs.mkdirSync(path.dirname(lockDir), { recursive: true, mode: 0o700 });
   const start = Date.now();
@@ -392,14 +365,14 @@ export function acquireApplyLock(
       fs.mkdirSync(lockDir);
     } catch (err) {
       if (!err || err.code !== "EEXIST") throw err;
-      tryReclaimLockDir(lockDir, staleMs);
+      // Never reclaim / rename / delete an existing lock dir. Wait or timeout.
       sleepMs(15);
       continue;
     }
     try {
       writeOwnerDoc(lockDir);
     } catch (err) {
-      // Fail closed: never leave an ownerless lock that could age-reclaim.
+      // Fail closed: never leave an ownerless lock behind.
       removeLockDirBestEffort(lockDir);
       const detail = err && err.message ? String(err.message) : "owner write failed";
       throw new Error(
@@ -410,5 +383,7 @@ export function acquireApplyLock(
       removeLockDirBestEffort(lockDir);
     };
   }
-  throw new Error(`apply lock timeout for ${safe}/${targetKey}`);
+  throw new Error(
+    `apply lock timeout for ${safe}/${targetKey} (${formatApplyLockDiag(lockDir)})`
+  );
 }

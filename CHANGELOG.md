@@ -438,9 +438,10 @@ remains release-gated.
 
 - **Exclusive apply lock + durable marker (auto + peer):** per-`(runId,
   targetKey)` atomic mkdir lock + durable `owner.json` (`pid`/`startToken`/
-  `acquiredAt`); reclaim only positively dead owners after settle via
-  owner-atomic rename/tombstone + identity recheck (replacement locks restored,
-  never deleted); ownerless / unknown never age-reclaim; owner write fail
+  `acquiredAt`); **automatic stale reclaim disabled** (no in-place rename/
+  tombstone: three-contender displacement is not fixable with a pure directory
+  CAS on Node stdlib) - acquire waits or times out with owner diagnostics;
+  abandoned locks need holder release or operator cleanup; owner write fail
   removes lock dir and fails closed. Patch integrity recheck catches post-stat
   hash/read races as structured `patch unreadable` (auto/peer finalize
   `patch-integrity-failure`, never throw).
@@ -450,7 +451,7 @@ remains release-gated.
   reverse OK => revalidate under lock then heal marker; else revalidate, apply,
   finalize with marker (marker fail after apply => reverse =>
   `marker-persist-failure` or `manual-needed`). Honesty: not a TOCTOU seal;
-  abandoned ownerless locks need manual cleanup.
+  abandoned locks (including ownerless/dead) need holder release or manual cleanup.
 - **`loadPatchTouchPaths` header fail-closed:** union numstat +
   `diff --git`/rename-copy both sides; non-empty numstat makes headers
   load-bearing (`blocked-patch-headers` when empty/unparseable/uncorroborated);

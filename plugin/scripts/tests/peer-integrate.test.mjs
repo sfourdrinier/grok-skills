@@ -547,9 +547,11 @@ test("peer-stop restop: applied marker exists but operator reverted patch - not 
   }
 });
 
-test("apply lock: abandoned lock is reclaimed; live holder is never stolen", async () => {
+test("apply lock: live holder and abandoned dead lock are never stolen", async () => {
   const {
     acquireApplyLock,
+    isApplyLockReclaimable,
+    tryReclaimLockDir,
     targetIdentityKey,
   } = await import("../lib/integrate-apply-state.mjs");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-apply-lock-"));
@@ -571,11 +573,10 @@ test("apply lock: abandoned lock is reclaimed; live holder is never stolen", asy
     assert.equal(stole, false, "must not steal a live holder's lock");
     releaseLive();
 
-    // Abandoned: write a lock dir with a dead owner (pid 1 with wrong startToken or
-    // a non-existent pid) and old timestamp; reclaim must succeed.
+    // Abandoned dead owner: automatic reclaim is disabled - timeout + diagnostics;
+    // lock remains until manual cleanup / holder release.
     const release2 = acquireApplyLock(runId, targetKey, process.env, 200);
     release2();
-    // Recreate abandoned lock with dead pid owner record.
     const runsDir = path.join(xdg, "grok-skills", "runs", runId);
     const lockDir = path.join(runsDir, "apply-locks", `${targetKey}.lock`);
     fs.mkdirSync(lockDir, { recursive: true });
@@ -588,13 +589,26 @@ test("apply lock: abandoned lock is reclaimed; live holder is never stolen", asy
         acquiredAt: new Date(Date.now() - 60_000).toISOString(),
       })}\n`
     );
-    const releaseReclaim = acquireApplyLock(runId, targetKey, process.env, 500, {
-      staleMs: 1_000,
-    });
-    assert.equal(typeof releaseReclaim, "function");
-    releaseReclaim();
+    assert.equal(isApplyLockReclaimable(lockDir, 1_000), true, "diagnostic looksAbandoned");
+    assert.equal(tryReclaimLockDir(lockDir, 1_000), false, "reclaim always no-op");
+    let reclaimedDead = false;
+    let deadTimeoutMsg = "";
+    try {
+      acquireApplyLock(runId, targetKey, process.env, 80, { staleMs: 1_000 });
+      reclaimedDead = true;
+    } catch (err) {
+      deadTimeoutMsg = String(err.message || err);
+    }
+    assert.equal(reclaimedDead, false, "dead abandoned lock must not be auto-reclaimed");
+    assert.match(deadTimeoutMsg, /timeout/i);
+    assert.match(deadTimeoutMsg, /automatic reclaim disabled|looksAbandoned|manual/i);
+    assert.equal(
+      JSON.parse(fs.readFileSync(path.join(lockDir, "owner.json"), "utf8")).startToken,
+      "dead-token"
+    );
 
-    // Unknown owner but fresh age: do not reclaim (fail closed; wait/timeout).
+    // Unknown owner: do not reclaim (fail closed; wait/timeout).
+    fs.rmSync(lockDir, { recursive: true, force: true });
     fs.mkdirSync(lockDir, { recursive: true });
     fs.writeFileSync(
       path.join(lockDir, "owner.json"),
@@ -611,7 +625,7 @@ test("apply lock: abandoned lock is reclaimed; live holder is never stolen", asy
     } catch (err) {
       assert.match(String(err.message || err), /timeout/i);
     }
-    assert.equal(reclaimedUnknownFresh, false, "fresh unknown owner must not be stolen");
+    assert.equal(reclaimedUnknownFresh, false, "unknown owner must not be stolen");
   } finally {
     if (prev === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = prev;

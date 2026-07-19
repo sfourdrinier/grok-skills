@@ -116,7 +116,7 @@ Phase 7 locks product defaults (not a silent flip):
 - **auto / review** = for one-shot code, opt-in isolated worktrees (apply-on-ready vs parent apply); for ACP peer, same stop-time land/retain choice after always-external isolation
 - **ACP** = default multi-turn peer channel for `grok-engineer-coder` (opt out with `GROK_DISABLE_ACP=1`); one-shot `code` is fallback; peer is never live-edit of the operator tree during prompts
 - **runMode direct** remains a **separate** installed-home security posture (orthogonal to integration; peer is hardened-only)
-- **Shared auto/peer apply spine** (exclusive apply lock + durable marker + header-union dirty set + fail-closed ownerless reclaim) + peer-stop final-envelope / durable-terminal / single-flight lifecycle honesty; peer-stop **not** completion-notification eligible (see CHANGELOG Phase 7 final-review Fixed)
+- **Shared auto/peer apply spine** (exclusive apply lock + durable marker + header-union dirty set + fail-closed no automatic reclaim) + peer-stop final-envelope / durable-terminal / single-flight lifecycle honesty; peer-stop **not** completion-notification eligible (see CHANGELOG Phase 7 final-review Fixed)
 
 Canonical mode matrix (do not restate here): [plugin/references/integration-modes.md](../plugin/references/integration-modes.md).
 

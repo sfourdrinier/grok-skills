@@ -218,25 +218,44 @@ test("apply lock: owner-write failure removes mkdir; ownerless never age-reclaim
       fs.writeFileSync = realWrite;
     }
 
-    // 4) Positive dead identity still reclaims; durable owner is re-readable as this pid.
+    // 4) Positive dead identity is diagnostic-only; acquire does NOT reclaim it.
+    // After manual cleanup, a fresh acquire writes durable self owner.
     fs.mkdirSync(lockDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(lockDir, "owner.json"),
-      `${JSON.stringify({
-        schemaVersion: 1,
-        pid: 999999991,
-        startToken: "dead-token",
-        acquiredAt: new Date(Date.now() - 60_000).toISOString(),
-      })}\n`
+    const deadBody = {
+      schemaVersion: 1,
+      pid: 999999991,
+      startToken: "dead-token",
+      acquiredAt: new Date(Date.now() - 60_000).toISOString(),
+    };
+    fs.writeFileSync(path.join(lockDir, "owner.json"), `${JSON.stringify(deadBody)}\n`);
+    assert.equal(
+      isApplyLockReclaimable(lockDir, 1_000),
+      true,
+      "dead+stale looks abandoned (diagnostic)"
     );
-    const releaseDead = acquireApplyLock(runId, targetKey, process.env, 500, {
-      staleMs: 1_000,
-    });
-    assert.equal(typeof releaseDead, "function");
-    assert.equal(fs.existsSync(path.join(lockDir, "owner.json")), true);
+    let stoleDead = false;
+    let deadErr = "";
+    try {
+      acquireApplyLock(runId, targetKey, process.env, 80, { staleMs: 1_000 });
+      stoleDead = true;
+    } catch (err) {
+      deadErr = String(err.message || err);
+    }
+    assert.equal(stoleDead, false, "must not reclaim dead lock automatically");
+    assert.match(deadErr, /timeout/i);
+    assert.match(deadErr, /automatic reclaim disabled|looksAbandoned|manual/i, deadErr);
+    const stillDead = JSON.parse(
+      fs.readFileSync(path.join(lockDir, "owner.json"), "utf8")
+    );
+    assert.equal(stillDead.pid, 999999991);
+    assert.equal(stillDead.startToken, "dead-token");
+    // Manual cleanup then acquire succeeds with durable self owner.
+    fs.rmSync(lockDir, { recursive: true, force: true });
+    const release = acquireApplyLock(runId, targetKey, process.env, 500);
+    assert.equal(typeof release, "function");
     const owner = JSON.parse(fs.readFileSync(path.join(lockDir, "owner.json"), "utf8"));
     assert.equal(owner.pid, process.pid);
-    releaseDead();
+    release();
   } finally {
     if (prev === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = prev;
@@ -244,17 +263,22 @@ test("apply lock: owner-write failure removes mkdir; ownerless never age-reclaim
   }
 });
 
-test("apply lock: reclaim is owner-atomic; replacement lock survives race", async () => {
-  // TOCTOU: after a stale checker decides reclaim is OK, a fresh owner can replace
-  // the lock before delete. Reclaim must rename/tombstone only the observed owner
-  // identity and restore on mismatch - never rmSync a replacement.
+test("apply lock: no automatic reclaim under 3-contender race (fail closed)", async () => {
+  // Three contenders on one lock name:
+  //   D - dead abandoned owner already on disk
+  //   A - stale reclaimer/acquirer that would previously rename D (or B) away
+  //   B - fresh live replacement
+  //   C - third acquirer after any displacement
+  // Protocol must never rename/delete an existing lockDir; A and C time out;
+  // B remains sole holder; no contender can release another's lock.
   const {
     acquireApplyLock,
     tryReclaimLockDir,
     isApplyLockReclaimable,
+    formatApplyLockDiag,
     targetIdentityKey,
   } = await import("../lib/integrate-apply-state.mjs");
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-apply-lock-race-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-apply-lock-3race-"));
   const xdg = path.join(root, "xdg");
   const prev = process.env.XDG_STATE_HOME;
   process.env.XDG_STATE_HOME = xdg;
@@ -262,6 +286,10 @@ test("apply lock: reclaim is owner-atomic; replacement lock survives race", asyn
   const targetKey = targetIdentityKey(root);
   const runsDir = path.join(xdg, "grok-skills", "runs", runId);
   const lockDir = path.join(runsDir, "apply-locks", `${targetKey}.lock`);
+  const realRename = fs.renameSync;
+  const realRm = fs.rmSync;
+  let renameOnLock = 0;
+  let rmOnLock = 0;
   try {
     fs.mkdirSync(lockDir, { recursive: true });
     const deadOwner = {
@@ -270,84 +298,93 @@ test("apply lock: reclaim is owner-atomic; replacement lock survives race", asyn
       startToken: "dead-token-stale",
       acquiredAt: new Date(Date.now() - 60_000).toISOString(),
     };
-    fs.writeFileSync(
-      path.join(lockDir, "owner.json"),
-      `${JSON.stringify(deadOwner)}\n`
-    );
-    assert.equal(
-      isApplyLockReclaimable(lockDir, 1_000),
-      true,
-      "precondition: dead owner is reclaimable"
-    );
+    fs.writeFileSync(path.join(lockDir, "owner.json"), `${JSON.stringify(deadOwner)}\n`);
+    assert.equal(isApplyLockReclaimable(lockDir, 1_000), true);
 
-    let paused = false;
-    const reclaimed = tryReclaimLockDir(lockDir, 1_000, {
-      afterObserve: () => {
-        paused = true;
-        // Fresh holder replaces the stale lock while the reclaimer is paused.
-        fs.rmSync(lockDir, { recursive: true, force: true });
-        fs.mkdirSync(lockDir, { recursive: true });
-        fs.writeFileSync(
-          path.join(lockDir, "owner.json"),
-          `${JSON.stringify({
-            schemaVersion: 1,
-            pid: process.pid,
-            startToken: "fresh-live-owner",
-            acquiredAt: new Date().toISOString(),
-          })}\n`
-        );
-      },
-    });
-    assert.equal(paused, true, "race hook must run after observe");
-    assert.equal(reclaimed, false, "must not reclaim after owner identity changed");
-    assert.equal(fs.existsSync(lockDir), true, "replacement lock dir must remain");
-    const survivor = JSON.parse(
-      fs.readFileSync(path.join(lockDir, "owner.json"), "utf8")
-    );
-    assert.equal(survivor.startToken, "fresh-live-owner");
-    assert.equal(survivor.pid, process.pid);
+    fs.renameSync = function patchedRename(from, to) {
+      if (String(from) === lockDir || String(to) === lockDir) renameOnLock += 1;
+      return realRename.call(this, from, to);
+    };
+    fs.rmSync = function patchedRm(p, opts) {
+      if (String(p) === lockDir) rmOnLock += 1;
+      return realRm.call(this, p, opts);
+    };
 
-    // Live/unknown still fail closed (no steal via reclaim).
-    assert.equal(isApplyLockReclaimable(lockDir, 1_000), false);
+    // Contender A: tryReclaim is a permanent no-op (never renames/deletes).
     assert.equal(tryReclaimLockDir(lockDir, 1_000), false);
-    assert.equal(fs.existsSync(path.join(lockDir, "owner.json")), true);
+    let aAcquired = false;
+    let aErr = "";
+    try {
+      acquireApplyLock(runId, targetKey, process.env, 80, { staleMs: 1_000 });
+      aAcquired = true;
+    } catch (err) {
+      aErr = String(err.message || err);
+    }
+    assert.equal(aAcquired, false, "A must not acquire over dead D");
+    assert.match(aErr, /timeout/i);
+    assert.match(aErr, /automatic reclaim disabled|looksAbandoned|manual/i, aErr);
+    assert.equal(renameOnLock, 0, "A must never rename the lock dir");
+    assert.equal(rmOnLock, 0, "A must never rm the lock dir on reclaim path");
+    assert.equal(
+      JSON.parse(fs.readFileSync(path.join(lockDir, "owner.json"), "utf8")).startToken,
+      "dead-token-stale",
+      "D must remain undisturbed"
+    );
+    assert.match(formatApplyLockDiag(lockDir), /looksAbandoned=yes|automatic reclaim disabled/i);
 
-    // Dead owner reclaim still works (positive identity, no race).
+    // Contender B: operator-style replacement (or a prior legitimate release+acquire)
+    // becomes the sole live holder under the exclusive name.
+    fs.rmSync = realRm;
+    fs.renameSync = realRename;
     fs.rmSync(lockDir, { recursive: true, force: true });
-    fs.mkdirSync(lockDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(lockDir, "owner.json"),
-      `${JSON.stringify({
-        schemaVersion: 1,
-        pid: 999999992,
-        startToken: "dead-token-ok",
-        acquiredAt: new Date(Date.now() - 60_000).toISOString(),
-      })}\n`
-    );
-    assert.equal(tryReclaimLockDir(lockDir, 1_000), true);
-    assert.equal(fs.existsSync(lockDir), false, "dead owner lock removed");
-
-    // acquireApplyLock still reclaims dead and writes durable self owner.
-    fs.mkdirSync(lockDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(lockDir, "owner.json"),
-      `${JSON.stringify({
-        schemaVersion: 1,
-        pid: 999999993,
-        startToken: "dead-for-acquire",
-        acquiredAt: new Date(Date.now() - 60_000).toISOString(),
-      })}\n`
-    );
-    const release = acquireApplyLock(runId, targetKey, process.env, 500, {
-      staleMs: 1_000,
-    });
-    assert.equal(typeof release, "function");
-    const selfOwner = JSON.parse(
+    const releaseB = acquireApplyLock(runId, targetKey, process.env, 500);
+    assert.equal(typeof releaseB, "function");
+    const bOwnerBefore = JSON.parse(
       fs.readFileSync(path.join(lockDir, "owner.json"), "utf8")
     );
-    assert.equal(selfOwner.pid, process.pid);
-    release();
+    assert.equal(bOwnerBefore.pid, process.pid);
+
+    // Contender C: concurrent acquire against live B - timeout, B intact.
+    renameOnLock = 0;
+    rmOnLock = 0;
+    fs.renameSync = function patchedRename(from, to) {
+      if (String(from) === lockDir || String(to) === lockDir) renameOnLock += 1;
+      return realRename.call(this, from, to);
+    };
+    fs.rmSync = function patchedRm(p, opts) {
+      if (String(p) === lockDir) rmOnLock += 1;
+      return realRm.call(this, p, opts);
+    };
+    let cAcquired = false;
+    let cRelease = null;
+    try {
+      cRelease = acquireApplyLock(runId, targetKey, process.env, 80);
+      cAcquired = true;
+    } catch (err) {
+      assert.match(String(err.message || err), /timeout/i);
+    }
+    assert.equal(cAcquired, false, "C must not acquire over live B");
+    assert.equal(cRelease, null, "C must not obtain a release handle");
+    assert.equal(renameOnLock, 0, "C must never rename B's lock");
+    assert.equal(rmOnLock, 0, "C must never rm B's lock");
+    const bOwnerAfter = JSON.parse(
+      fs.readFileSync(path.join(lockDir, "owner.json"), "utf8")
+    );
+    assert.equal(bOwnerAfter.pid, bOwnerBefore.pid);
+    assert.equal(bOwnerAfter.startToken, bOwnerBefore.startToken);
+    assert.equal(bOwnerAfter.acquiredAt, bOwnerBefore.acquiredAt);
+
+    // Only B may release; after B releases, a new acquire can succeed.
+    fs.renameSync = realRename;
+    fs.rmSync = realRm;
+    releaseB();
+    assert.equal(fs.existsSync(lockDir), false);
+    const releaseAfter = acquireApplyLock(runId, targetKey, process.env, 500);
+    assert.equal(typeof releaseAfter, "function");
+    releaseAfter();
   } finally {
+    fs.renameSync = realRename;
+    fs.rmSync = realRm;
     if (prev === undefined) delete process.env.XDG_STATE_HOME;
     else process.env.XDG_STATE_HOME = prev;
     fs.rmSync(root, { recursive: true, force: true });
