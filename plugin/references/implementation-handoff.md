@@ -114,15 +114,15 @@ Mode-aware integrate (canonical:
 
 ### Manual apply (review / when auto did not apply)
 
-1. `handoff --run-id` success + ready  
-2. Confirm base still present / ancestry  
-3. Dirty overlap inventory on target paths (`git status --porcelain -z`)  
+1. `handoff --run-id` success + ready
+2. Confirm base still present / ancestry
+3. Dirty overlap inventory on target paths (`git status --porcelain -z`)
 4. Explicit patch integrity recheck: on-disk patch bytes/size/sha still match the
-   handoff manifest (same integrity gate auto/peer re-run before apply)  
-5. `git apply --check --binary path/to/implementation.patch`  
-6. Explicit apply only with operator intent  
-7. Re-run project validation on parent  
-8. Record runId + patch sha256  
+   handoff manifest (same integrity gate auto/peer re-run before apply)
+5. `git apply --check --binary path/to/implementation.patch`
+6. Explicit apply only with operator intent
+7. Re-run project validation on parent
+8. Record runId + patch sha256
 
 **Never** auto-commit, merge, cherry-pick, or push from this plugin in any mode.
 

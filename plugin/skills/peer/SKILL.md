@@ -111,11 +111,15 @@ node "$SKILL_BASE/run.mjs" cleanup --run-id '<id>' --confirm
 
 ## Safety notes
 
-- Start parity plants cwd sentinel, private home, tool allowlist, and baseline
-  before spawn (fail closed if unmet). The ACP child is spawned with the same
-  global C6 tool / permission / web / sandbox pins the running envelope
-  advertises (probe-accepted globals before `agent stdio`). Peer-stop reuses
-  the **start** baseline (never re-captured at stop).
+- Start parity requires/verifies the cwd sentinel **contract** (sandbox
+  capability, tool allowlist, private home, baseline, no `.env`) before spawn
+  and fails closed if unmet, but does **not** plant the sentinel. The model
+  creates `.grok-run-<run-id>` as its mandatory first action on the first
+  peer-prompt (same as code mode), so stop-time sentinel proof is genuine.
+  The ACP child is spawned with the same global C6 tool / permission / web /
+  sandbox pins the running envelope advertises (probe-accepted globals before
+  `agent stdio`). Peer-stop reuses the **start** baseline (never re-captured
+  at stop).
 - `pre_tool_use` may appear as an initialize **capability**; the wrapper does
   **not** register a deny hook (documented NON-enforcement). OS sandbox + C6
   pins are the real layers. Peer does **not** claim full code-mode isolation

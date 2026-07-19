@@ -122,8 +122,10 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 
 - **ACP peer channel** (hardened only; wrapper + companion): `peer
   start|prompt|stop` drive a long-lived `grok agent stdio` (ACP) session with
-  start parity (sandbox capability, tool allowlist, cwd sentinel, baseline, no
-  .env) before the first prompt. Wrapper-owned 0600 control socket (not a FIFO);
+  start parity (sandbox capability, tool allowlist, cwd sentinel contract, baseline,
+  no .env) before the first prompt - start verifies the contract and does not plant
+  the sentinel; the model creates it on first prompt. Wrapper-owned 0600 control
+  socket (not a FIFO);
   peer.json records wrapper+child pid/starttime and the start
   `originalBaseline`; run.json records `worktreePath` / lifecycle so
   `cleanup --run-id` can remove the external worktree after peer-stop
@@ -325,6 +327,18 @@ three batches. Two release-blockers were real.
 
 Every applicable review finding was fixed (no deferrals). Comments that were
 already resolved or stale after the re-architecture are noted as such above.
+
+### Fixed (Phase 7 - docs/runtime honesty residual)
+
+- **Start parity sentinel honesty:** `plugin/skills/peer/SKILL.md` and the ACP
+  peer-channel design spec now match `peer_process.assert_start_parity` - start
+  requires/verifies the cwd sentinel **contract** but does **not** plant it; the
+  model creates the sentinel on first prompt. Phase 5 changelog wording updated
+  to say "sentinel contract" the same way.
+- **ACP `clientInfo.version`:** initialize advertises packaging-stable `2.0.0`
+  (not `experimental`); unit coverage asserts the initialize payload.
+- **implementation-handoff checklist:** trailing whitespace removed from the
+  parent-apply numbered list (`git diff --check` clean).
 
 **Round 2** (the review bot re-scanned each commit and found further issues,
 including regressions in the round-1 fixes): direct git-guard now content-hashes

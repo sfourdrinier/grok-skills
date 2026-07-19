@@ -38,6 +38,9 @@ _FAKE_PEER = textwrap.dedent(
         method = msg.get("method")
         mid = msg.get("id")
         if method == "initialize":
+            # Echo clientInfo so tests can assert the honest plugin version id
+            # the wrapper advertises (stable packaging version, not "experimental").
+            params = msg.get("params") or {}
             write_msg({
                 "jsonrpc": "2.0",
                 "id": mid,
@@ -48,6 +51,7 @@ _FAKE_PEER = textwrap.dedent(
                         "promptCapabilities": {"embeddedContext": True},
                         "mcpCapabilities": {"http": True, "sse": True},
                     },
+                    "echoedClientInfo": params.get("clientInfo"),
                     "_meta": {
                         "x.ai/hooks": {
                             "blockingEvents": ["pre_tool_use"],
@@ -159,6 +163,28 @@ class AcpFramingTests(unittest.TestCase):
             self.assertEqual(prompt_result.get("stopReason"), "end_turn")
             self.assertEqual(len(chunks), 2)
             client.session_cancel(session_id="sess-fake-1")
+        finally:
+            proc.kill()
+            proc.wait(timeout=5)
+
+    def test_initialize_client_info_uses_stable_plugin_version(self) -> None:
+        """clientInfo.version must be the packaging id (2.0.0), not experimental."""
+        from groklib import acp
+
+        proc = subprocess.Popen(
+            [sys.executable, "-u", str(self.peer_script)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+        )
+        try:
+            client = acp.AcpClient(proc, timeout_seconds=5)
+            result = client.initialize()
+            echoed = result.get("echoedClientInfo") or {}
+            self.assertEqual(echoed.get("name"), "grok-skills-wrapper")
+            self.assertEqual(echoed.get("version"), "2.0.0")
+            self.assertNotEqual(echoed.get("version"), "experimental")
         finally:
             proc.kill()
             proc.wait(timeout=5)

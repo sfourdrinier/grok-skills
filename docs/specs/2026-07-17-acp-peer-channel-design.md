@@ -58,11 +58,15 @@ private-home destroy, terminalize run record.
 ## Confinement and isolation (honest parity)
 
 - Start parity (fail closed before first prompt): sandbox profile capability,
-  tool allowlist (or hard-refuse if empty), mcpServers [], web policy, cwd
-  sentinel planted, original_baseline + pristine gate scripts captured, no
-  .env copy. Child argv pins the same global C6 tool / permission / web /
-  sandbox flags the running envelope advertises (probe-accepted placement
-  before `agent stdio`; see `peer_process.build_acp_stdio_argv`).
+  tool allowlist (or hard-refuse if empty), mcpServers [], web policy,
+  original_baseline + pristine gate scripts captured, no .env copy. Start
+  parity requires/verifies the cwd sentinel **contract** but does **not**
+  plant the sentinel - the model creates `.grok-run-<run-id>` as its mandatory
+  first action on the first peer-prompt (same as code mode; see
+  `peer_process.assert_start_parity`), so stop-time proof is genuine. Child
+  argv pins the same global C6 tool / permission / web / sandbox flags the
+  running envelope advertises (probe-accepted placement before `agent stdio`;
+  see `peer_process.build_acp_stdio_argv`).
 - Stop: `verify_enforcement` against the private home/policy when possible.
   Failure adds a `sandbox-failure` blocker (forces not-ready).
   Do **not** claim "full code-mode isolation stack" when ACP did not produce
@@ -155,7 +159,8 @@ with `applied=true`. Peer-stop is **not** completion-notification eligible
 2. CRASH/REAPER: peer.json records wrapper + child pid/starttime; MAX_PEER_LEASE
    separate from MAX_RUN_TIMEOUT; start baseline persisted for crash-stop.
 3. START PARITY: fail closed before first prompt (sandbox capability, tools,
-   mcpServers [], web, sentinel, baseline, no .env).
+   mcpServers [], web, sentinel contract (not planted; model creates on first
+   prompt), baseline, no .env).
 4. REDACTION: control-socket + turn envelopes scanned; multi-frame residual
    risk documented; child stderr dropped or redacted.
 5. HANDOFF: `/grok:handoff` is code-mode only (refuses peer runIds); peer runs

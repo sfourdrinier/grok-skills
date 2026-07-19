@@ -247,7 +247,7 @@ class AcpClient:
             "initialize",
             {
                 "protocolVersion": _PROTOCOL_VERSION,
-                "clientInfo": {"name": "grok-skills-wrapper", "version": "experimental"},
+                "clientInfo": {"name": "grok-skills-wrapper", "version": "2.0.0"},
                 "capabilities": {},
             },
         )
