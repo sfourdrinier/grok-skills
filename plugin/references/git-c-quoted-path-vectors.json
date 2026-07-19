@@ -122,6 +122,33 @@
       "rest": "\"a/quote\\\"here.txt\" \"b/quote\\\"here.txt\"",
       "expected": ["quote\"here.txt", "quote\"here.txt"],
       "appliesTo": ["python"]
+    },
+    {
+      "id": "unquoted-literal-space-b-slash-same-path",
+      "rest": "a/x b/y.txt b/x b/y.txt",
+      "expected": ["x b/y.txt", "x b/y.txt"],
+      "appliesTo": ["python"],
+      "note": "Real git emits unquoted a/<path> b/<path> even when path contains literal ' b/'. Dual-condition parser must prefer the equal strip(a)==strip(b) separator, not the first ' b/' substring."
+    },
+    {
+      "id": "unquoted-literal-space-b-slash-rename",
+      "rest": "a/x b/y.txt b/z b/w.txt",
+      "expected": null,
+      "appliesTo": ["python"],
+      "note": "Ambiguous unquoted rename with ' b/' in both sides has multiple reconstructible splits; fail closed rather than guess."
+    },
+    {
+      "id": "unquoted-spaces-no-b-slash-in-path",
+      "rest": "a/my dir/f.txt b/my dir/f.txt",
+      "expected": ["my dir/f.txt", "my dir/f.txt"],
+      "appliesTo": ["python"]
+    },
+    {
+      "id": "unquoted-first-quoted-second-with-literal-b-slash",
+      "rest": "a/x b/y.txt \"b/x b/y.txt\"",
+      "expected": ["x b/y.txt", "x b/y.txt"],
+      "appliesTo": ["python"],
+      "note": "Second side C-quoted: first-side end is the space before the opening quote (not first ' b/')."
     }
   ],
   "devNullExclusion": [

@@ -352,6 +352,41 @@ class Phase1SecretScanTests(unittest.TestCase):
         # UTF-8 replace path is weaker; latin-1 path is what production uses.
         scan_patch_bytes_for_secrets(b"hello without credentials")
 
+    def test_opaque_injected_denylist_token_blocks_patch_write(self) -> None:
+        """Exact injected denylist values must fail closed even without pattern shape.
+
+        Opaque 40-char tokens match none of _SECRET_VALUE_PATTERNS; only the
+        per-run injectedsecrets denylist SSOT can catch them in patch bytes.
+        """
+        from groklib import injectedsecrets
+        from groklib.handoff_patch import scan_patch_bytes_for_secrets
+        from groklib.envelope import SecretMaterialError
+
+        # Split so fixtures never hold a contiguous secret-shaped literal.
+        opaque = "a1b2c3d4e5f6" + "g7h8i9j0k1l2" + "m3n4o5p6q7r8" + "s9t0"
+        self.addCleanup(injectedsecrets.clear_injected_secret_denylist)
+        injectedsecrets.clear_injected_secret_denylist()
+        injectedsecrets.set_injected_secret_denylist([opaque])
+
+        with self.assertRaises(SecretMaterialError):
+            scan_patch_bytes_for_secrets(
+                ("diff body with leaked " + opaque + " value\n").encode("utf-8")
+            )
+
+        (self.repo / "leaked.txt").write_text(
+            "token=" + opaque + "\n", encoding="utf-8"
+        )
+        meta, path, tree, blockers, steps = capture_phase1_patch(
+            worktree_path=self.repo,
+            base_revision=self.base,
+            artifacts_dir=self.artifacts,
+            run_id="20260716T020408Z-a82843",
+        )
+        self.assertIsNone(meta)
+        self.assertIsNone(path)
+        self.assertTrue(any(b.kind == "secret-material" for b in blockers))
+        self.assertFalse((self.artifacts / "implementation.patch").is_file())
+
 
 class TapFailureLinesTests(unittest.TestCase):
     """tap_failure_lines surfaces failing test names from validation stdout tails."""

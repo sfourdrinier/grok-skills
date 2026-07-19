@@ -10,7 +10,7 @@ import secrets
 import subprocess
 from typing import List, Optional, Sequence, Tuple
 
-from groklib import GrokWrapperError, log_stderr, platformsupport
+from groklib import GrokWrapperError, injectedsecrets, log_stderr, platformsupport
 from groklib import path_inventory
 from groklib import worktree as worktree_mod
 from groklib.envelope import assert_no_secret_material, SecretMaterialError
@@ -48,13 +48,37 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _assert_no_injected_denylist_in_text(text: str) -> None:
+    """Fail closed when any current injected-credential denylist value occurs.
+
+    Exact denylist occurrence is the SSOT for opaque tokens that match none of
+    ``_SECRET_VALUE_PATTERNS``. Casefold matches the redaction helper so casing
+    variants of the same injected credential still block the patch.
+    """
+    denylist = injectedsecrets.current_injected_secret_denylist()
+    if not denylist or not text:
+        return
+    folded = text.casefold()
+    for secret in denylist:
+        if not secret:
+            continue
+        if secret in text or secret.casefold() in folded:
+            raise SecretMaterialError(
+                "injected credential denylist value found in patch",
+                {"source": "injected-secret-denylist"},
+            )
+
+
 def scan_patch_bytes_for_secrets(patch_bytes: bytes) -> None:
-    """Fail closed if patch bytes contain secret-shaped material.
+    """Fail closed if patch bytes contain secret-shaped or injected material.
 
     Decodes as latin-1 (1:1 with bytes) so ASCII credentials embedded in binary
-    git patch segments still match; UTF-8 replace would destroy them.
+    git patch segments still match; UTF-8 replace would destroy them. Pattern
+    shapes and the per-run injected denylist both apply (never instead of).
     """
-    assert_no_secret_material(patch_bytes.decode("latin-1"))
+    text = patch_bytes.decode("latin-1")
+    _assert_no_injected_denylist_in_text(text)
+    assert_no_secret_material(text)
 
 
 def _run_git_env(repo: pathlib.Path, args: Sequence[str], env: Optional[dict] = None) -> subprocess.CompletedProcess:

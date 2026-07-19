@@ -3,7 +3,7 @@
 # Single NUL-safe source of truth for repo-relative path inventories from git.
 # Non -z path listers C-quote non-ASCII names under default core.quotePath
 # (e.g. café.txt -> "caf\303\251.txt"). Callers must use these helpers (raw -z
-# via the shared worktree git runner + NUL split) and never C-unquote
+# via the shared worktree bytes git runner + NUL split) and never C-unquote
 # already-raw -z paths. Consumed by worktree_escape fingerprinting/escape
 # checks, worktree diff_summary / tree-to-tree listings, and handoff_patch
 # changed-path lists.
@@ -25,8 +25,8 @@ def decode_nul_paths(payload: Union[bytes, str]) -> List[str]:
     """Decode a NUL-separated path inventory; never C-unquote.
 
     ``git ... -z`` already emits raw path bytes/text. Bytes use surrogateescape
-    so non-UTF-8 pathnames survive fingerprinting; str payloads (from the shared
-    worktree text runner after a -z call) are split on NUL only.
+    so non-UTF-8 pathnames survive fingerprinting; str payloads (legacy text
+    runners) are split on NUL only and cannot recover destroyed bytes.
     """
     if not payload:
         return []
@@ -47,6 +47,11 @@ def _stderr_text(completed) -> str:
     return str(raw).strip()
 
 
+def _run_inventory_git(repo: pathlib.Path, args: tuple) -> "object":
+    """Run inventory git via the shared bytes runner (surrogateescape-ready)."""
+    return worktree._run_git_bytes(repo, args)
+
+
 def list_diff_name_only(
     repo: pathlib.Path,
     *revisions: str,
@@ -55,10 +60,11 @@ def list_diff_name_only(
     """Return repo-relative paths from ``git diff --name-only -z`` (exit 0 or 1).
 
     Accepts zero, one, or two revision args (working-tree vs base, or tree-to-tree).
-    Non-(0,1) exits fail closed so inventories never silently shrink.
+    Non-(0,1) exits fail closed so inventories never silently shrink. Git is
+    invoked in bytes mode; NUL fields decode via utf-8 surrogateescape.
     """
     args = ("diff", "--name-only", "-z", *revisions)
-    completed = worktree._run_git(repo, args)
+    completed = _run_inventory_git(repo, args)
     if completed.returncode not in (0, 1):
         _log(
             "list_diff_name_only",
@@ -75,7 +81,7 @@ def list_diff_name_only(
                 "argv": ["git", "-C", str(repo)] + list(args),
             },
         )
-    return decode_nul_paths(completed.stdout or "")
+    return decode_nul_paths(completed.stdout or b"")
 
 
 def list_ls_files(
@@ -85,7 +91,7 @@ def list_ls_files(
 ) -> List[str]:
     """Return repo-relative paths from ``git ls-files -z`` plus ``extra_args``."""
     args = ("ls-files", "-z", *extra_args)
-    completed = worktree._run_git(repo, args)
+    completed = _run_inventory_git(repo, args)
     if completed.returncode != 0:
         _log(
             "list_ls_files",
@@ -102,7 +108,7 @@ def list_ls_files(
                 "argv": ["git", "-C", str(repo)] + list(args),
             },
         )
-    return decode_nul_paths(completed.stdout or "")
+    return decode_nul_paths(completed.stdout or b"")
 
 
 def list_working_tree_changed_paths(

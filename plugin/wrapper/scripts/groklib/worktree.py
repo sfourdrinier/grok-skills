@@ -88,18 +88,15 @@ def _git_env(env: Optional[Dict[str, str]] = None) -> Dict[str, str]:
     return merged
 
 
-def _run_git(
+def _run_git_bytes(
     repo: pathlib.Path, args: Sequence[str], env: Optional[Dict[str, str]] = None
 ) -> "subprocess.CompletedProcess":
-    """Run a git command in ``repo`` as an argv list (never shell) and return the completed process.
+    """Run git in ``repo`` capturing raw stdout/stderr bytes (no text decode).
 
-    Raises GrokWrapperError("worktree-failure") only when the git binary itself
-    cannot be executed (OSError). A non-zero exit is returned to the caller so
-    boolean probes (ancestry, ref existence) can inspect the status; commands
-    that must succeed go through _git, which raises on non-zero. ``env``, when
-    supplied, replaces the child environment (used to redirect GIT_INDEX_FILE so
-    a snapshot never mutates the real index); None inherits the parent env.
-    Always disables hooks via core.hooksPath.
+    SSOT for callers that must preserve non-UTF-8 path bytes (path_inventory -z
+    inventories, binary patches). Text-mode ``_run_git`` is a thin decode wrapper
+    over this. Raises GrokWrapperError("worktree-failure") only when git cannot
+    be executed; non-zero exits are returned to the caller.
     """
     argv = [
         "git",
@@ -113,21 +110,51 @@ def _run_git(
             argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            encoding="utf-8",
             env=_git_env(env),
             timeout=_GIT_TIMEOUT_SECONDS,
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        # A bounded wall-clock timeout guards a hung git the same way the verify
-        # mode's git helper did (T3 unified this source); a spawn failure or a
-        # timeout is a fail-closed worktree-failure.
-        _log("_run_git", "git could not be executed: {}: {}".format(argv, exc))
+        _log("_run_git_bytes", "git could not be executed: {}: {}".format(argv, exc))
         raise GrokWrapperError(
             "worktree-failure",
             "git could not be executed: {}".format(exc),
             {"argv": argv},
         ) from exc
+
+
+def _run_git(
+    repo: pathlib.Path, args: Sequence[str], env: Optional[Dict[str, str]] = None
+) -> "subprocess.CompletedProcess":
+    """Run a git command in ``repo`` as an argv list (never shell) and return the completed process.
+
+    Raises GrokWrapperError("worktree-failure") only when the git binary itself
+    cannot be executed (OSError). A non-zero exit is returned to the caller so
+    boolean probes (ancestry, ref existence) can inspect the status; commands
+    that must succeed go through _git, which raises on non-zero. ``env``, when
+    supplied, replaces the child environment (used to redirect GIT_INDEX_FILE so
+    a snapshot never mutates the real index); None inherits the parent env.
+    Always disables hooks via core.hooksPath. Stdout/stderr are UTF-8 text
+    (replacement on invalid bytes); callers that need raw path bytes use
+    ``_run_git_bytes`` instead.
+    """
+    completed = _run_git_bytes(repo, args, env=env)
+    stdout = completed.stdout or b""
+    stderr = completed.stderr or b""
+    if isinstance(stdout, bytes):
+        stdout_text = stdout.decode("utf-8", errors="replace")
+    else:
+        stdout_text = str(stdout)
+    if isinstance(stderr, bytes):
+        stderr_text = stderr.decode("utf-8", errors="replace")
+    else:
+        stderr_text = str(stderr)
+    return subprocess.CompletedProcess(
+        args=completed.args,
+        returncode=completed.returncode,
+        stdout=stdout_text,
+        stderr=stderr_text,
+    )
 
 
 def _git(repo: pathlib.Path, *args: str, env: Optional[Dict[str, str]] = None) -> str:

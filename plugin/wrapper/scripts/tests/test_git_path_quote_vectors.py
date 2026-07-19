@@ -103,6 +103,54 @@ class GitPathQuoteGoldenVectorTests(unittest.TestCase):
                 got = parse_diff_git_header_paths(case["rest"])
                 self.assertIsNone(got, "malformed header must fail closed (None)")
 
+    def test_real_git_header_for_path_with_literal_space_b_slash(self) -> None:
+        """End-to-end: real git emits 'a/x b/y.txt b/x b/y.txt'; parser must keep path."""
+        import shutil
+        import subprocess
+        import tempfile
+
+        from groklib.implementation_handoff import paths_from_git_patch
+        from tests import gitfixtures
+
+        tmp = tempfile.mkdtemp(prefix="grok-diff-git-bslash-")
+        self.addCleanup(lambda: shutil.rmtree(tmp, ignore_errors=True))
+        repo = gitfixtures.make_repo(tmp)
+        # Isolate the weird path as the only staged change.
+        subprocess.run(
+            ["git", "-C", str(repo), "checkout", "--", "."],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo), "clean", "-fdq"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        weird_dir = repo / "x b"
+        weird_dir.mkdir()
+        (weird_dir / "y.txt").write_text("payload\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "-C", str(repo), "add", "-A"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        patch = subprocess.check_output(
+            ["git", "-C", str(repo), "diff", "--cached", "--no-ext-diff"]
+        )
+        header_line = next(
+            line
+            for line in patch.splitlines()
+            if line.startswith(b"diff --git ") and b"x b/y.txt" in line
+        )
+        rest = header_line[len(b"diff --git ") :].decode("utf-8", errors="surrogateescape")
+        self.assertEqual(rest, "a/x b/y.txt b/x b/y.txt")
+        # Dual-condition: header parser and paths_from_git_patch agree.
+        self.assertEqual(parse_diff_git_header_paths(rest), ("x b/y.txt", "x b/y.txt"))
+        self.assertIn("x b/y.txt", paths_from_git_patch(patch))
+
 
 if __name__ == "__main__":
     unittest.main()
