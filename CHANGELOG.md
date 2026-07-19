@@ -381,6 +381,12 @@ and quote the contract path. Suite: wrapper 809, plugin 285.
   axis only), plus adjacent workflow-patterns / roadmap hardened-mode wording.
   Preserves recent peer direct stop-time-apply corrections; frozen plans/history
   untouched.
+- **manual-smoke peer `--integration` placement:** `--integration` is a
+  per-invocation companion flag and peer-start does not persist it. The ACP
+  peer live-smoke recipe now puts `--integration review` on `peer stop` (the
+  command that determines retain vs apply) and omits it from `peer start`.
+  Peer skill / agents already matched product surfaces; only the smoke recipe
+  was wrong.
 
 ### Changed (Phase 0)
 

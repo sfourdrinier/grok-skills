@@ -74,9 +74,10 @@ against grok 0.2.102 on a throwaway git repo (`note.txt` only):
 ```bash
 export CLAUDE_PLUGIN_ROOT=/absolute/path/to/grok-skills/plugin
 # peer-start (background resident wrapper; one running envelope). ACP is the
-# default channel; pass --integration review to retain the patch for review.
+# default channel. --integration is per-invocation on companion/peer-stop only
+# (peer-start does not persist it); pass it on the stop that determines landing.
 node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" peer start \
-  --target . --base HEAD --integration review
+  --target . --base HEAD
 # Capture runId + socketPath from the running envelope, then:
 node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" peer prompt \
   --run-id '<runId>' --task-file - <<'GROK_TASK'
@@ -86,8 +87,11 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" peer prompt \
   --run-id '<runId>' --task-file - <<'GROK_TASK'
 Reply with exactly: PEER-PONG-2
 GROK_TASK
-# peer-stop finalizes: real validation, then apply per --integration mode.
-node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" peer stop --run-id '<runId>'
+# peer-stop finalizes: real validation, then apply/retain per --integration.
+# review|worktree retain the verified patch; auto/direct apply when ready
+# (direct needs consent). Landing is controlled here, not at peer-start.
+node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" peer stop \
+  --run-id '<runId>' --integration review
 ```
 
 Transcript tail (2026-07-17 live, runId `20260717T110823Z-140ae8`):
