@@ -258,10 +258,19 @@ class StatusModeTests(unittest.TestCase):
         }
         _force_running_record(paths, requestedModel=record.get("requestedModel"), repository=record.get("repository"))
 
+        jwt_token = "".join(
+            (
+                "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.",
+                "eyJzdWIiOiIxMjM0NTY3ODkwIn0.",
+                "dozjgNryP4J3jVmNHl0w",
+            )
+        )
+        api_key = "".join(("sk-", "abcdef0123456789ABCDEFGHIJKLMNOP"))
         secret_thought = (
             "the handler reads Authorization: bearer "
-            "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w "
-            "and also an api key sk-abcdef0123456789ABCDEFGHIJKLMNOP"
+            + jwt_token
+            + " and also an api key "
+            + api_key
         )
         writer = ProgressWriter(paths.run_id, paths.progress_path)
         writer.emit("start", "run created", data={"mode": "review"})
@@ -288,14 +297,14 @@ class StatusModeTests(unittest.TestCase):
         )
         embedded_text = thought_event["data"]["text"]
         self.assertNotIn("bearer ", embedded_text)
-        self.assertNotIn("sk-abcdef0123456789ABCDEFGHIJKLMNOP", embedded_text)
-        self.assertNotIn("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", embedded_text)
+        self.assertNotIn(api_key, embedded_text)
+        self.assertNotIn(jwt_token.split(".", 1)[0], embedded_text)
         self.assertIn("[redacted-", embedded_text)
 
         # On-disk progress is redacted at write time (same patterns + denylist).
         raw_progress = paths.progress_path.read_text(encoding="utf-8")
         self.assertNotIn("bearer ", raw_progress)
-        self.assertNotIn("sk-abcdef0123456789ABCDEFGHIJKLMNOP", raw_progress)
+        self.assertNotIn(api_key, raw_progress)
         self.assertIn("[redacted-", raw_progress)
 
     def test_status_redacts_secret_split_across_two_events(self) -> None:

@@ -254,8 +254,11 @@ class ReviewModeTests(ModeHarness):
         # SAME id, so exactly one (secret-free) envelope still reaches the caller.
         run_paths = runstate.create_run("review")
         progress = ProgressWriter(run_paths.run_id, run_paths.progress_path)
+        bearer_body = "".join(("abc123", "def456", "ABCDEF"))
         exc = GrokWrapperError(
-            "cli-failure", "grok exited nonzero", {"stderr": "Authorization: Bearer abc123def456ABCDEF"}
+            "cli-failure",
+            "grok exited nonzero",
+            {"stderr": "Authorization: Bearer " + bearer_body},
         )
         env = _shared.terminalize_unexpected_failure(
             run_paths=run_paths,
@@ -268,7 +271,7 @@ class ReviewModeTests(ModeHarness):
         self.assertEqual(env["runId"], run_paths.run_id)
         self.assertEqual(env["status"], "failure")
         self.assertEqual(env["error"]["class"], "cli-failure")
-        self.assertNotIn("abc123def456ABCDEF", json.dumps(env), "no secret leaks in the fallback envelope")
+        self.assertNotIn(bearer_body, json.dumps(env), "no secret leaks in the fallback envelope")
 
     def test_review_invalid_target_escaping_repo_fails_closed(self) -> None:
         repo = self._repo()
@@ -386,7 +389,8 @@ class ReviewModeTests(ModeHarness):
         envelope = json.loads(out)
         self.assertEqual(envelope["status"], "success")
         text = envelope["response"]["text"]
-        self.assertNotIn("sk-ABCDEF0123456789ABCDEFGHIJKLMNOP", text)
+        secret_key = "".join(("sk-", "ABCDEF0123456789ABCDEFGHIJKLMNOP"))
+        self.assertNotIn(secret_key, text)
         self.assertIn("[redacted-api-key-token]", text)
         # The rest of the body is preserved (not dropped).
         self.assertIn("rotate it", text)

@@ -59,6 +59,11 @@ _AWS_ASIA = _fx("ASIA", "IOSFODNN7EXAMPLE")
 _BEARER_OPAQUE = _fx("4f8a9c3d2e1b7f6a5d4c3b2a1908f7e6d5c4b3a2", "secretvalue")
 _BEARER_ALPHA = _fx("AbCdEfGhIjKlMnOp", "QrStUv")
 _BEARER_MIXED = _fx("abcdef123456", "ABCDEFsecretbody")
+_BEARER_SHORT = _fx("abc", "123")
+_PEM_RSA_BEGIN = _fx("-----BEGIN ", "RSA PRIVATE KEY-----")
+_PEM_RSA_END = _fx("-----END ", "RSA PRIVATE KEY-----")
+_PEM_PGP_BEGIN = _fx("-----BEGIN ", "PGP PRIVATE KEY BLOCK-----")
+_PEM_PGP_END = _fx("-----END ", "PGP PRIVATE KEY BLOCK-----")
 
 
 class SecretScanGuardTests(unittest.TestCase):
@@ -185,7 +190,7 @@ class SecretScanGuardTests(unittest.TestCase):
         # off (truncation / chunk boundary) must still have its base64 body removed
         # to end-of-string, never left verbatim, and the result must pass the scanner.
         body = "MIIBVeryLongBase64KeyMaterial0123456789ABCDEFabcdef"
-        raw = "-----BEGIN RSA PRIVATE KEY-----\n" + body + "\nmore-body-9876543210"
+        raw = _PEM_RSA_BEGIN + "\n" + body + "\nmore-body-9876543210"
         cleaned = redact_secret_value_text(raw)
         self.assertNotIn(body, cleaned)
         self.assertNotIn("more-body-9876543210", cleaned)
@@ -194,7 +199,7 @@ class SecretScanGuardTests(unittest.TestCase):
 
     def test_redact_removes_multiline_pem_block_whole(self) -> None:
         body = "MIIBkeymaterial1234567890ABCDEFabcdef0987654321"
-        raw = "-----BEGIN RSA PRIVATE KEY-----\n" + body + "\n-----END RSA PRIVATE KEY-----"
+        raw = _PEM_RSA_BEGIN + "\n" + body + "\n" + _PEM_RSA_END
         cleaned = redact_secret_value_text(raw)
         self.assertNotIn(body, cleaned)
         assert_no_secret_material({"note": cleaned})
@@ -213,15 +218,17 @@ class SecretScanGuardTests(unittest.TestCase):
     def test_redact_secret_text_stream_catches_split_pem(self) -> None:
         from groklib.envelope import redact_secret_text_stream
 
-        first = "-----BEGIN RSA PRIVATE KEY-----\nMIIBkeymaterial"
-        second = "0123456789ABCDEF\n-----END RSA PRIVATE KEY-----"
+        first = _PEM_RSA_BEGIN + "\nMIIBkeymaterial"
+        second = "0123456789ABCDEF\n" + _PEM_RSA_END
         redacted = redact_secret_text_stream([first, second])
         self.assertNotIn("MIIBkeymaterial", "".join(redacted))
         assert_no_secret_material({"events": [{"data": {"text": t}} for t in redacted]})
 
     def test_assert_no_secret_material_raises_on_bearer_value(self) -> None:
         with self.assertRaises(SecretMaterialError):
-            assert_no_secret_material({"detail": "Authorization header sent: Bearer abc123"})
+            assert_no_secret_material(
+                {"detail": "Authorization header sent: Bearer " + _BEARER_SHORT}
+            )
 
     def test_assert_no_secret_material_raises_on_raw_token_shapes(self) -> None:
         # SEC2: raw credential VALUES leaking under a benign key (e.g. a token in
@@ -267,7 +274,7 @@ class SecretScanGuardTests(unittest.TestCase):
             _AWS_AKIA,
             _GHP,
             _XOXB,
-            "-----BEGIN RSA PRIVATE KEY-----\nMIIBkeymaterial1234567890\n-----END RSA PRIVATE KEY-----",
+            _PEM_RSA_BEGIN + "\nMIIBkeymaterial1234567890\n" + _PEM_RSA_END,
         )
         for token in raw_tokens:
             with self.subTest(token=token[:10]):
@@ -439,13 +446,14 @@ class RedactSecretMaterialTests(unittest.TestCase):
         # round3: the whole PEM block (key material included) must be removed,
         # not just the -----BEGIN----- header line.
         pem = (
-            "-----BEGIN RSA PRIVATE KEY-----\n"
-            "MIIBOgIBAAJBAKtopsecretkeymaterialdonotleak1234567890\n"
-            "-----END RSA PRIVATE KEY-----"
+            _PEM_RSA_BEGIN
+            + "\n"
+            + "MIIBOgIBAAJBAKtopsecretkeymaterialdonotleak1234567890\n"
+            + _PEM_RSA_END
         )
         cleaned = redact_secret_value_text("key: {} done".format(pem))
         self.assertNotIn("topsecretkeymaterial", cleaned)
-        self.assertNotIn("-----BEGIN RSA PRIVATE KEY-----", cleaned)
+        self.assertNotIn(_PEM_RSA_BEGIN, cleaned)
         self.assertIn("[redacted-pem-private-key]", cleaned)
         assert_no_secret_material({"detail": cleaned})
 
@@ -583,9 +591,10 @@ class PgpPrivateKeyPatternTests(unittest.TestCase):
     """Round4 F5: the PEM pattern must also catch the PGP armored private-key header."""
 
     _PGP = (
-        "-----BEGIN PGP PRIVATE KEY BLOCK-----\n"
-        "lQVYBGXtopsecretpgpkeymaterialdonotleak1234567890\n"
-        "-----END PGP PRIVATE KEY BLOCK-----"
+        _PEM_PGP_BEGIN
+        + "\n"
+        + "lQVYBGXtopsecretpgpkeymaterialdonotleak1234567890\n"
+        + _PEM_PGP_END
     )
 
     def test_pgp_private_key_block_is_flagged(self) -> None:

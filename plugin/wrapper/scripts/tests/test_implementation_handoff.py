@@ -570,7 +570,8 @@ class CommandEvidenceTests(unittest.TestCase):
         # outside the window and leave the token body exposed. Redact full first.
         # Use non-token padding after the secret so the bearer pattern ends cleanly.
         pad = "n" * 5000
-        secret = " Bearer abcdef0123456789deadbeefcafebabe "
+        bearer_body = "".join(("abcdef0123456789", "deadbeefcafebabe"))
+        secret = " Bearer " + bearer_body + " "
         raw = (pad + secret + "!" * 200).encode("utf-8")
         rec = build_command_evidence(
             argv=["echo"],
@@ -580,7 +581,7 @@ class CommandEvidenceTests(unittest.TestCase):
             stdout=raw,
         )
         self.assertTrue(rec["stdoutTail"]["truncated"])
-        self.assertNotIn("abcdef0123456789deadbeefcafebabe", rec["stdoutTail"]["text"])
+        self.assertNotIn(bearer_body, rec["stdoutTail"]["text"])
         self.assertIn("redacted", rec["stdoutTail"]["text"].lower())
 
     def test_spawn_failure_record_is_envelope_valid(self) -> None:
@@ -854,6 +855,7 @@ class WriteManifestRoundTripTests(unittest.TestCase):
             self.assertEqual(validate_implementation_handoff(loaded), [])
 
     def test_write_manifest_redacts_secret_argv_in_blockers(self) -> None:
+        bearer_body = "".join(("abcdef0123456789", "deadbeefcafebabe"))
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "implementation-handoff.json"
             doc = {
@@ -883,7 +885,7 @@ class WriteManifestRoundTripTests(unittest.TestCase):
                             "kind": "validation-failure",
                             "message": "failed",
                             "detail": {
-                                "argv": ["tool", "Bearer abcdef0123456789deadbeefcafebabe"],
+                                "argv": ["tool", "Bearer " + bearer_body],
                             },
                         }
                     ],
@@ -892,5 +894,5 @@ class WriteManifestRoundTripTests(unittest.TestCase):
             }
             write_manifest(path, doc)
             text = path.read_text(encoding="utf-8")
-            self.assertNotIn("abcdef0123456789deadbeefcafebabe", text)
+            self.assertNotIn(bearer_body, text)
             self.assertIn("redacted", text.lower())

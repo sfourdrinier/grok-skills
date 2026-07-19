@@ -51,6 +51,9 @@ const SK_PROJ = fx(
   "sk-proj-",
   "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCdEfGhIjKlMnOpQrStUvWxYz0123456789"
 );
+const BEARER_SHORT = fx("abc", "123");
+const PEM_RSA_BEGIN = fx("-----BEGIN ", "RSA PRIVATE KEY-----");
+const PEM_RSA_END = fx("-----END ", "RSA PRIVATE KEY-----");
 const RUNSTATE_PY = path.resolve(
   SCRIPT_DIR,
   "..",
@@ -565,7 +568,7 @@ test("F-RELAY-SECRET: extended credential shapes (aws/github/slack/pem/pure-alph
     fx("AKIA", "IOSFODNN7EXAMPLE"),
     GHP,
     XOXB,
-    "-----BEGIN RSA PRIVATE KEY-----\nMIIBkeymaterial1234567890\n-----END RSA PRIVATE KEY-----",
+    `${PEM_RSA_BEGIN}\nMIIBkeymaterial1234567890\n${PEM_RSA_END}`,
     `Bearer ${BEARER_ALPHA}`,
   ];
   for (const secret of secrets) {
@@ -625,8 +628,8 @@ test("F-DRY-MIRROR: the Node relay constants match the Python runstate source of
 
 test("F1-relay-cross-boundary: a PEM key split across two events is redacted in both halves", () => {
   const segments = [
-    "-----BEGIN RSA PRIVATE KEY-----\nMIIBkeymaterial",
-    "0123456789ABCDEF\n-----END RSA PRIVATE KEY-----",
+    `${PEM_RSA_BEGIN}\nMIIBkeymaterial`,
+    `0123456789ABCDEF\n${PEM_RSA_END}`,
   ];
   const redacted = redactSecretTextStream(segments);
   const joined = redacted.join("");
@@ -637,12 +640,19 @@ test("F1-relay-cross-boundary: a PEM key split across two events is redacted in 
 
 test("F1-relay-cross-boundary: formatProgressLines masks a bearer token split across two events", () => {
   const events = [
-    { phase: "grok", message: "streaming", data: { text: "Authorization header is Bearer abc123" } },
+    {
+      phase: "grok",
+      message: "streaming",
+      data: { text: `Authorization header is Bearer ${BEARER_SHORT}` },
+    },
     { phase: "grok", message: "streaming", data: { text: "DEF456ghijklmnopqrstuvwxyz done" } },
   ];
   const lines = formatProgressLines(events);
   const joined = lines.join("\n");
-  assert.ok(!joined.includes("abc123DEF456ghijklmnopqrstuvwxyz"), "the joined bearer token must not survive");
+  assert.ok(
+    !joined.includes(`${BEARER_SHORT}DEF456ghijklmnopqrstuvwxyz`),
+    "the joined bearer token must not survive"
+  );
   assert.ok(!joined.includes("DEF456ghijklmnopqrstuvwxyz"), "the token remainder must not print verbatim");
   assert.ok(joined.includes("[redacted-secret]"), "the split secret is stream-redacted");
 });
@@ -654,8 +664,16 @@ test("F1-relay-cross-boundary: renderRunProgress stream-redacts a split secret",
     const runDir = path.join(dir, runId);
     fs.mkdirSync(runDir);
     const lines = [
-      JSON.stringify({ phase: "grok", message: "s", data: { text: "-----BEGIN RSA PRIVATE KEY-----\nMIIBsecretkeypart" } }),
-      JSON.stringify({ phase: "grok", message: "s", data: { text: "9876543210ZZ\n-----END RSA PRIVATE KEY-----" } }),
+      JSON.stringify({
+        phase: "grok",
+        message: "s",
+        data: { text: `${PEM_RSA_BEGIN}\nMIIBsecretkeypart` },
+      }),
+      JSON.stringify({
+        phase: "grok",
+        message: "s",
+        data: { text: `9876543210ZZ\n${PEM_RSA_END}` },
+      }),
     ];
     fs.writeFileSync(path.join(runDir, "progress.jsonl"), lines.join("\n") + "\n");
     const sunk = [];
