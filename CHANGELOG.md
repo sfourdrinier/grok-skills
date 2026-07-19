@@ -368,6 +368,20 @@ id; peer-stop fails closed if it cannot persist terminal evidence; the resident
 peer wrapper uses an ignored stderr fd; agent recipes use a valid mktemp template
 and quote the contract path. Suite: wrapper 809, plugin 285.
 
+### Fixed (Phase 7 - code worktree / direct landing docs honesty)
+
+- **Mode-aware code landing docs:** product surfaces no longer claim one-shot
+  `code` always writes only in an external worktree. Truth: consented product
+  default is live-tree `integration=direct` (hardened-direct sandbox-to-repo);
+  bare wrapper still defaults to worktree; auto/review stay external worktrees;
+  ACP peer remains always-worktree with stop-time apply. Updated README Security
+  short section, wrapper `SKILL.md` code section, `authority-policies.md` code
+  row, `modes/code.py` header comments, `manual-smoke.md` scenarios, peer-native
+  design (removed phantom `--integration direct --raw`; runMode is a separate
+  axis only), plus adjacent workflow-patterns / roadmap hardened-mode wording.
+  Preserves recent peer direct stop-time-apply corrections; frozen plans/history
+  untouched.
+
 ### Changed (Phase 0)
 
 - `plugin/scripts/lib/task-file.mjs`: task-text temp staging deduplicated

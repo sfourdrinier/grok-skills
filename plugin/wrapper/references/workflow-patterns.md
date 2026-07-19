@@ -119,9 +119,16 @@ python3 plugin/wrapper/scripts/grok_agent.py reason \
 **Check:** `response`; if the critique should follow a fixed rubric, pass
 `--schema <path>` and check `response.structured` against it.
 
-## 7. Code implementation in an external worktree
+## 7. Code implementation (mode-aware)
 
 **When:** Grok should actually write or modify code against a specification.
+Landing is mode-aware (`--integration`; product matrix:
+`plugin/references/integration-modes.md`).
+
+### 7a. Bare wrapper / isolated worktree (safe default)
+
+Omitting `--integration` (or passing `worktree`) creates an external worktree.
+This is the fail-closed bare-wrapper default.
 
 ```bash
 python3 plugin/wrapper/scripts/grok_agent.py code \
@@ -137,6 +144,23 @@ python3 plugin/wrapper/scripts/grok_agent.py code \
 for every required command; `changedFiles` / `diffSummary` for what actually
 changed; `cleanup.status == "retained"` (the worktree is never removed on a
 successful run).
+
+### 7b. Consented live-tree direct
+
+Product companion/skills pass `--integration direct` only after per-repo
+setup consent. No external worktree; sandbox write root is the repo root.
+
+```bash
+python3 plugin/wrapper/scripts/grok_agent.py code \
+  --integration direct \
+  --target <workspace-relative-path> \
+  --base <committed-revision> \
+  --task-file <path-to-spec-file>
+```
+
+**Check:** edits are on the operator checkout; `worktreePath` is absent/null
+for this path; protected-path post-run guards apply. Do not expect a retained
+external worktree from product-default direct after consent.
 
 ## 8. Test generation and required validation
 

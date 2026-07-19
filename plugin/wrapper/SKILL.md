@@ -1,6 +1,6 @@
 ---
 name: grok-cli
-description: Use when the user says to use Grok, wants a Grok review, wants a second opinion from Grok, or asks to delegate a task to Grok. Also use for getting an independent code review from Grok, having Grok reason about an architecture or debugging question, having Grok implement code in an isolated worktree, or having Grok independently verify someone else's implementation. Trigger phrases include "use grok", "grok review", "second opinion from grok", and "delegate to grok".
+description: Use when the user says to use Grok, wants a Grok review, wants a second opinion from Grok, or asks to delegate a task to Grok. Also use for getting an independent code review from Grok, having Grok reason about an architecture or debugging question, having Grok implement code (live tree after consent, or opt-in isolated worktree), or having Grok independently verify someone else's implementation. Trigger phrases include "use grok", "grok review", "second opinion from grok", and "delegate to grok".
 ---
 
 <!-- plugin/wrapper/SKILL.md -->
@@ -114,16 +114,37 @@ python3 plugin/wrapper/scripts/grok_agent.py reason \
 `--schema <path>`, `--model`, `--timeout` (default 900), optional `--max-turns`
 (default: unlimited).
 
-### `code` - implementation in an isolated worktree
+### `code` - mode-aware implementation (worktree or live tree)
 
-Use when Grok should actually write or modify code. The wrapper creates and
-verifies an external git worktree itself (never the current checkout),
-requires the workspace's full build gate (build or typecheck+lint, plus test
-when present) to pass with exit 0, and keeps the worktree for inspection.
-Nothing is ever committed, merged, pushed, or deleted automatically.
+Use when Grok should actually write or modify code. Landing is **mode-aware**
+(`--integration`; see `../../references/integration-modes.md`):
+
+- **Bare wrapper default** (`--integration` omitted or `worktree`): creates and
+  verifies an **external** git worktree (never the current checkout), requires
+  the workspace's full build gate (build or typecheck+lint, plus test when
+  present) to pass with exit 0, and keeps the worktree for inspection. Fail-closed
+  isolation so an un-consented bare `python3 …/grok_agent.py code` call cannot
+  silently edit the operator checkout.
+- **`--integration direct`**: hardened-direct live-tree edits under private
+  auth home + sandbox write-confined to the **repo root** (+ private tmp) +
+  post-run protected-path guards. Product companion/skills pass this only after
+  per-repo setup consent. No external worktree; no pre-apply dual-condition gate.
+- Product alias modes `auto` / `review` map through the companion onto the
+  worktree path (auto may apply a verified ready patch; review retains).
+
+Nothing is ever committed, merged, pushed, or deleted automatically. ACP peer is
+a separate channel that is **always** external worktree with stop-time apply.
 
 ```bash
+# bare wrapper: safe worktree default
 python3 plugin/wrapper/scripts/grok_agent.py code \
+  --target <workspace-relative-path> \
+  --base <committed-revision> \
+  --task-file <path-to-spec-file>
+
+# consented live-tree path (product default after setup --integration direct)
+python3 plugin/wrapper/scripts/grok_agent.py code \
+  --integration direct \
   --target <workspace-relative-path> \
   --base <committed-revision> \
   --task-file <path-to-spec-file>
@@ -132,13 +153,17 @@ python3 plugin/wrapper/scripts/grok_agent.py code \
 Optional flags: `--web`, `--model`, `--timeout` (default 3600), optional
 `--max-turns` (default: unlimited), optional **`--contract-file <path>`**
 (operator-trusted JSON: writeScopes + requiredValidation argv arrays; trust
-model `operator-contract-trusted-no-os-sandbox` - no OS FS sandbox claim).
-If the task depends on uncommitted changes in the current checkout, `code`
-fails closed rather than approximating them - commit what the task needs first.
+model `operator-contract-trusted-no-os-sandbox` - no OS FS sandbox claim),
+`--integration direct|worktree` (wrapper-native; bare default `worktree`).
+If the task depends on uncommitted changes in the current checkout and the
+run uses the worktree path, `code` fails closed rather than approximating them
+- commit what the task needs first.
 
-After Grok, the wrapper always attempts phase-1 patch + phase-2
-`implementation-handoff.json` under the run dir (even on classified failure
-when forensics are possible). Parents integrate only via `handoff --run-id`.
+After Grok on the **worktree** path, the wrapper always attempts phase-1 patch
++ phase-2 `implementation-handoff.json` under the run dir (even on classified
+failure when forensics are possible). Parents integrate only via
+`handoff --run-id` for retained worktrees; live-tree `direct` already landed
+source edits.
 
 ### `handoff` - read-only verified implementation handoff (1.6.0+)
 

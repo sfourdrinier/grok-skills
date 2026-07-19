@@ -24,8 +24,12 @@ names). ACP peer isolation/landing is **not** the same for `direct` - see
   trusted-input posture for one-shot code, documented loudly. Equivalent trust
   level to an Opus/Sonnet subagent editing your tree - which is the goal for
   that path.
-  - Sub-option `--integration direct --raw` (or run-mode direct): the existing
-    installed-CLI path, zero wrapper safety, fastest.
+  - **Orthogonal security axis (not an integration sub-flag):** `runMode`
+    hardened (default) vs `runMode` direct. Use companion
+    `setup --run-mode direct` / `GROK_SKILLS_MODE=direct` for the installed-CLI
+    / normal-home path. There is **no** `--integration direct --raw` flag;
+    do not invent one. runMode and integration both use the word "direct" -
+    disambiguate via [integration-modes.md](../../plugin/references/integration-modes.md).
 - **auto (opt-in)**: current worktree flow with EVERY safety check, PLUS on
   dual-condition READY the companion auto-applies the patch to your tree
   (git apply --binary). Native feel + full verification before anything lands.

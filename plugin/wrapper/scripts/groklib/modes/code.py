@@ -1,21 +1,33 @@
 # wrapper/scripts/groklib/modes/code.py
 #
-# `code` mode (spec 5.3): write-capable authority mode. Grok runs inside an
-# ISOLATED external git worktree (never the operator's real checkout), branched
-# from a COMMITTED base whose sufficiency is proven up front -- the wrapper
-# never stashes, commits, copies, or approximates uncommitted current-checkout
-# changes, and never copies or symlinks `.env` into the worktree. The full
-# root-to-target repo rules (C7) are prepended to the task, and the task's first
-# required action is to create a `.grok-run-<run-id>` cwd sentinel proving Grok
-# is operating in the correct isolated workspace. Editing + terminal tools are
-# allowed only inside the sandbox's write confinement; --web is permitted.
+# `code` mode (spec 5.3): write-capable authority mode. Landing is mode-aware:
 #
-# The pre-Grok setup (worktree create + verify, optional offline `pnpm install`)
-# and the post-Grok gate (cwd sentinel, diff confinement, original-checkout
-# scan, and the workspace's FULL build gate) are the two hooks handed to the
-# shared worktree lifecycle (_worktree.run_worktree_mode), which owns the
-# private-home isolation, execution, model/sandbox verification, single-teardown
-# cleanup, and the retained-worktree cleanup semantics.
+# * DIRECT BRANCH (`--integration direct`): dispatch only. run() hands off to
+#   modes.direct.run - Grok edits the operator's REAL checkout under private
+#   auth home + sandbox write-confined to the repo root (+ private tmp) +
+#   post-run protected-path guards. No external worktree. Product companion
+#   passes --integration direct only after per-repo setup consent.
+#
+# * WORKTREE BRANCH (bare wrapper default when `--integration` is omitted, or
+#   explicit `worktree`; also any `--continue-run`): Grok runs inside an
+#   ISOLATED external git worktree (never the operator's real checkout),
+#   branched from a COMMITTED base whose sufficiency is proven up front -- the
+#   wrapper never stashes, commits, copies, or approximates uncommitted
+#   current-checkout changes, and never copies or symlinks `.env` into the
+#   worktree. The full root-to-target repo rules (C7) are prepended to the task,
+#   and the task's first required action is to create a `.grok-run-<run-id>` cwd
+#   sentinel proving Grok is operating in the correct isolated workspace.
+#   Editing + terminal tools are allowed only inside the sandbox's write
+#   confinement; --web is permitted.
+#
+# The worktree-branch pre-Grok setup (worktree create + verify, optional
+# offline `pnpm install`) and the post-Grok gate (cwd sentinel, diff
+# confinement, original-checkout scan, and the workspace's FULL build gate) are
+# the two hooks handed to the shared worktree lifecycle
+# (_worktree.run_worktree_mode), which owns the private-home isolation,
+# execution, model/sandbox verification, single-teardown cleanup, and the
+# retained-worktree cleanup semantics. Direct-branch lifecycle lives in
+# modes.direct / modes._direct (comment-only pointer; do not re-document here).
 
 import argparse
 import json

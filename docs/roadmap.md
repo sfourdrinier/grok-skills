@@ -15,7 +15,7 @@ Unifying idea: Grok as a live second mind you can pull into either harness.
 
 | Mode | Env / flag | Behavior |
 |------|------------|----------|
-| **hardened** (default) | `GROK_SKILLS_MODE=hardened` or omit | Private auth home, OS sandbox verify, worktree isolation, secret redaction, gate-script integrity. |
+| **hardened** (default) | `GROK_SKILLS_MODE=hardened` or omit | Private auth home, OS sandbox verify, mode-aware isolation (worktree for code auto/review and all ACP peer; live tree for consented code direct), secret redaction, gate-script integrity. |
 | **direct** | `GROK_SKILLS_MODE=direct` or companion `--run-mode direct` | Use the **installed Grok CLI** with its normal home/auth (parity with "use your installed Codex"). Faster setup; you accept Grok's own isolation model. |
 
 Setup and skills document both. Hardened stays the default for open-source

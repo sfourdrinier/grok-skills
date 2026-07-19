@@ -416,7 +416,19 @@ What it actually enforces:
 
 - Private throwaway Grok home per run (your real credentials are not the run’s `HOME`)
 - OS sandbox write confinement on the supported platform (verified after the run)
-- `code` only writes inside an external worktree + escape checks
+- **Mode-aware write landing** (see [integration-modes.md](plugin/references/integration-modes.md)):
+  - **One-shot `code` `integration=direct`** (product default after per-repo consent):
+    live-tree edits under hardened-direct (private home + sandbox write-confined to
+    the **repo root** + private tmp + post-run protected-path guards). Not worktree
+    isolation.
+  - **One-shot `code` `auto` / `review` / `worktree`**: external worktree + escape
+    checks; auto may apply a verified ready patch; review retains for parent apply.
+  - **Bare wrapper** `python3 …/grok_agent.py code` without `--integration`: still
+    defaults to **worktree** so an un-consented bare call cannot silently edit the
+    live tree.
+  - **ACP peer:** always external retained worktree during the session; at ready
+    peer-stop, `direct`/`auto` apply (direct needs consent), `review` retains.
+    Peer direct is stop-time apply, not one-shot code live-edit.
 - One redacted JSON envelope on stdout (pattern scan + exact values from the injected `auth.json`)
 - Build scripts that Grok rewrote are not executed (gate refused)
 
