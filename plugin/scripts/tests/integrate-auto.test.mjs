@@ -5,6 +5,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -82,16 +83,25 @@ function capturePatchAndRestore(repo) {
 }
 
 function stagePatch(xdgStateHome, runId, patchBody) {
-  const art = path.join(
-    xdgStateHome,
-    "grok-skills",
-    "runs",
-    runId,
-    "artifacts"
-  );
+  const runDir = path.join(xdgStateHome, "grok-skills", "runs", runId);
+  const art = path.join(runDir, "artifacts");
   fs.mkdirSync(art, { recursive: true });
   const patchPath = path.join(art, "implementation.patch");
-  fs.writeFileSync(patchPath, patchBody);
+  const buf = Buffer.from(patchBody);
+  fs.writeFileSync(patchPath, buf);
+  // Matching validation manifest: apply re-verifies patch bytes/sha256 against
+  // this after apply-time handoff ready (same SSOT peer uses).
+  const sha = createHash("sha256").update(buf).digest("hex");
+  fs.writeFileSync(
+    path.join(runDir, "implementation-handoff.json"),
+    JSON.stringify({
+      patch: {
+        sha256: sha,
+        bytes: buf.length,
+        relativePath: "artifacts/implementation.patch",
+      },
+    })
+  );
   return patchPath;
 }
 
@@ -552,6 +562,104 @@ test("auto re-check flips to not-ready at apply time: no apply; exit 1", () => {
     );
     assert.match(res.stderr, /revalidation|not ready|BLOCKED/i);
     assert.ok(!/APPLIED runId=/i.test(res.stderr));
+    assert.deepEqual(readCalls(callsPath), ["code", "handoff", "handoff"]);
+  } finally {
+    cleanup();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("auto: patch tampered after apply-time ready is refused (integrity check)", () => {
+  // TOCTOU: apply-time handoff revalidation returns ready against the staged
+  // patch+manifest, then the on-disk implementation.patch is substituted before
+  // git apply. Auto must compare current bytes/size/hash against the revalidated
+  // manifest (verifyPatchAgainstManifest) and fail closed - never apply.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-auto-integ-"));
+  const repo = initTargetRepo(path.join(root, "repo"));
+  const xdg = path.join(root, "xdg");
+  const patchPath = stagePatch(xdg, RUN_ID, capturePatchAndRestore(repo));
+  const before = fs.readFileSync(path.join(repo, "foo.txt"), "utf8");
+  assert.equal(before, "hello\n");
+
+  // Unit path: handoff callback reports ready, then tampers the patch so the
+  // later pre-apply integrity check sees a mismatch against the manifest.
+  const unit = applyVerifiedPatch({
+    wrapper: "unused",
+    runId: RUN_ID,
+    targetRepo: repo,
+    env: { XDG_STATE_HOME: xdg },
+    runHandoff: () => {
+      fs.writeFileSync(patchPath, `${fs.readFileSync(patchPath, "utf8")}\n# injected\n`);
+      return { code: 0, envelope: { response: { integration: { ready: true } } } };
+    },
+    stderrLine: () => {},
+  });
+  assert.equal(unit.ok, false);
+  assert.equal(unit.outcome, "patch-integrity-failure");
+  assert.equal(
+    fs.readFileSync(path.join(repo, "foo.txt"), "utf8"),
+    before,
+    "unit path: tampered patch must not be applied"
+  );
+
+  // Companion path: second (apply-time) handoff mutates the patch after ready.
+  // Restore a matching patch first so the first handoff + stage stay honest.
+  const cleanPatch = capturePatchAndRestore(repo);
+  stagePatch(xdg, RUN_ID, cleanPatch);
+  const patchFile = path.join(
+    xdg,
+    "grok-skills",
+    "runs",
+    RUN_ID,
+    "artifacts",
+    "implementation.patch"
+  );
+  const callsPath = path.join(root, "calls.log");
+  const ready = `${handoffEnvelope(true)}\n`;
+  const { env, cleanup } = makeFakeWrapper({
+    code: { stdout: `${codeEnvelope()}\n`, exitCode: 0 },
+    handoff: [
+      { stdout: ready, exitCode: 0 },
+      {
+        stdout: ready,
+        exitCode: 0,
+        mutate: {
+          path: patchFile,
+          content: `${cleanPatch}\n# injected after ready\n`,
+        },
+      },
+    ],
+  });
+  try {
+    const res = runCompanion(
+      [
+        "code",
+        "--integration",
+        "auto",
+        "--target",
+        ".",
+        "--base",
+        "HEAD",
+        "--task",
+        "tamper after ready",
+      ],
+      { cwd: repo, env: companionEnv(env, root, xdg, callsPath) }
+    );
+    assert.equal(res.code, 1, `expected exit 1; stderr: ${res.stderr}`);
+    assert.equal(
+      fs.readFileSync(path.join(repo, "foo.txt"), "utf8"),
+      "hello\n",
+      "companion path: tampered patch must not be applied"
+    );
+    assert.ok(!/APPLIED runId=/i.test(res.stderr), "must not claim applied");
+    assert.match(res.stderr, /integrity|BLOCKED/i);
+    const envLines = res.stdout.split("\n").filter((l) => l.trim().startsWith("{"));
+    assert.equal(envLines.length, 1, `one envelope; got: ${res.stdout}`);
+    const finalEnv = JSON.parse(envLines[0]);
+    assert.equal(finalEnv.status, "failure");
+    assert.equal(finalEnv.mode, "code");
+    assert.equal(finalEnv.response?.integration?.applied, false);
+    assert.equal(finalEnv.response?.integration?.outcome, "patch-integrity-failure");
     assert.deepEqual(readCalls(callsPath), ["code", "handoff", "handoff"]);
   } finally {
     cleanup();

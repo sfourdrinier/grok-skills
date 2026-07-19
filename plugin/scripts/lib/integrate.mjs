@@ -60,9 +60,9 @@ export function locateHandoffManifest(runId, env = process.env) {
 /**
  * Verify an on-disk patch matches the validation manifest's `patch.sha256`
  * (lowercase hex) + `patch.bytes`. Fail closed on a missing/corrupt manifest or
- * any mismatch, so a patch substituted/corrupted between wrapper validation and
- * companion apply cannot land (the wrapper's handoff re-check does the equivalent
- * for the code auto path, which re-runs handoff instead of reusing this).
+ * any mismatch, so a patch substituted/corrupted between wrapper validation
+ * (or apply-time handoff revalidation) and companion apply cannot land.
+ * Shared by peer-stop and code auto apply paths.
  * @returns {{ok: boolean, reason?: string}}
  */
 export function verifyPatchAgainstManifest(runId, patchPath, env = process.env) {
@@ -468,6 +468,25 @@ export function applyVerifiedPatch({
       outcome: "blocked-patch-unreadable",
       reason: "patch read/hash failed",
       runId,
+    };
+  }
+
+  // Re-verify current implementation.patch bytes/size/hash against the
+  // revalidated handoff manifest immediately before the shared apply ladder.
+  // Handoff ready does not freeze the artifact: a substitute/corruption between
+  // revalidation and git apply must fail closed (same SSOT peer uses).
+  const integrity = verifyPatchAgainstManifest(runId, patchPath, env);
+  if (!integrity.ok) {
+    stderrLine(
+      `[grok-auto] BLOCKED: patch integrity check failed for ${runId}: ${integrity.reason}`
+    );
+    return {
+      ok: false,
+      outcome: "patch-integrity-failure",
+      reason: integrity.reason || "patch integrity check failed",
+      runId,
+      patchPath,
+      patchSha,
     };
   }
 
