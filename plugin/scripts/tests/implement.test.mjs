@@ -443,6 +443,40 @@ test("unit: unparseable code stdout still synthesizes complete failure (preserve
   assert.notEqual(env.status, "success");
 });
 
+// Parseable code envelope without a usable runId is not stdout corruption:
+// classify handoff-unavailable (cannot hand off / apply), never output-malformed.
+test("unit: parseable code envelope missing runId is handoff-unavailable (not output-malformed)", () => {
+  const codeOut = {
+    schemaVersion: 1,
+    mode: "code",
+    status: "success",
+    runId: null,
+    response: { text: "ok", integration: { ready: true } },
+  };
+  const env = buildAutoCodeFallbackEnvelope({
+    codeEnvelope: codeOut,
+    runId: null,
+    jobId: "job-no-runid",
+    codeExit: 0,
+    // stdout is the JSON envelope itself - parseable, so NOT output-malformed
+    codeStdout: `${JSON.stringify(codeOut)}\n`,
+  });
+  assert.equal(env.schemaVersion, 1);
+  assert.equal(env.mode, "code");
+  assert.equal(env.status, "failure");
+  assert.equal(env.runId, null, "must not invent a runId");
+  assert.equal(
+    env.error?.class,
+    "handoff-unavailable",
+    "parseable envelope without runId is handoff-unavailable, not output-malformed"
+  );
+  assert.notEqual(env.error?.class, "output-malformed");
+  assert.notEqual(env.error?.class, "output-missing");
+  assert.equal(env.response?.integration?.applied, false);
+  assert.equal(env.response?.integration?.ready, false);
+  assert.equal(env.response?.integration?.outcome, "not-ready");
+});
+
 test("auto: empty code envelope yields one complete failure envelope on stdout + store", async () => {
   const finalizeCalls = [];
   const writes = [];

@@ -28,3 +28,7 @@ Rules (design §11 / PR3):
 - Companion uses this for `notificationMode=auto` (notify only when **background**).
 - Companion **never** forwards this env to the Python wrapper.
 - Do **not** change `skill-run.mjs`; set the env in the skill/agent shell only.
+- Completion notify is mode-gated: only
+  `review` / `reason` / `code` / `verify` / `adversarial-review`
+  (`NOTIFY_ELIGIBLE_MODES`). Peer-stop / handoff / status / setup / etc. are
+  **not** eligible even when notifications are on.

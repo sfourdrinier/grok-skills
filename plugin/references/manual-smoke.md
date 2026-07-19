@@ -20,9 +20,9 @@ Preferred (GitHub marketplace):
 1. `/plugin marketplace add sfourdrinier/grok-skills`
 2. `/plugin install grok@grok-skills`
 3. Reload plugins / restart session.
-4. Confirm `/grok:` lists: preflight, setup, review, reason, code, verify,
-   handoff, status, cleanup, jobs, result, cancel, transfer, debate,
-   adversarial-review.
+4. Confirm `/grok:` lists: preflight, setup, review, reason, code, peer,
+   implement, verify, handoff, status, cleanup, jobs, result, cancel,
+   transfer, debate, adversarial-review.
 5. Optional unit tests from a clone:
    - `cd plugin/wrapper/scripts && python3 -m unittest discover -s tests -q`
    - `cd plugin/scripts && node --test tests/*.test.mjs`
@@ -103,7 +103,10 @@ STOP: success peer-stop
 Expect: start `status: running` with `response.peer.sessionId` + `socketPath`;
 each prompt one redacted turn envelope; stop finalizes with
 `implementation-handoff.json` carrying `confinement: "worktree-final-diff-only"`
-(unless a scopes contract was supplied) and private home destroyed. With
+(unless a scopes contract was supplied) and private home destroyed. The
+companion rewrites the peer-stop envelope with the real apply outcome before
+stdout/store/job finalize (blocked apply = failure, not raw wrapper success).
+Peer-stop is **not** completion-notification eligible. With
 `GROK_DISABLE_ACP=1`, the companion refuses peer modes with a one-line pointer
 to the spec. Control socket lives under the private home (short AF_UNIX path),
 not the run dir.
@@ -127,7 +130,11 @@ not the run dir.
       notifications `auto` → `runs/<runId>/notified.json` may appear as `completed`
       (native may fail headless; marker still completes)
 - [ ] `/grok:cleanup --run-id <id>` dry-run, then `--confirm`
-- [ ] `grok-engineer-coder` routes implementation to companion `code` (one shell call; no unrestricted Bash)
+- [ ] `grok-engineer-coder` prefers ACP peer (`peer start/prompt/stop`) with
+      one-shot `code` fallback (`GROK_DISABLE_ACP=1`); one shell call path; no
+      unrestricted Bash
+- [ ] Peer-stop blocked apply (dirty/consent/integrity) yields failure envelope
+      on stdout + `/grok:result` (not raw wrapper success); no peer toast
 - [ ] `grok-rescue` routes diagnosis to `reason` (not pure implement); one Bash(node) call
 - [ ] Codex: after SessionStart, `~/.codex/agents/grok-*.toml` present with
       `# managed-by: grok-skills`, `# agent-run:`, and `GROK_AGENT_RUN=…/agents/run.mjs`

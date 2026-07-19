@@ -106,9 +106,9 @@ plugin's own contract -> code -> handoff pipeline.
 | 2 (PR8) | Iteration loop: session archive + `code --continue-run` | **done 2026-07-17** |
 | 3 (PR9) | Claude Code native surface (bin/, plugin data dir, SubagentStop, userConfig, agent frontmatter) | **done 2026-07-17** |
 | 4 (PR10) | Codex parity polish | **done 2026-07-17** |
-| 5 (PR11) | ACP probe + spec + experimental peer channel (GROK_EXPERIMENTAL_ACP) | **done 2026-07-17** |
+| 5 (PR11) | ACP probe + spec + peer channel (default; opt out with `GROK_DISABLE_ACP=1`; `GROK_EXPERIMENTAL_ACP` no longer a hard gate) | **done 2026-07-17** |
 | 6 (PR11) | Manifest polish + drift guard + version bump; tag pending maintainer go | **done 2026-07-17** (tag still maintainer-gated) |
-| 7 | Peer-native re-architecture: integration=direct consented default, auto/review opt-in worktrees, ACP default peer channel, mode-aware integrate, honest docs | **in progress on `feat/2.0-peer-agent`** (plan: `docs/superpowers/plans/2026-07-17-phase7-peer-native.md`; design: `docs/specs/2026-07-17-peer-native-integration-design.md`; live evidence: `docs/checklists/2.0-live-smoke-ledger.md`) |
+| 7 | Peer-native re-architecture: integration=direct consented default, auto/review opt-in worktrees, ACP default peer channel, mode-aware integrate, honest docs | **in progress on `feat/2.0-peer-agent`** (code + docs-follow-code closeout; plan: `docs/superpowers/plans/2026-07-17-phase7-peer-native.md`; design: `docs/specs/2026-07-17-peer-native-integration-design.md`; live evidence: `docs/checklists/2.0-live-smoke-ledger.md`) |
 
 Phase 7 locks product defaults (not a silent flip):
 
@@ -116,13 +116,14 @@ Phase 7 locks product defaults (not a silent flip):
 - **auto / review** = opt-in isolated worktrees (apply-on-ready vs parent apply)
 - **ACP** = default multi-turn peer channel for `grok-engineer-coder` (opt out with `GROK_DISABLE_ACP=1`); one-shot `code` is fallback
 - **runMode direct** remains a **separate** installed-home security posture (orthogonal to integration)
+- **Shared auto/peer apply spine** + peer-stop final-envelope / single-flight lifecycle honesty (see CHANGELOG Phase 7 post-round-14)
 
 Canonical mode matrix (do not restate here): [plugin/references/integration-modes.md](../plugin/references/integration-modes.md).
 
 ## Recommended next order (after Wave 1 polish)
 
 1. ~~**Live validation**~~ done 2026-07-15 (`docs/checklists/wave1-live-results-2026-07-15.md`)
-2. **Finish Phase 7** peer-native closeout (docs honesty, live dogfood residuals, tag readiness) on `feat/2.0-peer-agent`
+2. **Finish Phase 7** peer-native closeout (docs honesty landed; dual-host installed-host smoke + tag readiness still open) on `feat/2.0-peer-agent`
 3. **Linux sandbox profile** when a probe report exists  
 4. Optional apply-worktree UX; official directory listings
 

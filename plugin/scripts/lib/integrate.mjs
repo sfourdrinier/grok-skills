@@ -111,8 +111,16 @@ function git(cwd, args) {
   };
 }
 
-/** Strip git's double-quoted path quoting (special-char paths). */
-function unquoteGitPath(p) {
+/**
+ * Decode one git core.quotePath C-style token (`"..."` with `\\NNN` octal and
+ * named escapes). Shared golden vectors: plugin/references/git-c-quoted-path-vectors.json
+ * (parity with Python groklib.git_path_quote). Do **not** apply to NUL-safe
+ * `-z` path_inventory payloads (already raw).
+ *
+ * @param {string} p
+ * @returns {string}
+ */
+export function unquoteGitPath(p) {
   const s = String(p).trim();
   if (!(s.startsWith('"') && s.endsWith('"'))) return s;
   // git core.quotePath C-style: the path is wrapped in "..." with non-ASCII bytes

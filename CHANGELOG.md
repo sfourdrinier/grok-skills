@@ -118,7 +118,7 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 - Validation blockers and command evidence name failing tests from FULL
   stdout (`failedTests`), surviving tail truncation.
 
-### Added (Phase 5 - experimental ACP peer-preview channel, PR11)
+### Added (Phase 5 - ACP peer channel, PR11)
 
 - **ACP peer channel** (hardened only; wrapper + companion): `peer
   start|prompt|stop` drive a long-lived `grok agent stdio` (ACP) session with
@@ -215,11 +215,68 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
   wrapper output, runs peer integration, attaches the final outcome via the
   shared auto final-envelope SSOT (`attachIntegrationFinalOutcome` /
   `buildPeerStopFinalEnvelope`), then emits exactly one final envelope, stores
-  that envelope, finalizes the job, and notifies from final envelope +
-  effective code - all before first stdout write. Success apply still one
-  success envelope with `response.integration.applied=true`.
+  that envelope, and finalizes the job from final envelope + effective code -
+  all before first stdout write. Success apply still one success envelope with
+  `response.integration.applied=true`. Peer-stop remains **outside**
+  completion-notification eligibility (`NOTIFY_ELIGIBLE_MODES`); the rewrite
+  path does not invent peer toasts.
 - Capture path extracted to `lib/companion-capture.mjs` so the entrypoint stays
   under the 900-line cap while the rewrite-before-write contract is centralized.
+
+### Fixed (Phase 7 - post-round-14 apply / peer / path honesty)
+
+Consolidated by root cause (not review-round chronology). Unit coverage lands
+with each behavior; installed-host live smoke remains deferred to dual-host
+post-smoke (see live-smoke ledger).
+
+- **Shared fail-closed apply spine (auto + peer):** one dirty-guard ladder for
+  both `code --integration auto` and ready peer-stop apply - `git status
+  --porcelain -z` fail-closed, `git apply --numstat` fail-closed, dirty-overlap
+  block, `git apply --check --binary`, apply, reverse-on-failure. Outcomes
+  include `blocked-dirty-status` / `blocked-numstat` / `blocked-dirty-overlap`
+  (no blind apply when status cannot be trusted).
+- **Patch integrity recheck before apply:** after apply-time handoff ready,
+  auto rechecks `implementation.patch` bytes/size/hash against the revalidated
+  manifest (`verifyPatchAgainstManifest`, same SSOT as peer) and fails closed
+  with `patch-integrity-failure` if substituted/corrupted. Best-effort under
+  trusted local state - not an atomic TOCTOU seal.
+- **Complete auto failure envelope:** when auto has no usable handoff envelope,
+  emit one full C4-shaped failure envelope (`schemaVersion`, `mode=code`,
+  `status=failure`, stable `runId` or null, classified error,
+  `response.integration.applied=false` / `ready=false`) instead of a partial
+  schemaVersion/mode/status-only object. Never invent success. Classes:
+  empty stdout => `output-missing`; non-JSON => `output-malformed`; parseable
+  code envelope missing usable runId => `handoff-unavailable` (not
+  `output-malformed`). Integration outcome fields route through
+  `attachIntegrationFinalOutcome`.
+- **NUL-safe path inventory + quoted patch headers:** shared `path_inventory`
+  uses raw `-z` relative paths so default `core.quotePath` non-ASCII names no
+  longer become phantom dirty keys; handoff path cross-check decodes C-quoted
+  `diff --git` headers via `git_path_quote` (octal + named escapes, a/b sides,
+  `/dev/null`) without C-unquoting NUL-safe inventories. Companion
+  `unquoteGitPath` shares golden vectors in
+  `plugin/references/git-c-quoted-path-vectors.json` (Python + Node parity
+  tests; no runtime cross-language dependency).
+- **Last-wins task/web argv (companion-args SSOT):** split-or-equals
+  `flagValue` last-wins for `--task` / `--task-file` (and stdin sentinel
+  staging); `--web` / `--no-web` resolve by last occurrence (equals-aware,
+  prefix-safe). Task-file-over-task policy, hermetic force-off, schema refusal,
+  and D-WEB expansion preserved.
+- **ACP child C6 pins + capability-only pre_tool_use honesty:** peer
+  `agent stdio` spawn assembles the same global tool / permission / web /
+  sandbox pins the running envelope advertises (`code._TOOLS` +
+  `effective_tools` + `HEADLESS_PERMISSION_MODE`, probe-accepted global
+  placement before `agent`). Initialize may advertise `pre_tool_use` as a
+  capability; the wrapper does **not** register a deny hook - OS sandbox + C6
+  pins are the real layers (documented NON-enforcement).
+- **Peer-stop single-flight lifecycle + field-safe peer.json:**
+  running -> stopping -> stopped|failed under `run_lock` with `stopOwner`
+  identity, abandoned-stopping reclaim after grace, concurrent field updates
+  not clobbered, failure ends as `failed` (not `stopped`), concurrent dual-stop
+  finalizes once, durable terminals restop without revalidation, live-wrapper
+  fallback kill only on confirmed pid+startToken. Centralized peer.json RMW
+  refuses empty stopOwner tokens while PID is alive and refuses peer-prompt for
+  non-promptable lifecycles.
 
 ### Fixed (Phase 7 - PR #5 Codex code-review remediation)
 
@@ -301,7 +358,7 @@ and quote the contract path. Suite: wrapper 809, plugin 285.
 
 ### Suite counts (ratchet)
 
-- Wrapper: 653 -> 804. Plugin: 172 -> 281 (through PR #5 code-review remediation, all findings fixed).
+- Wrapper: 653 -> 809+. Plugin: 172 -> 285+ (through PR #5 code-review remediation + post-round-14 apply/peer/path honesty; exact counts re-verified by `tools/verify.sh` / CI).
 
 ## [1.6.0] - 2026-07-16
 

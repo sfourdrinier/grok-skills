@@ -246,7 +246,13 @@ export async function runImplementCombo(wrapper, rest, runMode, track, {
  * @param {object|null|undefined} baseEnvelope
  * @param {number} finalCode
  * @param {{ok?: boolean, outcome?: string}|null} applied
- * @param {{ mode?: string, readyFallback?: boolean }} [opts]
+ * @param {{
+ *   mode?: string,
+ *   readyFallback?: boolean,
+ *   forceReady?: boolean|null,
+ * }} [opts]
+ *   forceReady: when boolean, overwrite response.integration.ready (auto failure
+ *   fallback forces false so a code-leg ready claim cannot leak into the final).
  * @returns {object|null}
  */
 export function attachIntegrationFinalOutcome(baseEnvelope, finalCode, applied, opts = {}) {
@@ -259,17 +265,21 @@ export function attachIntegrationFinalOutcome(baseEnvelope, finalCode, applied, 
     baseResp.integration && typeof baseResp.integration === "object"
       ? baseResp.integration
       : {};
+  const integration = {
+    ...baseInteg,
+    applied: applied?.ok === true,
+    outcome:
+      applied?.outcome ?? (opts.readyFallback === true ? "not-applied" : "not-ready"),
+  };
+  if (typeof opts.forceReady === "boolean") {
+    integration.ready = opts.forceReady;
+  }
   const out = {
     ...baseEnvelope,
     status: finalCode === 0 ? "success" : "failure",
     response: {
       ...baseResp,
-      integration: {
-        ...baseInteg,
-        applied: applied?.ok === true,
-        outcome:
-          applied?.outcome ?? (opts.readyFallback === true ? "not-applied" : "not-ready"),
-      },
+      integration,
     },
   };
   if (typeof opts.mode === "string" && opts.mode) {
@@ -303,6 +313,16 @@ export function buildAutoFinalEnvelope(result, finalCode, applied) {
  * (schemaVersion/mode/status/runId/error/response.integration). Never invent
  * success; never invent a runId (known result/job run id or explicit null).
  *
+ * Classification (existing C4 classes only):
+ * - preserve code-leg error.class when present
+ * - parseable code envelope without a usable runId -> handoff-unavailable
+ *   (cannot hand off / apply; not stdout corruption)
+ * - non-empty unparseable stdout -> output-malformed
+ * - empty stdout -> output-missing
+ *
+ * Integration fields route through attachIntegrationFinalOutcome (ready forced
+ * false; applied false; outcome not-ready).
+ *
  * @param {{
  *   codeEnvelope?: object|null,
  *   runId?: string|null,
@@ -319,45 +339,46 @@ export function buildAutoCodeFallbackEnvelope(result = {}) {
     sanitizeRunId(result.runId) ||
     sanitizeRunId(ce?.runId) ||
     null;
-  const baseResp =
-    ce?.response && typeof ce.response === "object" && !Array.isArray(ce.response)
-      ? ce.response
-      : {};
-  const baseInteg =
-    baseResp.integration && typeof baseResp.integration === "object"
-      ? baseResp.integration
-      : {};
   const preservedError =
     ce?.error && typeof ce.error === "object" && typeof ce.error.class === "string"
       ? ce.error
       : null;
   const stdout = typeof result.codeStdout === "string" ? result.codeStdout : "";
   const exitCode = typeof result.codeExit === "number" ? result.codeExit : null;
-  // Prefer the code leg's classified error when present; otherwise classify the
-  // missing/unparseable stdout (C4: output-missing / output-malformed).
-  const error =
-    preservedError ||
-    (stdout.trim()
-      ? {
-          class: "output-malformed",
-          message:
-            "code leg produced no parseable envelope (stdout corruption or non-JSON wrapper output)",
-          detail: {
-            exitCode,
-            jobId: result.jobId ?? null,
-            stdoutBytes: Buffer.byteLength(stdout, "utf8"),
-          },
-        }
-      : {
-          class: "output-missing",
-          message:
-            "code leg produced no parseable envelope (empty stdout; spawn failure or wrapper crash)",
-          detail: {
-            exitCode,
-            jobId: result.jobId ?? null,
-            stdoutBytes: 0,
-          },
-        });
+  const detailBase = {
+    exitCode,
+    jobId: result.jobId ?? null,
+    stdoutBytes: Buffer.byteLength(stdout, "utf8"),
+  };
+  let error = preservedError;
+  if (!error) {
+    if (ce) {
+      // Parseable code envelope is never stdout corruption. Without a usable
+      // runId (or without a handoff envelope on this path) classify
+      // handoff-unavailable so auto cannot claim apply success.
+      error = {
+        class: "handoff-unavailable",
+        message: knownRunId
+          ? "code envelope is parseable but no handoff envelope is available for auto apply"
+          : "code envelope is parseable but has no usable runId; cannot hand off or auto-apply",
+        detail: detailBase,
+      };
+    } else if (stdout.trim()) {
+      error = {
+        class: "output-malformed",
+        message:
+          "code leg produced no parseable envelope (stdout corruption or non-JSON wrapper output)",
+        detail: detailBase,
+      };
+    } else {
+      error = {
+        class: "output-missing",
+        message:
+          "code leg produced no parseable envelope (empty stdout; spawn failure or wrapper crash)",
+        detail: { ...detailBase, stdoutBytes: 0 },
+      };
+    }
+  }
   const base = ce
     ? { ...ce }
     : {
@@ -368,8 +389,8 @@ export function buildAutoCodeFallbackEnvelope(result = {}) {
         error,
         response: null,
       };
-  // Force honest failure + integration outcome even when the code envelope claimed
-  // success without a usable runId (auto never applied in this branch).
+  // Force honest failure even when the code envelope claimed success without a
+  // usable runId (auto never applied in this branch).
   base.schemaVersion = typeof base.schemaVersion === "number" ? base.schemaVersion : 1;
   base.mode = "code";
   base.status = "failure";
@@ -377,16 +398,15 @@ export function buildAutoCodeFallbackEnvelope(result = {}) {
   if (!base.error || typeof base.error !== "object" || typeof base.error.class !== "string") {
     base.error = error;
   }
-  base.response = {
-    ...baseResp,
-    integration: {
-      ...baseInteg,
-      ready: false,
-      applied: false,
-      outcome: "not-ready",
-    },
-  };
-  return base;
+  // Route integration outcome fields through the shared SSOT (no parallel field
+  // construction). forceReady=false so a code-leg ready claim cannot leak.
+  const attached = attachIntegrationFinalOutcome(
+    base,
+    1,
+    { ok: false, outcome: "not-ready" },
+    { mode: "code", readyFallback: false, forceReady: false }
+  );
+  return attached || base;
 }
 
 /**

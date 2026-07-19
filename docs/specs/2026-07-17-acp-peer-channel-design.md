@@ -60,18 +60,28 @@ private-home destroy, terminalize run record.
 - Start parity (fail closed before first prompt): sandbox profile capability,
   tool allowlist (or hard-refuse if empty), mcpServers [], web policy, cwd
   sentinel planted, original_baseline + pristine gate scripts captured, no
-  .env copy.
+  .env copy. Child argv pins the same global C6 tool / permission / web /
+  sandbox flags the running envelope advertises (probe-accepted placement
+  before `agent stdio`; see `peer_process.build_acp_stdio_argv`).
 - Stop: `verify_enforcement` against the private home/policy when possible.
   Failure adds a `sandbox-failure` blocker (forces not-ready).
   Do **not** claim "full code-mode isolation stack" when ACP did not produce
-  sandbox-events telemetry - record the miss honestly.
-- `pre_tool_use` deny is registered as NON-enforcement (OS sandbox enforces).
+  sandbox-events telemetry - record the miss honestly. Do **not** claim full
+  runtime tool-approval enforcement beyond local CLI parse + initialize probe
+  evidence.
+- `pre_tool_use` may be advertised on initialize as a capability; the wrapper
+  does **not** register a deny hook (NON-enforcement). OS sandbox + C6 pins
+  enforce.
 - Secret redaction: every relayed chunk, control-socket payload, and turn
   envelope passes the same `assert_no_secret_material` scan as
   `emit_envelope` (after redaction).
 - Confinement label: a peer session that passed real gates with a contract
   scopes list gets `contract-scopes` (same standing as a code run); otherwise
   `worktree-final-diff-only`.
+- Lifecycle single-flight: peer-stop owns running -> stopping ->
+  stopped|failed under `run_lock` with `stopOwner` reclaim; peer.json RMW is
+  field-safe (renew_lease / child-death writers cannot clobber stopping /
+  stopOwner).
 
 ### Residual risk: per-frame progress redaction
 
@@ -113,11 +123,12 @@ patch itself per integration mode; `/grok:handoff` does NOT accept peer runs
 (code-mode only).
 
 Terminal honesty: the companion rewrites the peer-stop stdout envelope with the
-true apply outcome **before** first write / store / notify (shared auto final-
-envelope SSOT). Blocked apply => one `status: failure` envelope with
+true apply outcome **before** first write / store / job finalize (shared auto
+final-envelope SSOT). Blocked apply => one `status: failure` envelope with
 `response.integration.applied=false` + outcome, stored identically for
 `/grok:result`, job failed, nonzero exit; success apply => one success envelope
-with `applied=true`.
+with `applied=true`. Peer-stop is **not** completion-notification eligible
+(`NOTIFY_ELIGIBLE_MODES` excludes peer modes).
 
 ## Failure model
 
@@ -148,7 +159,7 @@ with `applied=true`.
 5. HANDOFF: `/grok:handoff` is code-mode only (refuses peer runIds); peer runs
    integrate via `peer stop` itself, per active mode (Task 7.4 peer-handoff
    eligibility later removed by the peer-honesty hardening).
-6. pre_tool_use deny is NON-enforcement.
+6. pre_tool_use is capability-only honesty (not registered); NON-enforcement.
 7. Prompts serialized: one in-flight prompt per session.
 8. WRAPPER GATE: ACP default; `GROK_DISABLE_ACP=1` is the opt-out (both
    wrapper and companion). `GROK_EXPERIMENTAL_ACP` is no longer a hard gate.

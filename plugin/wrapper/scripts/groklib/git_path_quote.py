@@ -2,7 +2,9 @@
 #
 # Git core.quotePath C-style path decoding for non -z outputs (diff --git headers,
 # apply --numstat, etc.). Distinct from path_inventory: NUL-safe -z inventories
-# are already raw and must never be C-unquoted.
+# are already raw and must never be C-unquoted. Shared golden vectors:
+# plugin/references/git-c-quoted-path-vectors.json (parity with Node unquoteGitPath).
+# Invalid UTF-8 after decode uses U+FFFD (errors="replace") to match Node Buffer.
 
 from __future__ import annotations
 
@@ -49,7 +51,9 @@ def decode_git_c_escape_body(body: str) -> str:
             continue
         out.append(ord(nxt) & 0xFF)
         i += 1
-    return out.decode("utf-8", errors="surrogateescape")
+    # Invalid UTF-8 sequences become U+FFFD (parity with Node Buffer UTF-8 decode).
+    # Do not use surrogateescape: companion dirty-guard paths must match.
+    return out.decode("utf-8", errors="replace")
 
 
 def decode_git_c_quoted_token(token: str) -> str:
