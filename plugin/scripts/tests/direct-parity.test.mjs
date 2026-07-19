@@ -123,6 +123,145 @@ test("runDirectGrok redacts stderr before relaying it to the terminal", () => {
   assert.doesNotMatch(all, new RegExp(secret), `secret must not reach the terminal: ${all}`);
 });
 
+// D4(a): direct mode must load operator ~/.grok auth values into the exact-value
+// denylist (via production AUTH_FILE_NAMES + registration helpers) so an opaque
+// token that matches NO pattern scanner is still stripped from envelope + stderr.
+// Pattern-only redaction is not enough for runMode=direct (uses operator home).
+test("runDirectGrok D4(a) redacts opaque operator-auth values from envelope and stderr", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-d4a-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-d4a-home-"));
+  // Same opaque shape as the Python D4(a) fixture: 40 alnum chars, no secret prefix.
+  const opaque = "a1b2c3d4e5f6g7h8i9j0" + "k1l2m3n4o5p6q7r8s9t0";
+  const captured = [];
+  const orig = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (s, enc, cb) => {
+    captured.push(String(s));
+    if (typeof enc === "function") enc();
+    else if (typeof cb === "function") cb();
+    return true;
+  };
+  try {
+    fs.mkdirSync(path.join(home, ".grok"), { recursive: true });
+    // String leaf >=16 chars under AUTH_FILE_NAMES is the D4(a) denylist input.
+    fs.writeFileSync(
+      path.join(home, ".grok", "auth.json"),
+      JSON.stringify({ apiKey: opaque }),
+      { mode: 0o600 }
+    );
+    const fakeGrok = path.join(dir, "fake-grok.sh");
+    // Echo the opaque token on BOTH stdout (envelope) and stderr (terminal relay).
+    fs.writeFileSync(
+      fakeGrok,
+      `#!/bin/sh\nprintf '%s\\n' 'leak ${opaque} to-stderr' 1>&2\nprintf '%s\\n' '{"result":"token ${opaque} echoed"}'\n`
+    );
+    fs.chmodSync(fakeGrok, 0o755);
+    const scriptsDir = path.resolve(SCRIPT_DIR, "..", "..", "wrapper", "scripts");
+    const res = runDirectGrok({
+      mode: "code",
+      args: ["--target", dir, "--base", "HEAD", "--task", "x"],
+      cwd: dir,
+      env: {
+        ...process.env,
+        HOME: home,
+        GROK_AGENT_BINARY: fakeGrok,
+      },
+      scriptsDir,
+      python: "python3",
+    });
+    assert.equal(res.code, 0, `expected success envelope: ${res.envelopeText}`);
+    assert.doesNotMatch(
+      res.envelopeText,
+      new RegExp(opaque),
+      `opaque auth value must be absent from envelope: ${res.envelopeText}`
+    );
+    assert.match(
+      res.envelopeText,
+      /redacted-injected-value/,
+      "D4(a) injected-value placeholder expected in envelope"
+    );
+    const allErr = captured.join("");
+    assert.doesNotMatch(
+      allErr,
+      new RegExp(opaque),
+      `opaque auth value must be absent from stderr relay: ${allErr}`
+    );
+  } finally {
+    process.stderr.write = orig;
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// Unreadable/malformed operator auth must not disable pattern redaction: empty
+// denylist is fail-safe, pattern scan + assert still apply (D4(a) never instead-of).
+test("runDirectGrok still pattern-redacts when operator auth is unreadable", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-d4a-bad-"));
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-d4a-bad-home-"));
+  const secret = "sk-" + "BADAUTHSTILLREDACT0123456789ABCD";
+  try {
+    fs.mkdirSync(path.join(home, ".grok"), { recursive: true });
+    // Unreadable/malformed auth.json: register fails safe (empty denylist).
+    fs.writeFileSync(path.join(home, ".grok", "auth.json"), "{not-json", { mode: 0o600 });
+    const fakeGrok = path.join(dir, "fake-grok.sh");
+    fs.writeFileSync(
+      fakeGrok,
+      `#!/bin/sh\nprintf '%s\\n' '{"result":"here is a token ${secret} end"}'\n`
+    );
+    fs.chmodSync(fakeGrok, 0o755);
+    const scriptsDir = path.resolve(SCRIPT_DIR, "..", "..", "wrapper", "scripts");
+    const res = runDirectGrok({
+      mode: "code",
+      args: ["--target", dir, "--base", "HEAD", "--task", "x"],
+      cwd: dir,
+      env: {
+        ...process.env,
+        HOME: home,
+        GROK_AGENT_BINARY: fakeGrok,
+      },
+      scriptsDir,
+      python: "python3",
+    });
+    assert.equal(res.code, 0, `expected success envelope: ${res.envelopeText}`);
+    assert.doesNotMatch(
+      res.envelopeText,
+      new RegExp(secret),
+      `pattern secret must still be redacted with bad auth: ${res.envelopeText}`
+    );
+    assert.match(res.envelopeText, /redacted/i, "pattern redaction marker expected");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+// DRY guard: Node must not own a copied auth filename list; REDACT_SCRIPT loads
+// AUTH_FILE_NAMES + register/clear helpers from the Python redaction/authhome SSOT.
+test("direct REDACT_SCRIPT registers D4(a) denylist via production AUTH_FILE_NAMES helpers", () => {
+  const src = fs.readFileSync(
+    path.resolve(SCRIPT_DIR, "..", "lib", "direct-grok.mjs"),
+    "utf8"
+  );
+  assert.match(src, /AUTH_FILE_NAMES/, "REDACT_SCRIPT must import AUTH_FILE_NAMES SSOT");
+  assert.match(src, /source_grok_dir/, "REDACT_SCRIPT must resolve operator ~/.grok via source_grok_dir");
+  assert.match(
+    src,
+    /register_injected_secrets_from_home/,
+    "REDACT_SCRIPT must register via production helper"
+  );
+  assert.match(src, /redact_injected_secrets/, "REDACT_SCRIPT must apply exact-value denylist redaction");
+  assert.match(
+    src,
+    /clear_injected_secret_denylist/,
+    "REDACT_SCRIPT must clear the denylist in finally"
+  );
+  // No Node-side auth filename list (production AUTH_FILE_NAMES is the only source).
+  assert.doesNotMatch(
+    src,
+    /authFileNames\s*=\s*\[/,
+    "Node must not own a copied auth filename list"
+  );
+});
+
 test("runDirectGrok verify uses --worktree as cwd, not --target", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-wt-"));
   try {

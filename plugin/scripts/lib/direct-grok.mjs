@@ -135,18 +135,38 @@ function toolsAllowlist(mode, web) {
  */
 /**
  * Redact a direct-mode envelope through the wrapper's SINGLE redaction source
- * (groklib.envelope) so runMode=direct honors the same stdout redaction contract
- * as hardened mode. Returns the redacted JSON string, or null (fail closed) if
- * redaction cannot run or a secret survives the scan.
+ * (groklib.envelope + D4(a) injectedsecrets) so runMode=direct honors the same
+ * stdout redaction contract as hardened mode. Loads operator ~/.grok auth leaves
+ * via production AUTH_FILE_NAMES / register_injected_secrets_from_home (no
+ * Node-side filename list), exact-masks those values first, then pattern-redacts
+ * and fail-closed asserts. Auth unreadable -> empty denylist (pattern scan still
+ * runs). Denylist always cleared in finally. Returns the redacted JSON string, or
+ * null (fail closed) if redaction cannot run or a secret survives the scan.
  */
-const REDACT_SCRIPT =
-  "import sys,json;" +
-  "sys.path.insert(0, sys.argv[1]);" +
-  "from groklib.envelope import redact_secret_material, assert_no_secret_material;" +
-  "obj=json.load(sys.stdin);" +
-  "red=redact_secret_material(obj, redact_keys=True);" +
-  "assert_no_secret_material(red);" +
-  "sys.stdout.write(json.dumps(red))";
+const REDACT_SCRIPT = [
+  "import sys, json",
+  "sys.path.insert(0, sys.argv[1])",
+  // AUTH_FILE_NAMES + source_grok_dir are the production SSOTs (modes/_shared);
+  // register/redact/clear live in injectedsecrets (same path hardened create_private_home uses).
+  "from groklib.modes._shared import AUTH_FILE_NAMES, source_grok_dir",
+  "from groklib.injectedsecrets import (",
+  "    register_injected_secrets_from_home,",
+  "    redact_injected_secrets,",
+  "    clear_injected_secret_denylist,",
+  ")",
+  "from groklib.envelope import redact_secret_material, assert_no_secret_material",
+  "obj = json.load(sys.stdin)",
+  "try:",
+  // Fail-safe: register never raises; unreadable/malformed auth yields empty denylist
+  // without weakening the pattern scan / assert below.
+  "    register_injected_secrets_from_home(source_grok_dir(), AUTH_FILE_NAMES)",
+  "    red = redact_injected_secrets(obj)",
+  "    red = redact_secret_material(red, redact_keys=True)",
+  "    assert_no_secret_material(red)",
+  "    sys.stdout.write(json.dumps(red))",
+  "finally:",
+  "    clear_injected_secret_denylist()",
+].join("\n");
 
 /** Run the wrapper's single-source redactor over a JSON payload; returns the
  *  redacted JSON string, or null if redaction cannot run / a secret survives. */
