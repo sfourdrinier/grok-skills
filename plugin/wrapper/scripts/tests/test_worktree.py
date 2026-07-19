@@ -3,9 +3,7 @@
 import json
 import os
 import pathlib
-import shutil
 import subprocess
-import tempfile
 import unittest
 from typing import Optional
 from unittest import mock
@@ -23,74 +21,32 @@ from groklib.worktree import (
 )
 from groklib.worktree_escape import (
     assert_changes_within,
-    assert_original_checkout_unmodified,
     capture_original_checkout_baseline,
-    repo_change_fingerprint,
 )
 
-from tests import gitfixtures
+from tests.worktree_test_base import WorktreeTestBase, _git
 
 
-def _git(repo: pathlib.Path, *args: str) -> str:
-    argv = ["git", "-C", str(repo)] + [str(arg) for arg in args]
-    completed = subprocess.run(
-        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding="utf-8", check=False
-    )
-    if completed.returncode != 0:
-        raise AssertionError(
-            "test git helper failed: {} exit {} stderr={!r}".format(args, completed.returncode, completed.stderr)
-        )
-    return completed.stdout
+class RebuildWorktreeFromRecordTests(WorktreeTestBase):
+    def test_rebuild_worktree_from_record_roundtrip(self) -> None:
+        from groklib.worktree import rebuild_worktree_from_record
 
-
-class WorktreeTestBase(unittest.TestCase):
-    """Isolates XDG_STATE_HOME (worktree root) and the fixture repo under tempfile."""
-
-    def setUp(self) -> None:
-        self.tmp_root = tempfile.mkdtemp(prefix="grok-cli-worktree-test-")
-        self.addCleanup(shutil.rmtree, self.tmp_root, True)
-        self.state_home = os.path.join(self.tmp_root, "state-home")
-        os.makedirs(self.state_home, exist_ok=True)
-        self._env_patcher = mock.patch.dict(os.environ, {"XDG_STATE_HOME": self.state_home})
-        self._env_patcher.start()
-        self.addCleanup(self._env_patcher.stop)
-
-        repo_parent = tempfile.mkdtemp(prefix="grok-cli-repo-", dir=self.tmp_root)
-        self.repo_root = gitfixtures.make_repo(repo_parent)
-        self.base = gitfixtures.head_revision(self.repo_root)
-
-    def _create(self) -> ExternalWorktree:
-        run_id = runstate.new_run_id()
-        return create_external_worktree(repo_root=self.repo_root, base=self.base, run_id=run_id)
-
-    def _force_remove(self, wt: ExternalWorktree) -> None:
-        # Test-only teardown that force-removes regardless of dirty state so the
-        # temp repo's worktree registry is left clean; the tmp_root rmtree then
-        # deletes everything on disk. Production removal (remove_external_worktree)
-        # deliberately refuses dirty worktrees, so it cannot serve as teardown.
-        subprocess.run(
-            ["git", "-C", str(self.repo_root), "worktree", "remove", "--force", str(wt.path)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        subprocess.run(
-            ["git", "-C", str(self.repo_root), "branch", "-D", wt.branch],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-        )
-        marker = pathlib.Path(str(wt.path) + ".owner.json")
-        if marker.exists():
-            marker.unlink()
-
-    def _worktree_list_paths(self) -> list:
-        out = _git(self.repo_root, "worktree", "list", "--porcelain")
-        paths = []
-        for line in out.splitlines():
-            if line.startswith("worktree "):
-                paths.append(pathlib.Path(line[len("worktree "):]).resolve())
-        return paths
+        wt = self._create()
+        record = {
+            "worktreePath": str(wt.path),
+            "worktreeBranch": wt.branch,
+            "baseRevision": wt.base_revision,
+            "repository": str(wt.repo_root),
+        }
+        rebuilt = rebuild_worktree_from_record(record)
+        self.assertIsNotNone(rebuilt)
+        assert rebuilt is not None
+        self.assertEqual(rebuilt.path, wt.path)
+        self.assertEqual(rebuilt.branch, wt.branch)
+        self.assertEqual(rebuilt.base_revision, wt.base_revision)
+        self.assertEqual(rebuilt.repo_root, wt.repo_root)
+        self.assertIsNone(rebuild_worktree_from_record({"worktreePath": "/x"}))
+        self.assertIsNone(rebuild_worktree_from_record({}))
 
 
 class CreateWorktreeTests(WorktreeTestBase):
@@ -197,7 +153,6 @@ class CreateWorktreeTests(WorktreeTestBase):
         )
         self.assertNotEqual(branch_check.returncode, 0, "no worktree branch may be created")
 
-
 class VerifyWorktreeTests(WorktreeTestBase):
     def test_verify_passes_for_created_worktree_and_fails_for_repo_subdir(self) -> None:
         wt = self._create()
@@ -230,7 +185,6 @@ class VerifyWorktreeTests(WorktreeTestBase):
             verify_external_worktree(phantom)
         self.assertEqual(ctx.exception.error_class, "worktree-failure")
 
-
 class DiffSummaryTests(WorktreeTestBase):
     def test_diff_summary_lists_tracked_and_untracked_changes(self) -> None:
         wt = self._create()
@@ -244,7 +198,6 @@ class DiffSummaryTests(WorktreeTestBase):
         self.assertIn("a.txt", changed)
         self.assertIn("brand_new.txt", changed)
         self.assertIn("a.txt", stat_text)
-
 
 class VerifySnapshotArtifactRuleTests(WorktreeTestBase):
     """The verify entry/exit snapshot + artifact-tolerance combined rule (PR968 codex).
@@ -341,262 +294,6 @@ class VerifySnapshotArtifactRuleTests(WorktreeTestBase):
 
         assert_changes_within(wt, (), worktree_changed=changed, original_baseline=baseline)
 
-
-class RepoChangeFingerprintTests(WorktreeTestBase):
-    def test_fingerprint_detects_rewrite_of_already_dirty_file(self) -> None:
-        # Grok dogfood-4 #2 review-fs-content: a rewrite of an ALREADY-dirty file
-        # changes its content fingerprint, so the before/after set difference is
-        # non-empty even though the PATH set is unchanged (a path-only diff missed it).
-        dirty = self.repo_root / "a.txt"
-        with dirty.open("a", encoding="utf-8") as handle:
-            handle.write("operator's own edit\n")
-        before = repo_change_fingerprint(self.repo_root)
-        self.assertIn("a.txt", {path for path, _fp in before})
-
-        # A path-only diff would see the same {a.txt, dirty.txt} set before/after.
-        with dirty.open("a", encoding="utf-8") as handle:
-            handle.write("a run-attributable rewrite\n")
-        after = repo_change_fingerprint(self.repo_root)
-        changed = {path for path, _fp in (after - before)}
-        self.assertIn("a.txt", changed, "a rewrite of an already-dirty file must be detected")
-        self.assertNotIn("dirty.txt", changed, "the operator's untouched pre-existing dirt is not flagged")
-
-
-class AssertChangesWithinTests(WorktreeTestBase):
-    def test_assert_changes_within_flags_outside_writes(self) -> None:
-        wt = self._create()
-        self.addCleanup(self._force_remove, wt)
-        # Production always passes an entry baseline (pre-existing tracked + untracked
-        # dirt), so the operator's untracked dirty.txt is exempt while a run write is
-        # flagged. Capture it before any escape.
-        baseline = capture_original_checkout_baseline(self.repo_root)
-
-        # In-worktree change confined to the worktree passes.
-        (wt.path / "pkg" / "generated.txt").write_text("ok\n", encoding="utf-8")
-        assert_changes_within(wt, (wt.path,), original_baseline=baseline)
-
-        # A write to a TRACKED file in the ORIGINAL checkout (Grok editing real
-        # source) must be flagged, while the pre-existing untracked dirty.txt is
-        # tolerated (it is the operator's, not run-introduced).
-        with (self.repo_root / "a.txt").open("a", encoding="utf-8") as handle:
-            handle.write("escaped-write\n")
-        with self.assertRaises(GrokWrapperError) as ctx:
-            assert_changes_within(wt, (wt.path,), original_baseline=baseline)
-        self.assertEqual(ctx.exception.error_class, "unexpected-edits")
-
-    def test_assert_changes_within_flags_planted_untracked_file_in_original_checkout(self) -> None:
-        # original-checkout-scan-misses-untracked-new-files: a sandbox bypass that
-        # PLANTS a brand-new untracked file into the operator's real checkout (not a
-        # tracked edit) must be flagged; a path-only tracked-diff scan missed it.
-        wt = self._create()
-        self.addCleanup(self._force_remove, wt)
-        baseline = capture_original_checkout_baseline(self.repo_root)
-
-        # Pre-existing operator dirt (dirty.txt) stays exempt; only the newly
-        # planted file is a violation.
-        (self.repo_root / "exfil.env").write_text("SECRET=planted\n", encoding="utf-8")
-        with self.assertRaises(GrokWrapperError) as ctx:
-            assert_changes_within(wt, (wt.path,), original_baseline=baseline)
-        self.assertEqual(ctx.exception.error_class, "unexpected-edits")
-        self.assertTrue(any("exfil.env" in v for v in ctx.exception.detail["violations"]))
-        self.assertFalse(any("dirty.txt" in v for v in ctx.exception.detail["violations"]))
-
-    def test_worktree_change_outside_allowed_subroot_flagged(self) -> None:
-        wt = self._create()
-        self.addCleanup(self._force_remove, wt)
-        baseline = capture_original_checkout_baseline(self.repo_root)
-        # Change lands at the worktree root, but only pkg/ is allowed.
-        (wt.path / "outside.txt").write_text("x\n", encoding="utf-8")
-        with self.assertRaises(GrokWrapperError) as ctx:
-            assert_changes_within(wt, (wt.path / "pkg",), original_baseline=baseline)
-        self.assertEqual(ctx.exception.error_class, "unexpected-edits")
-
-    def test_assert_changes_within_tolerates_gitignored_build_artifacts(self) -> None:
-        # Grok dogfood #7: a multi-package workspace build writes into per-package
-        # packages/<pkg>/dist and .next, NESTED below the worktree root. These
-        # are tolerated ONLY when git genuinely ignores them (a real disposable
-        # build root), not merely because a same-named component appears.
-        wt = self._create()
-        self.addCleanup(self._force_remove, wt)
-
-        baseline = capture_original_checkout_baseline(self.repo_root)
-        (wt.path / ".gitignore").write_text("dist/\n.next/\n", encoding="utf-8")
-        nested_dist = wt.path / "packages" / "foo" / "dist"
-        nested_dist.mkdir(parents=True)
-        (nested_dist / "bundle.js").write_text("// built\n", encoding="utf-8")
-        nested_next = wt.path / "packages" / "foo" / ".next"
-        nested_next.mkdir(parents=True)
-        (nested_next / "manifest.json").write_text("{}\n", encoding="utf-8")
-
-        # The gitignored artifact paths are tolerated even with a narrow root; the
-        # operator's pre-existing untracked dirt is exempted by the entry baseline.
-        assert_changes_within(
-            wt,
-            (wt.path / "pkg",),
-            worktree_changed=[
-                "packages/foo/dist/bundle.js",
-                "packages/foo/.next/manifest.json",
-            ],
-            original_baseline=baseline,
-        )
-
-    def test_assert_changes_within_flags_dist_under_src_not_ignored(self) -> None:
-        # Grok dogfood #5 attack: writing to packages/foo/src/dist/backdoor.ts
-        # carries a "dist" component but is NOT gitignored -- it is a source-tree
-        # escape and must still be flagged closed, never exempted by name.
-        wt = self._create()
-        self.addCleanup(self._force_remove, wt)
-
-        baseline = capture_original_checkout_baseline(self.repo_root)
-        # Only dist/ and .next/ at any level are ignored; src/dist is NOT.
-        (wt.path / ".gitignore").write_text("/dist/\n", encoding="utf-8")
-        backdoor = wt.path / "packages" / "foo" / "src" / "dist"
-        backdoor.mkdir(parents=True)
-        (backdoor / "backdoor.ts").write_text("export const pwn = 1\n", encoding="utf-8")
-        with self.assertRaises(GrokWrapperError) as ctx:
-            assert_changes_within(
-                wt,
-                (wt.path / "pkg",),
-                worktree_changed=["packages/foo/src/dist/backdoor.ts"],
-                original_baseline=baseline,
-            )
-        self.assertEqual(ctx.exception.error_class, "unexpected-edits")
-
-        # A plain nested SOURCE edit (no artifact component) is also flagged.
-        nested_src = wt.path / "packages" / "foo" / "src"
-        (nested_src / "code.ts").write_text("export const x = 1\n", encoding="utf-8")
-        with self.assertRaises(GrokWrapperError) as ctx:
-            assert_changes_within(
-                wt, (wt.path / "pkg",), worktree_changed=["packages/foo/src/code.ts"], original_baseline=baseline
-            )
-        self.assertEqual(ctx.exception.error_class, "unexpected-edits")
-
-    def test_pre_dirty_original_file_rewritten_during_run_is_flagged(self) -> None:
-        # Round5 original-checkout-baseline-path-only-exclusion: a tracked file
-        # already dirty at run entry must be exempt ONLY while its content is
-        # unchanged. If the run REWRITES it (an escape), it must be flagged, not
-        # permanently blessed by a path-only exemption.
-        pre_dirty = self.repo_root / "a.txt"
-        with pre_dirty.open("a", encoding="utf-8") as handle:
-            handle.write("operator's own pre-existing edit\n")
-        # Baseline captured at run entry, with a.txt already dirty.
-        baseline = capture_original_checkout_baseline(self.repo_root)
-        self.assertIn("a.txt", baseline)
-
-        wt = self._create()
-        self.addCleanup(self._force_remove, wt)
-
-        # Unchanged since entry -> still exempt (no false positive on operator dirt).
-        assert_changes_within(wt, (wt.path,), original_baseline=baseline)
-
-        # The run now REWRITES the already-dirty file in the REAL checkout.
-        with pre_dirty.open("a", encoding="utf-8") as handle:
-            handle.write("// run-attributable escape into an already-dirty file\n")
-        with self.assertRaises(GrokWrapperError) as ctx:
-            assert_changes_within(wt, (wt.path,), original_baseline=baseline)
-        self.assertEqual(ctx.exception.error_class, "unexpected-edits")
-        self.assertTrue(any("a.txt" in v for v in ctx.exception.detail["violations"]))
-
-    def test_mode_only_change_to_pre_dirty_original_file_is_flagged(self) -> None:
-        # Round7 mode-only-change-baseline-exemption-bypass: a tracked file already
-        # dirty at run entry must be exempt only while BOTH its content and its mode
-        # are unchanged. A mode-only mutation (chmod +x -- content byte-identical, so
-        # git hash-object is unchanged) is still a run-attributable change and must be
-        # flagged, not silently blessed as pre-existing operator dirt.
-        pre_dirty = self.repo_root / "a.txt"
-        os.chmod(str(pre_dirty), 0o644)
-        with pre_dirty.open("a", encoding="utf-8") as handle:
-            handle.write("operator's own pre-existing edit\n")
-        baseline = capture_original_checkout_baseline(self.repo_root)
-        self.assertIn("a.txt", baseline)
-
-        wt = self._create()
-        self.addCleanup(self._force_remove, wt)
-
-        # Unchanged content AND mode since entry -> still exempt.
-        assert_changes_within(wt, (wt.path,), original_baseline=baseline)
-
-        # A MODE-ONLY mutation with NO content change (chmod +x).
-        os.chmod(str(pre_dirty), 0o755)
-        with self.assertRaises(GrokWrapperError) as ctx:
-            assert_changes_within(wt, (wt.path,), original_baseline=baseline)
-        self.assertEqual(ctx.exception.error_class, "unexpected-edits")
-        self.assertTrue(any("a.txt" in v for v in ctx.exception.detail["violations"]))
-
-    def test_assert_changes_within_flags_planted_gitignored_file_in_original_checkout(self) -> None:
-        # Grok r5 #4: the original-checkout escape scan must flag ANY modification
-        # including gitignored files -- a sandbox bypass that PLANTS a gitignored file
-        # (repo/.env.local, repo/node_modules/.bin/evil) in the operator's real
-        # checkout was invisible to the --exclude-standard scan. The .gitignore is
-        # captured into the baseline first (exempt operator dirt); only the newly
-        # planted ignored file is a violation.
-        wt = self._create()
-        self.addCleanup(self._force_remove, wt)
-        (self.repo_root / ".gitignore").write_text("secret/\n*.local\n", encoding="utf-8")
-        baseline = capture_original_checkout_baseline(self.repo_root)
-
-        # Plant a gitignored file deep inside an ignored directory AND at the root.
-        (self.repo_root / "secret").mkdir()
-        (self.repo_root / "secret" / "evil.bin").write_text("exfil\n", encoding="utf-8")
-        (self.repo_root / "creds.local").write_text("SECRET=planted\n", encoding="utf-8")
-        with self.assertRaises(GrokWrapperError) as ctx:
-            assert_changes_within(wt, (wt.path,), original_baseline=baseline)
-        self.assertEqual(ctx.exception.error_class, "unexpected-edits")
-        violations = ctx.exception.detail["violations"]
-        self.assertTrue(any("secret/evil.bin" in v for v in violations), violations)
-        self.assertTrue(any("creds.local" in v for v in violations), violations)
-        # Pre-existing operator dirt (dirty.txt) stays exempt.
-        self.assertFalse(any("dirty.txt" in v for v in violations))
-
-    def test_original_checkout_artifact_named_edit_always_flagged(self) -> None:
-        # Escape detection of edits in the operator's REAL checkout must NEVER be
-        # softened by artifact tolerance: a tracked file under a "build"-named
-        # directory, newly diverged during the run, is still an escape.
-        artifact_dir = self.repo_root / "build"
-        artifact_dir.mkdir()
-        tracked = artifact_dir / "orchestrate.ts"
-        tracked.write_text("export const v = 1\n", encoding="utf-8")
-        _git(self.repo_root, "add", "-A")
-        _git(self.repo_root, "commit", "-q", "-m", "add tracked build file")
-        base = _git(self.repo_root, "rev-parse", "HEAD").strip()
-
-        run_id = runstate.new_run_id()
-        wt = create_external_worktree(repo_root=self.repo_root, base=base, run_id=run_id)
-        self.addCleanup(self._force_remove, wt)
-        baseline = capture_original_checkout_baseline(self.repo_root)
-
-        # Grok "escapes" and edits the tracked build file in the REAL checkout.
-        with tracked.open("a", encoding="utf-8") as handle:
-            handle.write("// escaped edit\n")
-        with self.assertRaises(GrokWrapperError) as ctx:
-            assert_changes_within(wt, (wt.path,), original_baseline=baseline)
-        self.assertEqual(ctx.exception.error_class, "unexpected-edits")
-
-    def test_original_checkout_unmodified_flags_post_gate_write_but_not_worktree_output(self) -> None:
-        # PR968 codex post-build-gate: the re-scan run AFTER the build gate must flag a
-        # write into the operator's REAL checkout (a Grok-modified build script escaping)
-        # while ignoring the isolated worktree's OWN build outputs, so a legitimate gate
-        # that only writes inside the worktree never false-positives.
-        wt = self._create()
-        self.addCleanup(self._force_remove, wt)
-        baseline = capture_original_checkout_baseline(self.repo_root)
-
-        # A legitimate build writes only inside the worktree (its own outputs) -- the
-        # original-checkout re-scan must ignore it entirely.
-        (wt.path / "pkg" / "built.js").write_text("// built\n", encoding="utf-8")
-        assert_original_checkout_unmodified(wt, (wt.path,), original_baseline=baseline)
-
-        # A Grok-modified build step escaping into the REAL checkout is flagged, while
-        # the operator's pre-existing untracked dirty.txt stays exempt.
-        (self.repo_root / "gate-escaped.txt").write_text("planted by build\n", encoding="utf-8")
-        with self.assertRaises(GrokWrapperError) as ctx:
-            assert_original_checkout_unmodified(wt, (wt.path,), original_baseline=baseline)
-        self.assertEqual(ctx.exception.error_class, "unexpected-edits")
-        self.assertEqual(ctx.exception.detail.get("phase"), "post-build-gate")
-        self.assertTrue(any("gate-escaped.txt" in v for v in ctx.exception.detail["violations"]))
-        self.assertFalse(any("dirty.txt" in v for v in ctx.exception.detail["violations"]))
-
-
 class CommittedBaseTests(WorktreeTestBase):
     def test_committed_base_sufficient_for_committed_path(self) -> None:
         assert_committed_base_sufficient(self.repo_root, self.base, ("pkg/mod.txt", "a.txt"))
@@ -619,7 +316,6 @@ class CommittedBaseTests(WorktreeTestBase):
         with self.assertRaises(GrokWrapperError) as ctx:
             assert_committed_base_sufficient(self.repo_root, side_sha, ("a.txt",))
         self.assertEqual(ctx.exception.error_class, "worktree-failure")
-
 
 class RemoveWorktreeTests(WorktreeTestBase):
     def test_remove_dry_run_reports_without_removing(self) -> None:
@@ -926,7 +622,6 @@ class RemoveWorktreeTests(WorktreeTestBase):
         self.assertEqual(unrelated_check.returncode, 0, "the unrelated branch must NOT be deleted")
         _git(self.repo_root, "branch", "-D", unrelated_branch)
 
-
 class LifecycleIsolationTests(WorktreeTestBase):
     def test_original_checkout_dirty_file_untouched_through_full_lifecycle(self) -> None:
         dirty_path = self.repo_root / "dirty.txt"
@@ -946,7 +641,3 @@ class LifecycleIsolationTests(WorktreeTestBase):
 
         self.assertEqual(dirty_path.read_text(encoding="utf-8"), before_content)
         self.assertEqual(dirty_path.stat().st_mtime_ns, before_mtime)
-
-
-if __name__ == "__main__":
-    unittest.main()

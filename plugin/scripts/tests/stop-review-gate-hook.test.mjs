@@ -2,6 +2,10 @@
 //
 // Unit tests for the stop-gate decision parsing over canned wrapper envelopes.
 // Run with: node --test plugin/scripts/tests/
+//
+// Kept on fixtures/fake_wrapper.py (not helpers/fake-wrapper.mjs): needs large
+// stderr, PID file + SIGTERM-ignore sleep, and empty-findings success envelopes
+// for the live hook spawn path (orphan / maxbuf / e2big).
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
@@ -16,6 +20,7 @@ import { writeGateConfig } from "../lib/gate-state.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const HOOK = path.resolve(SCRIPT_DIR, "..", "stop-review-gate-hook.mjs");
+// Bespoke progressive simulator - see file header for why not makeFakeWrapper.
 const FAKE_WRAPPER = path.resolve(SCRIPT_DIR, "fixtures", "fake_wrapper.py");
 const HOOKS_JSON = path.resolve(SCRIPT_DIR, "..", "..", "hooks", "hooks.json");
 

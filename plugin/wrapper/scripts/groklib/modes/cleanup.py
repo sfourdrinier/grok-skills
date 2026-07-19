@@ -9,16 +9,28 @@
 # authority. A worktree without a valid owner marker is still refused
 # (state-ownership-violation), and any other worktree-failure retains everything
 # and reports it. An unknown run id is `invalid-target`.
+#
+# Iteration chains (code --continue-run): a continuation's run.json records the
+# SEED worktreePath while the sibling marker still names the seed. Continuation
+# cleanup removes only that continuation's run dir and defers the shared
+# worktree to its owner (success note, not a failure). Missing worktree after
+# the seed was cleaned is also a note, not an error. Non-continuation runs that
+# point at a foreign worktree still fail closed (state-ownership-violation).
 
 import argparse
 import json
 import pathlib
 import shutil
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from groklib import GrokWrapperError, log_stderr, runstate
 from groklib import envelope as envelope_mod
-from groklib.worktree import ExternalWorktree, remove_external_worktree
+from groklib.worktree import (
+    ExternalWorktree,
+    marker_path_for,
+    rebuild_worktree_from_record,
+    remove_external_worktree,
+)
 
 # Design §14.17 - factual only; do not say "unacknowledged."
 # Manifest-ready is write-time only (not dual-condition /grok:handoff ready).
@@ -76,15 +88,72 @@ def _fail(run_id: str, exc: GrokWrapperError, worktree: Optional[ExternalWorktre
 
 
 def _rebuild_worktree(record: dict) -> Optional[ExternalWorktree]:
-    path = record.get("worktreePath")
-    branch = record.get("worktreeBranch")
-    base = record.get("baseRevision")
-    repository = record.get("repository")
-    if not (isinstance(path, str) and isinstance(branch, str) and isinstance(base, str) and isinstance(repository, str)):
+    """Delegate to worktree.rebuild_worktree_from_record (single source)."""
+    return rebuild_worktree_from_record(record)
+
+
+def _is_continuation_run(record: dict) -> bool:
+    """True when run.json records a continuesRunId (code --continue-run child)."""
+    continues = record.get("continuesRunId")
+    return isinstance(continues, str) and bool(continues.strip())
+
+
+def _worktree_owner_run_id(worktree: ExternalWorktree) -> Optional[str]:
+    """Return the sibling marker's runId when readable; None when marker is absent/unreadable."""
+    marker_path = marker_path_for(worktree.path)
+    if not marker_path.is_file():
         return None
-    return ExternalWorktree(
-        path=pathlib.Path(path), branch=branch, base_revision=base, repo_root=pathlib.Path(repository)
-    )
+    try:
+        return runstate.verify_owner_marker(marker_path)
+    except GrokWrapperError:
+        return None
+
+
+def _continuation_worktree_deferral(
+    run_id: str, worktree: Optional[ExternalWorktree], record: dict
+) -> Tuple[bool, Optional[str]]:
+    """Decide whether a continuation should skip worktree removal.
+
+    Returns ``(defer, note)``. When ``defer`` is True the shared worktree is left
+    alone (or already gone) and ``note`` explains why; the run dir is still cleaned.
+    When ``defer`` is False the normal ownership-bound removal path applies.
+
+    Non-continuations always return ``(False, None)`` so foreign ownership still
+    fails closed via remove_external_worktree.
+    """
+    if worktree is None or not _is_continuation_run(record):
+        return False, None
+
+    owner_run_id = _worktree_owner_run_id(worktree)
+    path_exists = worktree.path.exists()
+    path_run_id = worktree.path.name
+
+    # Fully gone (seed cleaned, or never present): note missing, clean run dir only.
+    if not path_exists and owner_run_id is None:
+        note = (
+            "worktree missing (already removed or cleaned with its owner run); "
+            "continuation run dir cleaned only"
+        )
+        _log(
+            "_continuation_worktree_deferral",
+            "continuation {!r}: {}".format(run_id, note),
+        )
+        return True, note
+
+    # Marker (or path name) names another run -- typically the seed. Defer.
+    foreign_owner = owner_run_id is not None and owner_run_id != run_id
+    foreign_path = path_run_id != run_id
+    if foreign_owner or foreign_path:
+        owner_label = owner_run_id or path_run_id
+        note = "worktree owned by run {}; clean that run to remove it".format(owner_label)
+        _log(
+            "_continuation_worktree_deferral",
+            "continuation {!r} defers shared worktree to {!r}".format(run_id, owner_label),
+        )
+        return True, note
+
+    # Marker and path both name this continuation: normal removal.
+    return False, None
 
 
 _TERMINAL_LIFECYCLES = frozenset({"completed", "failed", "canceled"})
@@ -142,32 +211,59 @@ def _remove_run_dir(run_dir: pathlib.Path) -> None:
         )
 
 
-def _dry_run(run_id: str, run_dir: pathlib.Path, worktree: Optional[ExternalWorktree]) -> dict:
+def _dry_run(
+    run_id: str,
+    run_dir: pathlib.Path,
+    worktree: Optional[ExternalWorktree],
+    record: dict,
+) -> dict:
+    defer, worktree_note = _continuation_worktree_deferral(run_id, worktree, record)
     worktree_report = None
-    if worktree is not None:
+    if worktree is not None and not defer:
         worktree_report = remove_external_worktree(worktree, confirmed=False, expected_run_id=run_id)
-    response = {"dryRun": True, "runDir": str(run_dir), "worktree": worktree_report}
+    response = {
+        "dryRun": True,
+        "runDir": str(run_dir),
+        "worktree": worktree_report,
+        "worktreeRemoved": False,
+    }
+    if worktree_note:
+        response["worktreeNote"] = worktree_note
+        response["worktreeDeferred"] = True
     warnings: List[str] = []
+    if worktree_note:
+        warnings.append(worktree_note)
     if _integration_ready_handoff(run_dir):
         warnings.append(_READY_HANDOFF_WARNING)
         response["integrationReadyHandoff"] = True
+    detail = "dry-run: nothing removed; pass --confirm to remove"
+    if worktree_note:
+        detail = "dry-run: nothing removed; {}".format(worktree_note)
     return envelope_mod.build_envelope(
         run_id=run_id,
         mode="cleanup",
         status="success",
         response=response,
         warnings=warnings,
-        cleanup={"status": "retained", "detail": "dry-run: nothing removed; pass --confirm to remove"},
+        cleanup={"status": "retained", "detail": detail},
         **_worktree_fields(worktree),
     )
 
 
-def _confirmed(run_id: str, run_dir: pathlib.Path, worktree: Optional[ExternalWorktree]) -> dict:
+def _confirmed(
+    run_id: str,
+    run_dir: pathlib.Path,
+    worktree: Optional[ExternalWorktree],
+    record: dict,
+) -> dict:
     ready_handoff_warning = _READY_HANDOFF_WARNING if _integration_ready_handoff(run_dir) else None
+    defer, worktree_note = _continuation_worktree_deferral(run_id, worktree, record)
     worktree_report = None
-    if worktree is not None:
+    worktree_removed = False
+    if worktree is not None and not defer:
         try:
             worktree_report = remove_external_worktree(worktree, confirmed=True, expected_run_id=run_id)
+            worktree_removed = True
         except GrokWrapperError as exc:
             if exc.error_class != "worktree-failure":
                 raise
@@ -193,7 +289,6 @@ def _confirmed(run_id: str, run_dir: pathlib.Path, worktree: Optional[ExternalWo
         # run-dir removal failed. Report the partial state honestly instead of a
         # "not-applicable" cleanup that hides the removed worktree + retained run
         # dir. This returns (does not raise), so run()'s handler is bypassed.
-        worktree_removed = worktree is not None
         _log("_confirmed", "run dir removal failed after worktree removal for {}: {}".format(run_id, exc))
         detail = (
             "worktree removed; run dir removal failed and is retained"
@@ -211,6 +306,7 @@ def _confirmed(run_id: str, run_dir: pathlib.Path, worktree: Optional[ExternalWo
                 "worktree": worktree_report,
                 "worktreeRemoved": worktree_removed,
                 "runDirRemoved": False,
+                **({"worktreeNote": worktree_note} if worktree_note else {}),
             },
             cleanup={"status": "failed", "detail": detail},
             **_worktree_fields(worktree),
@@ -223,11 +319,19 @@ def _confirmed(run_id: str, run_dir: pathlib.Path, worktree: Optional[ExternalWo
     response = {
         "runDir": str(run_dir),
         "worktree": worktree_report,
-        "worktreeRemoved": worktree is not None,
+        "worktreeRemoved": worktree_removed,
         "runDirRemoved": True,
     }
+    if worktree_note:
+        response["worktreeNote"] = worktree_note
+        response["worktreeDeferred"] = True
     if ready_handoff_warning:
         response["integrationReadyHandoff"] = True
+    warnings: List[str] = []
+    if worktree_note:
+        warnings.append(worktree_note)
+    if ready_handoff_warning:
+        warnings.append(ready_handoff_warning)
     if branch_retained:
         cleanup_field = {
             "status": "retained",
@@ -235,10 +339,14 @@ def _confirmed(run_id: str, run_dir: pathlib.Path, worktree: Optional[ExternalWo
                 worktree_report.get("worktreeBranch"), worktree_report.get("branchRetainReason")
             ),
         }
+    elif worktree_note:
+        cleanup_field = {
+            "status": "clean",
+            "detail": "run dir removed; {}".format(worktree_note),
+        }
     else:
-        detail = "run dir removed" + (" and worktree removed" if worktree is not None else "")
+        detail = "run dir removed" + (" and worktree removed" if worktree_removed else "")
         cleanup_field = {"status": "clean", "detail": detail}
-    warnings: List[str] = [ready_handoff_warning] if ready_handoff_warning else []
     return envelope_mod.build_envelope(
         run_id=run_id,
         mode="cleanup",
@@ -319,9 +427,9 @@ def run(args: argparse.Namespace) -> dict:
     worktree = _rebuild_worktree(record)
     try:
         if not confirmed:
-            return _dry_run(run_id, run_dir, worktree)
+            return _dry_run(run_id, run_dir, worktree, record)
         # Refuse to delete an actively owned or still-finalizing run (C3).
         _refuse_active_run(run_id, run_dir, record)
-        return _confirmed(run_id, run_dir, worktree)
+        return _confirmed(run_id, run_dir, worktree, record)
     except GrokWrapperError as exc:
         return _fail(run_id, exc, worktree)

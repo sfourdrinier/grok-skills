@@ -4,17 +4,34 @@
 // preflight report). Extracted from grok-companion.mjs for the 900-line cap.
 
 import { spawnSync } from "node:child_process";
+import path from "node:path";
 import process from "node:process";
 
-import { installCodexAgents, uninstallCodexAgents } from "./codex-agents.mjs";
+import { flagValue, hasFlagOrEquals } from "./companion-args.mjs";
+import {
+  getCodexAgentsScope,
+  installCodexAgents,
+  parseCodexAgentsScope,
+  setCodexAgentsScope,
+  uninstallCodexAgents,
+} from "./codex-agents.mjs";
 import { grokBinaryAvailable } from "./direct-grok.mjs";
 import { readGateConfig, writeGateConfig } from "./gate-state.mjs";
 import {
+  parseTargetFlag,
+  resolveTargetWorkspaceRoot,
+} from "./git-context.mjs";
+import {
+  getIntegrationConsent,
+  getIntegrationMode,
   getNotificationConfig,
   getRunMode,
+  INTEGRATION_MODES,
   NOTIFICATION_MODES,
+  parseIntegrationMode,
   parseNotificationMode,
   parseWebhookUrl,
+  setIntegrationMode,
   setNotificationConfig,
   setRunMode,
 } from "./jobs.mjs";
@@ -35,43 +52,116 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
   const skipCodexAgents = args.includes("--skip-codex-agents");
   const forceCodexAgents = args.includes("--force-codex-agents");
   const removeCodexAgents = args.includes("--remove-codex-agents");
-  if (args.includes("--run-mode") || args.includes("direct") || args.includes("hardened")) {
-    const idx = args.indexOf("--run-mode");
-    const mode = idx >= 0 ? args[idx + 1] : args.find((a) => a === "direct" || a === "hardened");
+  // Capture scope before other prefs writes (jobs-index may drop unknown keys).
+  const priorCodexAgentsScope = getCodexAgentsScope(cwd, process.env);
+  let scopeFlag = null;
+  let invalidCodexAgentsScope = null;
+  {
+    // Presence SSOT (split OR equals) - never re-open local startsWith loops.
+    if (hasFlagOrEquals(args, "--codex-agents-scope")) {
+      const rawScope = flagValue(args, "--codex-agents-scope");
+      if (rawScope === null) {
+        invalidCodexAgentsScope = "(missing value)";
+      } else {
+        scopeFlag = parseCodexAgentsScope(rawScope);
+        if (!scopeFlag) {
+          invalidCodexAgentsScope = String(rawScope).trim() || rawScope;
+        }
+      }
+    }
+  }
+  // runMode is security posture (hardened|direct). Do not treat --integration
+  // direct/worktree/... values as run-mode (orthogonal axis). Split AND equals
+  // forms are accepted (argv SSOT / wrapper argparse parity).
+  {
+    let mode = null;
+    if (hasFlagOrEquals(args, "--run-mode")) {
+      mode = flagValue(args, "--run-mode");
+    } else {
+      // Bare convenience: setup direct | setup hardened (not a flag value).
+      for (let i = 0; i < args.length; i++) {
+        const a = args[i];
+        if (a !== "direct" && a !== "hardened") continue;
+        const prev = args[i - 1];
+        // Skip any value-bearing flag's argument: a --target/notification value
+        // literally named "direct"/"hardened" must not be read as the bare
+        // `setup direct` convenience (review: --target value misread as run mode).
+        if (
+          [
+            "--integration",
+            "--run-mode",
+            "--target",
+            "--notification-mode",
+            "--notification-webhook-url",
+            "--codex-agents-scope",
+          ].includes(prev)
+        )
+          continue;
+        mode = a;
+        break;
+      }
+    }
     if (mode === "direct" || mode === "hardened") {
       setRunMode(cwd, mode);
     }
   }
+  // Integration mode (how edits land) - orthogonal to runMode security posture.
+  // SECURITY: consent + integrationMode are target-scoped (resolved --target git
+  // toplevel, default '.'), so the operator consents for the repo they will edit.
+  // Other setup prefs (runMode, notifications, gate) stay companion-cwd scoped.
+  const integrationTargetWorkspace = resolveTargetWorkspaceRoot(
+    cwd,
+    parseTargetFlag(args)
+  );
+  let invalidIntegrationMode = null;
+  {
+    if (hasFlagOrEquals(args, "--integration")) {
+      const rawIntegration = flagValue(args, "--integration");
+      if (rawIntegration === null) {
+        invalidIntegrationMode = "(missing value)";
+      } else {
+        const parsedIntegration = parseIntegrationMode(rawIntegration);
+        if (!parsedIntegration) {
+          invalidIntegrationMode = String(rawIntegration).trim() || rawIntegration;
+        } else {
+          setIntegrationMode(integrationTargetWorkspace, parsedIntegration);
+        }
+      }
+    }
+  }
   // Notification prefs: parse all flags first; apply atomically or apply none.
+  // Equals forms (`--notification-mode=auto`) are accepted via the argv SSOT.
   let invalidNotificationMode = null;
   let invalidWebhookUrl = null;
   /** @type {{ notificationMode?: string, notificationWebhookUrl?: string|null }} */
   const notifyPatch = {};
-  const notifyModeIdx = args.indexOf("--notification-mode");
-  if (notifyModeIdx >= 0) {
-    const rawMode = args[notifyModeIdx + 1];
-    if (rawMode === undefined || String(rawMode).startsWith("--")) {
-      invalidNotificationMode = "(missing value)";
-    } else {
-      const parsedMode = parseNotificationMode(rawMode);
-      if (!parsedMode) {
-        invalidNotificationMode = String(rawMode).trim().toLowerCase() || rawMode;
+  {
+    if (hasFlagOrEquals(args, "--notification-mode")) {
+      const rawMode = flagValue(args, "--notification-mode");
+      if (rawMode === null) {
+        invalidNotificationMode = "(missing value)";
       } else {
-        notifyPatch.notificationMode = parsedMode;
+        const parsedMode = parseNotificationMode(rawMode);
+        if (!parsedMode) {
+          invalidNotificationMode = String(rawMode).trim().toLowerCase() || rawMode;
+        } else {
+          notifyPatch.notificationMode = parsedMode;
+        }
       }
     }
   }
-  const webhookIdx = args.indexOf("--notification-webhook-url");
-  if (webhookIdx >= 0) {
-    const rawUrl = args[webhookIdx + 1];
-    if (rawUrl === undefined || String(rawUrl).startsWith("--")) {
-      invalidWebhookUrl = "webhook-url-missing-value";
-    } else {
-      const parsedWebhook = parseWebhookUrl(rawUrl);
-      if (!parsedWebhook.ok) {
-        invalidWebhookUrl = parsedWebhook.reason || "webhook-url-invalid";
+  {
+    if (hasFlagOrEquals(args, "--notification-webhook-url")) {
+      const rawUrl = flagValue(args, "--notification-webhook-url");
+      if (rawUrl === null) {
+        invalidWebhookUrl = "webhook-url-missing-value";
       } else {
-        notifyPatch.notificationWebhookUrl = parsedWebhook.url;
+        const parsedWebhook = parseWebhookUrl(rawUrl);
+        if (!parsedWebhook.ok) {
+          invalidWebhookUrl = parsedWebhook.reason || "webhook-url-invalid";
+        } else {
+          notifyPatch.notificationWebhookUrl = parsedWebhook.url;
+        }
       }
     }
   }
@@ -82,9 +172,20 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
   if (enable) writeGateConfig(cwd, true);
   if (disable) writeGateConfig(cwd, false);
 
+  // Re-persist scope after other prefs writes so jobs-index rewrites cannot drop it.
+  const effectiveCodexAgentsScope = scopeFlag || priorCodexAgentsScope;
+  if (!invalidCodexAgentsScope) {
+    setCodexAgentsScope(cwd, effectiveCodexAgentsScope, process.env);
+  }
+
   const gate = readGateConfig(cwd);
   const runMode = getRunMode(cwd);
+  const integrationMode = getIntegrationMode(integrationTargetWorkspace);
+  const integrationConsent = getIntegrationConsent(integrationTargetWorkspace);
   const notifyPrefs = getNotificationConfig(cwd);
+  const codexAgentsScope = invalidCodexAgentsScope
+    ? priorCodexAgentsScope
+    : getCodexAgentsScope(cwd, process.env);
   const binary = grokBinaryAvailable();
   const wrapper = resolveWrapperPath(process.env);
   const webhookDetail = formatWebhookDisplay(notifyPrefs.notificationWebhookUrl);
@@ -96,6 +197,18 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
   } else {
     notificationsDetail = `${notifyPrefs.notificationMode}${
       notifyPrefs.notificationWebhookUrl ? `; webhook=${webhookDetail}` : ""
+    }`;
+  }
+  let integrationDetail;
+  if (invalidIntegrationMode) {
+    integrationDetail = `invalid ${JSON.stringify(invalidIntegrationMode)} (integration prefs unchanged)`;
+  } else {
+    integrationDetail = `${integrationMode}${
+      integrationMode === "direct"
+        ? integrationConsent
+          ? "; consent=yes"
+          : "; consent=no (first direct run will refuse)"
+        : ""
     }`;
   }
   const rows = [
@@ -115,6 +228,11 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
       detail: runMode,
     },
     {
+      name: "integration mode",
+      ok: !invalidIntegrationMode,
+      detail: integrationDetail,
+    },
+    {
       name: "notifications",
       ok: !notifyPrefsInvalid,
       detail: notificationsDetail,
@@ -123,6 +241,13 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
       name: "stop-review gate",
       ok: true,
       detail: gate.stopReviewGate ? "ENABLED" : "disabled",
+    },
+    {
+      name: "codex agents scope",
+      ok: !invalidCodexAgentsScope,
+      detail: invalidCodexAgentsScope
+        ? `invalid ${JSON.stringify(invalidCodexAgentsScope)} (scope prefs unchanged; valid: user|project)`
+        : codexAgentsScope,
     },
   ];
   const hints = [];
@@ -142,6 +267,20 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
       "Hardened mode is default. For installed-CLI posture: companion setup --run-mode direct"
     );
   }
+  if (invalidIntegrationMode) {
+    hints.push(
+      `Valid --integration values: ${INTEGRATION_MODES.join(" | ")}. Integration prefs were not changed.`
+    );
+  } else if (integrationMode === "direct" && !integrationConsent) {
+    const targetHint =
+      path.resolve(integrationTargetWorkspace) ===
+      path.resolve(resolveTargetWorkspaceRoot(cwd, "."))
+        ? "setup --integration direct"
+        : `setup --integration direct --target ${integrationTargetWorkspace}`;
+    hints.push(
+      `Direct integration is the default but needs one-time consent: ${targetHint} (or use --integration worktree for isolation).`
+    );
+  }
   if (invalidNotificationMode) {
     hints.push(
       `Valid --notification-mode values: ${NOTIFICATION_MODES.join(" | ")}. No notification prefs were written.`
@@ -155,13 +294,27 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
       "Notifications are off. For background completion signals: setup --notification-mode auto (recommended)."
     );
   }
+  if (invalidCodexAgentsScope) {
+    hints.push(
+      "Valid --codex-agents-scope values: user | project. Scope prefs were not changed."
+    );
+  } else if (codexAgentsScope === "project") {
+    hints.push(
+      "Codex agents scope=project: managed TOMLs install into <cwd>/.codex/agents (SessionStart honors this prefs)."
+    );
+  }
 
   let agentsResult = null;
   let agentsOk = true;
   if (removeCodexAgents) {
-    agentsResult = uninstallCodexAgents({ env: process.env, backup: true });
+    agentsResult = uninstallCodexAgents({
+      env: process.env,
+      backup: true,
+      cwd,
+      scope: codexAgentsScope,
+    });
     const detail = agentsResult.ok
-      ? `removed=[${agentsResult.removed.join(", ") || "none"}] user-owned-kept=[${agentsResult.skippedUser.join(", ") || "none"}] backups=[${agentsResult.backedUp.join(", ") || "none"}] → ${agentsResult.destDir}`
+      ? `scope=${codexAgentsScope} removed=[${agentsResult.removed.join(", ") || "none"}] user-owned-kept=[${agentsResult.skippedUser.join(", ") || "none"}] backups=[${agentsResult.backedUp.join(", ") || "none"}] → ${agentsResult.destDir}`
       : `errors: ${agentsResult.errors.join("; ")}`;
     rows.push({ name: "codex agents", ok: agentsResult.ok, detail });
     agentsOk = agentsResult.ok;
@@ -177,8 +330,11 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
       updateManaged: true,
       pluginRoot,
       backup: true,
+      cwd,
+      scope: codexAgentsScope,
     });
     const parts = [
+      `scope=${codexAgentsScope}`,
       `installed=[${agentsResult.installed.join(", ") || "none"}]`,
       `updated=[${agentsResult.updated.join(", ") || "none"}]`,
       `skipped=[${agentsResult.skipped.join(", ") || "none"}]`,
@@ -203,11 +359,11 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
       );
     } else if (agentsResult.skippedUser?.length) {
       hints.push(
-        "Some ~/.codex/agents/grok-*.toml look user-owned (no managed-by header). Use setup --force-codex-agents to overwrite (creates .bak)."
+        "Some grok-*.toml agents look user-owned (no managed-by header). Use setup --force-codex-agents to overwrite (creates .bak)."
       );
     } else if (agentsResult.skipped.length && !agentsResult.installed.length) {
       hints.push(
-        "Codex agents already up to date under ~/.codex/agents (SessionStart keeps managed agents in sync)."
+        `Codex agents already up to date under ${agentsResult.destDir} (SessionStart keeps managed agents in sync).`
       );
     }
   }
@@ -244,5 +400,13 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
   }
 
   process.stdout.write(renderSetupReport({ rows, runMode, hints }));
-  return binary.ok && wrapper && agentsOk && !notifyPrefsInvalid && preflightOk ? 0 : 1;
+  return binary.ok &&
+    wrapper &&
+    agentsOk &&
+    !notifyPrefsInvalid &&
+    !invalidCodexAgentsScope &&
+    !invalidIntegrationMode &&
+    preflightOk
+    ? 0
+    : 1;
 }

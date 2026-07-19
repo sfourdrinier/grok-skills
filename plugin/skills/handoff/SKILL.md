@@ -64,22 +64,46 @@ Durable handoff artifacts exist only after a **hardened** `code` run. Direct
 run-mode does not write verified handoff state; use `setup --run-mode hardened`
 (or the companion's hardened default) before expecting `/grok:handoff` ready.
 
-## Parent integrate protocol (document only - never auto-apply)
+## Parent integrate protocol (mode-aware; handoff is read-only)
 
-This plugin **never** auto-applies, commits, merges, cherry-picks, or pushes.
+This skill is **read-only** - it never applies. How results land is mode-aware
+(canonical: `plugin/references/integration-modes.md`):
 
-1. Dispatch `/grok:code` with optional `--contract-file` (writeScopes + validation)
-2. Wait for terminal status (`/grok:status --run-id` optional)
-3. Run `/grok:handoff --run-id <id>`
-4. Proceed only if envelope status is success and `response.integration.ready`
-5. Verify `patch.sha256` matches on-disk patch
-6. Inspect patch and changed files
-7. Confirm parent base still contains `baseRevision` ancestry as needed
-8. Check dirty overlap on paths you will touch
-9. `git apply --check --binary <patch>`
-10. Explicit `git apply --binary <patch>` (or equivalent) only with operator intent
-11. Re-run relevant validation on the parent checkout
-12. Record `runId` + patch hash in your notes
+- **code direct:** source edits already live; handoff artifacts may be absent
+  on pure live-tree paths; review the working tree diff (ACP peer is separate:
+  always worktree + stop-time apply - see integration-modes.md)
+- **auto:** companion may auto-apply after dual-condition ready + apply-time
+  revalidation via the shared apply spine (exclusive lock + durable marker;
+  you still may call handoff to observe ready). Canonical:
+  [integration-modes.md](../../references/integration-modes.md)
+- **review:** never auto-applies; parent apply is manual after ready
+
+Auto/peer apply is companion-owned via the shared apply spine (exclusive lock +
+durable marker; already-applied restop) in
+[integration-modes.md](../../references/integration-modes.md); handoff remains
+read-only and code-mode only.
+
+This plugin **never** auto-commits, merges, cherry-picks, or pushes in any mode.
+
+### Manual parent apply (review / when auto did not apply)
+
+This flow is **code-mode only**: `/grok:handoff` refuses peer runIds. A peer run
+is finalized by `peer stop` itself (use its response as the ready signal); it
+never routes through `/grok:handoff`.
+
+Canonical parent-apply checklist (do not fork the algorithm):
+[implementation-handoff.md](../../references/implementation-handoff.md)
+Parent apply checklist. Operator summary:
+
+1. `/grok:handoff --run-id` success + `response.integration.ready`
+2. Confirm parent base still present / ancestry
+3. Dirty overlap check on target paths (`git status --porcelain -z` inventory)
+4. Explicit patch integrity recheck: on-disk patch bytes/size/sha still match the
+   handoff manifest (same integrity gate auto/peer re-run before apply)
+5. `git apply --check --binary <patch>`
+6. Explicit `git apply --binary <patch>` only with operator intent
+7. Re-run project validation on the parent checkout
+8. Record `runId` + patch sha256
 
 ## What this mode never does
 

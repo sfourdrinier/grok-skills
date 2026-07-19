@@ -17,6 +17,13 @@ from groklib import GrokWrapperError
 _TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _TRUST_MODEL = "operator-contract-trusted-no-os-sandbox"
 
+# Display-field size caps (Phase 1 finding 4). Enforced at contract load and
+# mirrored on handoff contractSummary so a tampered manifest cannot push
+# multi-MB objective/criteria through the handoff response.
+OBJECTIVE_MAX_CHARS = 2000
+ACCEPTANCE_CRITERIA_MAX_ITEMS = 32
+ACCEPTANCE_CRITERION_MAX_CHARS = 500
+
 
 def trust_model() -> str:
     return _TRUST_MODEL
@@ -24,6 +31,55 @@ def trust_model() -> str:
 
 def _contract_error(message: str, detail: Optional[dict] = None) -> GrokWrapperError:
     return GrokWrapperError("implementation-contract-invalid", message, detail or {})
+
+
+def objective_criteria_bound_errors(
+    objective: object,
+    acceptance: object,
+    *,
+    field_prefix: str = "",
+) -> List[str]:
+    """Return bound-violation messages for objective / acceptanceCriteria.
+
+    Shared by ``validate_contract`` (raises) and handoff manifest validation
+    (returns error list). ``field_prefix`` is prepended to each field name
+    (e.g. ``\"contractSummary.\"``) so callers can label nested paths.
+    """
+    errors: List[str] = []
+    obj_label = "{}objective".format(field_prefix)
+    ac_label = "{}acceptanceCriteria".format(field_prefix)
+
+    if isinstance(objective, str) and len(objective) > OBJECTIVE_MAX_CHARS:
+        errors.append(
+            "{} exceeds {} characters (got {})".format(
+                obj_label, OBJECTIVE_MAX_CHARS, len(objective)
+            )
+        )
+
+    if not isinstance(acceptance, list):
+        # Caller is responsible for type checks when the field is present;
+        # only enforce item/count bounds when we already have a list.
+        return errors
+
+    if len(acceptance) > ACCEPTANCE_CRITERIA_MAX_ITEMS:
+        errors.append(
+            "{} exceeds {} items (got {})".format(
+                ac_label, ACCEPTANCE_CRITERIA_MAX_ITEMS, len(acceptance)
+            )
+        )
+
+    for i, item in enumerate(acceptance):
+        if not isinstance(item, str):
+            errors.append("{}[{}] must be a string".format(ac_label, i))
+            continue
+        stripped = item.strip()
+        if len(stripped) > ACCEPTANCE_CRITERION_MAX_CHARS:
+            errors.append(
+                "{}[{}] exceeds {} characters after strip (got {})".format(
+                    ac_label, i, ACCEPTANCE_CRITERION_MAX_CHARS, len(stripped)
+                )
+            )
+    return errors
 
 
 def normalize_repo_relative(path: str) -> str:
@@ -204,6 +260,24 @@ def _assert_no_symlink_components(path: pathlib.Path) -> pathlib.Path:
     return p
 
 
+def load_optional_contract_arg(contract_file: object) -> Optional[dict]:
+    """Load ``--contract-file`` when present; blank/whitespace is invalid (not absent).
+
+    Shared by code/direct/peer-start so present-but-empty forms
+    (``--contract-file`` / ``--contract-file=`` / empty shell expansion) always
+    fail closed as ``implementation-contract-invalid`` rather than silently
+    running without writeScopes / requiredValidation.
+    """
+    if contract_file is None:
+        return None
+    if not str(contract_file).strip():
+        raise _contract_error(
+            "--contract-file was provided but is empty; omit the flag or pass a path",
+            {"contractFile": contract_file},
+        )
+    return load_contract_file(pathlib.Path(str(contract_file).strip()))
+
+
 def load_contract_file(path: pathlib.Path) -> dict:
     """Load and parse a contract file. Rejects non-regular files and symlink escapes."""
     p = pathlib.Path(path)
@@ -344,13 +418,22 @@ def validate_contract(data: dict) -> dict:
     if objective is not None and not isinstance(objective, str):
         raise _contract_error("objective must be a string when present")
 
+    # Size caps: fail closed BEFORE Grok spawns (Phase 1 finding 4).
+    ac_value = list(acceptance) if isinstance(acceptance, list) else []
+    bound_errs = objective_criteria_bound_errors(
+        objective if isinstance(objective, str) else None,
+        ac_value,
+    )
+    if bound_errs:
+        raise _contract_error(bound_errs[0], {"errors": bound_errs})
+
     return {
         "schemaVersion": 1,
         "taskId": task_id,
         "objective": objective if isinstance(objective, str) else "",
         "target": target_norm,
         "writeScopes": scopes_out,
-        "acceptanceCriteria": list(acceptance) if isinstance(acceptance, list) else [],
+        "acceptanceCriteria": ac_value,
         "requiredValidation": req_out,
         "trustModel": _TRUST_MODEL,
     }

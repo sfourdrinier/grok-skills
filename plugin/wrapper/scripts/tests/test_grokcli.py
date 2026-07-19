@@ -112,6 +112,8 @@ class BuildArgvTests(GrokCliTestBase):
             self.assertEqual(argv.count(flag), 1, "flag {} must appear exactly once".format(flag))
         # Default: no --max-turns (unlimited). Explicit budget only when set.
         self.assertNotIn("--max-turns", argv)
+        # Fresh runs never emit --resume (probe: --session-id is create-only).
+        self.assertNotIn("--resume", argv)
 
         # prompt is delivered via --prompt-file; the positional / -p / --single
         # single-turn forms are never used.
@@ -125,6 +127,20 @@ class BuildArgvTests(GrokCliTestBase):
         emitted_flags = [token for token in argv if token.startswith("--")]
         for flag in emitted_flags:
             self.assertIn(flag, grokcli.C6_BASELINE_FLAGS, "unexpected flag {}".format(flag))
+
+    def test_build_argv_resume_session_emits_resume_instead_of_session_id(self) -> None:
+        # docs/research/2026-07-17-session-resume-probe.md: continuation uses
+        # --resume <id>; --session-id is create-only when the id exists in the store.
+        self.assertIn("--resume", grokcli.C6_BASELINE_FLAGS)
+        fresh = grokcli.build_argv(self._make_spec(resume_session=False))
+        self.assertIn("--session-id", fresh)
+        self.assertNotIn("--resume", fresh)
+        resumed = grokcli.build_argv(self._make_spec(resume_session=True))
+        self.assertIn("--resume", resumed)
+        self.assertNotIn("--session-id", resumed)
+        self.assertEqual(resumed.count("--resume"), 1)
+        idx = resumed.index("--resume")
+        self.assertEqual(resumed[idx + 1], "11111111-1111-4111-8111-111111111111")
 
     def test_build_argv_schema_run_adds_json_schema_alongside_streaming_json(self) -> None:
         # D-STREAM (T2-0): a schema run ALWAYS streams (--output-format

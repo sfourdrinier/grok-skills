@@ -42,6 +42,15 @@ jobs:
         working-directory: plugin/scripts
         run: node --test tests/*.test.mjs
 
+  mechanical:
+    name: mechanical checks (line cap, ascii hyphens)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install ripgrep
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
+      - run: tools/checks.sh
+
   packaging:
     name: packaging manifests
     runs-on: ubuntu-latest

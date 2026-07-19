@@ -10,7 +10,8 @@ import secrets
 import subprocess
 from typing import List, Optional, Sequence, Tuple
 
-from groklib import GrokWrapperError, log_stderr, platformsupport
+from groklib import GrokWrapperError, injectedsecrets, log_stderr, platformsupport
+from groklib import path_inventory
 from groklib import worktree as worktree_mod
 from groklib.envelope import assert_no_secret_material, SecretMaterialError
 from groklib.implementation_handoff import HandoffBlocker
@@ -47,13 +48,37 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _assert_no_injected_denylist_in_text(text: str) -> None:
+    """Fail closed when any current injected-credential denylist value occurs.
+
+    Exact denylist occurrence is the SSOT for opaque tokens that match none of
+    ``_SECRET_VALUE_PATTERNS``. Casefold matches the redaction helper so casing
+    variants of the same injected credential still block the patch.
+    """
+    denylist = injectedsecrets.current_injected_secret_denylist()
+    if not denylist or not text:
+        return
+    folded = text.casefold()
+    for secret in denylist:
+        if not secret:
+            continue
+        if secret in text or secret.casefold() in folded:
+            raise SecretMaterialError(
+                "injected credential denylist value found in patch",
+                {"source": "injected-secret-denylist"},
+            )
+
+
 def scan_patch_bytes_for_secrets(patch_bytes: bytes) -> None:
-    """Fail closed if patch bytes contain secret-shaped material.
+    """Fail closed if patch bytes contain secret-shaped or injected material.
 
     Decodes as latin-1 (1:1 with bytes) so ASCII credentials embedded in binary
-    git patch segments still match; UTF-8 replace would destroy them.
+    git patch segments still match; UTF-8 replace would destroy them. Pattern
+    shapes and the per-run injected denylist both apply (never instead of).
     """
-    assert_no_secret_material(patch_bytes.decode("latin-1"))
+    text = patch_bytes.decode("latin-1")
+    _assert_no_injected_denylist_in_text(text)
+    assert_no_secret_material(text)
 
 
 def _run_git_env(repo: pathlib.Path, args: Sequence[str], env: Optional[dict] = None) -> subprocess.CompletedProcess:
@@ -247,7 +272,9 @@ def list_changed_paths(worktree_path: pathlib.Path, base_revision: str) -> List[
     """NUL-safe changed path list vs base (tracked + untracked exclude-standard).
 
     Fail closed: non-(0,1) ``git diff`` or failed ``ls-files`` raises so writeScopes
-    never see a silently incomplete inventory.
+    never see a silently incomplete inventory. Path decoding reuses
+    path_inventory (single -z / surrogateescape source of truth); status tokens
+    still come from ``diff --name-status -z``.
     """
     completed = _run_git_env(
         worktree_path,
@@ -272,6 +299,7 @@ def list_changed_paths(worktree_path: pathlib.Path, base_revision: str) -> List[
                 i += 1
                 continue
             # name-status -z: status\0path\0 or Rxxx\0old\0new\0
+            # Paths are already raw -z bytes; decode only (never C-unquote).
             try:
                 status = raw.decode("utf-8", errors="surrogateescape")
             except Exception:
@@ -295,24 +323,15 @@ def list_changed_paths(worktree_path: pathlib.Path, base_revision: str) -> List[
                     st = "deleted"
                 paths.append({"path": p, "status": st, "oldPath": None})
                 i += 2
-    # untracked
-    ut = _run_git_env(worktree_path, ["ls-files", "-z", "--others", "--exclude-standard"])
-    if ut.returncode != 0:
-        raise GrokWrapperError(
-            "artifact-generation-failure",
-            "git ls-files --others failed while listing untracked changes",
-            {
-                "exitStatus": ut.returncode,
-                "stderr": (ut.stderr or b"").decode("utf-8", errors="replace").strip(),
-            },
-        )
-    if ut.stdout:
-        for raw in ut.stdout.split(b"\0"):
-            if not raw:
-                continue
-            p = raw.decode("utf-8", errors="surrogateescape")
-            if not any(c["path"] == p for c in paths):
-                paths.append({"path": p, "status": "added", "oldPath": None})
+    # untracked via shared path_inventory ls-files -z (no third path lister).
+    for p in path_inventory.list_ls_files(
+        worktree_path,
+        "--others",
+        "--exclude-standard",
+        error_class="artifact-generation-failure",
+    ):
+        if not any(c["path"] == p for c in paths):
+            paths.append({"path": p, "status": "added", "oldPath": None})
     return paths
 
 

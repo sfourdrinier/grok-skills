@@ -18,6 +18,10 @@ DEFAULT_WEB_BY_MODE = {
     "verify": False,
     "status": False,
     "cleanup": False,
+    "peer": False,
+    "peer-start": False,
+    "peer-prompt": False,
+    "peer-stop": False,
 }
 
 

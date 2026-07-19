@@ -51,16 +51,25 @@ Required wrapper flags (copy exactly, substitute only placeholder values):
     is removed whether it is clean OR dirty (`code` mode intentionally leaves its
     worktree dirty), so a dirty owner-marked worktree owned by the requested run
     is removed, never refused.
+  - **Iteration chains** (`code --continue-run`): a continuation's `run.json`
+    records the seed's `worktreePath` while the sibling marker still names the
+    seed. Cleaning a continuation removes only that continuation's run dir
+    (envelope, artifacts, session archive) and **defers** the shared worktree:
+    success with a note like `worktree owned by run <seed>; clean that run to
+    remove it` (not `state-ownership-violation`). Cleaning the seed removes the
+    worktree as usual even if continuation run dirs still reference it; a later
+    continuation cleanup then succeeds with a missing-worktree note. A
+    **non-continuation** run whose record points at someone else's worktree still
+    fails closed (`state-ownership-violation`).
 - Preserve the user's arguments exactly. Do not strip, add, or reorder flags.
   Do not invent a flag that is not in the argument-hint.
 
-Run it as one Bash call and relay the result. SINGLE-QUOTE the run id so it
-reaches the companion as one literal argv element; NEVER embed the raw argument
-inside a position the shell would evaluate. An unquoted OR double-quoted value
-containing `$(...)`/backticks is command-substituted locally BEFORE the wrapper
-ever validates it. Single quotes pass the bytes verbatim; the wrapper then
-rejects any run id that is not the strict `YYYYMMDDThhmmssZ-xxxxxx` run-id shape
-and binds the destructive removal to the requested run id:
+Run it as one Bash call and relay the result.
+- Injection safety (canonical rationale: `plugin/references/argv-safety.md`):
+  Wrap every substituted flag VALUE in single quotes (`--run-id '<run-id>'`).
+  Bare flags (`--web`) carry no value to quote. The wrapper then rejects any run
+  id that is not the strict `YYYYMMDDThhmmssZ-xxxxxx` run-id shape and binds the
+  destructive removal to the requested run id:
 ```bash
 node "$SKILL_BASE/run.mjs" cleanup --run-id '<run-id from $ARGUMENTS>' [--confirm]
 ```

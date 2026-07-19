@@ -19,13 +19,41 @@ from groklib.implementation_handoff import (
     HARD_BLOCKER_KINDS,
     HandoffBlocker,
     HandoffBuildResult,
+    NO_AUTHORITATIVE_VALIDATION_KIND,
+    NO_AUTHORITATIVE_VALIDATION_MESSAGE,
     SOFT_BLOCKER_KINDS,
     _HARD_PRIMARY_MAPPING,
     _STEP_ORDER,
     compute_integration_ready,
+    enforce_ready_evidence_guard,
     primary_error_from_blockers,
     write_manifest,
 )
+
+
+_TAP_FAILURE_LIMIT = 5
+
+
+def tap_failure_lines(text: str, limit: int = _TAP_FAILURE_LIMIT) -> List[str]:
+    """Extract up to ``limit`` TAP "not ok" lines from a validation stdout tail.
+
+    Evidence tails are size-capped, so a mid-output failing test name can be
+    lost from the raw tail; surfacing the "not ok" lines in the blocker detail
+    lets a failed requiredValidation name its tests. Lines pass through
+    redact_secret_value_text so a secret-shaped test name never reaches a
+    manifest or envelope.
+    """
+    if not text:
+        return []
+    out: List[str] = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("not ok"):
+            out.append(redact_secret_value_text(stripped[:300]))
+            if len(out) >= limit:
+                break
+    return out
+
 
 
 def _redact_argv(argv: list) -> list:
@@ -111,6 +139,9 @@ def code_handoff_finalize(
     assert_cwd_sentinel: Callable[..., None],
     run_recorded_command: Callable[..., dict],
     step_log: Optional[List[str]] = None,
+    continues_run_id: Optional[str] = None,
+    iteration: Optional[int] = None,
+    require_sentinel: bool = True,
 ) -> HandoffBuildResult:
     """Execute design §14.6 order on the FinalizeStage path. Writes handoff before return/raise.
 
@@ -142,23 +173,27 @@ def code_handoff_finalize(
     changed: List[dict] = []
     validation_evidence: List[dict] = []
 
-    # 1. verify sentinel - policy failure continues forensics when worktree readable
+    # 1. verify sentinel - policy failure continues forensics when worktree readable.
+    # require_sentinel=False (a peer session that handled ZERO prompts) skips this:
+    # Grok never ran, so there is no sentinel to prove and no missing-sentinel
+    # blocker to raise. Code mode always requires it (default True).
     steps.append("verify-sentinel")
-    try:
-        assert_cwd_sentinel(worktree, sentinel_name)
-    except GrokWrapperError as exc:
-        sentinel_ok = False
-        blockers.append(
-            HandoffBlocker(
-                "wrong-working-directory",
-                str(exc),
-                dict(exc.detail or {}, errorClass=exc.error_class),
+    if require_sentinel:
+        try:
+            assert_cwd_sentinel(worktree, sentinel_name)
+        except GrokWrapperError as exc:
+            sentinel_ok = False
+            blockers.append(
+                HandoffBlocker(
+                    "wrong-working-directory",
+                    str(exc),
+                    dict(exc.detail or {}, errorClass=exc.error_class),
+                )
             )
-        )
 
-    # 2. remove exact sentinel only (skip when sentinel was never valid)
+    # 2. remove exact sentinel only (skip when sentinel was never valid / not required)
     steps.append("remove-sentinel")
-    if sentinel_ok:
+    if require_sentinel and sentinel_ok:
         try:
             _remove_exact_sentinel(worktree.path, sentinel_name)
         except GrokWrapperError as exc:
@@ -374,11 +409,17 @@ def code_handoff_finalize(
                 )
             if int(rec.get("exitStatus", 1)) != 0:
                 validation_ok = False
+                detail = {"argv": safe_argv, "exitStatus": rec.get("exitStatus")}
+                failed = rec.get("failedTests") or tap_failure_lines(
+                    ((rec.get("stdoutTail") or {}).get("text") or "")
+                )
+                if failed:
+                    detail["failedTests"] = list(failed)
                 blockers.append(
                     HandoffBlocker(
                         "validation-failure",
                         "requiredValidation command failed",
-                        {"argv": safe_argv, "exitStatus": rec.get("exitStatus")},
+                        detail,
                     )
                 )
     else:
@@ -538,6 +579,27 @@ def code_handoff_finalize(
 
     # 11. compute ready
     steps.append("compute-ready")
+    # Authoritative only for gates that ACTUALLY ran (wrapper-executed evidence).
+    contract_validation_ran = bool(
+        contract and isinstance(contract.get("requiredValidation"), list)
+        and len(contract.get("requiredValidation") or []) > 0
+    )
+    build_gate_ran = any(
+        isinstance(c, dict)
+        and str(c.get("purpose") or "").startswith("build-gate:")
+        for c in (stage.acc.commands or [])
+    )
+    # Vacuous pass when a gate did not run still keeps the bool fields true so a
+    # single authoritative gate can satisfy ready; sources.authoritative tracks
+    # whether the gate actually executed.
+    if not (build_gate_ran or contract_validation_ran):
+        blockers.append(
+            HandoffBlocker(
+                NO_AUTHORITATIVE_VALIDATION_KIND,
+                NO_AUTHORITATIVE_VALIDATION_MESSAGE,
+                {},
+            )
+        )
     ready = compute_integration_ready(
         terminal_outcome=terminal_outcome,
         head_matches_base=head_ok,
@@ -583,17 +645,37 @@ def code_handoff_finalize(
             terminal_outcome = "failed"
             ready = False
 
+    if build_gate_ran:
+        build_gate_source: Dict[str, Any] = {
+            "authoritative": True,
+            "passed": bool(build_gate_ok),
+        }
+    else:
+        build_gate_source = {
+            "authoritative": False,
+            "passed": False,
+            "reason": "not executed",
+        }
+    if contract_validation_ran:
+        contract_val_source: Dict[str, Any] = {
+            "authoritative": True,
+            "passed": bool(validation_ok),
+            "trustModel": trust_model(),
+        }
+    else:
+        contract_val_source = {
+            "authoritative": False,
+            "passed": False,
+            "reason": "not executed",
+            "trustModel": trust_model(),
+        }
     validation_block = {
         "requiredCommandsPassed": validation_ok,
         "buildGatePassed": build_gate_ok,
         "allPassed": validation_ok and build_gate_ok,
         "sources": {
-            "wrapperBuildGate": {"authoritative": True, "passed": build_gate_ok},
-            "contractRequiredValidation": {
-                "authoritative": True,
-                "passed": validation_ok,
-                "trustModel": trust_model(),
-            },
+            "wrapperBuildGate": build_gate_source,
+            "contractRequiredValidation": contract_val_source,
             "modelClaimedCommands": {
                 "authoritative": False,
                 "note": "ignored for readiness",
@@ -606,6 +688,15 @@ def code_handoff_finalize(
         "runId": run_id,
         "taskId": task_id,
         "contractSha256": _contract_sha256(contract),
+        "contractSummary": (
+            {
+                "taskId": contract.get("taskId"),
+                "objective": contract.get("objective") or "",
+                "acceptanceCriteria": list(contract.get("acceptanceCriteria") or []),
+            }
+            if contract
+            else None
+        ),
         "baseRevision": base_revision,
         "resultTreeOid": result_tree or "",
         "changedFiles": changed,
@@ -622,9 +713,33 @@ def code_handoff_finalize(
         },
         "createdAtUtc": _now_utc(),
     }
+    # Lineage from code --continue-run (both present or both absent; validator).
+    if continues_run_id is not None and iteration is not None:
+        doc["continuesRunId"] = continues_run_id
+        doc["iteration"] = iteration
 
     # 12. write handoff JSON
     steps.append("write-manifest")
+    # CRITICAL anti-forgery: ready=true is impossible without real command evidence.
+    doc = enforce_ready_evidence_guard(doc, list(stage.acc.commands or []))
+    ready = bool(doc.get("integration", {}).get("ready"))
+    # Keep blockers list in sync with any guard-injected soft blocker.
+    if not ready:
+        guard_blockers = doc.get("integration", {}).get("blockers") or []
+        existing_kinds = {b.kind for b in blockers}
+        for raw in guard_blockers:
+            if not isinstance(raw, dict):
+                continue
+            kind = raw.get("kind")
+            if kind == NO_AUTHORITATIVE_VALIDATION_KIND and kind not in existing_kinds:
+                blockers.append(
+                    HandoffBlocker(
+                        NO_AUTHORITATIVE_VALIDATION_KIND,
+                        str(raw.get("message") or NO_AUTHORITATIVE_VALIDATION_MESSAGE),
+                        raw.get("detail") if isinstance(raw.get("detail"), dict) else {},
+                    )
+                )
+                existing_kinds.add(kind)
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     try:
         platformsupport.restrict_dir_permissions(artifacts_dir)

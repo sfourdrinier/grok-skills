@@ -87,6 +87,13 @@ test("setNotificationConfig persists mode and webhook", () => {
   assert.equal(getRunMode(cwd, env), "hardened");
 });
 
+test("combo notify mode must be eligible: 'code' yes, 'implement' no", () => {
+  // The implement/auto combo notification uses mode "code" (finalizeCombo),
+  // because "implement" is NOT notify-eligible and would be silently dropped.
+  assert.equal(NOTIFY_ELIGIBLE_MODES.has("code"), true);
+  assert.equal(NOTIFY_ELIGIBLE_MODES.has("implement"), false);
+});
+
 test("attemptNotify off is a no-op without marker", async () => {
   const runDir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-run-"));
   const result = await attemptNotify({

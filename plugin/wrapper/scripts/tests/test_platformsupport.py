@@ -240,6 +240,10 @@ class ProcessStartTokenTests(unittest.TestCase):
             los_angeles = platformsupport._process_start_token_for("macos", pid)
         with mock.patch.dict(os.environ, {"TZ": "Asia/Tokyo"}):
             tokyo = platformsupport._process_start_token_for("macos", pid)
+        # Sandboxed runners may deny `ps` (Operation not permitted); skip rather
+        # than fail closed on an environment that cannot exercise live lstart.
+        if los_angeles is None and tokyo is None:
+            self.skipTest("ps lstart unavailable in this environment")
         self.assertIsNotNone(los_angeles)
         self.assertEqual(los_angeles, tokyo)
 

@@ -179,13 +179,13 @@ test("every skill markdown is present to scan", () => {
   assert.ok(agentAndTomlFiles().length >= 2, "expected Claude agents and Codex TOML templates");
 });
 
-test("Claude agents restrict tools to Bash(node:*)", () => {
+test("Claude agents restrict tools to Bash(node:*) and Bash(grok-skills:*)", () => {
   for (const file of fs.readdirSync(AGENTS_DIR).filter((n) => n.endsWith(".md"))) {
     const body = fs.readFileSync(path.join(AGENTS_DIR, file), "utf8");
     assert.match(
       body,
-      /^tools:\s*Bash\(node:\*\)\s*$/m,
-      `${file} must set tools: Bash(node:*) (not unrestricted Bash)`
+      /^tools:\s*Bash\(node:\*\),\s*Bash\(grok-skills:\*\)\s*$/m,
+      `${file} must set tools: Bash(node:*), Bash(grok-skills:*) (not unrestricted Bash)`
     );
     assert.ok(
       /never invent (versioned )?cache paths/i.test(body),

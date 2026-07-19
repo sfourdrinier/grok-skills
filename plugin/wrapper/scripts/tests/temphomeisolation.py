@@ -36,7 +36,15 @@ class TempHomeIsolationMixin:
     _TEMP_ENV_KEYS = ("TMPDIR", "TMP", "TEMP")
 
     def setUp(self) -> None:
+        # Ambient TMPDIR may already be nested (agent sandboxes, CI wrappers).
+        # Budget ~50 bytes of root so gsi-*/gs-*/.grok/l-*.sock stays under the
+        # 100-byte AF_UNIX guard in runstate.allocate_leader_socket.
         real_temp_root = tempfile.gettempdir()
+        if len(os.fsencode(real_temp_root)) > 50:
+            for candidate in ("/tmp", "/private/tmp"):
+                if os.path.isdir(candidate) and os.access(candidate, os.W_OK):
+                    real_temp_root = candidate
+                    break
         isolated_dir = tempfile.mkdtemp(prefix="gsi-", dir=real_temp_root)
 
         saved_tempdir = tempfile.tempdir

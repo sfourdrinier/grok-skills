@@ -155,9 +155,27 @@ class ExtractInjectedSecretsTests(unittest.TestCase):
         self._write_auth(json.dumps({"token": _OPAQUE_TOKEN_40}).encode("utf-8"))
         injectedsecrets.register_injected_secrets_from_home(self.grok_dir, ("auth.json",))
         self.assertEqual(current_injected_secret_denylist(), (_OPAQUE_TOKEN_40,))
-        # A subsequent home with malformed auth resets the denylist to empty
-        # (never accumulates a stale prior home's values).
+        # Trustworthy new home values replace (never accumulate stale prior home).
+        other = "z9y8x7w6v5u4t3s2r1q0" + "p9o8n7m6l5k4j3i2h1g0"
+        self._write_auth(json.dumps({"token": other}).encode("utf-8"))
+        injectedsecrets.register_injected_secrets_from_home(self.grok_dir, ("auth.json",))
+        self.assertEqual(current_injected_secret_denylist(), (other,))
+
+    def test_register_preserves_existing_denylist_when_extraction_empty(self) -> None:
+        """Missing/malformed home must not wipe a valid non-empty in-memory denylist."""
+        self.addCleanup(clear_injected_secret_denylist)
+        set_injected_secret_denylist([_OPAQUE_TOKEN_40])
+        self.assertEqual(current_injected_secret_denylist(), (_OPAQUE_TOKEN_40,))
+        # Malformed auth: extract empty, preserve existing.
         self._write_auth(b"broken")
+        injectedsecrets.register_injected_secrets_from_home(self.grok_dir, ("auth.json",))
+        self.assertEqual(current_injected_secret_denylist(), (_OPAQUE_TOKEN_40,))
+        # Missing auth file: still preserve.
+        (self.grok_dir / "auth.json").unlink()
+        injectedsecrets.register_injected_secrets_from_home(self.grok_dir, ("auth.json",))
+        self.assertEqual(current_injected_secret_denylist(), (_OPAQUE_TOKEN_40,))
+        # Empty process + missing home stays pattern-only (empty).
+        clear_injected_secret_denylist()
         injectedsecrets.register_injected_secrets_from_home(self.grok_dir, ("auth.json",))
         self.assertEqual(current_injected_secret_denylist(), ())
 

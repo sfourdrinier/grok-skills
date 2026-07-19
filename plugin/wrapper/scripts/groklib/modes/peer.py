@@ -1,0 +1,878 @@
+# wrapper/scripts/groklib/modes/peer.py
+#
+# ACP peer channel (peer-start / peer-prompt / peer-stop). Default peer path;
+# opt out with GROK_DISABLE_ACP=1 (wrapper + companion). Control plane is a
+# wrapper-owned unix socket (0600), not a FIFO. Start parity before first prompt;
+# peer-stop runs real requiredValidation + build gate (evidence-backed ready).
+
+from __future__ import annotations
+
+import argparse
+import os
+import pathlib
+import stat
+import subprocess
+import tempfile
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
+
+from groklib import GrokWrapperError, log_stderr, runstate
+from groklib import platformsupport
+from groklib import worktree as worktree_mod
+from groklib import worktree_escape
+from groklib import acp as acp_mod
+from groklib import grokcli
+from groklib.authhome import (
+    PrivateHome,
+    create_private_home,
+    destroy_private_home,
+    render_config_toml,
+)
+
+# Patch point for tests (mock.patch.object(peer_mod, "AcpClient", ...)).
+AcpClient = acp_mod.AcpClient
+from groklib.envelope import (
+    arm_peer_resident_stdout_suppress,
+    assert_no_secret_material,
+    build_envelope,
+    clear_peer_resident_stdout_suppress,
+    emit_envelope,
+    failure_envelope,
+    redact_secret_material,
+    redact_secret_value_text,
+)
+from groklib.grokcli import check_version
+from groklib.implementation_contract import assert_target_matches, load_optional_contract_arg
+from groklib.modes import _shared
+from groklib.modes import peer_control
+from groklib.modes import peer_stop
+from groklib.modes import code as code_mode
+from groklib.modes._envelope import _policy_field
+from groklib.modes.peer_process import (
+    StartResources as _StartResources,
+    abort_peer_start as _abort_peer_start,
+    assert_start_parity as _assert_start_parity,
+    build_acp_stdio_argv as _build_acp_stdio_argv,
+    kill_recorded_child as _kill_recorded_child,
+    require_process_identity_token as _require_process_identity_token,
+    spawn_acp_child as _spawn_acp_child,
+    unregister_active_child as _unregister_active_child,
+)
+from groklib.peer_doc import (
+    mark_peer_died_if_allowed,
+    max_prompts_handled,
+    patch_lease_expires,
+    read_peer_doc_unlocked,
+    write_peer_doc_unlocked,
+)
+from groklib.modes.review import _resolve_target as _resolve_repo_target
+from groklib.platformsupport import require_probed_platform_for_live
+from groklib.progress import ProgressWriter
+from groklib.projectconfig import load_project_config
+from groklib.sandbox import policy_for_mode, render_sandbox_toml
+from groklib.web_defaults import resolve_web_access
+
+# Re-exports for tests that patch peer_mod._open_control_socket / _assert_peer_uid.
+_assert_peer_uid = peer_control.assert_peer_uid
+_open_control_socket = peer_control.open_control_socket
+
+# Same tool allowlist as code mode (start parity; single source: modes.code._TOOLS).
+_TOOLS: Tuple[str, ...] = code_mode._TOOLS
+
+_SENTINEL_PREFIX = ".grok-run-"
+# MAX_PEER_LEASE is separate from MAX_RUN_TIMEOUT; each prompt renews it.
+MAX_PEER_LEASE_SECONDS = 2 * 3600
+
+
+def _log(function: str, message: str) -> None:
+    log_stderr("modes.peer", function, message)
+
+
+_require_experimental_acp = peer_control.require_experimental_acp
+_record_peer_worktree = peer_control.record_peer_worktree
+_load_original_baseline = peer_control.load_original_baseline
+
+
+@dataclass
+class PeerSession:
+    run_id: str
+    run_paths: runstate.RunPaths
+    session_id: str
+    socket_path: pathlib.Path
+    acp: Any
+    child: Any
+    home: PrivateHome
+    worktree: worktree_mod.ExternalWorktree
+    progress: ProgressWriter
+    peer_doc: dict
+    contract: Optional[dict]
+    original_baseline: Any
+    model: str
+    sentinel_name: str
+    _prompt_lock: threading.Lock = field(default_factory=threading.Lock)
+    _prompt_in_flight: bool = False
+    _stop_requested: bool = False
+
+    def renew_lease(self, *, require_prompts_persist: bool = False) -> None:
+        """Renew home lease + peer.json leaseExpiresAt (and optional promptsHandled).
+
+        When ``require_prompts_persist`` is True (pre-ACP prompt attempt), a
+        promptsHandled / peer.json write failure raises instead of logging: the
+        sentinel proof depends on durable promptsHandled before model tools run.
+        """
+        runstate.write_peer_lease(
+            self.home.home_dir,
+            child_pid=int(self.peer_doc["child"]["pid"]),
+            child_start_token=self.peer_doc["child"].get("startToken"),
+            lease_seconds=MAX_PEER_LEASE_SECONDS,
+        )
+        expires = time.time() + MAX_PEER_LEASE_SECONDS
+        # In-memory only for resident bookkeeping; disk is field-patched under lock
+        # so a stale whole-doc write cannot reopen dual-finalize over stopping.
+        self.peer_doc["leaseExpiresAt"] = expires
+        prompts_handled = self.peer_doc.get("promptsHandled")
+        try:
+            disk = patch_lease_expires(
+                self.run_paths,
+                expires,
+                prompts_handled=(
+                    int(prompts_handled)
+                    if isinstance(prompts_handled, (int, float))
+                    and not isinstance(prompts_handled, bool)
+                    else None
+                ),
+            )
+            self.peer_doc["leaseExpiresAt"] = disk.get("leaseExpiresAt", expires)
+            if "promptsHandled" in disk:
+                # Disk already raised via peer_doc.max_prompts_handled SSOT; re-max
+                # with in-memory so a concurrent higher resident count stays visible.
+                self.peer_doc["promptsHandled"] = max_prompts_handled(
+                    prompts_handled, disk.get("promptsHandled")
+                )
+        except (OSError, GrokWrapperError) as exc:
+            if require_prompts_persist:
+                raise GrokWrapperError(
+                    "acp-failure",
+                    "could not persist promptsHandled before ACP prompt: {}".format(exc),
+                    {
+                        "runId": self.run_id,
+                        "reason": "prompts-handled-persist-failed",
+                        "promptsHandled": prompts_handled,
+                    },
+                ) from exc
+            _log("renew_lease", "could not refresh peer.json: {}".format(exc))
+
+
+def source_grok_dir() -> pathlib.Path:
+    return _shared.source_grok_dir()
+
+
+def _extract_chunk_text(notification: dict) -> str:
+    params = notification.get("params") or {}
+    update = params.get("update") or {}
+    content = update.get("content")
+    if isinstance(content, dict) and isinstance(content.get("text"), str):
+        return content["text"]
+    if isinstance(update.get("text"), str):
+        return update["text"]
+    return ""
+
+
+_NON_PROMPTABLE_LIFECYCLES = frozenset({"stopping", "stopped", "failed", "died"})
+
+
+def _refuse_if_not_promptable(session: PeerSession) -> None:
+    """Fail closed when local or disk lifecycle is already stop/terminal owned."""
+    if getattr(session, "_stop_requested", False):
+        raise GrokWrapperError(
+            "acp-failure",
+            "peer session stop already requested; refusing further prompts",
+            {"runId": session.run_id, "hint": "reattach-unsupported"},
+        )
+    peer_doc = getattr(session, "peer_doc", None) or {}
+    life = peer_doc.get("lifecycle") if isinstance(peer_doc, dict) else None
+    if life in _NON_PROMPTABLE_LIFECYCLES:
+        raise GrokWrapperError(
+            "acp-failure",
+            "peer session lifecycle is {!r}; reattach unsupported - peer-stop then peer-start".format(
+                life
+            ),
+            {"runId": session.run_id, "lifecycle": life, "hint": "reattach-unsupported"},
+        )
+    # Best-effort disk re-check so a concurrent peer-stop claim is not raced by a
+    # resident control prompt that still holds a stale in-memory lifecycle=running.
+    # Unreadable / missing peer.json must NOT refuse the prompt here: local checks
+    # already applied, and start/test fixtures may prompt before peer.json exists.
+    try:
+        disk = read_peer_doc_unlocked(session.run_paths)
+    except Exception:
+        return
+    if not isinstance(disk, dict):
+        return
+    disk_life = disk.get("lifecycle")
+    if disk_life not in _NON_PROMPTABLE_LIFECYCLES:
+        return
+    session.peer_doc["lifecycle"] = disk_life
+    if "stopOwner" in disk:
+        session.peer_doc["stopOwner"] = disk.get("stopOwner")
+    raise GrokWrapperError(
+        "acp-failure",
+        "peer session lifecycle is {!r}; reattach unsupported - peer-stop then peer-start".format(
+            disk_life
+        ),
+        {
+            "runId": session.run_id,
+            "lifecycle": disk_life,
+            "hint": "reattach-unsupported",
+        },
+    )
+
+
+def _handle_prompt(session: PeerSession, task: str) -> dict:
+    """Run one serialized session/prompt; relay redacted chunks; return turn envelope."""
+    if session._prompt_in_flight or not session._prompt_lock.acquire(blocking=False):
+        raise GrokWrapperError(
+            "acp-failure",
+            "a prompt is already in flight for this peer session",
+            {"runId": session.run_id},
+        )
+    session._prompt_in_flight = True
+    try:
+        _refuse_if_not_promptable(session)
+        # Child liveness
+        child = session.child
+        if child is not None and getattr(child, "poll", lambda: None)() is not None:
+            try:
+                disk, applied = mark_peer_died_if_allowed(session.run_paths)
+                if applied:
+                    session.peer_doc["lifecycle"] = "died"
+                else:
+                    # Stop/terminal ownership wins; mirror disk lifecycle for locals.
+                    session.peer_doc["lifecycle"] = disk.get(
+                        "lifecycle", session.peer_doc.get("lifecycle")
+                    )
+            except (OSError, GrokWrapperError):
+                pass
+            raise GrokWrapperError(
+                "acp-failure",
+                "peer child is dead; reattach is not supported in v1 - run peer-stop then peer-start",
+                {"runId": session.run_id, "hint": "reattach-unsupported"},
+            )
+
+        texts: List[str] = []
+
+        def _on_update(note: dict) -> None:
+            text = _extract_chunk_text(note)
+            if not text:
+                return
+            texts.append(text)
+            # Redact before progress.jsonl (amendment 4).
+            redacted = redact_secret_value_text(text)
+            session.progress.safe_emit(
+                "grok",
+                "session/update",
+                data={"text": redacted, "sessionUpdate": True},
+            )
+
+        # On the FIRST prompt, build the payload the SAME way code mode does:
+        # repo rules (AGENTS/CLAUDE) + contract directive + the cwd-sentinel
+        # directive (Grok's mandatory first action; the wrapper no longer plants
+        # it, so the stop-time check is genuine proof Grok operated in the
+        # worktree). Without this a peer session could implement while never
+        # seeing the governing rules/scopes and only discover the mismatch at stop.
+        prompts_handled = int(session.peer_doc.get("promptsHandled", 0) or 0)
+        prompt_text = task
+        if prompts_handled == 0:
+            from groklib import rules
+            from groklib.modes.code import _contract_directive, _sentinel_directive
+
+            # Discover rules from the OPERATOR checkout (repoRoot), NOT the
+            # committed-base worktree: code mode reads the live checkout, so
+            # uncommitted AGENTS.md/CLAUDE.md changes and a strict-parity divergence
+            # must be seen here too, before Grok edits. Grok still RUNS in the
+            # isolated worktree (the ACP session cwd is unchanged).
+            repo_root = pathlib.Path(
+                str(session.peer_doc.get("repoRoot") or session.worktree.path)
+            )
+            target_rel = session.peer_doc.get("targetRelative") or ""
+            target_abs = (repo_root / target_rel) if target_rel else repo_root
+            # Discover repo rules the SAME way AND with the SAME strictness as code
+            # mode (project ruleFileParity). Do NOT swallow errors: a
+            # RulesParityError (unreadable / non-UTF-8 rule file, or a strict-parity
+            # divergence) is a GrokWrapperError and propagates to the control
+            # handler as a rules-parity-failure turn envelope - failing the prompt
+            # CLOSED, instead of running Grok with zero governing rules (fail-open).
+            require_parity = bool(session.peer_doc.get("requireRuleFileParity", False))
+            try:
+                instructions, rule_warnings = rules.discover_instruction_files_with_warnings(
+                    repo_root, target_abs, require_parity=require_parity
+                )
+            except GrokWrapperError:
+                raise  # RulesParityError etc. -> control handler -> failure envelope
+            except Exception as exc:
+                # Any unexpected discovery error still fails the prompt CLOSED via a
+                # classified error, so it cannot run ruleless AND cannot crash the
+                # resident serving loop (which only catches GrokWrapperError).
+                raise GrokWrapperError(
+                    "validation-failure",
+                    "peer rule discovery failed: {}".format(exc),
+                    {"repoRoot": str(repo_root)},
+                ) from exc
+            for warning in rule_warnings:
+                session.progress.safe_emit("validate", warning)
+            parts = (
+                _sentinel_directive(session.sentinel_name)
+                + _contract_directive(session.contract)
+                + task
+            )
+            prompt_text = rules.build_prompt_payload(instructions, parts)
+
+        # Count + PERSIST the attempt BEFORE waiting for the final ACP response.
+        # If session_prompt times out or errors AFTER Grok already ran tools, a
+        # promptsHandled left at 0 would make peer-stop SKIP the mandatory cwd
+        # sentinel proof and finalize a mutated worktree unverified. Recording the
+        # attempt up front forces sentinel enforcement at stop (fail closed) for
+        # any turn that reached the model. Persist failure refuses the ACP call
+        # and rolls the in-memory bump back so stop does not require a sentinel
+        # for a prompt that never reached the model.
+        session.peer_doc["promptsHandled"] = prompts_handled + 1
+        try:
+            session.renew_lease(require_prompts_persist=True)
+        except Exception:
+            session.peer_doc["promptsHandled"] = prompts_handled
+            raise
+        result = session.acp.session_prompt(
+            session_id=session.session_id,
+            text=prompt_text,
+            on_update=_on_update,
+        )
+        session.renew_lease()
+        combined = "".join(texts)
+        redacted_result = redact_secret_material(
+            {
+                "text": combined,
+                "stopReason": result.get("stopReason"),
+                "usage": result.get("usage"),
+            },
+            redact_keys=True,
+        )
+        turn_env = build_envelope(
+            run_id=session.run_id,
+            mode="peer-prompt",
+            status="success",
+            requestedModel=session.model,
+            effectiveModel=session.model,
+            progressStreamPath=str(session.run_paths.progress_path),
+            response={"peer": {"sessionId": session.session_id}, "result": redacted_result},
+            grok={
+                "sessionId": session.session_id,
+                "requestId": None,
+                "stopReason": result.get("stopReason"),
+                "modelUsage": None,
+            },
+        )
+        # Defense in depth: same scan as emit_envelope before control-plane leave.
+        assert_no_secret_material(turn_env)
+        return turn_env
+    finally:
+        session._prompt_in_flight = False
+        try:
+            session._prompt_lock.release()
+        except RuntimeError:
+            pass
+
+
+def _handle_control_connection(session: PeerSession, conn: Any) -> Optional[dict]:
+    """Serve one control-plane request. Returns final envelope when op=stop."""
+    uid = peer_control.peer_cred_uid(conn)
+    if uid is not None:
+        _assert_peer_uid(uid)
+    req = peer_control.read_json_line(conn)
+    op = req.get("op")
+    if op == "prompt":
+        task = req.get("task")
+        if not isinstance(task, str) or not task.strip():
+            peer_control.write_json_line(
+                conn,
+                {
+                    "type": "error",
+                    "error": {"class": "usage-error", "message": "prompt requires task text"},
+                },
+            )
+            return None
+        try:
+            env = _handle_prompt(session, task)
+            peer_control.write_json_line(conn, {"type": "result", "envelope": env})
+        except GrokWrapperError as exc:
+            err_env = failure_envelope(
+                run_id=session.run_id,
+                mode="peer-prompt",
+                error_class=exc.error_class,
+                message=str(exc),
+                detail=exc.detail or None,
+            )
+            peer_control.write_json_line(conn, {"type": "result", "envelope": err_env})
+        return None
+    if op == "stop":
+        session._stop_requested = True
+        final = _stop_session(session)
+        # Write failure after finalize must NOT re-enter stop (serve_until_stop
+        # would otherwise treat the exception as "no final" and call stop again).
+        try:
+            peer_control.write_json_line(conn, {"type": "result", "envelope": final})
+        except GrokWrapperError as exc:
+            _log(
+                "_handle_control_connection",
+                "post-stop control write failed (terminal already produced): {}".format(exc),
+            )
+        except OSError as exc:
+            _log(
+                "_handle_control_connection",
+                "post-stop control write OSError (terminal already produced): {}".format(exc),
+            )
+        return final
+    peer_control.write_json_line(
+        conn,
+        {"type": "error", "error": {"class": "usage-error", "message": "unknown op {!r}".format(op)}},
+    )
+    return None
+
+
+def _stop_session(session: PeerSession) -> dict:
+    """session/cancel, tear down child, code finalize path, destroy home."""
+    return peer_stop.stop_session(session)
+
+
+def _serve_control_plane(
+    session: PeerSession, running_env: dict, preopened: Any = None
+) -> dict:
+    """Block serving the control socket until stop; return the final envelope."""
+    del running_env  # reserved for future progress on the control plane
+
+    def _open(_path):
+        if preopened is not None:
+            return preopened
+        return _open_control_socket(session.socket_path)
+
+    return peer_control.serve_until_stop(
+        session,
+        open_socket=_open,
+        handle_connection=_handle_control_connection,
+        stop_session=_stop_session,
+    )
+
+
+def _load_peer_doc(run_id: str) -> Tuple[runstate.RunPaths, dict]:
+    if not runstate.is_valid_run_id(run_id):
+        raise GrokWrapperError("invalid-target", "not a valid run id: {!r}".format(run_id))
+    paths = runstate.RunPaths(
+        run_id=run_id,
+        run_dir=runstate.state_root() / "runs" / run_id,
+        progress_path=runstate.state_root() / "runs" / run_id / "progress.jsonl",
+        envelope_path=runstate.state_root() / "runs" / run_id / "envelope.json",
+        trace_dir=runstate.state_root() / "runs" / run_id / "trace",
+    )
+    peer_path = paths.run_dir / "peer.json"
+    if not peer_path.is_file():
+        raise GrokWrapperError(
+            "invalid-target",
+            "no peer session for run {}".format(run_id),
+            {"runId": run_id},
+        )
+    try:
+        doc = read_peer_doc_unlocked(paths)
+    except GrokWrapperError:
+        raise
+    return paths, doc
+
+
+def _connect_control(socket_path: str, payload: dict, timeout: float = 900.0) -> dict:
+    return peer_control.connect_control(socket_path, payload, timeout=timeout)
+
+
+def run_peer_start(args: argparse.Namespace) -> dict:
+    """Create run + worktree + home + ACP child; emit running; serve control socket."""
+    _require_experimental_acp()
+    clear_peer_resident_stdout_suppress()
+    require_probed_platform_for_live()
+    binary = _shared.resolve_binary(args)
+    check_version(binary)
+    runstate.best_effort_reap_stale_temp_homes(runstate.LIVE_START_STALE_HOME_MAX_AGE_SECONDS)
+
+    target = getattr(args, "target", None)
+    base = getattr(args, "base", None)
+    if not target or not base:
+        raise GrokWrapperError(
+            "usage-error",
+            "peer-start requires --target and --base",
+            {"target": target, "base": base},
+        )
+    repo_root, target_abs, target_relative = _resolve_repo_target(target)
+    model = getattr(args, "model", None) or "grok-4.5"
+    web_access = resolve_web_access("peer", getattr(args, "web", None))
+    timeout = int(getattr(args, "timeout", None) or 900)
+
+    # Present empty/blank --contract-file is invalid (not "no contract") - same
+    # SSOT as code/direct (load_optional_contract_arg).
+    contract = load_optional_contract_arg(getattr(args, "contract_file", None))
+    if contract is not None:
+        cli_target = target_relative if target_relative else "."
+        assert_target_matches(contract, cli_target)
+
+    original_baseline = worktree_escape.capture_original_checkout_baseline(repo_root)
+    project_config = load_project_config(repo_root)
+
+    run_paths = runstate.create_run("peer-start")
+    progress = ProgressWriter(run_paths.run_id, run_paths.progress_path)
+    progress.safe_emit("start", "peer-start run created")
+
+    res = _StartResources()
+    try:
+        required_paths: Tuple[str, ...] = (target_relative,) if target_relative else ()
+        worktree_mod.assert_committed_base_sufficient(repo_root, base, required_paths)
+        worktree = worktree_mod.create_external_worktree(
+            repo_root=repo_root, base=base, run_id=run_paths.run_id
+        )
+        worktree_mod.verify_external_worktree(worktree)
+        res.worktree = worktree
+        progress.safe_emit("worktree", "worktree ready", data={"worktree": str(worktree.path)})
+        # Record worktree ownership on run.json immediately (cleanup rebuild path).
+        _record_peer_worktree(
+            run_paths,
+            model=model,
+            repo_root=repo_root,
+            target_relative=target_relative,
+            worktree=worktree,
+        )
+
+        # Capture pristine gate scripts (start parity) before any model edit.
+        from groklib.modes.code import _read_committed_manifest_fields, _target_in_worktree
+
+        _pristine_name, pristine_scripts = _read_committed_manifest_fields(
+            _target_in_worktree(worktree.path, target_relative)
+        )
+        del _pristine_name  # captured for parity; gate runs at stop via finalize
+
+        # Two-phase policy (mirrors _direct.py): render sandbox.toml from an os-temp
+        # placeholder (a superset of <home>/tmp, which does not exist until the home
+        # is created), create the home, then rebuild the policy with the real
+        # <home>/tmp. This makes the child's TMPDIR (grokcli minimal env), the
+        # enforced sandbox profile, and the stop-time verify_enforcement all agree on
+        # <home>/tmp - and that tmp dies with the private home instead of leaking
+        # (was: a standalone gs-peer-tmp mkdtemp granted as a sandbox root but never
+        # recorded in peer.json nor removed on stop).
+        real_home = source_grok_dir().parent
+        os_temp = pathlib.Path(tempfile.gettempdir()).resolve()
+        placeholder_policy = policy_for_mode(
+            "peer", worktree=worktree.path, private_tmp=os_temp
+        )
+        sandbox_toml = render_sandbox_toml(placeholder_policy, real_home=real_home)
+        config_toml = render_config_toml(mode="peer")
+        home = create_private_home(
+            source_grok_dir=source_grok_dir(),
+            auth_file_names=_shared.AUTH_FILE_NAMES,
+            config_toml=config_toml,
+            sandbox_toml=sandbox_toml,
+        )
+        private_tmp = grokcli.private_tmp_dir(home)
+        res.home = home
+        grokcli._ensure_private_tmp(private_tmp)
+        policy = policy_for_mode(
+            "peer", worktree=worktree.path, private_tmp=private_tmp.resolve()
+        )
+        leader_socket = runstate.allocate_leader_socket(home.home_dir, run_paths.run_id)
+        sentinel_name = _SENTINEL_PREFIX + run_paths.run_id
+
+        # START PARITY fail closed BEFORE spawn (amendment 3).
+        _assert_start_parity(
+            worktree=worktree,
+            home=home,
+            tools=_TOOLS,
+            web_access=web_access,
+            policy=policy,
+        )
+        progress.safe_emit("sandbox", "start parity ok", data={"profile": policy.profile})
+
+        child = _spawn_acp_child(
+            binary=binary,
+            home=home,
+            worktree=worktree,
+            leader_socket=leader_socket,
+            model=model,
+            policy=policy,
+            tools=_TOOLS,
+            web_access=web_access,
+        )
+        res.child = child
+        acp = AcpClient(child, timeout_seconds=timeout)
+        res.acp = acp
+        try:
+            init = acp.initialize()
+            # Honesty: initialize may advertise pre_tool_use as a capability, but
+            # this wrapper does not register a deny hook (amendment 6 NON-enforcement;
+            # OS sandbox + C6 --tools/--permission-mode pins are the real layers).
+            hooks = ((init.get("_meta") or {}).get("x.ai/hooks") or {})
+            if "pre_tool_use" in (hooks.get("blockingEvents") or []):
+                progress.safe_emit(
+                    "sandbox",
+                    "pre_tool_use capability detected (not registered; documented "
+                    "NON-enforcement; OS sandbox + C6 tool/permission pins enforce)",
+                    data={
+                        "enforcement": "non-enforcement-advisory",
+                        "hookRegistered": False,
+                        "blockingEvents": list(hooks.get("blockingEvents") or []),
+                    },
+                )
+            session = acp.session_new(cwd=str(worktree.path), mcp_servers=[])
+            session_id = session.get("sessionId")
+            if not isinstance(session_id, str) or not session_id:
+                raise GrokWrapperError("acp-failure", "session/new returned no sessionId")
+        except Exception:
+            try:
+                acp.close()
+            except Exception:
+                pass
+            try:
+                destroy_private_home(home)
+            except Exception:
+                pass
+            raise
+
+        # Control socket under the private home (short path) - run-dir paths under a
+        # nested XDG_STATE_HOME often exceed the AF_UNIX ~104-byte limit.
+        socket_path = home.home_dir / ".grok" / "p-{}.sock".format(
+            run_paths.run_id.rsplit("-", 1)[-1]
+        )
+        encoded_len = len(str(socket_path).encode("utf-8"))
+        if encoded_len >= 100:
+            raise GrokWrapperError(
+                "acp-failure",
+                "peer control socket path exceeds 100-byte AF_UNIX guard",
+                {"path": str(socket_path), "bytes": encoded_len},
+            )
+        wrapper_pid = os.getpid()
+        child_pid = int(child.pid)
+        wrapper_token = _require_process_identity_token(wrapper_pid, role="wrapper")
+        child_token = _require_process_identity_token(child_pid, role="child")
+        peer_doc = {
+            "schemaVersion": 1,
+            "lifecycle": "running",
+            "sessionId": session_id,
+            "socketPath": str(socket_path),
+            "wrapper": {
+                "pid": wrapper_pid,
+                "startToken": wrapper_token,
+            },
+            "child": {
+                "pid": child_pid,
+                "startToken": child_token,
+            },
+            "homePath": str(home.home_dir),
+            "worktreePath": str(worktree.path),
+            "worktreeBranch": worktree.branch,
+            "baseRevision": worktree.base_revision,
+            "repoRoot": str(repo_root),
+            "targetRelative": target_relative,
+            "sentinelName": sentinel_name,
+            "contract": contract,
+            # Persist start baseline for crash-path peer-stop (never re-capture at stop).
+            "originalBaseline": dict(original_baseline) if original_baseline is not None else {},
+            "leaseExpiresAt": time.time() + MAX_PEER_LEASE_SECONDS,
+            "model": model,
+            "webAccess": web_access,
+            "pristineScriptsCaptured": pristine_scripts is not None,
+            "projectPackageManager": project_config.package_manager,
+            # Pin the build-gate skip set captured at START so a mid-run edit to
+            # .grok-skills.json cannot make peer-stop skip the original build
+            # script (or run a weaker validation set) while still reporting an
+            # evidence-backed ready result. Mirrors projectPackageManager pinning.
+            "projectNeverBuildWorkspaces": {
+                name: list(scripts)
+                for name, scripts in project_config.never_build_workspaces.items()
+            },
+        "requireRuleFileParity": bool(project_config.require_rule_file_parity),
+        }
+        # Initial peer.json create (run dir exclusive to this start; no concurrent
+        # stop/lease writers yet). Still route through the shared write helper.
+        with runstate.run_lock(run_paths):
+            write_peer_doc_unlocked(run_paths, peer_doc)
+        runstate.write_peer_lease(
+            home.home_dir,
+            child_pid=child_pid,
+            child_start_token=peer_doc["child"].get("startToken"),
+            lease_seconds=MAX_PEER_LEASE_SECONDS,
+        )
+
+        # Persist baseline snapshot as JSON-friendly dict for stop (paths only).
+        # original_baseline stays in-process for the resident wrapper.
+        if contract is not None:
+            from groklib.modes.code_continue import write_contract_json
+
+            write_contract_json(run_paths.run_dir, contract)
+
+        running_env = build_envelope(
+            run_id=run_paths.run_id,
+            mode="peer-start",
+            status="running",
+            requestedModel=model,
+            effectiveModel=model,
+            repository=str(repo_root),
+            targetWorkspace=target_relative or ".",
+            effectiveWorkingDirectory=str(worktree.path),
+            worktreePath=str(worktree.path),
+            worktreeBranch=worktree.branch,
+            baseRevision=worktree.base_revision,
+            progressStreamPath=str(run_paths.progress_path),
+            # Same policy shape/source as code/direct/worktree (_policy_field).
+            policy=_policy_field(_TOOLS, web_access),
+            response={
+                "peer": {
+                    "sessionId": session_id,
+                    "socketPath": str(socket_path),
+                }
+            },
+            cleanup={"status": "retained", "detail": str(worktree.path)},
+        )
+
+        session_obj = PeerSession(
+            run_id=run_paths.run_id,
+            run_paths=run_paths,
+            session_id=session_id,
+            socket_path=socket_path,
+            acp=acp,
+            child=child,
+            home=home,
+            worktree=worktree,
+            progress=progress,
+            peer_doc=peer_doc,
+            contract=contract,
+            original_baseline=original_baseline,
+            model=model,
+            sentinel_name=sentinel_name,
+        )
+
+        # Open the control socket BEFORE emitting the running envelope so a
+        # companion that immediately peer-prompts cannot race a missing socket.
+        control_srv = _open_control_socket(session_obj.socket_path)
+    except BaseException as _start_exc:
+        _abort_peer_start(run_paths=run_paths, progress=progress, res=res, error=_start_exc)
+        raise
+    emit_envelope(running_env, None)
+    try:
+        import sys
+
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+    # Arm suppression BEFORE serving: if _serve_control_plane raises (e.g. an
+    # accept() error or a stop/finalize exception), the running envelope above is
+    # already the single stdout write; without arming here the exception would
+    # reach grok_agent.main and emit a SECOND envelope for this process,
+    # violating the one-stdout-envelope contract.
+    arm_peer_resident_stdout_suppress()
+    final = _serve_control_plane(session_obj, running_env, preopened=control_srv)
+    # Resident process: exactly ONE stdout envelope (the running one above).
+    # Terminal outcome is delivered on the control socket to peer-stop and
+    # durable in the run dir; suppress the entrypoint's post-return emit.
+    final = dict(final)
+    final["_peerStartAlreadyEmittedRunning"] = True
+    return final
+
+
+def run_peer_prompt(args: argparse.Namespace) -> dict:
+    _require_experimental_acp()
+    run_id = getattr(args, "run_id", None)
+    if not run_id:
+        raise GrokWrapperError("usage-error", "peer-prompt requires --run-id")
+    try:
+        return _run_peer_prompt_body(args, str(run_id))
+    except GrokWrapperError as exc:
+        # Preserve the requested run id: a raised error would otherwise
+        # terminalize under a FRESH run id in grok_agent.main, so callers and
+        # /grok:jobs lose correlation exactly when they need to stop/clean up the
+        # broken peer. Success prompts already carry the resident run id.
+        # Guard the error class: a remote control-plane error can carry an
+        # arbitrary `class`, and an unregistered one would make failure_envelope
+        # raise InvalidEnvelopeError (escaping this except and re-introducing the
+        # fresh-run-id bug). Fall back to acp-failure.
+        from groklib.envelope import ERROR_CLASSES
+
+        error_class = exc.error_class if exc.error_class in ERROR_CLASSES else "acp-failure"
+        return failure_envelope(
+            run_id=str(run_id),
+            mode="peer-prompt",
+            error_class=error_class,
+            message=str(exc),
+            detail=dict(exc.detail or {}),
+            progressStreamPath=None,
+        )
+
+
+def _run_peer_prompt_body(args: argparse.Namespace, run_id: str) -> dict:
+    task = _shared.resolve_task_text(args)
+    paths, doc = _load_peer_doc(str(run_id))
+    lifecycle = doc.get("lifecycle")
+    # Fail closed for non-promptable lifecycles explicitly (do not rely on socket).
+    if lifecycle in ("stopping", "stopped", "failed", "died"):
+        raise GrokWrapperError(
+            "acp-failure",
+            "peer session lifecycle is {!r}; reattach unsupported - peer-stop then peer-start".format(
+                lifecycle
+            ),
+            {"runId": run_id, "lifecycle": lifecycle, "hint": "reattach-unsupported"},
+        )
+    # Child identity check via peer.json
+    child = doc.get("child") or {}
+    child_pid = child.get("pid")
+    child_token = child.get("startToken")
+    if isinstance(child_pid, int):
+        if not platformsupport.process_is_alive(child_pid):
+            try:
+                mark_peer_died_if_allowed(paths)
+            except (OSError, GrokWrapperError):
+                pass
+            raise GrokWrapperError(
+                "acp-failure",
+                "peer child is dead; reattach unsupported - run peer-stop then peer-start",
+                {"runId": run_id, "hint": "reattach-unsupported"},
+            )
+        if isinstance(child_token, str):
+            current = platformsupport.process_start_token(child_pid)
+            if current is not None and current != child_token:
+                try:
+                    mark_peer_died_if_allowed(paths)
+                except (OSError, GrokWrapperError):
+                    pass
+                raise GrokWrapperError(
+                    "acp-failure",
+                    "peer child pid recycled; reattach unsupported",
+                    {"runId": run_id, "hint": "reattach-unsupported"},
+                )
+    socket_path = doc.get("socketPath")
+    if not isinstance(socket_path, str) or not socket_path:
+        raise GrokWrapperError("acp-failure", "peer.json missing socketPath")
+    return _connect_control(socket_path, {"op": "prompt", "task": task})
+
+
+def run_peer_stop(args: argparse.Namespace) -> dict:
+    return peer_stop.run_peer_stop(
+        args,
+        load_peer_doc=_load_peer_doc,
+        connect_control=_connect_control,
+        require_experimental_acp=_require_experimental_acp,
+    )
+
+
+def run(args: argparse.Namespace) -> dict:
+    """Dispatch peer-start / peer-prompt / peer-stop from a single module entry."""
+    mode = getattr(args, "mode", None) or getattr(args, "peer_mode", None)
+    if mode == "peer-start":
+        return run_peer_start(args)
+    if mode == "peer-prompt":
+        return run_peer_prompt(args)
+    if mode == "peer-stop":
+        return run_peer_stop(args)
+    raise GrokWrapperError("usage-error", "unknown peer mode: {!r}".format(mode))

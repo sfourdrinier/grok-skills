@@ -2,27 +2,35 @@
 
 import hashlib
 import json
-import os
 import pathlib
-import shutil
-import subprocess
 import tempfile
 import unittest
-from unittest import mock
 
-from groklib import GrokWrapperError
 from groklib.command_evidence import build_command_evidence
-from groklib.handoff_patch import capture_phase1_patch, list_changed_paths
 from groklib.implementation_handoff import (
     compute_integration_ready,
     dual_condition_ready,
+    enforce_ready_evidence_guard,
+    paths_from_git_patch,
     primary_error_from_blockers,
+    ready_evidence_guard_errors,
     validate_implementation_handoff,
     write_manifest,
     HandoffBlocker,
+    NO_AUTHORITATIVE_VALIDATION_KIND,
     _STEP_ORDER,
 )
-from tests import gitfixtures
+
+
+def _git_c_quote_path_body(path: str) -> str:
+    """Encode a path the way git core.quotePath does inside a quoted token body."""
+    out = []
+    for byte in path.encode("utf-8"):
+        if byte >= 0x80 or byte < 0x20 or byte in (0x22, 0x5C):
+            out.append("\\%03o" % byte)
+        else:
+            out.append(chr(byte))
+    return "".join(out)
 
 
 def _mini_patch(*paths: str) -> bytes:
@@ -43,14 +51,25 @@ def _mini_patch(*paths: str) -> bytes:
     return "".join(parts).encode("utf-8")
 
 
-def _git(repo: pathlib.Path, *args: str) -> None:
-    subprocess.run(
-        ["git", "-C", str(repo)] + list(args),
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-
+def _mini_patch_c_quoted(*paths: str) -> bytes:
+    """Minimal patch whose ``diff --git`` headers use git C-style quoting (non-ASCII)."""
+    if not paths:
+        paths = ("café.txt",)
+    parts = []
+    for path in paths:
+        body = _git_c_quote_path_body(path)
+        # Real git wraps the whole a/... and b/... tokens: "a/caf\303\251.txt"
+        header = 'diff --git "a/{0}" "b/{0}"\n'.format(body)
+        parts.append(
+            header
+            + "index 1111111..2222222 100644\n"
+            + '--- "a/{0}"\n'.format(body)
+            + '+++ "b/{0}"\n'.format(body)
+            + "@@ -1 +1 @@\n"
+            + "-old\n"
+            + "+new\n"
+        )
+    return "".join(parts).encode("ascii")
 
 class ValidateHandoffTests(unittest.TestCase):
     def _doc(self, **overrides):
@@ -174,6 +193,105 @@ class ValidateHandoffTests(unittest.TestCase):
         doc["changedFiles"] = [{"path": "a:b.txt", "status": "added", "oldPath": None}]
         self.assertEqual(validate_implementation_handoff(doc), [])
 
+    def test_contract_summary_optional_and_typed(self) -> None:
+        doc = self._doc()
+        self.assertEqual(validate_implementation_handoff(doc), [])
+        doc["contractSummary"] = {
+            "taskId": "T-1",
+            "objective": "x",
+            "acceptanceCriteria": ["a"],
+        }
+        self.assertEqual(validate_implementation_handoff(doc), [])
+        doc["contractSummary"] = None
+        self.assertEqual(validate_implementation_handoff(doc), [])
+        doc["contractSummary"] = {"taskId": 5}
+        self.assertTrue(
+            any("contractSummary" in e for e in validate_implementation_handoff(doc))
+        )
+
+    def test_manifest_iteration_and_continues_fields_validated(self) -> None:
+        doc = self._doc()
+        # Both absent: ok
+        self.assertEqual(validate_implementation_handoff(doc), [])
+        doc["iteration"] = 2
+        doc["continuesRunId"] = "20260716T000000Z-abc123"
+        self.assertEqual(validate_implementation_handoff(doc), [])
+        # iteration alone is invalid
+        alone = self._doc()
+        alone["iteration"] = 2
+        self.assertTrue(
+            any("continuesRunId" in e or "iteration" in e for e in validate_implementation_handoff(alone))
+        )
+        # continuesRunId alone is invalid
+        alone2 = self._doc()
+        alone2["continuesRunId"] = "20260716T000000Z-abc123"
+        self.assertTrue(
+            any("continuesRunId" in e or "iteration" in e for e in validate_implementation_handoff(alone2))
+        )
+        # iteration must be int >= 2
+        doc["iteration"] = 0
+        self.assertTrue(any("iteration" in e for e in validate_implementation_handoff(doc)))
+        doc["iteration"] = 1
+        self.assertTrue(any("iteration" in e for e in validate_implementation_handoff(doc)))
+        doc["iteration"] = 2
+        doc["continuesRunId"] = "not-a-run-id"
+        self.assertTrue(any("continuesRunId" in e for e in validate_implementation_handoff(doc)))
+
+    def test_contract_summary_objective_over_cap_rejected(self) -> None:
+        # Phase 1 finding 4: mirror contract caps so a tampered manifest cannot
+        # push multi-MB summary text through handoff validation.
+        doc = self._doc()
+        doc["contractSummary"] = {
+            "taskId": "T-1",
+            "objective": "x" * 2001,
+            "acceptanceCriteria": ["ok"],
+        }
+        errs = validate_implementation_handoff(doc)
+        self.assertTrue(any("objective" in e for e in errs), errs)
+
+    def test_contract_summary_criteria_over_cap_rejected(self) -> None:
+        doc = self._doc()
+        doc["contractSummary"] = {
+            "taskId": "T-1",
+            "objective": "ok",
+            "acceptanceCriteria": ["c{}".format(i) for i in range(33)],
+        }
+        errs = validate_implementation_handoff(doc)
+        self.assertTrue(any("acceptanceCriteria" in e for e in errs), errs)
+
+        doc["contractSummary"] = {
+            "taskId": "T-1",
+            "objective": "ok",
+            "acceptanceCriteria": ["z" * 501],
+        }
+        errs = validate_implementation_handoff(doc)
+        self.assertTrue(any("acceptanceCriteria" in e for e in errs), errs)
+
+    def test_write_manifest_redacts_contract_summary_fields(self) -> None:
+        # Phase 1 finding 4: write-side redaction lives in write_manifest (single
+        # place). Split secret-shaped fixture per repo rule 8.
+        bearer_secret = "Bearer " + "4f8a9b2c1d0e3f5a6b7c8d9e0f1a2b3c"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "implementation-handoff.json"
+            doc = self._doc()
+            doc["integration"] = {"ready": False, "blockers": []}
+            doc["changedFiles"] = []
+            doc["patch"] = dict(doc["patch"], bytes=0)
+            doc["contractSummary"] = {
+                "taskId": "T-1",
+                "objective": "ship with " + bearer_secret,
+                "acceptanceCriteria": ["must not echo " + bearer_secret],
+            }
+            write_manifest(path, doc)
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("4f8a9b2c1d0e3f5a6b7c8d9e0f1a2b3c", text)
+            self.assertIn("[redacted-bearer-token]", text)
+            loaded = json.loads(text)
+            self.assertIn(
+                "[redacted-bearer-token]",
+                loaded["contractSummary"]["acceptanceCriteria"][0],
+            )
+
     def test_dual_condition_requires_code_envelope_mode(self) -> None:
         import tempfile
 
@@ -212,6 +330,24 @@ class ValidateHandoffTests(unittest.TestCase):
                 patch_abs=p,
             )
             self.assertTrue(ready2)
+            # Handoff is code-mode only: a peer-stop envelope is NOT eligible
+            # (peer runs integrate through peer-stop itself, never this gate).
+            ready_peer, peer_blockers = dual_condition_ready(
+                manifest=doc,
+                envelope={
+                    "status": "success",
+                    "runId": doc["runId"],
+                    "mode": "peer-stop",
+                    "baseRevision": doc["baseRevision"],
+                    "changedFiles": ["a.ts"],
+                },
+                patch_abs=p,
+            )
+            self.assertFalse(ready_peer)
+            self.assertTrue(
+                any(b.get("kind") == "terminal-envelope-incomplete" for b in peer_blockers),
+                peer_blockers,
+            )
 
     def test_dual_condition_rejects_null_envelope_base(self) -> None:
         import tempfile
@@ -352,6 +488,63 @@ class ValidateHandoffTests(unittest.TestCase):
                 blockers,
             )
 
+    def test_paths_from_git_patch_decodes_c_quoted_non_ascii_and_spaces(self) -> None:
+        cafe = "café.txt"
+        space = "path with space.txt"
+        # Git C-quotes non-ASCII (octal UTF-8 bytes); spaces stay unquoted.
+        quoted = _mini_patch_c_quoted(cafe)
+        unquoted_space = _mini_patch(space)
+        self.assertEqual(paths_from_git_patch(quoted), {cafe})
+        self.assertEqual(paths_from_git_patch(unquoted_space), {space})
+        # Both a/ and b/ sides of a rename-style header with mixed quoting.
+        mixed = (
+            'diff --git "a/{0}" b/{1}\n'.format(_git_c_quote_path_body(cafe), space)
+        ).encode("ascii")
+        self.assertEqual(paths_from_git_patch(mixed), {cafe, space})
+        # /dev/null must not appear as a changed path (delete/create headers).
+        delete_header = (
+            'diff --git "a/{0}" "b/{0}"\n'
+            "deleted file mode 100644\n"
+            '--- "a/{0}"\n'
+            "+++ /dev/null\n".format(_git_c_quote_path_body(cafe))
+        ).encode("ascii")
+        self.assertEqual(paths_from_git_patch(delete_header), {cafe})
+
+    def test_dual_condition_ready_with_c_quoted_patch_headers(self) -> None:
+        """Ready handoff must not false-downgrade when git C-quotes patch paths."""
+        cafe = "café.txt"
+        space = "path with space.txt"
+        doc = self._doc()
+        doc["changedFiles"] = [
+            {"path": cafe, "status": "modified", "oldPath": None},
+            {"path": space, "status": "added", "oldPath": None},
+        ]
+        # Real-world mixed: non-ASCII C-quoted, space-path unquoted.
+        patch_bytes = _mini_patch_c_quoted(cafe) + _mini_patch(space)
+        with tempfile.TemporaryDirectory() as tmp:
+            p = pathlib.Path(tmp) / "implementation.patch"
+            p.write_bytes(patch_bytes)
+            doc["patch"]["sha256"] = hashlib.sha256(patch_bytes).hexdigest()
+            doc["patch"]["bytes"] = len(patch_bytes)
+            ready, blockers = dual_condition_ready(
+                manifest=doc,
+                envelope={
+                    "status": "success",
+                    "runId": doc["runId"],
+                    "mode": "code",
+                    "baseRevision": doc["baseRevision"],
+                    "changedFiles": [cafe, space],
+                },
+                patch_abs=p,
+            )
+            self.assertTrue(
+                ready,
+                "quoted non-ASCII + space paths must not false-downgrade dual-condition ready: {}".format(
+                    blockers
+                ),
+            )
+            self.assertEqual(blockers, [])
+
 
 class CommandEvidenceTests(unittest.TestCase):
     def test_tails_and_hashes(self) -> None:
@@ -377,7 +570,8 @@ class CommandEvidenceTests(unittest.TestCase):
         # outside the window and leave the token body exposed. Redact full first.
         # Use non-token padding after the secret so the bearer pattern ends cleanly.
         pad = "n" * 5000
-        secret = " Bearer abcdef0123456789deadbeefcafebabe "
+        bearer_body = "".join(("abcdef0123456789", "deadbeefcafebabe"))
+        secret = " Bearer " + bearer_body + " "
         raw = (pad + secret + "!" * 200).encode("utf-8")
         rec = build_command_evidence(
             argv=["echo"],
@@ -387,7 +581,7 @@ class CommandEvidenceTests(unittest.TestCase):
             stdout=raw,
         )
         self.assertTrue(rec["stdoutTail"]["truncated"])
-        self.assertNotIn("abcdef0123456789deadbeefcafebabe", rec["stdoutTail"]["text"])
+        self.assertNotIn(bearer_body, rec["stdoutTail"]["text"])
         self.assertIn("redacted", rec["stdoutTail"]["text"].lower())
 
     def test_spawn_failure_record_is_envelope_valid(self) -> None:
@@ -409,139 +603,90 @@ class CommandEvidenceTests(unittest.TestCase):
         )
         self.assertEqual(validate_envelope(env), [])
 
+class ReadyEvidenceGuardTests(unittest.TestCase):
+    """Task 7.4: ready=true is impossible without non-forgeable command evidence."""
 
-class Phase1PatchTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmp = tempfile.mkdtemp(prefix="grok-handoff-")
-        self.repo = gitfixtures.make_repo(self.tmp)
-        (self.repo / "tracked.txt").write_text("v1\n", encoding="utf-8")
-        _git(self.repo, "add", "tracked.txt")
-        _git(self.repo, "commit", "-q", "-m", "base")
-        self.base = subprocess.check_output(
-            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True
-        ).strip()
-        self.artifacts = pathlib.Path(self.tmp) / "artifacts"
-        self.artifacts.mkdir()
+    def _ready_manifest(self, *, authoritative: bool = True, passed: bool = True) -> dict:
+        return {
+            "schemaVersion": 1,
+            "runId": "20260716T020408Z-a82843",
+            "taskId": "t1",
+            "baseRevision": "a" * 40,
+            "resultTreeOid": "b" * 40,
+            "createdAtUtc": "2026-07-16T02:04:08Z",
+            "changedFiles": [{"path": "a.ts", "status": "modified", "oldPath": None}],
+            "patch": {
+                "format": "git-binary-full-index-v1",
+                "relativePath": "artifacts/implementation.patch",
+                "sha256": "c" * 64,
+                "bytes": 12,
+            },
+            "validation": {
+                "requiredCommandsPassed": True,
+                "buildGatePassed": True,
+                "allPassed": True,
+                "sources": {
+                    "wrapperBuildGate": {
+                        "authoritative": authoritative,
+                        "passed": passed,
+                    },
+                    "contractRequiredValidation": {
+                        "authoritative": False,
+                        "passed": False,
+                        "reason": "not executed",
+                    },
+                    "modelClaimedCommands": {
+                        "authoritative": False,
+                        "note": "ignored for readiness",
+                    },
+                },
+            },
+            "integration": {"ready": True, "blockers": []},
+            "worktree": {"retained": True, "path": "/tmp/wt", "branch": "b"},
+        }
 
-    def tearDown(self) -> None:
-        shutil.rmtree(self.tmp, ignore_errors=True)
+    def test_forgery_guard_ready_without_command_evidence_fails_closed(self) -> None:
+        """THE security test: force ready with absent evidence -> fail closed."""
+        doc = self._ready_manifest(authoritative=True, passed=True)
+        errors = ready_evidence_guard_errors(doc, commands=[])
+        self.assertTrue(errors, "must report missing commands[] evidence")
+        out = enforce_ready_evidence_guard(doc, commands=[])
+        self.assertIs(out["integration"]["ready"], False)
+        kinds = [b.get("kind") for b in out["integration"]["blockers"]]
+        self.assertIn(NO_AUTHORITATIVE_VALIDATION_KIND, kinds)
 
-    def test_patch_includes_unexpected_commit_vs_base(self) -> None:
-        """When HEAD moved, patch must still be vs baseRevision (not live HEAD)."""
-        (self.repo / "tracked.txt").write_text("v2\n", encoding="utf-8")
-        _git(self.repo, "add", "tracked.txt")
-        _git(self.repo, "commit", "-q", "-m", "unexpected")
-        meta, path, tree, blockers, steps = capture_phase1_patch(
-            worktree_path=self.repo,
-            base_revision=self.base,
-            artifacts_dir=self.artifacts,
-            run_id="20260716T020408Z-a82843",
-        )
-        self.assertIsNotNone(meta)
-        self.assertTrue(path and path.is_file())
-        text = path.read_bytes()
-        # Diff vs base must include the committed change content
-        self.assertIn(b"v2", text)
-        # Apply check against original base still works
-        apply_repo = pathlib.Path(self.tmp) / "apply-base"
-        subprocess.run(
-            ["git", "clone", "--quiet", str(self.repo), str(apply_repo)],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        _git(apply_repo, "reset", "--hard", self.base)
-        r = subprocess.run(
-            ["git", "-C", str(apply_repo), "apply", "--check", "--binary", str(path)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        self.assertEqual(r.returncode, 0, r.stderr.decode())
+    def test_forgery_guard_ready_with_fake_non_authoritative_fails_closed(self) -> None:
+        """Authoritative=false + model-shaped commands still cannot claim ready."""
+        doc = self._ready_manifest(authoritative=False, passed=False)
+        # Fake command entry without a real gate source must not unlock ready.
+        fake_cmds = [
+            {
+                "argv": ["echo", "forged"],
+                "cwd": ".",
+                "purpose": "model-claimed",
+                "exitStatus": 0,
+                "durationSeconds": 0.0,
+            }
+        ]
+        errors = ready_evidence_guard_errors(doc, commands=fake_cmds)
+        self.assertTrue(errors)
+        out = enforce_ready_evidence_guard(doc, commands=fake_cmds)
+        self.assertIs(out["integration"]["ready"], False)
 
-    def test_add_modify_delete_binary_untracked(self) -> None:
-        (self.repo / "tracked.txt").write_text("v2\n", encoding="utf-8")
-        (self.repo / "new.txt").write_text("new\n", encoding="utf-8")
-        (self.repo / "bin.dat").write_bytes(b"\x00\x01\x02\xff")
-        (self.repo / "gone.txt").write_text("x\n", encoding="utf-8")
-        _git(self.repo, "add", "gone.txt")
-        _git(self.repo, "commit", "-q", "-m", "add gone")
-        # rebase base to include gone, then delete
-        self.base = subprocess.check_output(
-            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True
-        ).strip()
-        (self.repo / "gone.txt").unlink()
-        meta, path, tree, blockers, steps = capture_phase1_patch(
-            worktree_path=self.repo,
-            base_revision=self.base,
-            artifacts_dir=self.artifacts,
-            run_id="20260716T020408Z-a82843",
-        )
-        self.assertIsNotNone(meta)
-        self.assertTrue(path and path.is_file())
-        self.assertEqual(meta["format"], "git-binary-full-index-v1")
-        self.assertEqual(meta["sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
-        self.assertFalse(any(b.kind == "temp-index-retained" for b in blockers))
-        self.assertIn("phase1-temp-index-cleaned", steps)
-        # no leftover temp index
-        leftovers = list(self.artifacts.glob("handoff.*.idx"))
-        self.assertEqual(leftovers, [])
-        # apply reconstructs
-        apply_repo = pathlib.Path(self.tmp) / "apply"
-        subprocess.run(
-            ["git", "clone", "--quiet", str(self.repo), str(apply_repo)],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        _git(apply_repo, "reset", "--hard", self.base)
-        r = subprocess.run(
-            ["git", "-C", str(apply_repo), "apply", "--check", "--binary", str(path)],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        self.assertEqual(r.returncode, 0, r.stderr.decode())
-
-    def test_odd_paths_with_nul_safe_list(self) -> None:
-        weird = self.repo / "has space.txt"
-        weird.write_text("ok\n", encoding="utf-8")
-        paths = list_changed_paths(self.repo, self.base)
-        names = [p["path"] for p in paths]
-        self.assertIn("has space.txt", names)
-
-    def test_oversized_patch_fail_closed(self) -> None:
-        (self.repo / "big.txt").write_bytes(b"Z" * 2000)
-        with mock.patch.dict(os.environ, {"GROK_HANDOFF_PATCH_MAX_BYTES": str(100)}):
-            # clamp min is 1 MiB in code — set below by mocking _patch_max_bytes
-            with mock.patch(
-                "groklib.handoff_patch._patch_max_bytes", return_value=50
-            ):
-                meta, path, tree, blockers, steps = capture_phase1_patch(
-                    worktree_path=self.repo,
-                    base_revision=self.base,
-                    artifacts_dir=self.artifacts,
-                    run_id="20260716T020408Z-a82843",
-                )
-        self.assertIsNone(meta)
-        self.assertTrue(any(b.kind == "artifact-too-large" for b in blockers))
-
-    def test_temp_index_retained_blocker(self) -> None:
-        (self.repo / "x.txt").write_text("x\n", encoding="utf-8")
-        real_unlink = pathlib.Path.unlink
-
-        def sticky_unlink(self, *args, **kwargs):
-            if "handoff." in str(self) and str(self).endswith(".idx"):
-                # pretend delete failed by no-op; leave file
-                return
-            return real_unlink(self, *args, **kwargs)
-
-        with mock.patch.object(pathlib.Path, "unlink", sticky_unlink):
-            meta, path, tree, blockers, steps = capture_phase1_patch(
-                worktree_path=self.repo,
-                base_revision=self.base,
-                artifacts_dir=self.artifacts,
-                run_id="20260716T020408Z-a82843",
+    def test_ready_with_authoritative_source_and_exit0_evidence_ok(self) -> None:
+        doc = self._ready_manifest(authoritative=True, passed=True)
+        cmds = [
+            build_command_evidence(
+                argv=["true"],
+                cwd=".",
+                purpose="build-gate:build",
+                exit_status=0,
+                duration_seconds=0.01,
             )
-        self.assertTrue(any(b.kind == "temp-index-retained" for b in blockers))
+        ]
+        self.assertEqual(ready_evidence_guard_errors(doc, cmds), [])
+        out = enforce_ready_evidence_guard(doc, cmds)
+        self.assertIs(out["integration"]["ready"], True)
 
 
 class ReadyAndDualConditionTests(unittest.TestCase):
@@ -678,7 +823,6 @@ class ReadyAndDualConditionTests(unittest.TestCase):
         self.assertEqual(cls, "artifact-generation-failure")
         self.assertIn("unexpected", msg)
 
-
 class WriteManifestRoundTripTests(unittest.TestCase):
     def test_writer_reader_same_validator(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -711,6 +855,7 @@ class WriteManifestRoundTripTests(unittest.TestCase):
             self.assertEqual(validate_implementation_handoff(loaded), [])
 
     def test_write_manifest_redacts_secret_argv_in_blockers(self) -> None:
+        bearer_body = "".join(("abcdef0123456789", "deadbeefcafebabe"))
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "implementation-handoff.json"
             doc = {
@@ -740,7 +885,7 @@ class WriteManifestRoundTripTests(unittest.TestCase):
                             "kind": "validation-failure",
                             "message": "failed",
                             "detail": {
-                                "argv": ["tool", "Bearer abcdef0123456789deadbeefcafebabe"],
+                                "argv": ["tool", "Bearer " + bearer_body],
                             },
                         }
                     ],
@@ -749,197 +894,5 @@ class WriteManifestRoundTripTests(unittest.TestCase):
             }
             write_manifest(path, doc)
             text = path.read_text(encoding="utf-8")
-            self.assertNotIn("abcdef0123456789deadbeefcafebabe", text)
+            self.assertNotIn(bearer_body, text)
             self.assertIn("redacted", text.lower())
-
-
-class PostGatePatchClearTests(unittest.TestCase):
-    """When post-gate capture is rejected, pre-gate patch metadata must not survive."""
-
-    def setUp(self) -> None:
-        self.tmp = tempfile.mkdtemp(prefix="grok-postgate-")
-        self.repo = gitfixtures.make_repo(self.tmp)
-        (self.repo / "tracked.txt").write_text("v1\n", encoding="utf-8")
-        _git(self.repo, "add", "tracked.txt")
-        _git(self.repo, "commit", "-q", "-m", "base")
-        self.base = subprocess.check_output(
-            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True
-        ).strip()
-        (self.repo / "tracked.txt").write_text("v2\n", encoding="utf-8")
-        self.run_dir = pathlib.Path(self.tmp) / "run"
-        self.artifacts = self.run_dir / "artifacts"
-        self.artifacts.mkdir(parents=True)
-        # Pre-gate patch file that would be stale after a rejected recapture
-        stale = self.artifacts / "implementation.patch"
-        stale.write_bytes(b"STALE-PRE-GATE-PATCH")
-
-    def tearDown(self) -> None:
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def test_post_gate_secret_material_clears_pre_gate_patch_meta(self) -> None:
-        from groklib.code_handoff_finalize import code_handoff_finalize
-        from groklib.worktree import ExternalWorktree
-        from groklib.modes._worktree import FinalizeStage, WorktreeAccumulator
-
-        pre_meta = {
-            "format": "git-binary-full-index-v1",
-            "relativePath": "artifacts/implementation.patch",
-            "sha256": hashlib.sha256(b"STALE-PRE-GATE-PATCH").hexdigest(),
-            "bytes": len(b"STALE-PRE-GATE-PATCH"),
-        }
-        post_tree = "c" * 40
-        pre_tree = "d" * 40
-
-        call_n = {"n": 0}
-
-        def fake_capture(**_kwargs):
-            call_n["n"] += 1
-            if call_n["n"] == 1:
-                return (
-                    pre_meta,
-                    self.artifacts / "implementation.patch",
-                    pre_tree,
-                    [],
-                    ["phase1-pre"],
-                )
-            # Post-gate: fatal secret-material; no meta, but write-tree reached
-            return (
-                None,
-                None,
-                post_tree,
-                [HandoffBlocker("secret-material", "secret-shaped material in patch", {})],
-                ["phase1-post"],
-            )
-
-        wt = ExternalWorktree(
-            path=self.repo,
-            branch="grok/code/test",
-            base_revision=self.base,
-            repo_root=self.repo,
-        )
-        acc = WorktreeAccumulator()
-        stage = FinalizeStage(
-            result=mock.Mock(),
-            worktree=wt,
-            effective_model="test",
-            progress=mock.Mock(),
-            acc=acc,
-            run_id="20260716T020408Z-a82843",
-        )
-
-        def _ok(*_a, **_k):
-            return None
-
-        def _recorded(**_k):
-            return {"exitStatus": 0}
-
-        with mock.patch(
-            "groklib.code_handoff_finalize.capture_phase1_patch", side_effect=fake_capture
-        ):
-            try:
-                result = code_handoff_finalize(
-                    stage=stage,
-                    sentinel_name=".__grok_sentinel_never__",
-                    contract=None,
-                    artifacts_dir=self.artifacts,
-                    original_baseline=None,
-                    run_build_gate=_ok,
-                    assert_changes_within=_ok,
-                    assert_original_checkout_unmodified=_ok,
-                    assert_cwd_sentinel=_ok,
-                    run_recorded_command=_recorded,
-                )
-            except GrokWrapperError:
-                # secret-material is hard; finalize may raise after writing
-                manifest_path = self.run_dir / "implementation-handoff.json"
-                self.assertTrue(manifest_path.is_file())
-                doc = json.loads(manifest_path.read_text(encoding="utf-8"))
-            else:
-                doc = result.manifest
-
-        self.assertIsNotNone(doc)
-        self.assertFalse(doc["integration"]["ready"])
-        # Stub patch, not the pre-gate secret-free patch metadata
-        self.assertEqual(doc["patch"]["bytes"], 0)
-        self.assertEqual(doc["patch"]["sha256"], "0" * 64)
-        # Prefer post-gate tree when capture reached write-tree
-        self.assertEqual(doc["resultTreeOid"], post_tree)
-        kinds = [b.get("kind") for b in doc["integration"]["blockers"]]
-        self.assertIn("secret-material", kinds)
-        # Disk must not retain pre-gate patch bytes under the advertised path
-        self.assertFalse((self.artifacts / "implementation.patch").is_file())
-
-
-class ListChangedPathsFailClosedTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmp = tempfile.mkdtemp(prefix="grok-listchg-")
-        self.repo = gitfixtures.make_repo(self.tmp)
-        (self.repo / "f.txt").write_text("x\n", encoding="utf-8")
-        _git(self.repo, "add", "f.txt")
-        _git(self.repo, "commit", "-q", "-m", "base")
-        self.base = subprocess.check_output(
-            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True
-        ).strip()
-
-    def tearDown(self) -> None:
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def test_git_diff_fatal_raises(self) -> None:
-        with mock.patch(
-            "groklib.handoff_patch._run_git_env",
-            return_value=subprocess.CompletedProcess(
-                args=["git"], returncode=128, stdout=b"", stderr=b"fatal: bad object"
-            ),
-        ):
-            with self.assertRaises(GrokWrapperError) as cm:
-                list_changed_paths(self.repo, self.base)
-            self.assertEqual(cm.exception.error_class, "artifact-generation-failure")
-
-
-class Phase1SecretScanTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.tmp = tempfile.mkdtemp(prefix="grok-secpatch-")
-        self.repo = gitfixtures.make_repo(self.tmp)
-        (self.repo / "tracked.txt").write_text("v1\n", encoding="utf-8")
-        _git(self.repo, "add", "tracked.txt")
-        _git(self.repo, "commit", "-q", "-m", "base")
-        self.base = subprocess.check_output(
-            ["git", "-C", str(self.repo), "rev-parse", "HEAD"], text=True
-        ).strip()
-        self.artifacts = pathlib.Path(self.tmp) / "artifacts"
-        self.artifacts.mkdir()
-
-    def tearDown(self) -> None:
-        shutil.rmtree(self.tmp, ignore_errors=True)
-
-    def test_bearer_in_file_blocks_patch_write(self) -> None:
-        # Split literal so fixtures do not hold contiguous secret-shaped tokens.
-        token = "Bearer " + "abcdef0123456789" + "deadbeefcafebabe"
-        (self.repo / "secret.txt").write_text("key=" + token + "\n", encoding="utf-8")
-        meta, path, tree, blockers, steps = capture_phase1_patch(
-            worktree_path=self.repo,
-            base_revision=self.base,
-            artifacts_dir=self.artifacts,
-            run_id="20260716T020408Z-a82843",
-        )
-        self.assertIsNone(meta)
-        self.assertIsNone(path)
-        self.assertTrue(any(b.kind == "secret-material" for b in blockers))
-        self.assertFalse((self.artifacts / "implementation.patch").is_file())
-
-    def test_binary_patch_bytes_scan_catches_embedded_bearer(self) -> None:
-        # Git may encode binary files without leaving raw ASCII in the patch
-        # body; the scanner itself must still catch secrets in raw byte streams.
-        from groklib.handoff_patch import scan_patch_bytes_for_secrets
-        from groklib.envelope import SecretMaterialError
-
-        token = b"Bearer " + b"abcdef0123456789" + b"deadbeefcafebabe"
-        blob = b"\x00\x01" + token + b"\xff\xfe"
-        with self.assertRaises(SecretMaterialError):
-            scan_patch_bytes_for_secrets(blob)
-        # UTF-8 replace path is weaker; latin-1 path is what production uses.
-        scan_patch_bytes_for_secrets(b"hello without credentials")
-
-
-if __name__ == "__main__":
-    unittest.main()

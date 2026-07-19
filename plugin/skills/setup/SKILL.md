@@ -1,7 +1,7 @@
 ---
 name: "setup"
-description: "Check Grok readiness and optionally toggle stop gate / run mode (Codex agents auto-install on SessionStart)"
-argument-hint: "[--enable-review-gate | --disable-review-gate] [--run-mode hardened|direct] [--notification-mode off|auto|native|webhook] [--notification-webhook-url <url>] [--force-codex-agents] [--skip-codex-agents] [--remove-codex-agents]"
+description: "Check Grok readiness and optionally toggle stop gate / run mode / Codex agents scope (Codex agents auto-install on SessionStart)"
+argument-hint: "[--enable-review-gate | --disable-review-gate] [--run-mode hardened|direct] [--integration direct|worktree|auto|review] [--target <path>] [--notification-mode off|auto|native|webhook] [--notification-webhook-url <url>] [--codex-agents-scope user|project] [--force-codex-agents] [--skip-codex-agents] [--remove-codex-agents]"
 allowed-tools: "Bash(node:*)"
 ---
 
@@ -30,11 +30,24 @@ use `--task-file -` with a single-quoted heredoc.
 <!-- plugin/skills/setup/SKILL.md -->
 
 `/grok:setup` (or Codex skill `setup`) is **optional**. It reports readiness and can
-toggle the stop gate / run mode.
+toggle the stop gate / run mode / Codex agents install scope.
 
 **Codex agents install automatically** on `SessionStart` (hook writes managed
-TOML under `~/.codex/agents/` with absolute `GROK_AGENT_RUN` → `agents/run.mjs`).
-You should not need a manual setup step after installing the plugin.
+TOML with absolute `GROK_AGENT_RUN` → `agents/run.mjs`). Default dest is personal
+`~/.codex/agents/`; `setup --codex-agents-scope project` persists workspace prefs
+and installs into `<cwd>/.codex/agents/` instead (SessionStart honors the same
+prefs). You should not need a manual setup step after installing the plugin.
+
+**Codex trust honesty:** on Codex, plugin hooks (the optional stop-review gate
+**and** the SubagentStop handoff nudge) stay **dormant until you trust them** via
+`/hooks`. That is the honest default posture - install alone does not enable those
+hooks. Skills and SessionStart agent materialization still work without hook trust.
+
+**Before promising implementer success on the live tree**, record integration
+consent with `setup --integration direct` **or** choose isolation with
+`setup --integration auto|review`. First direct landing without setup consent
+fails closed. `/grok:implement` always forces worktree + verify-only (never live
+lands). Canonical: `plugin/references/integration-modes.md`.
 
 Raw arguments:
 `$ARGUMENTS`
@@ -53,11 +66,15 @@ Supported flags:
 |------|--------|
 | `--run-mode hardened` | Persist hardened mode (default) |
 | `--run-mode direct` | Persist direct (installed Grok CLI home) |
+| `--integration direct` | Persist integration mode **and** record one-time consent for direct landing on the **target** repo (orthogonal to run mode): one-shot **code** live-tree edits, and ACP **peer-stop** apply of a verified ready patch after an always-external worktree. Does **not** make `/grok:implement` live-land (implement always forces worktree + verify-only). Consent is keyed on the resolved target workspace, not companion cwd. Canonical matrix: `plugin/references/integration-modes.md`. |
+| `--integration worktree\|auto\|review` | Persist integration mode for the target repo (no consent required; auto = apply-on-ready for code/peer-stop; review/worktree = isolated, manual parent apply). Prefer explicit setup before promising implementer success without live-tree consent. |
+| `--target <path>` | Repo (or dir) that integration prefs/consent apply to (default `.`). Git toplevel when inside a repo; absolute path when not. Use when consenting for a repo other than companion cwd. |
 | `--notification-mode off\|auto\|native\|webhook` | Completion signal prefs (default `off`; **auto** recommended for background jobs) |
 | `--notification-webhook-url <url>` | Webhook URL when mode is `webhook` |
 | `--enable-review-gate` | Opt-in stop-time review gate |
 | `--disable-review-gate` | Turn gate off |
-| `--force-codex-agents` | Overwrite user-owned `~/.codex/agents/grok-*.toml` (writes `*.bak` first) |
+| `--codex-agents-scope user\|project` | Persist install scope (default `user` = `~/.codex/agents/`; `project` = `<cwd>/.codex/agents/`). SessionStart honors the same prefs. |
+| `--force-codex-agents` | Overwrite user-owned `grok-*.toml` in the active scope dir (writes `*.bak` first; managed backups capped at 3) |
 | `--skip-codex-agents` | Skip agent ensure for this run only |
 | `--remove-codex-agents` | Remove **managed** agents only (backups as `*.toml.bak`); user-owned kept |
 
@@ -66,7 +83,10 @@ Examples:
 ```bash
 node "$SKILL_BASE/run.mjs" setup
 node "$SKILL_BASE/run.mjs" setup --run-mode hardened
+node "$SKILL_BASE/run.mjs" setup --integration direct
+node "$SKILL_BASE/run.mjs" setup --integration direct --target /path/to/other-repo
 node "$SKILL_BASE/run.mjs" setup --notification-mode auto
+node "$SKILL_BASE/run.mjs" setup --codex-agents-scope project
 node "$SKILL_BASE/run.mjs" setup --force-codex-agents
 node "$SKILL_BASE/run.mjs" setup --remove-codex-agents
 node "$SKILL_BASE/run.mjs" setup --enable-review-gate
@@ -76,32 +96,41 @@ node "$SKILL_BASE/run.mjs" setup --enable-review-gate
 
 - Grok CLI presence / version
 - Bundled wrapper path
-- Run mode (hardened vs direct)
+- Run mode (hardened vs direct security posture)
+- Integration mode (how code edits land) + direct consent status (target-scoped; see `--target`)
 - Stop-review gate on/off
-- **Codex agents** ensure result (dest `~/.codex/agents/`, absolute `agents/run.mjs`)
+- **Codex agents scope** (`user` or `project`)
+- **Codex agents** ensure result (dest from scope, absolute `agents/run.mjs`)
 - Hardened preflight checks when wrapper is available
 
 ## Agents (zero post-install)
 
 | Agent | Host | Role |
 |-------|------|------|
-| `grok-engineer-coder` | Claude (`plugin/agents/`) + Codex (`~/.codex/agents/`) | Grok implements code in an isolated worktree; host orchestrates |
-| `grok-rescue` | Claude + Codex | Diagnosis / second opinion via Grok `reason` (or `code` if target+base given) |
+| `grok-engineer-coder` (nickname **Grok Coder**) | Claude (`plugin/agents/`) + Codex (`~/.codex/agents/` or project `.codex/agents/`) | Grok implements via ACP peer (default) or code; edits land per [integration-modes.md](../../references/integration-modes.md); host orchestrates |
+| `grok-rescue` (nickname **Grok Rescue**) | Claude + Codex | Diagnosis / second opinion via Grok `reason` (or `code` if target+base given) |
 
 - **Claude Code:** loads `plugin/agents/` from the install automatically.
 - **Codex:** SessionStart auto-installs managed agents (Codex cannot register plugin
   agents natively yet - [openai/codex#18988](https://github.com/openai/codex/issues/18988)).
-  Managed files refresh when the plugin cache path or templates change (with
-  `*.bak` backup). User-edited files without the `managed-by: grok-skills`
-  header are left alone unless `--force-codex-agents`.
+  Scope defaults to personal `~/.codex/agents/`; `--codex-agents-scope project`
+  installs into `<cwd>/.codex/agents/` (prefs honored on SessionStart; see
+  [Codex subagents](https://developers.openai.com/codex/subagents)).
+  Managed files refresh when the plugin cache path or templates change (managed
+  `*.bak*` capped at 3 newest). User-edited files without the
+  `managed-by: grok-skills` header are left alone unless `--force-codex-agents`.
+- **Codex hooks dormant until trusted:** stop-review gate and SubagentStop handoff
+  nudge stay off until you approve them via `/hooks`. Agent materialization does
+  not require that step.
 - **Uninstall managed Codex agents:** disable/uninstall the plugin first (or they
   reappear on SessionStart), then
-  `setup --remove-codex-agents` (or delete `~/.codex/agents/grok-*.toml` that have
-  the managed header). See `plugin/references/plugin-root.md`.
+  `setup --remove-codex-agents` (or delete managed `grok-*.toml` under the active
+  scope dir). See `plugin/references/plugin-root.md`.
 
 ## Gate behavior (if enabled)
 
 When the stop-review gate is ON, ending a turn runs a structured Grok review and
 **blocks** on critical/high findings, missing structured findings, or setup/auth
-failures. Free-text "success" alone does not end the session. Codex may require
-hook trust via `/hooks`.
+failures. Free-text "success" alone does not end the session. On Codex, plugin
+hooks (stop gate **and** SubagentStop nudge) stay **dormant until trusted** via
+`/hooks` - that is the honest default posture.

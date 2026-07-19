@@ -11,7 +11,6 @@ import dataclasses
 import os
 import pathlib
 import stat
-import subprocess
 from typing import Dict, List, Optional, Sequence
 
 from groklib import GrokWrapperError, log_stderr, platformsupport, runstate
@@ -34,32 +33,17 @@ def _isolation_git_env() -> Dict[str, str]:
 
 
 def _run_git_bytes(repo: pathlib.Path, args: Sequence[str]) -> "subprocess.CompletedProcess":
-    """Run git capturing raw stdout bytes (no UTF-8 decode) for binary-safe patches.
+    """Run git capturing raw stdout bytes via worktree SSOT (isolation env).
 
-    ``worktree._run_git`` decodes stdout as UTF-8 and raises UnicodeDecodeError on
-    non-UTF-8 text hunks before a CompletedProcess exists; isolation patches must
-    survive arbitrary tracked dirty bytes (design §10).
+    Isolation patches must survive arbitrary tracked dirty bytes (design §10);
+    reuses ``worktree._run_git_bytes`` with GIT_EXTERNAL_DIFF scrubbed.
     """
-    argv = [
-        "git",
-        "-c",
-        "core.hooksPath={}".format(worktree_mod._EMPTY_GIT_HOOKS),
-        "-C",
-        str(repo),
-    ] + [str(arg) for arg in args]
     try:
-        return subprocess.run(
-            argv,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=_isolation_git_env(),
-            timeout=worktree_mod._GIT_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
+        return worktree_mod._run_git_bytes(repo, args, env=_isolation_git_env())
+    except GrokWrapperError as exc:
         raise _iso_error(
             "git could not be executed for isolation patch: {}".format(exc),
-            {"argv": argv},
+            dict(exc.detail or {}),
         ) from exc
 
 

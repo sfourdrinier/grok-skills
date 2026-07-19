@@ -1,7 +1,7 @@
 ---
 name: "code"
-description: "Have Grok implement code in an isolated external worktree (nothing is committed or pushed)"
-argument-hint: "--target <path> --base <revision> (--task <text> | --task-file <path>) [--contract-file <path>] [--web] [--model <id>] [--timeout <s>] [--max-turns <n>]"
+description: "Have Grok implement code (default: live tree; opt-in isolated worktree). Nothing is committed or pushed"
+argument-hint: "(--target <path> --base <revision> | --continue-run <runId>) (--task <text> | --task-file <path>) [--contract-file <path>] [--web] [--model <id>] [--timeout <s>] [--max-turns <n>]"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
 
@@ -32,38 +32,38 @@ use `--task-file -` with a single-quoted heredoc.
 <!-- plugin/skills/code.md -->
 
 Run a Grok `code` implementation through the hardened wrapper and relay its
-result envelope. The wrapper creates and verifies its own external git worktree
-(never the current checkout), runs the workspace build gate, and keeps the
-worktree for inspection. Nothing is ever committed, merged, pushed, or deleted
-automatically.
+result envelope. How edits land is **mode-aware** (canonical:
+`plugin/references/integration-modes.md`): default **direct** edits the real
+tree (hardened-direct; one-time consent); **auto** / **review** use an
+external git worktree. The wrapper runs the workspace build gate. Nothing is
+ever committed, merged, pushed, or deleted automatically.
 
 Raw slash-command arguments:
 `$ARGUMENTS`
 
 Required wrapper flags (copy exactly, substitute only placeholder values):
-- `--target <workspace-relative-path>` is required.
-- `--base <committed-revision>` is required (the wrapper builds the worktree
-  from a committed revision; if the task depends on uncommitted changes, the run
-  fails closed - the user must commit what the task needs first).
+- Fresh run: `--target <workspace-relative-path>` and `--base <committed-revision>`
+  are required. For **auto/review** the wrapper builds the worktree from a
+  committed revision (uncommitted task deps fail closed - commit first). For
+  **direct**, `--base` is still required (CLI parity), but the run is anchored on
+  the live working-tree state at start - NOT a base diff - so `--base` does not
+  frame direct edits; they land on the live tree and protected paths roll back
+  after (dirty-overlap policy applies; see integration-modes.md).
+- Optional `--integration direct|auto|review|worktree` (default direct when
+  consented; see `plugin/references/integration-modes.md`).
+- Continuation: `--continue-run <runId>` instead of `--target`/`--base` (reuses
+  the prior retained worktree; mutually exclusive with `--target`, `--base`, and
+  `--contract-file`). Prior target identity, consent keying, auto apply-on-ready
+  on the **new** run, and direct-continue hardened-wrapper lineage: see
+  [integration-modes.md](../../references/integration-modes.md) continue-run.
 - Exactly one of `--task <text>` or `--task-file <path>` is required. Prefer
   `--task-file` for a multi-paragraph spec.
 - Preserve the user's arguments exactly. Do not strip, add, or reorder flags.
   Do not invent a flag that is not in the argument-hint.
-- Shell-injection safety for `--task <text>`: the task is free text you must NEVER
-  place in a shell-evaluated position. `$(...)`/backticks inside a double-quoted
-  `--task "..."` run locally BEFORE the wrapper validates them. When the arguments
-  carry a `--task <text>`, deliver that text on STDIN with `--task-file -` and a
-  SINGLE-QUOTED heredoc so the shell passes it byte-for-byte; the companion stages
-  it into a temp file for the wrapper.
-- Shell-injection safety for flag VALUES (`--target`, `--base`, a `--task-file
-  <path>`, `--model`, `--timeout`, `--max-turns`, and EVERY other value you
-  substitute from `$ARGUMENTS`): wrap each substituted value in SINGLE quotes, for
-  example `--target '<path>' --base '<revision>'`. Single quotes stop the shell
-  from evaluating `$(...)`/backticks, so a hostile value reaches the companion as
-  one literal argv token and the wrapper validates it (target/worktree path
-  resolution + escape guards). An unquoted OR double-quoted value would be
-  command-substituted locally BEFORE the wrapper ever sees it -- the same
-  injection class as an unsafe `--task "..."`. The bare `--web` flag carries no
+- Injection safety (canonical rationale: `plugin/references/argv-safety.md`):
+  task text is NEVER placed in a shell-evaluated position - deliver it with
+  `--task-file -` and a SINGLE-QUOTED heredoc. Wrap every substituted flag
+  VALUE in single quotes (`--target '<path>'`). Bare flags (`--web`) carry no
   value to quote.
 
 `--web` passthrough:
@@ -117,11 +117,29 @@ message instead of an envelope, tell the user to run `/grok:setup`.
 
 ## Implementation contract + handoff (1.6.0+)
 
-Optional `--contract-file <path>` points at operator-trusted JSON (writeScopes +
-`requiredValidation` argv arrays). Bad contracts fail closed **before** Grok
-with `implementation-contract-invalid`. Trust model:
+**Derive a contract by default** before a non-exploratory `code` run (host
+agents: `agents/grok-engineer-coder.md`, Codex
+`codex-agents/grok-engineer-coder.toml`). Stage operator-trusted JSON and pass
+`--contract-file <path>` (writeScopes + `requiredValidation` argv arrays). Skip
+only for exploratory tasks, or when outcomes are not crisp (ask once, or
+proceed without a contract and say so). Bad contracts fail closed **before**
+Grok with `implementation-contract-invalid`. Trust model:
 `operator-contract-trusted-no-os-sandbox` (no OS filesystem sandbox claim for
 validation commands).
+
+`requiredValidation` argv is **shell-free** (canonical:
+`plugin/references/argv-safety.md`): no globs, no directory shorthands, no
+`$VARS`. Prefer **targeted** test modules over a heavy or environment-sensitive
+full suite; the workspace build gate still runs. Model examples:
+`["node", "--test"]` with `cwd`, and
+`["python3", "-m", "unittest", "discover", "-s", "tests", "-q"]`.
+
+While a hardened code run is in flight, do **not** commit or edit the target
+checkout (original-checkout guard cannot attribute mid-run divergence);
+integrate in a quiet window after the terminal envelope. Changes that add or
+move secret-shaped test fixtures cannot produce a handoff patch artifact
+(fail-closed scan); expect retained-worktree manual integration
+(`references/implementation-handoff.md`).
 
 **Direct run-mode refuses `--contract-file`** (companion fail-closed). Verified
 handoff artifacts (`implementation.patch` + `implementation-handoff.json`) are
@@ -132,7 +150,43 @@ On success or classified failure after hardened Grok, the wrapper writes:
 - `runs/<runId>/artifacts/implementation.patch` (immutable git binary full-index)
 - `runs/<runId>/implementation-handoff.json`
 
-**Notify is not integrate.** After a code run, parents (Claude Code / Codex)
-must call `/grok:handoff --run-id <runId from the code envelope>` and require
-dual-condition ready before any apply. See `skills/handoff/SKILL.md` and
-`references/implementation-handoff.md`. Never auto-apply.
+**Notify is not integrate.** After an isolated (`auto`/`review`) code run,
+parents must call `/grok:handoff --run-id <runId from the code envelope>` and
+require dual-condition ready before any apply. In **direct**, source edits are
+already live. See `skills/handoff/SKILL.md`,
+`references/implementation-handoff.md`, and the canonical matrix
+`references/integration-modes.md`.
+
+**Integration modes (link only - do not restate):**
+`plugin/references/integration-modes.md` - direct (default, live tree + consent),
+auto (worktree + apply-on-ready), review (worktree + manual parent apply).
+
+## Iterating on a run (2.0.0+)
+
+When handoff is not ready (or the operator wants a follow-up in the same
+worktree), continue instead of starting a fresh run:
+
+```bash
+node "$SKILL_BASE/run.mjs" code --continue-run '<runId>' --task-file - <<'GROK_TASK'
+<follow-up instructions; e.g. fix the handoff blockers>
+GROK_TASK
+```
+
+- Do **not** pass `--target`, `--base`, or `--contract-file` with
+  `--continue-run` (usage-error). Target, base, and the prior contract are
+  derived from the prior run (apply/consent keyed on prior `run.json`
+  target/repository). Continue-run is direct-consent exempt; product direct
+  continues on hardened wrapper worktree lineage (never live direct edit).
+- `--model` / `--timeout` / `--max-turns` / `--web` remain allowed (last-valid
+  companion argv SSOT: [argv-safety.md](../../references/argv-safety.md)).
+- Each continuation is a **new** run id with `continuesRunId` + `iteration` on
+  `run.json` and the handoff manifest. Auto apply-on-ready (when effective) runs
+  on the **new** run; review retains. Handoff the **new** run id before integrate.
+- Prefer at most two continuations, then report blockers rather than looping.
+- **Single-lineage:** each prior may be continued only once (`continuedByRunId`);
+  to iterate further, continue the child run (A->B->C), never fork siblings of A.
+- **Contract pinning:** if the prior had a contract, continuation reloads
+  `runs/<prior>/contract.json` and requires its sha256 to match the prior
+  handoff `contractSha256` (missing or tampered copy fails closed).
+- **Iteration cap:** the wrapper refuses a continue that would exceed iteration
+  20 (`usage-error`); stop earlier when blockers stop moving.

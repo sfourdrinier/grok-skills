@@ -165,16 +165,30 @@ def extract_injected_secret_values(grok_dir: pathlib.Path, auth_file_names: "Tup
 
 
 def register_injected_secrets_from_home(grok_dir: pathlib.Path, auth_file_names: "Tuple[str, ...]") -> None:
-    """Extract the injected credentials from a freshly-built private home and register them.
+    """Extract injected credentials from a private home and register them.
 
-    Called by authhome.create_private_home immediately after the auth material
-    is copied in. Fail-safe: extraction never raises, and this ALWAYS sets the
-    denylist (to the extracted values, or to empty when nothing could be
-    extracted) so the per-run denylist reflects only the current home and never
-    a stale prior one.
+    Called by authhome.create_private_home after auth material is copied, and by
+    peer-stop finalize reload. Extraction never raises.
+
+    Trustworthy (non-empty) extracted values always replace the denylist.
+    When extraction yields nothing (missing/unreadable/malformed home), preserve
+    any existing non-empty denylist so resident finalize cannot wipe a valid
+    in-memory set after auth is gone. Local new-process with empty denylist and
+    missing home stays pattern-only.
     """
     values = extract_injected_secret_values(grok_dir, auth_file_names)
-    set_injected_secret_denylist(values)
+    if values:
+        set_injected_secret_denylist(values)
+        return
+    if current_injected_secret_denylist():
+        _log(
+            "register_injected_secrets_from_home",
+            "extraction empty for {}; preserving existing non-empty denylist".format(
+                grok_dir
+            ),
+        )
+        return
+    set_injected_secret_denylist(())
 
 
 def _mask_text(text: str, denylist: Tuple[str, ...]) -> str:

@@ -4,15 +4,61 @@
 // using the installed Codex). Spawns the real `grok` binary with the operator
 // home/auth. No private-home isolation and no wrapper sandbox verification.
 // Emits a lightweight envelope so skills still see JSON on stdout.
+// Owns direct-mode handoff refusal copy (Task 1.6). Implement combo lives in
+// lib/implement.mjs so this module stays direct-mode only.
 
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { randomBytes } from "node:crypto";
 
+import { firstFlagValue, flagValue, resolveWebFlag } from "./companion-args.mjs";
+import { extractTask, stageTaskFile } from "./task-file.mjs";
+
+/** Honest refusal when handoff artifacts are requested for a direct-mode run. */
+export const DIRECT_NO_HANDOFF_MSG =
+  "direct-mode runs have no hardened run state. Job output: result <id>. For verified handoff artifacts, rerun with setup --run-mode hardened.";
+
+/** Direct-mode runId shape (single source; result/cancel resolve via job index). */
+export const DIRECT_RUN_ID_RE = /^direct-[0-9]+$/;
+
+export function isDirectRunId(id) {
+  return typeof id === "string" && DIRECT_RUN_ID_RE.test(id);
+}
+
+/** Raw --run-id value (no hardened-shape filter). Used for direct-id refusal.
+ *  First valid wins: a later hardened run id must not hide an earlier direct-* id. */
+export function rawRunIdFlag(args) {
+  return firstFlagValue(args, "--run-id");
+}
+
+/** First bare positional after argv[0] that looks like a direct run id. */
+export function bareDirectRunId(args) {
+  if (!Array.isArray(args)) return null;
+  for (let i = 1; i < args.length; i++) {
+    const a = args[i];
+    if (typeof a === "string" && !a.startsWith("-") && isDirectRunId(a)) return a;
+  }
+  return null;
+}
+
+export function writeDirectNoHandoffRefuse() {
+  process.stderr.write(`[grok-companion] ${DIRECT_NO_HANDOFF_MSG}\n`);
+  return 1;
+}
+
+/** True when status/handoff target a direct-* id (refuse before wrapper spawn). */
+export function isDirectHandoffRequest(wrapperMode, args) {
+  if (wrapperMode !== "status" && wrapperMode !== "handoff") return false;
+  return isDirectRunId(rawRunIdFlag(args)) || isDirectRunId(bareDirectRunId(args));
+}
+
+/**
+ * Resolve the installed Grok CLI binary.
+ * Honors GROK_AGENT_BINARY only (parity with the wrapper); no GROK_BINARY alias.
+ */
 function resolveGrokBinary(env = process.env) {
-  const override = (env.GROK_AGENT_BINARY ?? env.GROK_BINARY ?? "").trim();
+  const override = (env.GROK_AGENT_BINARY ?? "").trim();
   if (override) {
     return override;
   }
@@ -24,28 +70,106 @@ function resolveGrokBinary(env = process.env) {
   return "grok";
 }
 
-function readTask(args) {
-  const idx = args.indexOf("--task-file");
-  if (idx >= 0 && args[idx + 1]) {
-    return fs.readFileSync(args[idx + 1], "utf8");
-  }
-  const t = args.indexOf("--task");
-  if (t >= 0 && args[t + 1]) {
-    return args[t + 1];
-  }
-  return "";
-}
-
-function flagValue(args, name) {
-  const i = args.indexOf(name);
-  if (i >= 0 && args[i + 1]) {
-    return args[i + 1];
-  }
-  return null;
-}
-
 function hasFlag(args, name) {
-  return args.includes(name);
+  // Presence of the bare split form only (used for wrapper-only flags like
+  // --isolated that have no equals-value payload). Web resolution uses
+  // resolveWebFlag (equals-aware, last-wins with --no-web).
+  return Array.isArray(args) && args.includes(name);
+}
+
+// Per-mode default run timeouts (seconds). MIRRORS grok_agent.py _add_run_opts()
+// so direct mode honors the same deadlines as the hardened path; keep in sync.
+const DIRECT_TIMEOUT_DEFAULTS_SECONDS = {
+  code: 3600,
+  verify: 1800,
+  reason: 900,
+  review: 900,
+  "adversarial-review": 900,
+};
+// Hard ceiling mirrors runstate.MAX_RUN_TIMEOUT_SECONDS (the wrapper's clamp).
+const DIRECT_MAX_TIMEOUT_SECONDS = 7 * 24 * 3600;
+
+/**
+ * Bound for `grok --version` probes (setup + direct preflight). Small on purpose:
+ * --version must return promptly; a hanging shim must not block the companion.
+ * Override via GROK_DIRECT_VERSION_PROBE_TIMEOUT_MS for tests only.
+ */
+export const DIRECT_VERSION_PROBE_TIMEOUT_MS = 10_000;
+
+/** Resolve version-probe timeout ms (env override for tests; production uses constant). */
+export function resolveVersionProbeTimeoutMs(env = process.env) {
+  const raw = env && env.GROK_DIRECT_VERSION_PROBE_TIMEOUT_MS;
+  if (raw != null && String(raw).trim() !== "") {
+    const n = Number.parseInt(String(raw), 10);
+    if (Number.isFinite(n) && n > 0 && n <= 60_000) return n;
+  }
+  return DIRECT_VERSION_PROBE_TIMEOUT_MS;
+}
+
+/**
+ * Bounded `grok --version` probe shared by setup and direct preflight.
+ * @returns {{
+ *   ok: boolean,
+ *   version: string|null,
+ *   detail: string|null,
+ *   timedOut: boolean,
+ *   errorClass: "timeout"|"tool-unavailable"|null,
+ *   status: number|null,
+ * }}
+ */
+export function probeGrokVersion(binary, env = process.env) {
+  const timeoutMs = resolveVersionProbeTimeoutMs(env);
+  const result = spawnSync(binary, ["--version"], {
+    encoding: "utf8",
+    env,
+    timeout: timeoutMs,
+    killSignal: "SIGTERM",
+  });
+  const timedOut = Boolean(result.error && result.error.code === "ETIMEDOUT");
+  if (timedOut) {
+    return {
+      ok: false,
+      version: null,
+      detail: `grok --version exceeded the ${timeoutMs}ms probe timeout (runMode=direct); process killed`,
+      timedOut: true,
+      errorClass: "timeout",
+      status: result.status,
+    };
+  }
+  if (result.status === 0) {
+    const version = (result.stdout || "").trim().split("\n")[0] || null;
+    return {
+      ok: true,
+      version,
+      detail: null,
+      timedOut: false,
+      errorClass: null,
+      status: 0,
+    };
+  }
+  const detail =
+    (result.stderr || result.stdout || result.error?.message || "not found")
+      .toString()
+      .trim() || "not found";
+  return {
+    ok: false,
+    version: null,
+    detail,
+    timedOut: false,
+    errorClass: "tool-unavailable",
+    status: result.status,
+  };
+}
+
+/** Resolve the effective direct-mode timeout: --timeout override, else per-mode
+ *  default; junk/non-positive falls back to the default; clamped to the ceiling. */
+export function resolveDirectTimeoutSeconds(args, mode) {
+  const fallback = DIRECT_TIMEOUT_DEFAULTS_SECONDS[mode] ?? 900;
+  const raw = flagValue(args, "--timeout");
+  if (raw == null) return fallback;
+  const n = Number.parseInt(String(raw), 10);
+  if (!Number.isFinite(n) || n <= 0) return fallback;
+  return Math.min(n, DIRECT_MAX_TIMEOUT_SECONDS);
 }
 
 function toolsForMode(mode) {
@@ -62,10 +186,93 @@ function toolsForMode(mode) {
   return "read_file,list_dir,grep";
 }
 
+// Web tool IDs the hardened grokcli path folds into the allowlist when web access
+// is on (D-WEB contract). MIRRORS groklib/grokcli.py WEB_TOOLS; keep in sync.
+const WEB_TOOLS = ["web_search", "web_fetch", "open_page", "open_page_with_find"];
+
+/** The mode's tool allowlist, with the web tools appended when web is enabled -
+ *  else the installed CLI runs ungrounded while the envelope reports webAccess. */
+function toolsAllowlist(mode, web) {
+  const base = toolsForMode(mode);
+  return web ? `${base},${WEB_TOOLS.join(",")}` : base;
+}
+
 /**
  * Run a direct Grok CLI invocation. Returns { code, envelopeText }.
  */
-export function runDirectGrok({ mode, args, cwd, env = process.env }) {
+/**
+ * Redact a direct-mode envelope through the wrapper's SINGLE redaction source
+ * (groklib.envelope + D4(a) injectedsecrets) so runMode=direct honors the same
+ * stdout redaction contract as hardened mode. Loads operator ~/.grok auth leaves
+ * via production AUTH_FILE_NAMES / register_injected_secrets_from_home (no
+ * Node-side filename list), exact-masks those values first, then pattern-redacts
+ * and fail-closed asserts. Auth unreadable -> empty denylist (pattern scan still
+ * runs). Denylist always cleared in finally. Returns the redacted JSON string, or
+ * null (fail closed) if redaction cannot run or a secret survives the scan.
+ */
+const REDACT_SCRIPT = [
+  "import sys, json",
+  "sys.path.insert(0, sys.argv[1])",
+  // AUTH_FILE_NAMES + source_grok_dir are the production SSOTs (modes/_shared);
+  // register/redact/clear live in injectedsecrets (same path hardened create_private_home uses).
+  "from groklib.modes._shared import AUTH_FILE_NAMES, source_grok_dir",
+  "from groklib.injectedsecrets import (",
+  "    register_injected_secrets_from_home,",
+  "    redact_injected_secrets,",
+  "    clear_injected_secret_denylist,",
+  ")",
+  "from groklib.envelope import redact_secret_material, assert_no_secret_material",
+  "obj = json.load(sys.stdin)",
+  "try:",
+  // Fail-safe: register never raises; unreadable/malformed auth yields empty denylist
+  // without weakening the pattern scan / assert below.
+  "    register_injected_secrets_from_home(source_grok_dir(), AUTH_FILE_NAMES)",
+  "    red = redact_injected_secrets(obj)",
+  "    red = redact_secret_material(red, redact_keys=True)",
+  "    assert_no_secret_material(red)",
+  "    sys.stdout.write(json.dumps(red))",
+  "finally:",
+  "    clear_injected_secret_denylist()",
+].join("\n");
+
+/** Run the wrapper's single-source redactor over a JSON payload; returns the
+ *  redacted JSON string, or null if redaction cannot run / a secret survives. */
+function runRedactor(payload, { scriptsDir, python, env }) {
+  if (!scriptsDir || !python) return null;
+  const res = spawnSync(python, ["-c", REDACT_SCRIPT, scriptsDir], {
+    input: JSON.stringify(payload),
+    encoding: "utf8",
+    env,
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (res.error || res.status !== 0 || !res.stdout) return null;
+  return res.stdout;
+}
+
+function redactEnvelopeViaWrapper(envelope, opts) {
+  return runRedactor(envelope, opts);
+}
+
+/** Redact a free-text string (e.g. installed-CLI stderr) through the same single
+ *  source; returns the redacted text, or null when redaction cannot run. */
+function redactTextViaWrapper(text, opts) {
+  const out = runRedactor({ t: String(text) }, opts);
+  if (out == null) return null;
+  try {
+    return JSON.parse(out).t;
+  } catch {
+    return null;
+  }
+}
+
+export function runDirectGrok({
+  mode,
+  args,
+  cwd,
+  env = process.env,
+  scriptsDir = null,
+  python = null,
+}) {
   // --isolated is wrapper-only (owned external worktree). Direct mode bypasses
   // the hardened parser and must not silently review the live tree instead.
   if (hasFlag(args, "--isolated")) {
@@ -91,8 +298,74 @@ export function runDirectGrok({ mode, args, cwd, env = process.env }) {
     return { code: 1, envelopeText: `${JSON.stringify(envelope)}\n` };
   }
 
+  // --input / --rules-file are hardened reason-mode assembly flags: the wrapper
+  // reads each named artifact/rule file and folds it into the prompt. Direct mode
+  // builds the prompt only from the task text, so honoring these silently would
+  // return a "success" envelope that IGNORED every named input. Refuse fail-closed
+  // rather than drop them (parity with the --isolated refusal above).
+  if (
+    args.some(
+      (a) =>
+        a === "--input" ||
+        a === "--rules-file" ||
+        (typeof a === "string" && (a.startsWith("--input=") || a.startsWith("--rules-file=")))
+    )
+  ) {
+    const envelope = {
+      schemaVersion: 1,
+      mode,
+      status: "failure",
+      runId: `direct-${Date.now()}`,
+      error: {
+        class: "usage-error",
+        message:
+          "--input / --rules-file require hardened mode (runMode=direct does not assemble named artifacts or rule files into the prompt)",
+        detail: {
+          hint: "re-run without --input/--rules-file, or set GROK_SKILLS_MODE=hardened / companion setup --run-mode hardened",
+        },
+      },
+      response: null,
+      warnings: [
+        "runMode=direct: --input/--rules-file rejected fail-closed (no silent drop of named artifacts/rules)",
+      ],
+      policy: { direct: true },
+    };
+    return { code: 1, envelopeText: `${JSON.stringify(envelope)}\n` };
+  }
+
+  // --schema is a structured-output contract: the hardened wrapper loads the
+  // schema, passes it to Grok, AND validates the output (schema-mismatch failure).
+  // Direct mode has none of that machinery, so honoring it would return a
+  // "success" envelope with arbitrary unvalidated JSON/text. Refuse fail-closed.
+  if (
+    args.some(
+      (a) => a === "--schema" || (typeof a === "string" && a.startsWith("--schema="))
+    )
+  ) {
+    const envelope = {
+      schemaVersion: 1,
+      mode,
+      status: "failure",
+      runId: `direct-${Date.now()}`,
+      error: {
+        class: "usage-error",
+        message:
+          "--schema requires hardened mode (runMode=direct cannot load or validate a structured-output schema, so the result would be unvalidated)",
+        detail: {
+          hint: "re-run without --schema, or set GROK_SKILLS_MODE=hardened / companion setup --run-mode hardened",
+        },
+      },
+      response: null,
+      warnings: [
+        "runMode=direct: --schema rejected fail-closed (no schema load/validation available)",
+      ],
+      policy: { direct: true },
+    };
+    return { code: 1, envelopeText: `${JSON.stringify(envelope)}\n` };
+  }
+
   const binary = resolveGrokBinary(env);
-  const task = readTask(args);
+  const task = extractTask(args);
   if (!task.trim() && mode !== "preflight") {
     const envelope = {
       schemaVersion: 1,
@@ -114,8 +387,8 @@ export function runDirectGrok({ mode, args, cwd, env = process.env }) {
   }
 
   if (mode === "preflight") {
-    const version = spawnSync(binary, ["--version"], { encoding: "utf8", env });
-    const ok = version.status === 0;
+    const probe = probeGrokVersion(binary, env);
+    const ok = probe.ok;
     const envelope = {
       schemaVersion: 1,
       mode: "preflight",
@@ -126,7 +399,9 @@ export function runDirectGrok({ mode, args, cwd, env = process.env }) {
           {
             name: "grokBinary",
             ok,
-            detail: ok ? (version.stdout || "").trim().split("\n")[0] : version.stderr || "grok --version failed",
+            detail: ok
+              ? probe.version
+              : probe.detail || "grok --version failed",
           },
           {
             name: "runMode",
@@ -140,20 +415,46 @@ export function runDirectGrok({ mode, args, cwd, env = process.env }) {
       ],
       error: ok
         ? null
-        : { class: "tool-unavailable", message: "grok CLI not usable", detail: version.stderr },
+        : {
+            class: probe.errorClass || "tool-unavailable",
+            message: probe.timedOut
+              ? probe.detail
+              : "grok CLI not usable",
+            detail: {
+              timedOut: probe.timedOut,
+              exitCode: probe.status,
+              stderr: probe.timedOut ? null : probe.detail,
+            },
+          },
       policy: { direct: true },
     };
     return { code: ok ? 0 : 1, envelopeText: `${JSON.stringify(envelope)}\n` };
   }
 
   const model = flagValue(args, "--model") || "grok-4.5";
-  const cwdFlag = flagValue(args, "--target") || cwd;
-  const web = hasFlag(args, "--web");
-  const promptFile = path.join(
-    os.tmpdir(),
-    `grok-skills-direct-${randomBytes(4).toString("hex")}.md`
-  );
-  fs.writeFileSync(promptFile, task, "utf8");
+  // --worktree is a VERIFY-only flag (the retained worktree to inspect). Honor it
+  // as the cwd ONLY for verify; for other direct modes it is not a valid flag and
+  // must be ignored, or `code --target <consented A> --worktree <B>` would pass
+  // the direct-consent gate on A yet point the CLI at B - a live edit of a repo
+  // that never recorded direct consent. Non-verify modes fall back to --target.
+  const cwdFlag =
+    (mode === "verify" ? flagValue(args, "--worktree") : null) ||
+    flagValue(args, "--target") ||
+    cwd;
+  // Equals-aware last-wins --web/--no-web (single source: companion-args).
+  // null => default off for direct (no per-mode default table on this path).
+  const webFlag = resolveWebFlag(args);
+  const webRequested = webFlag === true;
+  // Verify MUST stay hermetic: the hardened verify path never accepts --web and
+  // the verify authority requires reproducible, network-free evidence. Force web
+  // off for verify even if --web slipped through, so a direct verify can never
+  // reach live web tools and still emit a normal verify envelope.
+  const web = mode === "verify" ? false : webRequested;
+  const webForcedOff = mode === "verify" && webRequested;
+  // Stage the prompt with the shared 0600 helper (private mkdtemp dir): the task
+  // text can carry transferred transcripts or pasted credentials, so it must not
+  // sit world-readable under /tmp while the installed Grok CLI runs.
+  const { taskPath: promptFile, cleanup: cleanupPrompt } = stageTaskFile(task);
 
   const argv = [
     "--prompt-file",
@@ -168,7 +469,7 @@ export function runDirectGrok({ mode, args, cwd, env = process.env }) {
     "--permission-mode",
     "auto",
     "--tools",
-    toolsForMode(mode),
+    toolsAllowlist(mode, web),
     "--no-subagents",
     "--no-memory",
     "--no-plan",
@@ -181,19 +482,34 @@ export function runDirectGrok({ mode, args, cwd, env = process.env }) {
   } else if (mode === "code" || mode === "verify") {
     argv.push("--sandbox", "workspace");
   }
+  // Forward an operator turn budget: the hardened path passes --max-turns to the
+  // CLI, so direct must too, or a turn-capped run silently ignores the cap and
+  // runs to the wall-clock timeout / normal completion.
+  const maxTurnsRaw = flagValue(args, "--max-turns");
+  if (maxTurnsRaw != null) {
+    const n = Number.parseInt(String(maxTurnsRaw), 10);
+    // Same [1, 100000] bound the hardened wrapper enforces (_MAX_TURNS); an
+    // out-of-range/junk value is not forwarded rather than passed on unbounded.
+    if (Number.isFinite(n) && n > 0 && n <= 100000) {
+      argv.push("--max-turns", String(n));
+    }
+  }
 
+  const timeoutSeconds = resolveDirectTimeoutSeconds(args, mode);
   const result = spawnSync(binary, argv, {
     cwd: path.resolve(cwd),
     encoding: "utf8",
     env,
     maxBuffer: 64 * 1024 * 1024,
+    // Honor --timeout / the per-mode default so a hung or endless-stream Grok
+    // CLI cannot block the companion in spawnSync forever (the hardened path
+    // enforces the same deadlines). On expiry spawnSync kills the child.
+    timeout: timeoutSeconds * 1000,
+    killSignal: "SIGTERM",
   });
+  const timedOut = Boolean(result.error && result.error.code === "ETIMEDOUT");
 
-  try {
-    fs.unlinkSync(promptFile);
-  } catch {
-    // ignore
-  }
+  cleanupPrompt();
 
   const raw = (result.stdout || "").trim();
   let responseText = raw;
@@ -217,34 +533,80 @@ export function runDirectGrok({ mode, args, cwd, env = process.env }) {
     schemaVersion: 1,
     mode,
     status: ok ? "success" : "failure",
-    runId: `direct-${Date.now().toString(16)}`,
+    runId: `direct-${Date.now()}`,
     response: { text: responseText },
     warnings: [
       "runMode=direct: used installed Grok CLI without grok-skills private-home isolation or wrapper sandbox verification",
+      ...(webForcedOff
+        ? ["verify stays hermetic: --web ignored (no live web access on the direct verify path)"]
+        : []),
     ],
     error: ok
       ? null
       : {
-          class: "tool-unavailable",
-          message: (result.stderr || "grok exited non-zero").trim().slice(0, 2000),
-          detail: { exitCode: result.status },
+          // A wall-clock timeout is a distinct remediation from a missing/broken
+          // binary; callers route tool-unavailable as "install/fix grok". Keep
+          // the class aligned with grok.stopReason (and the hardened timeout class).
+          class: timedOut ? "timeout" : "tool-unavailable",
+          message: timedOut
+            ? `grok CLI exceeded the ${timeoutSeconds}s timeout (runMode=direct); process killed`
+            : (result.stderr || "grok exited non-zero").trim().slice(0, 2000),
+          detail: { exitCode: result.status, timedOut },
         },
     policy: { direct: true, webAccess: web, model },
-    grok: { stopReason: ok ? "end_turn" : "error" },
+    grok: { stopReason: ok ? "end_turn" : timedOut ? "timeout" : "error" },
   };
   if (result.stderr) {
-    process.stderr.write(result.stderr);
+    // Redact stderr through the SAME single source before relaying to the
+    // terminal: the installed CLI can echo a token it read from the repo/terminal
+    // to stderr, and relaying raw bytes would leak it to terminal logs even though
+    // the stdout envelope is redacted/withheld just below. Withhold on failure.
+    const redactedErr = redactTextViaWrapper(result.stderr, { scriptsDir, python, env });
+    if (redactedErr != null) {
+      process.stderr.write(redactedErr.endsWith("\n") ? redactedErr : `${redactedErr}\n`);
+    } else {
+      process.stderr.write(
+        "[runMode=direct: grok stderr withheld; secret redaction unavailable]\n"
+      );
+    }
   }
-  return { code: ok ? 0 : 1, envelopeText: `${JSON.stringify(envelope)}\n` };
+  // Redact the response through the wrapper's redaction (installed CLI output can
+  // quote a token it read from the repo/terminal). Fail closed: if redaction
+  // cannot run, withhold response.text rather than emit a possible secret.
+  const redacted = redactEnvelopeViaWrapper(envelope, { scriptsDir, python, env });
+  if (redacted) {
+    return { code: ok ? 0 : 1, envelopeText: `${redacted}\n` };
+  }
+  // Fail closed on EVERY field derived from untrusted Grok output: response.text
+  // AND error.message (built from grok stderr, which can echo a token). Emit a
+  // minimal envelope that carries no unredacted model/stderr text.
+  const withheld = {
+    ...envelope,
+    response: { text: "[redaction-unavailable: response withheld under runMode=direct]" },
+    error: ok
+      ? null
+      : {
+          class: (envelope.error && envelope.error.class) || "tool-unavailable",
+          message: "[redaction-unavailable: error detail withheld under runMode=direct]",
+          detail: { exitCode: (envelope.error && envelope.error.detail && envelope.error.detail.exitCode) ?? null },
+        },
+    warnings: [
+      ...(envelope.warnings || []),
+      "runMode=direct: secret redaction could not run; response/error text withheld",
+    ],
+  };
+  return { code: ok ? 0 : 1, envelopeText: `${JSON.stringify(withheld)}\n` };
 }
 
 export function grokBinaryAvailable(env = process.env) {
   const binary = resolveGrokBinary(env);
-  const result = spawnSync(binary, ["--version"], { encoding: "utf8", env });
+  const probe = probeGrokVersion(binary, env);
   return {
     binary,
-    ok: result.status === 0,
-    version: (result.stdout || "").trim().split("\n")[0] || null,
-    detail: result.status === 0 ? null : (result.stderr || "not found").trim(),
+    ok: probe.ok,
+    version: probe.version,
+    detail: probe.detail,
+    timedOut: probe.timedOut,
+    errorClass: probe.errorClass,
   };
 }

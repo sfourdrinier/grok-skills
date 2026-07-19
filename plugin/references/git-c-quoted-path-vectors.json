@@ -1,0 +1,186 @@
+{
+  "schemaVersion": 1,
+  "title": "Git core.quotePath C-style path decode golden vectors",
+  "description": "Single-source parity vectors for Python groklib.git_path_quote and Node integrate unquoteGitPath. Covers non -z outputs only (diff --git headers, apply --numstat). Do NOT apply these decoders to NUL-safe path_inventory / -z payloads (already raw). Invalid UTF-8 after decode uses Unicode replacement U+FFFD on both sides (deliberate align; not surrogateescape).",
+  "tokenDecode": [
+    {
+      "id": "utf8-octal-e-acute",
+      "input": "\"\\303\\251.txt\"",
+      "expected": "é.txt",
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "utf8-octal-cafe-path",
+      "input": "\"caf\\303\\251.txt\"",
+      "expected": "café.txt",
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "named-tab",
+      "input": "\"a\\tb.js\"",
+      "expected": "a\tb.js",
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "named-newline-return",
+      "input": "\"a\\n\\r.txt\"",
+      "expected": "a\n\r.txt",
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "escaped-quote",
+      "input": "\"quote\\\"here.txt\"",
+      "expected": "quote\"here.txt",
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "escaped-backslash",
+      "input": "\"back\\\\slash.txt\"",
+      "expected": "back\\slash.txt",
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "named-and-octal-mixed",
+      "input": "\"x\\t\\303\\251\\\\y\\\"z\"",
+      "expected": "x\té\\y\"z",
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "plain-unquoted",
+      "input": "plain.js",
+      "expected": "plain.js",
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "path-with-spaces-unquoted",
+      "input": "path with space.txt",
+      "expected": "path with space.txt",
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "empty-quoted",
+      "input": "\"\"",
+      "expected": "",
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "unknown-escape-keeps-char",
+      "input": "\"\\8\"",
+      "expected": "8",
+      "appliesTo": ["python", "node"],
+      "note": "Git-like: unknown escape consumes backslash and keeps the next char"
+    },
+    {
+      "id": "trailing-backslash-noop",
+      "input": "\"x\\\"",
+      "expected": "x",
+      "appliesTo": ["python", "node"],
+      "note": "Quoted body ends with a lone backslash (no following escape char); decoder ignores the incomplete escape"
+    },
+    {
+      "id": "invalid-utf8-octal-replaced",
+      "input": "\"\\777\"",
+      "expected": "�",
+      "appliesTo": ["python", "node"],
+      "note": "0o777 is not valid UTF-8; both decoders emit U+FFFD (deliberate parity align)"
+    },
+    {
+      "id": "unterminated-quote-plain",
+      "input": "\"unterminated",
+      "expected": "\"unterminated",
+      "appliesTo": ["python", "node"],
+      "note": "Not both-ended with quotes => treated as plain token (no decode)"
+    }
+  ],
+  "diffGitHeaders": [
+    {
+      "id": "both-unquoted",
+      "rest": "a/foo.txt b/foo.txt",
+      "expected": ["foo.txt", "foo.txt"],
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "both-c-quoted-cafe",
+      "rest": "\"a/caf\\303\\251.txt\" \"b/caf\\303\\251.txt\"",
+      "expected": ["café.txt", "café.txt"],
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "mixed-first-quoted-second-unquoted-spaces",
+      "rest": "\"a/caf\\303\\251.txt\" b/path with space.txt",
+      "expected": ["café.txt", "path with space.txt"],
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "mixed-first-unquoted-second-quoted",
+      "rest": "a/old.txt \"b/caf\\303\\251.txt\"",
+      "expected": ["old.txt", "café.txt"],
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "escaped-quote-in-quoted-side",
+      "rest": "\"a/quote\\\"here.txt\" \"b/quote\\\"here.txt\"",
+      "expected": ["quote\"here.txt", "quote\"here.txt"],
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "unquoted-literal-space-b-slash-same-path",
+      "rest": "a/x b/y.txt b/x b/y.txt",
+      "expected": ["x b/y.txt", "x b/y.txt"],
+      "appliesTo": ["python", "node"],
+      "note": "Real git emits unquoted a/<path> b/<path> even when path contains literal ' b/'. Dual-condition parser must prefer the equal strip(a)==strip(b) separator, not the first ' b/' substring."
+    },
+    {
+      "id": "unquoted-literal-space-b-slash-rename",
+      "rest": "a/x b/y.txt b/z b/w.txt",
+      "expected": null,
+      "appliesTo": ["python", "node"],
+      "note": "Ambiguous unquoted rename with ' b/' in both sides has multiple reconstructible splits; fail closed rather than guess."
+    },
+    {
+      "id": "unquoted-spaces-no-b-slash-in-path",
+      "rest": "a/my dir/f.txt b/my dir/f.txt",
+      "expected": ["my dir/f.txt", "my dir/f.txt"],
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "unquoted-first-quoted-second-with-literal-b-slash",
+      "rest": "a/x b/y.txt \"b/x b/y.txt\"",
+      "expected": ["x b/y.txt", "x b/y.txt"],
+      "appliesTo": ["python", "node"],
+      "note": "Second side C-quoted: first-side end is the space before the opening quote (not first ' b/')."
+    }
+  ],
+  "devNullExclusion": [
+    {
+      "id": "delete-header-paths-exclude-dev-null",
+      "patchText": "diff --git \"a/caf\\303\\251.txt\" \"b/caf\\303\\251.txt\"\ndeleted file mode 100644\n--- \"a/caf\\303\\251.txt\"\n+++ /dev/null\n",
+      "expectedPaths": ["café.txt"],
+      "appliesTo": ["python", "node"],
+      "note": "paths_from_git_patch excludes literal /dev/null; C-quoted sides still decode"
+    },
+    {
+      "id": "header-token-dev-null-b-side",
+      "rest": "a/foo.txt b/foo.txt",
+      "expectedRaw": ["foo.txt", "foo.txt"],
+      "expectedFiltered": ["foo.txt"],
+      "appliesTo": ["python", "node"],
+      "note": "Real git keeps a/ b/ on diff --git even for deletes; /dev/null lives on ---/+++ lines (covered by delete-header-paths-exclude-dev-null). Parser still strips a/b; filter drops empty only."
+    }
+  ],
+  "malformedFailClosed": [
+    {
+      "id": "diff-header-missing-b-side",
+      "rest": "a/only-one-side",
+      "expected": null,
+      "appliesTo": ["python", "node"],
+      "note": "parse_diff_git_header_paths returns null when second side cannot be parsed"
+    },
+    {
+      "id": "diff-header-empty",
+      "rest": "",
+      "expected": null,
+      "appliesTo": ["python", "node"]
+    }
+  ]
+}

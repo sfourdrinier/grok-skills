@@ -889,6 +889,8 @@ git commit -m "feat: archive grok session store per run (groundwork for continue
 
 ### Task 2.2: `code --continue-run <runId>`
 
+> Hardened by review (Phase 2 findings 2-6): single-lineage `continuedByRunId` CAS claim + concurrent-writer guard, contract integrity pin / missing-copy fail-closed, early baseRevision validity, and MAX_CONTINUATION_ITERATION=20.
+
 **Files:**
 - Modify: `plugin/wrapper/scripts/grok_agent.py` (argparse, line ~201-211), `plugin/wrapper/scripts/groklib/modes/code.py` (continuation path in `run()`), `plugin/wrapper/scripts/groklib/code_handoff_finalize.py` (iteration counter in manifest), `plugin/wrapper/scripts/groklib/runstate.py` only if a helper is missing (`load_run_record` exists)
 - Test: `plugin/wrapper/scripts/tests/test_mode_code.py`, `plugin/wrapper/scripts/tests/test_implementation_handoff.py`
@@ -917,7 +919,7 @@ def _continuation_directive(prior_run_id: str, prior_iteration: int) -> str:
 
 Contract on continuation: the original `--contract-file` content is not on disk in the run dir today. Persist it: in Task 2.2 also write `runs/<runId>/contract.json` (the normalized contract, 0600) during the initial code run when a contract was provided (one `json.dumps` next to the existing artifact writes in `code_handoff_finalize.py`), and on continuation load it from the prior run dir so writeScopes/requiredValidation keep applying. No contract file -> no contract, same as today.
 
-- [ ] **Step 1: Failing tests** (representative set - write them all before implementing):
+- [x] **Step 1: Failing tests** (representative set - write them all before implementing):
 
 ```python
 # tests/test_mode_code.py
@@ -946,11 +948,11 @@ def test_manifest_iteration_and_continues_fields_validated(self):
     self.assertTrue(any("iteration" in e for e in validate_implementation_handoff(doc)))
 ```
 
-- [ ] **Step 2: Run to verify failures.**
+- [x] **Step 2: Run to verify failures.**
 
-- [ ] **Step 3: Implement in this order** (each keeping the suite green): (a) argparse flag + mutual-exclusion validation in `code.run()` head; (b) `_read_committed_manifest_fields_from_ref`; (c) contract persistence to `runs/<id>/contract.json`; (d) continuation branch in `run()` building `WorktreePrep` from the rebuilt worktree (this requires `run_worktree_mode` to accept a pre-existing worktree - add a `existing_worktree: Optional[ExternalWorktree]` parameter that skips creation but keeps every verify/finalize step; read `modes/_worktree.py:209` before deciding the exact seam); (e) session meta load + ModeRun fields; (f) run.json + manifest iteration fields.
+- [x] **Step 3: Implement in this order** (each keeping the suite green): (a) argparse flag + mutual-exclusion validation in `code.run()` head; (b) `_read_committed_manifest_fields_from_ref`; (c) contract persistence to `runs/<id>/contract.json`; (d) continuation branch in `run()` building `WorktreePrep` from the rebuilt worktree (this requires `run_worktree_mode` to accept a pre-existing worktree - add a `existing_worktree: Optional[ExternalWorktree]` parameter that skips creation but keeps every verify/finalize step; read `modes/_worktree.py:209` before deciding the exact seam); (e) session meta load + ModeRun fields; (f) run.json + manifest iteration fields.
 
-- [ ] **Step 4: Full wrapper suite green.**
+- [x] **Step 4: Full wrapper suite green.**
 
 - [ ] **Step 5: Live smoke on this repo** (hardened, macOS): initial `code` run with a trivial task, then `code --continue-run <id> --task 'Also update the comment above the function you changed.'`, then `handoff --run-id <new id>` -> ready. Record in `plugin/references/manual-smoke.md` as a new numbered scenario.
 
@@ -1180,6 +1182,8 @@ memory: project
 ```
 
 Rationale to record in the body: the agent is a thin relay (shell out, relay envelopes verbatim) - a small fast model is correct and cheap; `maxTurns: 40` bounds runaway relay loops; `memory: project` lets it remember per-repo quirks (package manager, prior runIds, build-gate config). grok-rescue keeps `model` inherit (it summarizes diagnoses - keep the smarter default) but gains `memory: project`.
+
+review reversal: model inherit (agent is an orchestrator)
 
 - [ ] **Step 2: Teams smoke checklist** (`docs/checklists/agent-teams-smoke.md`): with `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, spawn a teammate from `grok:grok-engineer-coder`, delegate one tiny implement cycle, confirm SendMessage follow-up reaches it and the handoff protocol holds. Record results + Claude Code version. This is a checklist, not CI.
 - [ ] **Step 3: Validate + commit.**

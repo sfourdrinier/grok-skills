@@ -21,10 +21,50 @@ run. `--base` alone is framing only (live checkout). Direct mode rejects
 `code` may take optional `--contract-file` (operator-trusted writeScopes +
 requiredValidation). After Grok, the wrapper writes
 `implementation-handoff.json` + `artifacts/implementation.patch` under the run
-dir. Parents must call **`handoff --run-id`** before integrate; dual-condition
-ready requires ready manifest **and** a success terminal envelope **and** patch
-rehash. Notifications are not ready. No auto-apply. See
-`plugin/references/implementation-handoff.md`.
+dir for isolated integration paths. Parents must call **`handoff --run-id`**
+before integrating **code-mode** auto/review results; dual-condition ready
+requires ready manifest **and** a success terminal envelope **and** patch
+rehash. Notifications are not ready. Integrate is **mode-aware** and
+**channel-aware** (one-shot code: direct lands live; auto may apply; review is
+parent apply. ACP peer: always external worktree; direct/auto apply at ready
+peer-stop with direct consent; review retains) - see
+`plugin/references/integration-modes.md`. Handoff skill itself never applies.
+Details: `plugin/references/implementation-handoff.md`.
+
+## Implementation contract load-time caps (2.0.0+)
+
+Operator contracts are validated **before** Grok spawns
+(`implementation-contract-invalid` fail-closed). Load-time invariants:
+
+| Cap / rule | Value |
+|------------|-------|
+| `schemaVersion` | must be **1** (only version accepted) |
+| `objective` | max **2000** characters when present |
+| `acceptanceCriteria` | max **32** items; each item max **500** chars after strip |
+| `writeScopes` | non-empty array of `{kind: file\|subtree, path}` |
+| `requiredValidation` | optional array; when present each entry needs non-empty string `argv[]` (no embedded NUL) |
+| Path normalization | operator paths reject Windows drive forms; Git-reported paths keep colons/backslashes as filename characters |
+
+Constants live in `plugin/wrapper/scripts/groklib/implementation_contract.py`
+(`OBJECTIVE_MAX_CHARS`, `ACCEPTANCE_CRITERIA_MAX_ITEMS`,
+`ACCEPTANCE_CRITERION_MAX_CHARS`) and are mirrored on handoff
+`contractSummary` so a tampered manifest cannot push multi-MB display fields.
+
+## Migration compatibility (2.0.0 peer-native)
+
+| Surface | Behavior |
+|---------|----------|
+| **integration default** | Product (companion/skills) defaults to **direct** after per-repo setup consent; bare `python3 …/grok_agent.py code` without `--integration` still defaults to **worktree** (fail-closed isolation for un-consented bare calls). |
+| **ACP peer channel** | Default on for `grok-engineer-coder`. Always external retained worktree during the session. Opt out with `GROK_DISABLE_ACP=1` (one-shot `code` fallback). `GROK_EXPERIMENTAL_ACP` is no longer a hard enable gate (legacy opt-in ignored). |
+| **runMode vs integration** | Orthogonal axes that both use the word "direct". runMode=direct = installed CLI home; integration=direct = edit-landing default name. For one-shot code, integration=direct means live-tree edits; for ACP peer it means stop-time apply of a verified ready patch (still external worktree during prompts). See integration-modes.md. |
+| **handoff vs peer** | `/grok:handoff` remains **code-mode only** and refuses peer runIds (`handoff-unavailable`). Peer integrate runs at `peer stop` via the shared auto/peer apply spine (dirty-status fail-closed + patch integrity): direct and auto both apply when ready (direct needs consent); review retains. |
+| **peer notifications** | Peer-stop is **not** completion-notification eligible (`NOTIFY_ELIGIBLE_MODES` excludes peer modes). |
+| **task / web argv** | Companion **last-valid** split-or-equals for value flags (`flagValue` SSOT): later bare without value does not wipe; never consume a following flag as value. `--web`/`--no-web` last occurrence via `resolveWebFlag`. See `plugin/references/argv-safety.md`. |
+| **apply lock + marker** | Exclusive per-`(runId, targetKey)` apply lock (`apply-locks/<targetKey>.lock` + durable owner); durable `integration-applied-<targetKey>.json`; automatic stale reclaim disabled (timeout + owner diagnostics; manual cleanup for abandoned locks); not a TOCTOU seal. See integration-modes Shared apply spine. |
+| **implement always-worktree** | `/grok:implement` always forces isolated worktree + verify-only handoff; never live lands even when workspace integration is direct/auto. Product direct default remains for **code** + **peer-stop** landing. |
+| **continue-run prior target** | `--target`/`--base`/`--contract-file` forbidden on continue; target/consent keyed on prior `run.json` identity (relative `targetWorkspace` resolves against recorded `repository`, not companion cwd); direct consent exempt; auto apply-on-ready on the **new** run; review retains; direct continue uses hardened wrapper lineage. |
+| **blank `--contract-file`** | Present-but-blank `--contract-file` / `--contract-file=` is usage failure on code, direct, and peer-start (`implementation-contract-invalid`); never treated as "no contract". |
+| **Older contracts** | schemaVersion must be 1; missing optional display fields normalize to empty; oversized objective/criteria fail at load (no silent truncation). |
 
 ## Completion notifications (1.5.0+)
 
@@ -49,7 +89,7 @@ Python wrapper.
 |------|------|
 | Operator re-attempt | Explicit re-fire after failed/stuck notify (may duplicate) |
 | Direct-mode push notify | Job-scoped marker home (direct has no wrapper `runs/<id>`) |
-| Headless / native honesty | Setup + docs: native needs a desktop session (macOS/Linux); **Windows** stays unsupported for native toast — use **webhook** |
+| Headless / native honesty | Setup + docs: native needs a desktop session (macOS/Linux); **Windows** stays unsupported for native toast - use **webhook** |
 
 Verified against local installs on 2026-07-15:
 
@@ -73,7 +113,7 @@ What we match:
 - Skills live under `skills/<name>/SKILL.md` (preferred over flat `commands/`)
 - Namespaced skills: `/grok:review`, `/grok:preflight`, …
 - **Critical:** plugin install copies only the plugin directory into
-  `~/.claude/plugins/cache` — paths like `../shared` do **not** survive install.
+  `~/.claude/plugins/cache` - paths like `../shared` do **not** survive install.
   The Python wrapper is therefore **bundled** at `plugin/wrapper/` so the cache
   still contains `wrapper/scripts/grok_agent.py`.
 - `claude plugin validate ./plugin --strict` and `claude plugin validate .` pass
@@ -88,9 +128,10 @@ What we match:
 - Plugin dual-manifest: `plugin/.codex-plugin/plugin.json` with `skills`,
   `hooks`, Figma-style `interface` (displayName, logos, defaultPrompt, category).
   Codex does not yet register plugin-bundled custom agents (openai/codex#18988);
-  we materialize `plugin/codex-agents/*.toml` into `~/.codex/agents/` on SessionStart
+  we materialize `plugin/codex-agents/*.toml` into `~/.codex/agents/` (or project
+  `.codex/agents/` when workspace prefs scope is `project`) on SessionStart
   with absolute `GROK_AGENT_RUN` → `agents/run.mjs` (v1.2.5+; SessionStart since
-  v1.2.1). Interface category: **Development & Workflow**.
+  v1.2.1). Interface category: **Development & Workflow**. See **Upstream gaps**.
 - Install sources (both hosts):
 
   | Source | Claude | Codex |
@@ -99,7 +140,7 @@ What we match:
   | Git URL | `https://github.com/sfourdrinier/grok-skills.git` | same / SSH |
   | Local path (dev) | absolute path to repo root | same |
 
-  Marketplace JSON still uses relative `./plugin` — after a git marketplace add,
+  Marketplace JSON still uses relative `./plugin` - after a git marketplace add,
   the host clones the repo and resolves that path inside the clone. No local
   path is required for end users.
 
@@ -166,6 +207,16 @@ If the operator sets `--max-turns` and Grok stops at the budget (often as
 `status: success` with `response` populated and a **warning** that findings may
 be incomplete. Empty shells are not salvaged (`findings: []` / `null`,
 placeholder-only findings, blank text).
+
+## Upstream gaps
+
+Re-check these at each release (links may close or change behavior). Workarounds
+in this repo must stay honest about what the host still cannot do.
+
+| Upstream | Gap | Our workaround / posture |
+|----------|-----|---------------------------|
+| [openai/codex#18988](https://github.com/openai/codex/issues/18988) | Plugins cannot bundle custom agents the way Claude loads `plugin/agents/` | SessionStart + optional `setup` materialize `plugin/codex-agents/*.toml` into `~/.codex/agents/` (or project `.codex/agents/` when `setup --codex-agents-scope project`) with absolute `GROK_AGENT_RUN` |
+| [openai/codex#18308](https://github.com/openai/codex/issues/18308) | Plugin hooks are not auto-trusted on install | Stop-review gate and SubagentStop handoff nudge stay **dormant until trusted** via `/hooks` (honest default). Skills and agent materialization do not depend on hook trust. |
 
 ## Not required for core use
 

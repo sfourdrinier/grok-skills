@@ -20,6 +20,7 @@ import stat
 from typing import Dict, FrozenSet, List, Optional, Tuple
 
 from groklib import GrokWrapperError, log_stderr
+from groklib import path_inventory
 from groklib import worktree
 from groklib.worktree import ExternalWorktree
 
@@ -69,21 +70,23 @@ def repo_change_fingerprint(repo_root: pathlib.Path) -> FrozenSet[Tuple[str, str
     two-way SET DIFFERENCE reveals any file the run wrote to (or reverted in) the real
     checkout even though its sandbox denies writes and it reported no edits. Covers tracked
     modifications, untracked non-ignored files, AND the gitignored set (Grok r5 #4). Each
-    entry is ``(path, fingerprint)`` (git hash-object + mode for tracked/untracked; a
-    bounded stat signature for ignored), NOT just the path, so a REWRITE or CHMOD of an
-    already-dirty file is a NEW pair. A deleted/unreadable path signs as ``absent``.
+    entry is ``(path, fingerprint)`` (git hash-object + mode for tracked/untracked;
+    content+mode for deny/snapshot-scope ignored paths; bounded stat signature for
+    bulk ignored caches), NOT just the path, so a REWRITE or CHMOD of an already-dirty
+    file is a NEW pair. A deleted/unreadable path signs as ``absent``.
     """
     resolved_repo_root = pathlib.Path(repo_root).resolve()
-    tracked = worktree._git(resolved_repo_root, "diff", "--name-only", "HEAD").splitlines()
-    untracked = worktree._git(resolved_repo_root, "ls-files", "--others", "--exclude-standard").splitlines()
-    changed = {entry for entry in (tracked + untracked) if entry}
+    # NUL-safe inventory (path_inventory): non -z listers C-quote non-ASCII under
+    # default core.quotePath, producing phantom keys that break fingerprint rewrite
+    # detection and dirty-path-conflict overlap.
+    changed = set(path_inventory.list_working_tree_changed_paths(resolved_repo_root, "HEAD"))
     pairs = {
         (relative, _working_tree_fingerprint(resolved_repo_root, relative)) for relative in changed
     }
     # Grok r5 #4: the scan above is blind to gitignored paths, so add the ignored set
-    # with a bounded stat signature -- a planted/rewritten/chmod'd ignored file is then
-    # a NEW (path, signature) pair the before/after set-difference surfaces.
-    for relative in _ignored_untracked_paths(resolved_repo_root):
+    # (content+mode for protected deny paths; bounded stat for bulk caches) -- a
+    # planted/rewritten/chmod'd ignored file is then a NEW (path, signature) pair.
+    for relative in path_inventory.list_ignored_untracked_paths(resolved_repo_root):
         pairs.add((relative, _ignored_path_signature(resolved_repo_root, relative)))
     return frozenset(pairs)
 
@@ -122,25 +125,32 @@ def _working_tree_fingerprint(repo_root: pathlib.Path, relative: str) -> str:
     return "{}:{}".format(content, _on_disk_mode_token(repo_root, relative))
 
 
-def _ignored_untracked_paths(repo_root: pathlib.Path) -> List[str]:
-    """List every IGNORED untracked repo-relative path in ``repo_root`` (one git call).
+def _ignored_path_needs_content_hash(relative: str) -> bool:
+    """True when the protected snapshot/deny SSOT requires content+mode for this path.
 
-    Grok r5 #4: the standard scan DROPS gitignored paths, so a write to ``repo/.env.local``
-    or ``repo/node_modules/.bin/evil`` was invisible. ``ls-files --others --ignored
-    --exclude-standard`` lists the ignored set INDIVIDUALLY, so a planted file is enumerated.
+    Bulk ignored caches (node_modules, build outputs) stay stat-only so fingerprinting
+    stays bounded. Deny-matched credentials (``.env``, ``*.pem``, keys, ...) must use
+    content+mode: a same-size rewrite that restores mtime is invisible to stat-only
+    signatures and would silently leave a leaked secret.
     """
-    lines = worktree._git(repo_root, "ls-files", "--others", "--ignored", "--exclude-standard").splitlines()
-    return [entry for entry in lines if entry]
+    # Late import: direct_finalize imports worktree_escape at module load; protect's
+    # is_snapshot_scope is the single scope predicate (deny globs + .git hooks/refs).
+    from groklib.modes.direct_protect import is_snapshot_scope
+
+    return is_snapshot_scope(relative)
 
 
 def _ignored_path_signature(repo_root: pathlib.Path, relative: str) -> str:
-    """Return a bounded stat-only signature (size:mtime_ns:mode) of an IGNORED path.
+    """Return a fingerprint of an IGNORED path (content+mode when protected, else stat).
 
-    The gitignored set (node_modules, build caches) can be enormous, so content-hashing
-    every entry is infeasible. A stat-only signature (one ``os.lstat``, no content read)
-    detects a planted file, an in-place rewrite (size/mtime), and a chmod (mode), keeping
-    the scan bounded (Grok r5 #4). An unstattable path signs as ``absent``.
+    Protected/deny-scoped ignored paths (``.env``, keys, ...) reuse
+    ``_working_tree_fingerprint`` so a same-size+mtime rewrite still flips the
+    before/after set. Bulk ignored caches keep a bounded stat-only signature
+    (size:mtime_ns:mode) - one ``os.lstat``, no content read (Grok r5 #4). An
+    unstattable path signs as ``absent``.
     """
+    if _ignored_path_needs_content_hash(relative):
+        return _working_tree_fingerprint(repo_root, relative)
     try:
         file_stat = os.lstat(str(pathlib.Path(repo_root) / relative))
     except OSError:
@@ -163,17 +173,17 @@ def capture_original_checkout_baseline(repo_root: pathlib.Path) -> Dict[str, str
     dirt.
     """
     resolved_repo_root = pathlib.Path(repo_root).resolve()
-    original_tracked = worktree._git(resolved_repo_root, "diff", "--name-only", "HEAD").splitlines()
-    original_untracked = worktree._git(resolved_repo_root, "ls-files", "--others", "--exclude-standard").splitlines()
     baseline: Dict[str, str] = {
         relative: _working_tree_fingerprint(resolved_repo_root, relative)
-        for relative in {entry for entry in (original_tracked + original_untracked) if entry}
+        for relative in path_inventory.list_working_tree_changed_paths(
+            resolved_repo_root, "HEAD"
+        )
     }
     # Grok r5 #4: the original checkout must be UNTOUCHED, so its gitignored set is
-    # baselined too (bounded stat signature) -- a pre-existing ignored file is exempt
-    # while its signature is unchanged, one the run plants/rewrites/chmods is flagged.
-    # Disjoint from the non-ignored set above, so no entry is overwritten.
-    for relative in _ignored_untracked_paths(resolved_repo_root):
+    # baselined too (content+mode when deny-scoped; bounded stat otherwise) -- a
+    # pre-existing ignored file is exempt while its signature is unchanged; one the
+    # run plants/rewrites/chmods is flagged. Disjoint from the non-ignored set above.
+    for relative in path_inventory.list_ignored_untracked_paths(resolved_repo_root):
         baseline[relative] = _ignored_path_signature(resolved_repo_root, relative)
     return baseline
 
@@ -243,17 +253,17 @@ def _collect_original_checkout_escapes(
     operator's REAL checkout is defense-in-depth and is NEVER softened by artifact
     tolerance: any newly diverged path is a violation regardless of name. A path
     already dirty at entry is exempt ONLY while its fingerprint (content+mode for
-    tracked/untracked, bounded stat signature for ignored) matches the entry
-    baseline; absent from the baseline or changed since entry (a run-attributable
-    rewrite, chmod, plant, or reversal), it is checked against ``resolved_roots``.
+    tracked/untracked and deny-scoped ignored paths; bounded stat for bulk
+    ignored caches) matches the entry baseline; absent from the baseline or
+    changed since entry (a run-attributable rewrite, chmod, plant, or reversal),
+    it is checked against ``resolved_roots``.
     """
     violations: List[str] = []
 
     # Scans tracked divergence AND untracked non-ignored files, so a sandbox bypass
     # PLANTING a brand-new untracked file is flagged, not only an edited tracked one.
-    original_tracked = worktree._git(wt.repo_root, "diff", "--name-only", "HEAD").splitlines()
-    original_untracked = worktree._git(wt.repo_root, "ls-files", "--others", "--exclude-standard").splitlines()
-    nonignored_after = sorted({entry for entry in (original_tracked + original_untracked) if entry})
+    # path_inventory is the single NUL-safe lister (default core.quotePath safe).
+    nonignored_after = path_inventory.list_working_tree_changed_paths(wt.repo_root, "HEAD")
     for relative in nonignored_after:
         # CONTENT-AND-MODE-based exemption (Round5 / Round7): a path already dirty at
         # entry is exempt only while its content AND on-disk mode match the entry
@@ -269,8 +279,9 @@ def _collect_original_checkout_escapes(
     # Grok r5 #4: the scan above is blind to gitignored paths, so a sandbox bypass PLANTING
     # repo/.env.local or repo/node_modules/.bin/evil evaded it. The original checkout must be
     # UNTOUCHED, so the gitignored set is scanned too: an ignored path is exempt only while
-    # its bounded stat signature matches the entry baseline; otherwise it is a violation.
-    ignored_after = sorted(_ignored_untracked_paths(wt.repo_root))
+    # its fingerprint (content+mode for deny-scoped, stat for bulk caches) matches the
+    # entry baseline; otherwise it is a violation.
+    ignored_after = sorted(path_inventory.list_ignored_untracked_paths(wt.repo_root))
     for relative in ignored_after:
         entry_signature = baseline.get(relative)
         if entry_signature is not None and _ignored_path_signature(wt.repo_root, relative) == entry_signature:

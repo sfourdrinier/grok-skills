@@ -2,7 +2,10 @@
 // SessionStart: stamp for /grok:transfer + auto-ensure Codex agents.
 // SessionEnd: keep last stamp for transfer.
 // Codex does not register plugin agents natively (openai/codex#18988), so we
-// materialize ~/.codex/agents/*.toml here — zero post-install step for users.
+// materialize agents TOML here - zero post-install step for users.
+// Dest honors workspace prefs scope (user -> ~/.codex/agents, project ->
+// <cwd>/.codex/agents). Project-scope discovery per Codex docs July 2026:
+// https://developers.openai.com/codex/subagents
 
 import path from "node:path";
 import process from "node:process";
@@ -60,8 +63,10 @@ if (event === "SessionStart") {
       `[grok-session] using entry plugin root ${pluginRoot} (ignoring stale env ${envRoot})\n`
     );
   }
+  // Scope from workspace prefs (setup --codex-agents-scope user|project).
   ensureCodexAgents({
     pluginRoot,
+    cwd,
     env: {
       ...process.env,
       CLAUDE_PLUGIN_ROOT: pluginRoot,

@@ -6,11 +6,12 @@ This plugin is a thin surface over the hardened Grok CLI wrapper. It adds no
 safety logic of its own. Skills and agents shell to the companion, which runs
 the wrapper and relays the single JSON result envelope on stdout VERBATIM.
 
-**Agents:** `grok-engineer-coder` (implement in isolated worktree; host
-orchestrates) and `grok-rescue` (diagnosis / second opinion). Claude loads
-`plugin/agents/` automatically. Codex agents auto-install on **SessionStart**
-into `~/.codex/agents/` (absolute `agents/run.mjs`); optional **setup** can force
-or remove managed agents.
+**Agents:** `grok-engineer-coder` (implement via ACP peer default or code;
+edits land per [integration-modes.md](integration-modes.md); host orchestrates)
+and `grok-rescue` (diagnosis / second opinion). Claude loads `plugin/agents/`
+automatically. Codex agents auto-install on **SessionStart** into
+`~/.codex/agents/` (absolute `agents/run.mjs`); optional **setup** can force or
+remove managed agents.
 
 **Invocation:** Claude uses `/grok:…` skills; Codex uses the skill picker /
 `$name` for the same skill names. Prefer each skill’s `$SKILL_BASE/run.mjs`.
@@ -20,7 +21,7 @@ or remove managed agents.
 Prerequisites: `grok` CLI installed and authenticated, `node` and `python3` on
 PATH, macOS for live modes.
 
-Preferred — install the marketplace from GitHub (no manual clone):
+Preferred - install the marketplace from GitHub (no manual clone):
 
 ```
 /plugin marketplace add sfourdrinier/grok-skills
@@ -43,7 +44,7 @@ No `GROK_AGENT_WRAPPER` is required for a standard install.
 ## Activating in Codex
 
 Repo marketplace: `.agents/plugins/marketplace.json` (relative source
-`./plugin` — resolved after Claude/Codex clone the marketplace root).
+`./plugin` - resolved after Claude/Codex clone the marketplace root).
 
 Preferred:
 
@@ -71,8 +72,12 @@ loading, secret scanning, and the fail-closed error model. See
 ## Security model
 
 Trusted-input developer tool. Enforced: write confinement, private auth home,
-redacted single envelope, worktree isolation, gate-script integrity. Not a
-sandbox against an adversarial model. Full notes:
+redacted single envelope, gate-script integrity; worktree isolation for one-shot
+code when **integration** is auto/review, and always for the ACP peer channel
+(not for one-shot code integration=direct live-tree - peer direct is stop-time
+apply; see [integration-modes.md](integration-modes.md) and
+[`../../SECURITY.md`](../../SECURITY.md)). Not a sandbox against an adversarial
+model. Full notes:
 [`../../docs/OPEN-SECURITY-DECISIONS.md`](../../docs/OPEN-SECURITY-DECISIONS.md).
 
 ## Wrapper resolution
@@ -98,19 +103,21 @@ Canonical table: root [README.md](../../README.md) (skills + agents). Summary:
 | `/grok:adversarial-review` | `adversarial-review` | Hostile; web on by default |
 | `/grok:dual-lens` | companion | Adversarial then ordinary review |
 | `/grok:reason` | `reason` | Cold second opinion; web off by default |
-| `/grok:code` | `code` | Isolated worktree implementation (+ optional `--contract-file`) |
+| `/grok:code` | `code` | Implementation per [integration mode](integration-modes.md) (+ optional `--contract-file`) |
 | `/grok:verify` | `verify` | Hermetic verify; never `--web` |
-| `/grok:handoff` | `handoff` | Verified implementation by **runId** (1.6.0+; dual-condition ready) |
+| `/grok:handoff` | `handoff` | Verified implementation by **runId** (1.6.0+; dual-condition ready; read-only) |
 | `/grok:debate` | companion | Two reason passes + synthesis |
 | `/grok:status` / `jobs` / `result` / `cancel` | companion | Job inspection |
 | `/grok:transfer` | companion | Claude session → task pack |
 | `/grok:cleanup` | `cleanup` | Dry-run by default; `--confirm` removes |
 
-## Implementation handoff (1.6.0+)
+## Integration modes + handoff (1.6.0+ / 2.0.0)
 
-See [implementation-handoff.md](implementation-handoff.md). After `/grok:code`,
-parents call `/grok:handoff --run-id` before any apply. Notify is not ready.
-No auto-apply.
+Canonical how-edits-land matrix: [integration-modes.md](integration-modes.md)
+(direct default, auto apply-on-ready, review manual). Dual-condition ready and
+manual parent apply checklist: [implementation-handoff.md](implementation-handoff.md).
+After isolated `/grok:code`, parents call `/grok:handoff --run-id` before apply.
+Notify is not ready. Integrate is mode-aware - do not assume never-auto-apply.
 
 ## Execution context and notifications (1.5.0+)
 
@@ -130,6 +137,56 @@ polish; Windows toast stays out until a smoke-test host exists.
 
 Off by default. Enable with `/grok:setup --enable-review-gate`. See
 `hooks/hooks.json` and `scripts/stop-review-gate-hook.mjs`.
+
+## Companion state layout (CLAUDE_PLUGIN_DATA)
+
+Job registry, workspace prefs, and the opt-in stop-review gate live under a
+per-workspace state dir:
+
+- When `CLAUDE_PLUGIN_DATA` is set to an **absolute** path (Claude Code host
+  fact: `~/.claude/plugins/data/<plugin-id>/`), state is:
+  `$CLAUDE_PLUGIN_DATA/state/<workspace-slug>-<hash16>/`
+- Otherwise the companion keeps the legacy location:
+  `$TMPDIR/grok-companion/<workspace-slug>-<hash16>/`
+- Workspace keying is identical in both layouts (basename slug + sha256 of the
+  canonical workspace root, first 16 hex chars). Relative `CLAUDE_PLUGIN_DATA`
+  values are ignored (fail open to the legacy root).
+- Best-effort migration (copy, not move): when the legacy dir has
+  `jobs-index.json` and the new root does **not** yet have `jobs-index.json`,
+  the companion copies the index (jobs list + prefs) and the `jobs/<id>/` body
+  tree forward, writing the new index last via temp + rename (atomic on the
+  same filesystem). Dir-exists alone is **not** completion - a partial copy
+  without the index is retried on the next call. Job-body copy is best-effort
+  per entry (stderr note on partial). Legacy stays as a **frozen snapshot**
+  after migration. The same complete-marker pattern migrates `gate-state.json`
+  for the stop-review gate. Never throws on migration failure.
+- **Dual-path flicker:** the state root follows `CLAUDE_PLUGIN_DATA` when the
+  host exports it. Mixed host versions (or sessions where the env is set
+  sometimes and unset other times) may see two roots; companion-side code
+  cannot fully collapse that. Explicit `/grok:setup` re-runs re-establish
+  prefs on the root the current process resolves.
+
+`jobs-index.json` holds `config` (run mode, notification prefs, last rescue id)
+and a short jobs list. Per-job artifacts sit under `jobs/<jobId>/`.
+
+## userConfig defaults (Claude Code)
+
+`plugin/.claude-plugin/plugin.json` declares `userConfig` for `runMode`,
+`notificationMode`, and `notificationWebhookUrl`. Claude exports values to
+hook/subprocess env as `CLAUDE_PLUGIN_OPTION_<KEY>` with the schema key
+uppercased (`runMode` -> `CLAUDE_PLUGIN_OPTION_RUNMODE`). The companion reads
+those env vars directly (`${user_config.*}` is rejected in shell-form hook
+commands, so no hooks.json substitution is used).
+
+Effective prefs precedence (per field):
+
+1. Explicit workspace prefs from `/grok:setup` (stored in `jobs-index.json`)
+2. `CLAUDE_PLUGIN_OPTION_*` env (invalid values ignored with a stderr note)
+3. Built-in defaults (`hardened` / `off` / no webhook)
+
+`GROK_SKILLS_MODE` remains a process-level override above setup for scripts and
+the stop-review gate. There is no enum support in the host schema - the
+companion validates `hardened|direct` and the notification mode set itself.
 
 ## Manual smoke
 

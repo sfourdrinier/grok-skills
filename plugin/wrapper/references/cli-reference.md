@@ -9,7 +9,7 @@ facts an operator needs: last-validated CLI evidence, the exact invocation
 baseline, how process isolation works, and what the sandbox does and does not
 enforce. Nothing here is guessed - every value below has a live-probe citation.
 
-## Last-validated version (advisory — not a runtime lock)
+## Last-validated version (advisory - not a runtime lock)
 
 `plugin/wrapper/accepted-version.json` records the last maintainer-probed Grok
 CLI build. **Runtime does not require this exact string.** `grokcli.check_version`
@@ -196,7 +196,7 @@ python3 plugin/wrapper/scripts/tests/live/live_probes.py --revalidate
 
 On a fully green run, rewrite `accepted-version.json` with the new version
 string, timestamp, evidence pointer, and keep `"enforcement": "none"`. On a red
-run, leave the stamp alone and fix wrapper assumptions (or escalate) — do not
+run, leave the stamp alone and fix wrapper assumptions (or escalate) - do not
 fake-green the stamp. The stamp is evidence, not a user allowlist.
 
 ## Per-platform live-probe gate

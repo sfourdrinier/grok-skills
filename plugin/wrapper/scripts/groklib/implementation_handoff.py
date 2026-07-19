@@ -22,8 +22,10 @@ from groklib.envelope import (
     redact_secret_value_text,
     SecretMaterialError,
 )
+from groklib.git_path_quote import parse_diff_git_header_paths
 from groklib.implementation_contract import (
     normalize_git_repo_path,
+    objective_criteria_bound_errors,
 )
 
 _log = lambda fn, msg: log_stderr("implementation_handoff", fn, msg)
@@ -214,7 +216,65 @@ def validate_implementation_handoff(doc: dict) -> List[str]:
     worktree = doc.get("worktree")
     if not isinstance(worktree, dict):
         errors.append("worktree must be object")
+    summary = doc.get("contractSummary")
+    if summary is not None:
+        if not isinstance(summary, dict):
+            errors.append("contractSummary must be object or null")
+        else:
+            if not isinstance(summary.get("taskId"), str):
+                errors.append("contractSummary.taskId must be string")
+            if not isinstance(summary.get("objective"), str):
+                errors.append("contractSummary.objective must be string")
+            ac = summary.get("acceptanceCriteria")
+            if not isinstance(ac, list) or not all(isinstance(c, str) for c in ac):
+                errors.append("contractSummary.acceptanceCriteria must be string array")
+            else:
+                # Mirror contract load caps so a tampered on-disk manifest cannot
+                # push multi-MB summary fields through the handoff response.
+                errors.extend(
+                    objective_criteria_bound_errors(
+                        summary.get("objective"),
+                        ac,
+                        field_prefix="contractSummary.",
+                    )
+                )
+    # Lineage (continue-run): iteration + continuesRunId both present or both absent.
+    has_iteration = "iteration" in doc
+    has_continues = "continuesRunId" in doc
+    if has_iteration != has_continues:
+        errors.append("iteration and continuesRunId must both be present or both absent")
+    elif has_iteration:
+        iteration = doc.get("iteration")
+        continues = doc.get("continuesRunId")
+        if not isinstance(iteration, int) or isinstance(iteration, bool) or iteration < 2:
+            errors.append("iteration must be an integer >= 2")
+        if not isinstance(continues, str) or not _RUN_ID_RE.match(continues):
+            errors.append("continuesRunId must be a runId-shaped string")
     return errors
+
+
+def redact_contract_summary(summary: Optional[dict]) -> Optional[dict]:
+    """Defense-in-depth: redact secret-shaped text in display summary fields.
+
+    Write-side single place is ``write_manifest``; the handoff echo path also
+    calls this so a tampered on-disk summary cannot leak known patterns into
+    the parent response. Known-pattern secrets already fail envelopes closed;
+    this neutralizes display fields cheaply when they still carry a match.
+    """
+    if summary is None:
+        return None
+    if not isinstance(summary, dict):
+        return summary
+    out: Dict[str, Any] = dict(summary)
+    obj = out.get("objective")
+    if isinstance(obj, str):
+        out["objective"] = redact_secret_value_text(obj)
+    ac = out.get("acceptanceCriteria")
+    if isinstance(ac, list):
+        out["acceptanceCriteria"] = [
+            redact_secret_value_text(c) if isinstance(c, str) else c for c in ac
+        ]
+    return out
 
 
 def _is_confined_git_repo_path(path: str) -> bool:
@@ -280,30 +340,130 @@ def compute_integration_ready(
     return True
 
 
+# Evidence-backed ready (Task 7.4): ready=true is only honest when at least one
+# wrapper-executed gate is marked authoritative AND commands[] carries a real
+# exitStatus. Model claims never count.
+NO_AUTHORITATIVE_VALIDATION_KIND = "no-authoritative-validation"
+NO_AUTHORITATIVE_VALIDATION_MESSAGE = "no authoritative validation ran"
+
+
+def command_evidence_supports_ready(commands: Sequence[Any]) -> bool:
+    """True when commands[] has at least one entry with a real int exitStatus."""
+    for cmd in commands or []:
+        if not isinstance(cmd, dict):
+            continue
+        if "exitStatus" not in cmd:
+            continue
+        try:
+            int(cmd["exitStatus"])
+        except (TypeError, ValueError):
+            continue
+        return True
+    return False
+
+
+def authoritative_source_passed(validation: Any) -> bool:
+    """True when any gate source is authoritative and passed."""
+    if not isinstance(validation, dict):
+        return False
+    sources = validation.get("sources")
+    if not isinstance(sources, dict):
+        return False
+    for key in ("wrapperBuildGate", "contractRequiredValidation"):
+        src = sources.get(key)
+        if (
+            isinstance(src, dict)
+            and src.get("authoritative") is True
+            and src.get("passed") is True
+        ):
+            return True
+    return False
+
+
+def ready_evidence_guard_errors(
+    manifest: dict, commands: Sequence[Any]
+) -> List[str]:
+    """Return errors when integration.ready is true without non-forgeable evidence.
+
+    Fail-closed: ready=true requires (1) an authoritative validation source that
+    passed and (2) a commands[] entry with a real exitStatus. Used by the
+    forgery guard and unit tests that attempt to force ready without evidence.
+    """
+    if not isinstance(manifest, dict):
+        return ["manifest must be object"]
+    integration = manifest.get("integration")
+    if not isinstance(integration, dict) or integration.get("ready") is not True:
+        return []
+    errors: List[str] = []
+    if not authoritative_source_passed(manifest.get("validation")):
+        errors.append(
+            "integration.ready true requires an authoritative validation source that passed"
+        )
+    if not command_evidence_supports_ready(commands):
+        errors.append(
+            "integration.ready true requires a commands[] entry with a real exitStatus"
+        )
+    return errors
+
+
+def enforce_ready_evidence_guard(
+    manifest: dict, commands: Sequence[Any]
+) -> dict:
+    """Force ready=false + blocker when ready lacks non-forgeable evidence.
+
+    Mutates ``manifest`` in place and returns it. Never synthesizes command
+    evidence; only downgrades a forged/vacuous ready claim.
+    """
+    errors = ready_evidence_guard_errors(manifest, commands)
+    if not errors:
+        return manifest
+    integration = manifest.get("integration")
+    if not isinstance(integration, dict):
+        integration = {}
+        manifest["integration"] = integration
+    integration["ready"] = False
+    blockers: List[Any] = []
+    raw = integration.get("blockers")
+    if isinstance(raw, list):
+        blockers = list(raw)
+    if not any(
+        isinstance(b, dict) and b.get("kind") == NO_AUTHORITATIVE_VALIDATION_KIND
+        for b in blockers
+    ):
+        blockers.append(
+            {
+                "kind": NO_AUTHORITATIVE_VALIDATION_KIND,
+                "message": NO_AUTHORITATIVE_VALIDATION_MESSAGE,
+                "detail": {"errors": list(errors)},
+            }
+        )
+    integration["blockers"] = blockers
+    return manifest
+
+
 # git-binary-full-index-v1 (and plain unified) path headers.
-_DIFF_GIT_A_B = re.compile(
-    rb"^diff --git a/(.+?) b/(.+?)\s*$",
-    re.MULTILINE,
-)
-
-
-def _unquote_git_path(raw: str) -> str:
-    """Strip optional surrounding double quotes from a git path token."""
-    if len(raw) >= 2 and raw[0] == '"' and raw[-1] == '"':
-        return raw[1:-1]
-    return raw
+# Git may C-quote either side under default core.quotePath, e.g.
+#   diff --git "a/caf\303\251.txt" "b/caf\303\251.txt"
+# Unquoted paths can contain spaces:
+#   diff --git a/path with space.txt b/path with space.txt
+# C-unquote SSOT: git_path_quote (never path_inventory / -z payloads).
+_DIFF_GIT_PREFIX = b"diff --git "
 
 
 def paths_from_git_patch(patch_bytes: bytes) -> set:
-    """Extract repo-relative paths named by ``diff --git a/... b/...`` headers."""
+    """Extract repo-relative paths named by ``diff --git`` headers (quoted or plain)."""
     found: set = set()
-    for match in _DIFF_GIT_A_B.finditer(patch_bytes):
-        for group in (match.group(1), match.group(2)):
-            try:
-                text = group.decode("utf-8", errors="surrogateescape")
-            except Exception:
-                continue
-            path = _unquote_git_path(text)
+    for raw_line in patch_bytes.splitlines():
+        if not raw_line.startswith(_DIFF_GIT_PREFIX):
+            continue
+        try:
+            rest = raw_line[len(_DIFF_GIT_PREFIX) :].decode("utf-8", errors="surrogateescape")
+        except Exception:
+            continue
+        parsed = parse_diff_git_header_paths(rest)
+        if not parsed:
+            continue
+        for path in parsed:
             if path and path != "/dev/null":
                 found.add(path)
     return found
@@ -378,14 +538,20 @@ def dual_condition_ready(
     if envelope.get("runId") != manifest.get("runId"):
         blockers.append({"kind": "handoff-unavailable", "message": "runId mismatch"})
         return False, blockers
-    # Dual-condition ready requires the terminal *code* envelope, not any success
+    # Dual-condition ready requires a terminal CODE envelope, not any success
     # envelope that merely reuses the same runId (corrupt/replaced artifact).
-    if envelope.get("mode") != "code":
+    # Handoff is code-mode only (handoff.py refuses non-code runs before this
+    # gate); peer runs integrate through peer-stop directly, never through here.
+    env_mode = envelope.get("mode")
+    if env_mode != "code":
         blockers.append(
             {
                 "kind": "terminal-envelope-incomplete",
-                "message": "integration-ready handoff requires a success envelope with mode code",
-                "detail": {"envelopeMode": envelope.get("mode")},
+                "message": (
+                    "integration-ready handoff requires a success envelope with "
+                    "mode code"
+                ),
+                "detail": {"envelopeMode": env_mode},
             }
         )
         return False, blockers
@@ -511,7 +677,11 @@ def dual_condition_ready(
 
 
 def write_manifest(path: pathlib.Path, doc: dict) -> None:
-    """Validate, secret-redact blockers, and write implementation-handoff.json (mode 0600)."""
+    """Validate, secret-redact blockers + contractSummary, write JSON (mode 0600).
+
+    Write-side redaction for contractSummary lives HERE only (not also in
+    code_handoff_finalize): one place for objective/criteria display fields.
+    """
     # Never persist raw secret-shaped argv/details from operator validation failures.
     if isinstance(doc, dict):
         doc = dict(doc)
@@ -520,6 +690,9 @@ def write_manifest(path: pathlib.Path, doc: dict) -> None:
             integration = dict(integration)
             integration["blockers"] = redact_handoff_blockers(integration["blockers"])
             doc["integration"] = integration
+        # Defense-in-depth for display fields (Phase 1 finding 4).
+        if "contractSummary" in doc:
+            doc["contractSummary"] = redact_contract_summary(doc.get("contractSummary"))
     errs = validate_implementation_handoff(doc)
     if errs:
         raise GrokWrapperError(
@@ -574,7 +747,14 @@ HARD_BLOCKER_KINDS = frozenset(
 )
 
 # Soft blockers only force integration.ready false (never primary ERROR_CLASS alone).
-SOFT_BLOCKER_KINDS = frozenset({"no-changes", "temp-index-retained"})
+SOFT_BLOCKER_KINDS = frozenset(
+    {
+        "no-changes",
+        "temp-index-retained",
+        "no-authoritative-validation",
+        "handoff-unavailable",
+    }
+)
 
 _HARD_PRIMARY_MAPPING = {
     "write-scope-violation": "write-scope-violation",

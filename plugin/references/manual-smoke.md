@@ -12,6 +12,10 @@ already cover the companion, gate, and wrapper contracts.
 - Grok CLI installed, authenticated (`grok --version` works; any build).
 - Plugin installed via marketplace (cache path) **or** `--plugin-dir ./plugin`.
 - No `GROK_AGENT_WRAPPER` set (prove the bundled layout works).
+- Before any **direct** live-tree code smoke or **direct** peer-stop apply, record
+  consent with `setup --integration direct` (or opt into
+  `auto`/`review`). First direct landing without consent fails closed - see
+  [integration-modes.md](integration-modes.md).
 
 ## Install (Claude Code)
 
@@ -20,9 +24,9 @@ Preferred (GitHub marketplace):
 1. `/plugin marketplace add sfourdrinier/grok-skills`
 2. `/plugin install grok@grok-skills`
 3. Reload plugins / restart session.
-4. Confirm `/grok:` lists: preflight, setup, review, reason, code, verify,
-   handoff, status, cleanup, jobs, result, cancel, transfer, debate,
-   adversarial-review.
+4. Confirm `/grok:` lists: preflight, setup, review, reason, code, peer,
+   implement, verify, handoff, status, cleanup, jobs, result, cancel,
+   transfer, debate, adversarial-review.
 5. Optional unit tests from a clone:
    - `cd plugin/wrapper/scripts && python3 -m unittest discover -s tests -q`
    - `cd plugin/scripts && node --test tests/*.test.mjs`
@@ -58,6 +62,69 @@ node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" preflight
 Expect one JSON envelope with `mode: "preflight"` and `status: "success"` when
 the Grok CLI is ready.
 
+## ACP peer channel (default; opt out with `GROK_DISABLE_ACP=1`)
+
+The ACP peer channel is the default multi-turn peer path. Opt out (force
+one-shot `code`) with `export GROK_DISABLE_ACP=1`. Spec:
+`docs/specs/2026-07-17-acp-peer-channel-design.md` (Amendments supersede draft).
+Peer always runs in an external retained worktree. Peer-stop applies its
+verified patch itself per the active `--integration` mode (review retains;
+auto/direct apply - direct needs consent; peer direct is stop-time apply, not
+live-edit). It is not eligible for `/grok:handoff`.
+
+Live smoke (start -> two prompts -> stop), recorded 2026-07-17
+against grok 0.2.102 on a throwaway git repo (`note.txt` only):
+
+```bash
+export CLAUDE_PLUGIN_ROOT=/absolute/path/to/grok-skills/plugin
+# peer-start (background resident wrapper; one running envelope). ACP is the
+# default channel. --integration is per-invocation on companion/peer-stop only
+# (peer-start does not persist it); pass it on the stop that determines landing.
+node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" peer start \
+  --target . --base HEAD
+# Capture runId + socketPath from the running envelope, then:
+node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" peer prompt \
+  --run-id '<runId>' --task-file - <<'GROK_TASK'
+Reply with exactly: PEER-PONG-1
+GROK_TASK
+node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" peer prompt \
+  --run-id '<runId>' --task-file - <<'GROK_TASK'
+Reply with exactly: PEER-PONG-2
+GROK_TASK
+# peer-stop finalizes: real validation, then apply/retain per --integration.
+# review|worktree retain the verified patch; auto/direct apply when ready
+# (direct needs consent - run setup --integration direct first if testing
+# apply). Landing is controlled here, not at peer-start. Peer-stop is not
+# completion-notification eligible.
+node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" peer stop \
+  --run-id '<runId>' --integration review
+```
+
+Transcript tail (2026-07-17 live, runId `20260717T110823Z-140ae8`):
+
+```text
+start: running  peer={sessionId: 019f6fc3-..., socketPath: .../gs-.../.grok/p-140ae8.sock}
+P1: success  result.stopReason=end_turn
+P2: success  result.stopReason=end_turn
+STOP: success peer-stop
+  response.peer.confinement=worktree-final-diff-only
+  response.peer.cleanup={status: clean}
+  cleanup={status: clean}
+```
+
+Expect: start `status: running` with `response.peer.sessionId` + `socketPath`;
+each prompt one redacted turn envelope; stop finalizes with
+`implementation-handoff.json` carrying `confinement: "worktree-final-diff-only"`
+(unless a scopes contract was supplied) and private home destroyed. The
+companion rewrites the peer-stop envelope with the real apply outcome under
+rewrite-before-write/store/finalize (onStdout computes final
+emitStdout/effectiveCode before first write; then write; then storeJobStdout;
+then updateJob/finalize; then notify). Blocked apply = failure, not raw wrapper
+success. Peer-stop is **not** completion-notification eligible. With
+`GROK_DISABLE_ACP=1`, the companion refuses peer modes with a one-line pointer
+to the spec. Control socket lives under the private home (short AF_UNIX path),
+not the run dir.
+
 ## Command checklist (Claude Code)
 
 - [ ] `/grok:preflight` → one readiness envelope
@@ -66,18 +133,36 @@ the Grok CLI is ready.
 - [ ] `/grok:reason --task "Reply with exactly: PONG"` → success envelope
 - [ ] `/grok:review --target . --task "list top risks"` → one review envelope (live checkout)
 - [ ] `/grok:review --target . --isolated --task "list risks"` → isolation worktree cleaned after run
-- [ ] `/grok:code --target . --base HEAD --task "trivial helper"` → worktree retained, no auto-commit
-- [ ] Dual-host (Claude + Codex): after code, `/grok:status --run-id <id>` then
-      `/grok:handoff --run-id <id>` → dual-condition ready only when success + patch
-- [ ] Failed code / no changes → handoff ready false; tampered patch → integrity failure
-- [ ] Notify does not replace handoff (integrate only after handoff ready)
+- [ ] `/grok:code` without prior direct consent → refuses direct with trust
+      summary / consent pointer (no silent live-tree edit). Do **not** expect a
+      worktree from the bare **product** default once consent is recorded.
+- [ ] After `/grok:setup --integration direct` (or with recorded consent), bare
+      `/grok:code --target . --base HEAD --task "trivial helper"` → **live-tree**
+      direct (edits already on the operator checkout; no external worktree
+      retained as the landing path; no auto-commit / no auto-push)
+- [ ] Explicit isolation still works: `/grok:code --integration review --target .
+      --base HEAD --task "trivial helper"` (or `--integration worktree` /
+      `auto`) → external worktree retained; review/worktree keep parent apply;
+      auto may apply on verified ready
+- [ ] Dual-host (Claude + Codex): after an isolated code run, `/grok:status
+      --run-id <id>` then `/grok:handoff --run-id <id>` → dual-condition ready
+      only when success + patch (handoff is for retained worktrees; live-tree
+      direct does not produce that isolation evidence path)
+- [ ] Failed isolated code / no changes → handoff ready false; tampered patch →
+      integrity failure
+- [ ] Notify does not replace handoff (integrate only after handoff ready for
+      isolated modes)
 - [ ] `/grok:verify --worktree <path> --task "confirm tests"` → verifier verdict; `--web` refused
 - [ ] `/grok:status --run-id <id>` → prior envelope
 - [ ] Background-style live run with `GROK_COMPANION_EXECUTION_CONTEXT=background` and
       notifications `auto` → `runs/<runId>/notified.json` may appear as `completed`
       (native may fail headless; marker still completes)
 - [ ] `/grok:cleanup --run-id <id>` dry-run, then `--confirm`
-- [ ] `grok-engineer-coder` routes implementation to companion `code` (one shell call; no unrestricted Bash)
+- [ ] `grok-engineer-coder` prefers ACP peer (`peer start/prompt/stop`) with
+      one-shot `code` fallback (`GROK_DISABLE_ACP=1`); one shell call path; no
+      unrestricted Bash
+- [ ] Peer-stop blocked apply (dirty/consent/integrity) yields failure envelope
+      on stdout + `/grok:result` (not raw wrapper success); no peer toast
 - [ ] `grok-rescue` routes diagnosis to `reason` (not pure implement); one Bash(node) call
 - [ ] Codex: after SessionStart, `~/.codex/agents/grok-*.toml` present with
       `# managed-by: grok-skills`, `# agent-run:`, and `GROK_AGENT_RUN=…/agents/run.mjs`
@@ -95,4 +180,4 @@ After a marketplace install, confirm the cached plugin contains:
 <cache>/skills/review/SKILL.md
 ```
 
-If `wrapper/` is missing, the install is incomplete — reinstall from this repo.
+If `wrapper/` is missing, the install is incomplete - reinstall from this repo.

@@ -444,7 +444,11 @@ def _scenario_secret_in_output(control: "dict") -> int:
     # a repo file. The wrapper must redact-and-REPORT it (dogfood-2 #3), not
     # hard-fail the whole run and lose the body.
     payload = _load_base_payload()
-    payload["text"] = "The config still contains a live key: sk-ABCDEF0123456789ABCDEFGHIJKLMNOP -- rotate it."
+    # Runtime join keeps the contiguous sk- shape out of source (AGENTS.md #8).
+    secret_key = "".join(("sk-", "ABCDEF0123456789ABCDEFGHIJKLMNOP"))
+    payload["text"] = (
+        "The config still contains a live key: " + secret_key + " -- rotate it."
+    )
     _emit_result(payload)
     return 0
 

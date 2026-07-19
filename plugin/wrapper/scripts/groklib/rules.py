@@ -214,56 +214,77 @@ def _load_single_instruction(level_dir: pathlib.Path, resolved_root: pathlib.Pat
     )
 
 
-def _discover_permissive(resolved_root: pathlib.Path, levels: List[pathlib.Path]) -> List[InstructionFile]:
+def _divergence_warning_for_level(level_dir: pathlib.Path, resolved_root: pathlib.Path) -> str:
+    """Build the permissive-mode warning when AGENTS.md and CLAUDE.md bodies diverge at one level."""
+    dir_relative = _posix_dir_relative(level_dir, resolved_root)
+    location = "repo root" if dir_relative == "" else dir_relative
+    return (
+        "AGENTS.md and CLAUDE.md differ at {}; only AGENTS.md was sent to Grok "
+        "(set ruleFileParity to enforce matching pairs)"
+    ).format(location)
+
+
+def _is_agents_md_pointer(content_bytes: bytes) -> bool:
+    """True when CLAUDE.md is a pointer whose entire meaningful content is ``@AGENTS.md``.
+
+    Surrounding whitespace and newlines are ignored. Invalid UTF-8 is never a
+    pointer (callers that already UTF-8-validated via ``_read_instruction_bytes``
+    never hit the decode failure path here).
+    """
+    try:
+        text = content_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return text.strip() == "@AGENTS.md"
+
+
+def _bodies_after_first_line(agents_bytes: bytes, claude_bytes: bytes) -> Tuple[bytes, bytes]:
+    """Return the file bodies after line 1 for both sides (same slice as strict parity)."""
+    _agents_header, agents_body = _split_header(agents_bytes)
+    _claude_header, claude_body = _split_header(claude_bytes)
+    return agents_body, claude_body
+
+
+def _discover_permissive(
+    resolved_root: pathlib.Path, levels: List[pathlib.Path]
+) -> Tuple[List[InstructionFile], List[str]]:
     """Load whichever of AGENTS.md/CLAUDE.md exist at each level (AGENTS.md preferred when both).
 
     The zero-config, repo-agnostic default. At each level: load nothing when
     neither file exists; load the single present file when only one exists; when
     BOTH exist, load AGENTS.md as the representative block (the same representative
     strict mode uses, and the order the shared header lists) so identical pairs are
-    not duplicated. No byte-parity or path-header enforcement -- that is the opt-in
-    strict mode. A repo carrying only a CLAUDE.md (the common Claude Code case)
-    loads that single file.
+    not duplicated. When both exist, CLAUDE.md is read once for comparison: a
+    pointer-style CLAUDE.md whose stripped content is exactly ``@AGENTS.md`` never
+    warns; otherwise bodies after the first line are compared with the same
+    ``_split_header`` semantics strict mode uses, and a body mismatch appends one
+    divergence warning. No path-header enforcement -- that is the opt-in strict
+    mode. A repo carrying only a CLAUDE.md (the common Claude Code case) loads
+    that single file.
     """
     discovered: List[InstructionFile] = []
+    warnings: List[str] = []
     for level_dir in levels:
         agents_name, claude_name = _scan_level(level_dir)
-        if agents_name is not None:
+        if agents_name is not None and claude_name is not None:
+            agents_file = _load_single_instruction(level_dir, resolved_root, agents_name)
+            claude_bytes = _read_instruction_bytes(level_dir / claude_name)
+            if not _is_agents_md_pointer(claude_bytes):
+                agents_body, claude_body = _bodies_after_first_line(
+                    agents_file.content_bytes, claude_bytes
+                )
+                if agents_body != claude_body:
+                    warnings.append(_divergence_warning_for_level(level_dir, resolved_root))
+            discovered.append(agents_file)
+        elif agents_name is not None:
             discovered.append(_load_single_instruction(level_dir, resolved_root, agents_name))
         elif claude_name is not None:
             discovered.append(_load_single_instruction(level_dir, resolved_root, claude_name))
-    return discovered
+    return discovered, warnings
 
 
-def discover_instruction_files(
-    repo_root: pathlib.Path, target: pathlib.Path, *, require_parity: bool = False
-) -> "list[InstructionFile]":
-    """Discover the C7 instruction-file chain for ``target``, root-first.
-
-    Walks every directory level from ``repo_root`` down to ``target``
-    (inclusive of both ends).
-
-    Standalone grok-skills default (``require_parity=False``): loads whichever of
-    AGENTS.md/CLAUDE.md exist at each level (CLAUDE.md preferred when both are
-    present), verbatim, with no byte-parity or path-header enforcement, so a plain
-    repo with a single rule file just works.
-
-    Strict pair mode (``require_parity=True``, opt-in via ``.grok-skills.json``):
-    at each level, if exactly one of the pair exists that is a RulesParityError;
-    if both exist, their bodies (bytes after the first line) must be byte-identical
-    and each file's own header line must match the shared-header or legacy
-    per-file-header convention, else a RulesParityError. One InstructionFile per
-    level is returned, using AGENTS.md as the canonical representative copy.
-
-    Raises RulesParityError when ``target`` is not under ``repo_root``.
-    """
-    resolved_root = repo_root.resolve()
-    resolved_target = target.resolve()
-    levels = _walk_levels(resolved_root, resolved_target)
-
-    if not require_parity:
-        return _discover_permissive(resolved_root, levels)
-
+def _discover_strict(resolved_root: pathlib.Path, levels: List[pathlib.Path]) -> List[InstructionFile]:
+    """Strict pair mode: both files required, body byte-parity + header conventions enforced."""
     discovered: List[InstructionFile] = []
     for level_dir in levels:
         agents_name, claude_name = _scan_level(level_dir)
@@ -286,6 +307,8 @@ def discover_instruction_files(
         agents_bytes = _read_instruction_bytes(agents_path)
         claude_bytes = _read_instruction_bytes(claude_path)
 
+        # Headers for path-header validation; body parity shares ``_split_header``
+        # with permissive divergence (via ``_bodies_after_first_line``).
         agents_header, agents_body = _split_header(agents_bytes)
         claude_header, claude_body = _split_header(claude_bytes)
 
@@ -316,6 +339,61 @@ def discover_instruction_files(
         )
 
     return discovered
+
+
+def discover_instruction_files_with_warnings(
+    repo_root: pathlib.Path, target: pathlib.Path, *, require_parity: bool = False
+) -> "tuple[list[InstructionFile], list[str]]":
+    """Same discovery as discover_instruction_files, plus divergence warnings.
+
+    Returns (files, warnings). A warning fires only in permissive mode when a
+    level carries BOTH AGENTS.md and CLAUDE.md, CLAUDE.md is not a pointer
+    whose stripped content is exactly ``@AGENTS.md``, and the bodies after the
+    first line differ (same comparison ruleFileParity enforces):
+    'AGENTS.md and CLAUDE.md differ at <repo-relative-dir or repo root>; only
+    AGENTS.md was sent to Grok (set ruleFileParity to enforce matching pairs)'.
+
+    Strict mode (``require_parity=True``) already fail-closes on divergence and
+    returns no warnings (it raises RulesParityError instead).
+    """
+    resolved_root = repo_root.resolve()
+    resolved_target = target.resolve()
+    levels = _walk_levels(resolved_root, resolved_target)
+
+    if not require_parity:
+        return _discover_permissive(resolved_root, levels)
+
+    return _discover_strict(resolved_root, levels), []
+
+
+def discover_instruction_files(
+    repo_root: pathlib.Path, target: pathlib.Path, *, require_parity: bool = False
+) -> "list[InstructionFile]":
+    """Discover the C7 instruction-file chain for ``target``, root-first.
+
+    Walks every directory level from ``repo_root`` down to ``target``
+    (inclusive of both ends). Thin wrapper over
+    ``discover_instruction_files_with_warnings`` that returns only the files
+    (existing call sites keep their signature and behavior).
+
+    Standalone grok-skills default (``require_parity=False``): loads whichever of
+    AGENTS.md/CLAUDE.md exist at each level (AGENTS.md preferred when both are
+    present), verbatim, with no byte-parity or path-header enforcement, so a plain
+    repo with a single rule file just works.
+
+    Strict pair mode (``require_parity=True``, opt-in via ``.grok-skills.json``):
+    at each level, if exactly one of the pair exists that is a RulesParityError;
+    if both exist, their bodies (bytes after the first line) must be byte-identical
+    and each file's own header line must match the shared-header or legacy
+    per-file-header convention, else a RulesParityError. One InstructionFile per
+    level is returned, using AGENTS.md as the canonical representative copy.
+
+    Raises RulesParityError when ``target`` is not under ``repo_root``.
+    """
+    files, _warnings = discover_instruction_files_with_warnings(
+        repo_root, target, require_parity=require_parity
+    )
+    return files
 
 
 def _render_instruction_block(instruction: InstructionFile) -> str:

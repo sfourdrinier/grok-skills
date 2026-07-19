@@ -4,5 +4,5 @@
   "version": "grok 0.2.101 (5bc4b5dfadcf) [stable]",
   "validatedAtUtc": "2026-07-14T17:31:02Z",
   "probeEvidence": "scripts/tests/fixtures/probe-report.md",
-  "note": "Last maintainer-validated Grok CLI build (advisory only). Runtime does NOT require this exact version — any working `grok --version` is accepted."
+  "note": "Last maintainer-validated Grok CLI build (advisory only). Runtime does NOT require this exact version - any working `grok --version` is accepted."
 }

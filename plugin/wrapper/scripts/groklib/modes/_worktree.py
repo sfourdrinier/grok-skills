@@ -31,11 +31,13 @@
 import dataclasses
 import pathlib
 import tempfile
+import uuid
 from typing import Callable, List, Optional, Tuple
 
 from groklib import GrokWrapperError, log_stderr, runstate
 from groklib import grokcli
 from groklib import platformsupport
+from groklib import session_store
 from groklib.authhome import create_private_home, render_config_toml
 from groklib.envelope import build_envelope, failure_envelope
 from groklib.progress import ProgressWriter
@@ -220,6 +222,12 @@ def run_worktree_mode(
     prepare: Callable[[WorktreeStage], WorktreePrep],
     finalize: Callable[[FinalizeStage], None],
     elicit_schema: Optional[dict] = None,
+    session_id: Optional[str] = None,
+    seed_session_from_run_dir: Optional[pathlib.Path] = None,
+    resume_session: bool = False,
+    continues_run_id: Optional[str] = None,
+    iteration: Optional[int] = None,
+    initial_warnings: Tuple[str, ...] = (),
 ) -> dict:
     """Execute the shared worktree-mode lifecycle for code/verify and return a validated C4 envelope.
 
@@ -261,6 +269,12 @@ def run_worktree_mode(
             prepare=prepare,
             finalize=finalize,
             elicit_schema=elicit_schema,
+            session_id=session_id,
+            seed_session_from_run_dir=seed_session_from_run_dir,
+            resume_session=resume_session,
+            continues_run_id=continues_run_id,
+            iteration=iteration,
+            initial_warnings=initial_warnings,
             run_paths=run_paths,
             progress=progress,
             acc=acc,
@@ -310,6 +324,20 @@ def run_worktree_mode(
         )
 
 
+def _lineage_record_fields(
+    continues_run_id: Optional[str], iteration: Optional[int]
+) -> dict:
+    """Optional continuesRunId + iteration for run.json (both or neither)."""
+    if continues_run_id is None and iteration is None:
+        return {}
+    fields: dict = {}
+    if continues_run_id is not None:
+        fields["continuesRunId"] = continues_run_id
+    if iteration is not None:
+        fields["iteration"] = iteration
+    return fields
+
+
 def _run_worktree_mode_body(
     *,
     mode: str,
@@ -324,28 +352,33 @@ def _run_worktree_mode_body(
     prepare: Callable[["WorktreeStage"], "WorktreePrep"],
     finalize: Callable[["FinalizeStage"], None],
     elicit_schema: Optional[dict],
+    session_id: Optional[str],
+    seed_session_from_run_dir: Optional[pathlib.Path],
+    resume_session: bool,
+    continues_run_id: Optional[str],
+    iteration: Optional[int],
+    initial_warnings: Tuple[str, ...],
     run_paths: runstate.RunPaths,
     progress: ProgressWriter,
     acc: "WorktreeAccumulator",
     holder: "WorktreeHolder",
 ) -> dict:
     """The classified-failure lifecycle body of run_worktree_mode (see its docstring)."""
+    lineage_fields = _lineage_record_fields(continues_run_id, iteration)
     try:
         record = runstate.load_run_record(run_paths.run_id)
         rev = int(record.get("recordRevision", 0))
         if record.get("lifecycle") == "created":
             record = runstate.set_lifecycle(run_paths, rev, "running")
             rev = int(record["recordRevision"])
-        runstate.cas_update_run_record(
-            run_paths,
-            rev,
-            {
-                "requestedModel": requested_model,
-                "repository": repository,
-                "targetWorkspace": target_workspace,
-                "status": "running",
-            },
-        )
+        running_fields = {
+            "requestedModel": requested_model,
+            "repository": repository,
+            "targetWorkspace": target_workspace,
+            "status": "running",
+        }
+        running_fields.update(lineage_fields)
+        runstate.cas_update_run_record(run_paths, rev, running_fields)
     except Exception as exc:
         _log("_run_worktree_mode_body", "lifecycle advance failed: {}".format(exc))
         try:
@@ -354,16 +387,14 @@ def _run_worktree_mode_body(
             if record.get("lifecycle") == "created":
                 record = runstate.set_lifecycle(run_paths, rev, "running")
                 rev = int(record["recordRevision"])
-            runstate.cas_update_run_record(
-                run_paths,
-                rev,
-                {
-                    "requestedModel": requested_model,
-                    "repository": repository,
-                    "targetWorkspace": target_workspace,
-                    "status": "running",
-                },
-            )
+            running_fields = {
+                "requestedModel": requested_model,
+                "repository": repository,
+                "targetWorkspace": target_workspace,
+                "status": "running",
+            }
+            running_fields.update(lineage_fields)
+            runstate.cas_update_run_record(run_paths, rev, running_fields)
         except Exception as retry_exc:
             _log("_run_worktree_mode_body", "retry lifecycle advance failed: {}".format(retry_exc))
             raise GrokWrapperError(
@@ -382,7 +413,7 @@ def _run_worktree_mode_body(
     # START (Grok dogfood-2 #1/#7), safely windowed so an active run is never hit.
     runstate.best_effort_reap_stale_temp_homes(runstate.LIVE_START_STALE_HOME_MAX_AGE_SECONDS)
 
-    warnings: List[str] = []
+    warnings: List[str] = list(initial_warnings)
     prep: Optional[WorktreePrep] = None
     home_cleanup: Optional[HomeCleanup] = None
     result: Optional[grokcli.GrokRunResult] = None
@@ -392,6 +423,7 @@ def _run_worktree_mode_body(
     # verdict, or sandbox/model verification) OR a SIGTERM escaping to the outer
     # handler still carries the completed redacted answer on the failure envelope.
     result_holder = holder.result_holder
+    session_id_holder: List[Optional[str]] = [session_id]
     sandbox_obj: Optional[dict] = None
     effective_model: Optional[str] = None
     outcome_error: Optional[GrokWrapperError] = None
@@ -461,6 +493,9 @@ def _run_worktree_mode_body(
                 repository=repository,
                 target_workspace=target_workspace,
                 detect_unexpected_edits=False,
+                session_id=session_id,
+                seed_session_from_run_dir=seed_session_from_run_dir,
+                resume_session=resume_session,
             )
             result, sandbox_obj, effective_model = _execute_and_verify(
                 mode_run,
@@ -471,6 +506,7 @@ def _run_worktree_mode_body(
                 progress,
                 result_holder,
                 acc.warnings,
+                session_id_holder,
             )
             finalize(
                 FinalizeStage(
@@ -483,6 +519,20 @@ def _run_worktree_mode_body(
                 )
             )
         finally:
+            # Archive the private-home session store STRICTLY BEFORE destroy so
+            # continue-run can seed + --resume (Task 2.1 / 2.2). Soft-fail only.
+            try:
+                archive_session_id = session_id_holder[0]
+                if archive_session_id is None:
+                    archive_session_id = str(uuid.uuid4())
+                    session_id_holder[0] = archive_session_id
+                session_store.archive_session(
+                    home.home_dir, run_paths.run_dir, archive_session_id
+                )
+            except Exception as archive_exc:
+                note = "session archive failed (run continues): {}".format(archive_exc)
+                _log("_run_worktree_mode_body", note)
+                acc.warnings.append(note)
             destroy_result = home_cleanup.destroy_once()
             progress.safe_emit(
                 "cleanup", "private home destroyed", data={"cleanupStatus": destroy_result["status"]}
@@ -561,19 +611,17 @@ def _run_worktree_mode_body(
         try:
             record = runstate.load_run_record(run_paths.run_id)
             rev = int(record.get("recordRevision", 0))
-            runstate.cas_update_run_record(
-                run_paths,
-                rev,
-                {
-                    "requestedModel": requested_model,
-                    "repository": repository,
-                    "targetWorkspace": target_workspace,
-                    "worktreePath": str(wt.path) if wt is not None else None,
-                    "worktreeBranch": wt.branch if wt is not None else None,
-                    "baseRevision": wt.base_revision if wt is not None else None,
-                    "status": "running",
-                },
-            )
+            meta_fields = {
+                "requestedModel": requested_model,
+                "repository": repository,
+                "targetWorkspace": target_workspace,
+                "worktreePath": str(wt.path) if wt is not None else None,
+                "worktreeBranch": wt.branch if wt is not None else None,
+                "baseRevision": wt.base_revision if wt is not None else None,
+                "status": "running",
+            }
+            meta_fields.update(lineage_fields)
+            runstate.cas_update_run_record(run_paths, rev, meta_fields)
         except Exception as meta_exc:
             _log("_run_worktree_mode_body", "non-terminal metadata merge failed: {}".format(meta_exc))
             if wt is not None:
@@ -638,19 +686,17 @@ def _run_worktree_mode_body(
     try:
         record = runstate.load_run_record(run_paths.run_id)
         rev = int(record.get("recordRevision", 0))
-        runstate.cas_update_run_record(
-            run_paths,
-            rev,
-            {
-                "requestedModel": requested_model,
-                "repository": repository,
-                "targetWorkspace": target_workspace,
-                "worktreePath": str(wt.path) if wt is not None else None,
-                "worktreeBranch": wt.branch if wt is not None else None,
-                "baseRevision": wt.base_revision if wt is not None else None,
-                "status": "running",
-            },
-        )
+        meta_fields = {
+            "requestedModel": requested_model,
+            "repository": repository,
+            "targetWorkspace": target_workspace,
+            "worktreePath": str(wt.path) if wt is not None else None,
+            "worktreeBranch": wt.branch if wt is not None else None,
+            "baseRevision": wt.base_revision if wt is not None else None,
+            "status": "running",
+        }
+        meta_fields.update(lineage_fields)
+        runstate.cas_update_run_record(run_paths, rev, meta_fields)
     except Exception as meta_exc:
         _log("_run_worktree_mode_body", "non-terminal metadata merge failed: {}".format(meta_exc))
         if wt is not None:

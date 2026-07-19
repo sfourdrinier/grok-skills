@@ -27,7 +27,7 @@ from groklib.envelope import (
 from groklib.modes import MODES
 
 _DEFAULT_BINARY = os.path.join("~", ".grok", "bin", "grok")
-_NON_STORING_MODES = frozenset({"status", "cleanup", "handoff"})
+_NON_STORING_MODES = frozenset({"status", "cleanup", "handoff", "peer-start", "peer-prompt", "peer-stop"})
 _SIGTERM_EXIT_CODE = 143  # 128 + SIGTERM, the conventional signal-terminated code
 
 # Fail-closed upper bounds for the operator-supplied run budgets (Grok r3 #11
@@ -199,8 +199,17 @@ def _build_parser() -> _Parser:
     _add_run_opts(reason, timeout=900)
 
     code = _sub("code")
-    code.add_argument("--target", required=True)
-    code.add_argument("--base", required=True)
+    # --target/--base are optional at parse time so --continue-run can omit them;
+    # code.run() enforces presence-or-continue with clean usage-errors.
+    code.add_argument("--target", default=None)
+    code.add_argument("--base", default=None)
+    code.add_argument(
+        "--continue-run",
+        default=None,
+        metavar="RUN_ID",
+        help="resume a prior terminal code run (reuses retained worktree + session); "
+        "mutually exclusive with --target/--base/--contract-file",
+    )
     _add_task_group(code)
     _add_web_flags(code)
     _add_run_opts(code, timeout=3600)
@@ -208,6 +217,24 @@ def _build_parser() -> _Parser:
         "--contract-file",
         default=None,
         help="optional operator-trusted implementation contract JSON (writeScopes + requiredValidation)",
+    )
+    code.add_argument(
+        "--integration",
+        choices=("direct", "worktree"),
+        default="worktree",
+        help="worktree (safe default for a bare wrapper call): isolated external "
+        "worktree; direct: edit the real repo under sandbox + post-run guards. The "
+        "plugin's skills/companion default to direct AFTER a per-repo consent gate "
+        "and always pass this flag explicitly, so the product default stays direct; "
+        "the wrapper defaults to worktree so an un-consented bare call cannot "
+        "silently edit the live tree.",
+    )
+    code.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="direct mode only: allow Grok to modify paths that were already dirty "
+        "in the operator checkout at run start",
     )
 
     verify = _sub("verify")
@@ -224,6 +251,21 @@ def _build_parser() -> _Parser:
 
     handoff = _sub("handoff")
     handoff.add_argument("--run-id", required=True)
+
+    # ACP peer channel (default; opt out with GROK_DISABLE_ACP=1).
+    peer_start = _sub("peer-start")
+    peer_start.add_argument("--target", required=True)
+    peer_start.add_argument("--base", required=True)
+    peer_start.add_argument("--contract-file", default=None)
+    _add_web_flags(peer_start)
+    _add_run_opts(peer_start, timeout=900)
+
+    peer_prompt = _sub("peer-prompt")
+    peer_prompt.add_argument("--run-id", required=True)
+    _add_task_group(peer_prompt)
+
+    peer_stop = _sub("peer-stop")
+    peer_stop.add_argument("--run-id", required=True)
 
     return parser
 
@@ -358,6 +400,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             detail={"reason": "external-termination", "exceptionType": type(exc).__name__},
         )
         return _emit(env, None)
+
+    # peer-start already emitted its "running" envelope before serving; the
+    # returned value is the post-stop final envelope (also delivered on the
+    # control socket). Strip the internal marker before stdout emit.
+    if isinstance(env, dict) and env.pop("_peerStartAlreadyEmittedRunning", None):
+        pass
 
     # PR1 single terminal writer: modes own durable envelope.json via
     # persist_terminal_envelope. Entrypoint never O_TRUNC-stores a second copy.

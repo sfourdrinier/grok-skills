@@ -1,7 +1,7 @@
 ---
 name: "cancel"
 description: "Cancel a running Grok job"
-argument-hint: "[job-id]"
+argument-hint: "[job-id|runId]"
 allowed-tools: "Bash(node:*)"
 ---
 
@@ -33,4 +33,5 @@ use `--task-file -` with a single-quoted heredoc.
 node "$SKILL_BASE/run.mjs" cancel "$ARGUMENTS"
 ```
 
-Present the cancel confirmation as returned.
+Accepts a **job id** or a **runId** - the companion translates. Present the
+cancel confirmation as returned.

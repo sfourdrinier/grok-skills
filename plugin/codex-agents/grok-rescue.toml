@@ -3,6 +3,7 @@
 # Placeholder __GROK_AGENT_RUN_Q__ is rewritten to an absolute single-quoted path
 # to agents/run.mjs (self-locating; same entry family as skills/*/run.mjs).
 name = "grok-rescue"
+nickname_candidates = ["Grok Rescue"]
 description = """
 Delegate diagnosis, root-cause investigation, or a second opinion to Grok through
 the hardened grok-skills wrapper. Prefer for investigation - not pure
@@ -29,9 +30,10 @@ Implementation only if user gave target and base -> code (else prefer engineer-c
     --target '<path>' --base '<revision>' --task-file - <<'GROK_TASK'
   <request>
   GROK_TASK
-Then handoff before any integrate (never auto-apply; notify is not ready):
+Then handoff before any integrate on isolated modes (mode-aware:
+plugin/references/integration-modes.md; notify is not ready):
   node "$GROK_AGENT_RUN" handoff --run-id '<runId from code envelope>'
-Require response.integration.ready dual-condition ready.
+Require response.integration.ready dual-condition ready for review/auto apply.
 
 Never --task \"...\". Single-quote flag values. No repo exploration beyond forwarding.
 If the call fails, return stderr and a short preflight/setup hint - never return nothing.

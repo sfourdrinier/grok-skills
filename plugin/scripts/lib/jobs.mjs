@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { resolveWorkspaceRoot } from "./gate-state.mjs";
+import { resolveTargetWorkspaceRoot } from "./git-context.mjs";
 import {
   isNotificationMode,
   NOTIFICATION_MODES,
@@ -32,7 +33,42 @@ export const DEFAULT_JOBS_CONFIG = Object.freeze({
   notificationMode: "off",
   notificationWebhookUrl: null,
   lastRescueJobId: null,
+  // Integration (how edits land) is orthogonal to runMode (security posture).
+  integrationMode: "direct",
+  integrationConsent: false,
 });
+
+/** Integration modes for code/implement (how edits land). Not runMode. */
+export const INTEGRATION_MODES = Object.freeze([
+  "direct",
+  "worktree",
+  "auto",
+  "review",
+]);
+
+/**
+ * @param {unknown} value
+ * @returns {"direct"|"worktree"|"auto"|"review"|null}
+ */
+export function parseIntegrationMode(value) {
+  const v = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  return INTEGRATION_MODES.includes(v) ? v : null;
+}
+
+/**
+ * Claude Code exports userConfig values as CLAUDE_PLUGIN_OPTION_<KEY> with the
+ * schema key uppercased (runMode -> RUNMODE). Also accept underscore forms
+ * (RUN_MODE) when trivially cheap - host docs are ambiguous on camelCase keys.
+ */
+const PLUGIN_OPTION_RUNMODE_KEYS = ["RUNMODE", "RUN_MODE"];
+const PLUGIN_OPTION_NOTIFICATIONMODE_KEYS = ["NOTIFICATIONMODE", "NOTIFICATION_MODE"];
+const PLUGIN_OPTION_WEBHOOK_KEYS = [
+  "NOTIFICATIONWEBHOOKURL",
+  "NOTIFICATION_WEBHOOK_URL",
+];
+const PLUGIN_OPTION_INTEGRATIONMODE_KEYS = ["INTEGRATIONMODE", "INTEGRATION_MODE"];
 
 /** Normalize stored/corrupt config values to a known mode (default off). */
 function normalizeNotificationMode(value) {
@@ -45,13 +81,70 @@ function normalizeWebhookUrl(value) {
   return parsed.ok ? parsed.url : null;
 }
 
-function normalizeConfig(raw) {
+/**
+ * @param {unknown} raw
+ * @param {{ legacySetup?: boolean }} [opts]
+ *   legacySetup: index file pre-dates prefsSources; treat stored prefs as setup.
+ */
+function normalizeConfig(raw, opts = {}) {
+  let prefsSources = {};
+  if (raw?.prefsSources && typeof raw.prefsSources === "object") {
+    prefsSources = { ...raw.prefsSources };
+  } else if (opts.legacySetup) {
+    // Pre-userConfig indexes: saveIndex persists config on EVERY job, so a
+    // workspace that merely ran a job (never setup) carries default values.
+    // Only pin a field as setup-authored when its stored value is NON-default
+    // (evidence of a deliberate setup); otherwise leave it unset so post-upgrade
+    // CLAUDE_PLUGIN_OPTION_* userConfig still applies.
+    const defaultNotificationMode = normalizeNotificationMode(undefined);
+    if (raw?.runMode === "direct") prefsSources.runMode = "setup";
+    if (normalizeNotificationMode(raw?.notificationMode) !== defaultNotificationMode) {
+      prefsSources.notificationMode = "setup";
+    }
+    if (normalizeWebhookUrl(raw?.notificationWebhookUrl)) {
+      prefsSources.notificationWebhookUrl = "setup";
+    }
+  }
   return {
     runMode: raw?.runMode === "direct" ? "direct" : "hardened",
     notificationMode: normalizeNotificationMode(raw?.notificationMode),
     notificationWebhookUrl: normalizeWebhookUrl(raw?.notificationWebhookUrl),
     lastRescueJobId: raw?.lastRescueJobId ?? null,
+    integrationMode:
+      parseIntegrationMode(raw?.integrationMode) ?? DEFAULT_JOBS_CONFIG.integrationMode,
+    integrationConsent: raw?.integrationConsent === true,
+    prefsSources,
   };
+}
+
+function isSetupAuthored(config, key) {
+  return config?.prefsSources?.[key] === "setup";
+}
+
+/**
+ * First non-empty CLAUDE_PLUGIN_OPTION_<suffix> among candidate suffixes.
+ * @returns {{ name: string, value: string } | null}
+ */
+function readPluginOption(env, suffixes) {
+  for (const suffix of suffixes) {
+    const name = `CLAUDE_PLUGIN_OPTION_${suffix}`;
+    const raw = env?.[name];
+    if (raw == null) continue;
+    const value = String(raw).trim();
+    if (!value) continue;
+    return { name, value };
+  }
+  return null;
+}
+
+function noteInvalidPluginOption(name, value) {
+  try {
+    process.stderr.write(
+      `[grok-jobs] ignoring invalid ${name}=${JSON.stringify(value)}; using setup prefs or default\n`
+    );
+  } catch {
+    /* best-effort */
+  }
 }
 
 export function isValidJobId(jobId) {
@@ -87,7 +180,12 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-function stateRoot(cwd, env = process.env) {
+/**
+ * Per-workspace state segment: `<basename-slug>-<sha256(canonical)[0:16]>`.
+ * Kept identical for legacy tmp and CLAUDE_PLUGIN_DATA layouts so migration
+ * and dual-path lookups share one key.
+ */
+function workspaceStateSegment(cwd) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   let canonical = workspaceRoot;
   try {
@@ -100,9 +198,162 @@ function stateRoot(cwd, env = process.env) {
       .replace(/[^a-zA-Z0-9._-]+/g, "-")
       .replace(/^-+|-+$/g, "") || "workspace";
   const hash = createHash("sha256").update(canonical).digest("hex").slice(0, 16);
-  const pluginData = (env[PLUGIN_DATA_ENV] ?? env.PLUGIN_DATA ?? "").trim();
-  const root = pluginData ? path.join(pluginData, "state") : FALLBACK;
-  return path.join(root, `${slug}-${hash}`);
+  return `${slug}-${hash}`;
+}
+
+/**
+ * Absolute CLAUDE_PLUGIN_DATA (or PLUGIN_DATA) only. Relative / empty -> null.
+ * Host fact: Claude exports ~/.claude/plugins/data/<id>/ as an absolute path.
+ */
+function resolvePluginDataDir(env = process.env) {
+  const raw = (env[PLUGIN_DATA_ENV] ?? env.PLUGIN_DATA ?? "").trim();
+  if (!raw || !path.isAbsolute(raw)) {
+    return null;
+  }
+  return raw;
+}
+
+/**
+ * Atomic file copy via temp + rename (same filesystem). Destination path is
+ * the complete-marker for migration: only written after body copy attempts.
+ */
+function atomicCopyFile(src, dest) {
+  const dir = path.dirname(dest);
+  mkdirPrivate(dir);
+  const tmp = path.join(
+    dir,
+    `.${path.basename(dest)}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`
+  );
+  try {
+    fs.copyFileSync(src, tmp);
+    try {
+      fs.chmodSync(tmp, FILE_MODE);
+    } catch {
+      /* best-effort */
+    }
+    fs.renameSync(tmp, dest);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      /* best-effort cleanup */
+    }
+    throw err;
+  }
+}
+
+/**
+ * Best-effort recursive copy of a job body directory (copy, never move).
+ * Per-entry failures are noted on stderr; caller decides completeness.
+ */
+function copyJobBodyTree(srcDir, destDir) {
+  mkdirPrivate(destDir);
+  const entries = fs.readdirSync(srcDir, { withFileTypes: true });
+  for (const entry of entries) {
+    const from = path.join(srcDir, entry.name);
+    const to = path.join(destDir, entry.name);
+    if (entry.isDirectory()) {
+      copyJobBodyTree(from, to);
+    } else if (entry.isFile()) {
+      fs.copyFileSync(from, to);
+      try {
+        fs.chmodSync(to, FILE_MODE);
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
+}
+
+/**
+ * Best-effort migration of jobs-index.json + jobs/<id>/ bodies from the legacy
+ * tmp root into CLAUDE_PLUGIN_DATA/state. Complete only when the new
+ * jobs-index.json exists (dir-exists alone is not enough - retry partials).
+ * Index is written last via temp+rename so interrupted copies stay retryable.
+ * Legacy is left in place as a frozen snapshot (copy, not move). Never throws.
+ */
+function maybeMigrateLegacyState(legacyDir, newDir) {
+  try {
+    const newIndex = path.join(newDir, "jobs-index.json");
+    // Complete-marker: index presence. Dir-without-index is retryable.
+    if (fs.existsSync(newIndex)) {
+      return;
+    }
+    if (!fs.existsSync(legacyDir)) {
+      return;
+    }
+    const legacyIndex = path.join(legacyDir, "jobs-index.json");
+    if (!fs.existsSync(legacyIndex)) {
+      return;
+    }
+    mkdirPrivate(newDir);
+
+    // Job bodies first (best-effort per entry). Partial bodies still allow the
+    // index write; individual entry failures are noted but do not abort.
+    const legacyJobs = path.join(legacyDir, "jobs");
+    const newJobs = path.join(newDir, "jobs");
+    if (fs.existsSync(legacyJobs)) {
+      mkdirPrivate(newJobs);
+      let entries = [];
+      try {
+        entries = fs.readdirSync(legacyJobs, { withFileTypes: true });
+      } catch (err) {
+        process.stderr.write(
+          `[grok-jobs] job body migration partial (list): ${err?.message ?? err}\n`
+        );
+        entries = [];
+      }
+      for (const entry of entries) {
+        try {
+          const from = path.join(legacyJobs, entry.name);
+          const to = path.join(newJobs, entry.name);
+          if (entry.isDirectory()) {
+            copyJobBodyTree(from, to);
+          } else if (entry.isFile()) {
+            fs.copyFileSync(from, to);
+            try {
+              fs.chmodSync(to, FILE_MODE);
+            } catch {
+              /* best-effort */
+            }
+          }
+        } catch (err) {
+          try {
+            process.stderr.write(
+              `[grok-jobs] job body migration partial for ${entry.name}: ${err?.message ?? err}\n`
+            );
+          } catch {
+            /* best-effort */
+          }
+        }
+      }
+    }
+
+    // Index last = complete marker. Atomic rename keeps partials retryable.
+    atomicCopyFile(legacyIndex, newIndex);
+    process.stderr.write(
+      `[grok-jobs] migrated workspace state from ${legacyDir} to ${newDir}\n`
+    );
+  } catch (err) {
+    try {
+      process.stderr.write(
+        `[grok-jobs] state migration skipped: ${err?.message ?? err}\n`
+      );
+    } catch {
+      /* best-effort */
+    }
+  }
+}
+function stateRoot(cwd, env = process.env) {
+  const segment = workspaceStateSegment(cwd);
+  const legacyDir = path.join(FALLBACK, segment);
+  const pluginData = resolvePluginDataDir(env);
+  if (pluginData) {
+    const newDir = path.join(pluginData, "state", segment);
+    maybeMigrateLegacyState(legacyDir, newDir);
+    return newDir;
+  }
+  return legacyDir;
 }
 
 export function jobsDir(cwd, env = process.env) {
@@ -118,21 +369,28 @@ function ensure(cwd, env = process.env) {
   mkdirPrivate(jobsDir(cwd, env));
 }
 
+function emptyConfig() {
+  return normalizeConfig({ ...DEFAULT_JOBS_CONFIG, prefsSources: {} });
+}
+
 function loadIndex(cwd, env = process.env) {
   ensure(cwd, env);
   const file = indexPath(cwd, env);
   if (!fs.existsSync(file)) {
-    return { version: 1, jobs: [], config: { ...DEFAULT_JOBS_CONFIG } };
+    return { version: 1, jobs: [], config: emptyConfig() };
   }
   try {
     const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    const legacySetup =
+      parsed?.config != null &&
+      (parsed.config.prefsSources === undefined || parsed.config.prefsSources === null);
     return {
       version: 1,
       jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [],
-      config: normalizeConfig(parsed.config),
+      config: normalizeConfig(parsed.config, { legacySetup }),
     };
   } catch {
-    return { version: 1, jobs: [], config: { ...DEFAULT_JOBS_CONFIG } };
+    return { version: 1, jobs: [], config: emptyConfig() };
   }
 }
 
@@ -142,6 +400,8 @@ function saveIndex(cwd, index, env = process.env) {
     .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")))
     .slice(0, MAX_JOBS);
   const config = normalizeConfig(index.config);
+  // Always persist prefsSources (possibly {}) so new indexes are not mistaken
+  // for pre-userConfig legacy files on the next load.
   const payload = {
     version: 1,
     config: {
@@ -149,6 +409,9 @@ function saveIndex(cwd, index, env = process.env) {
       notificationMode: config.notificationMode,
       notificationWebhookUrl: config.notificationWebhookUrl,
       lastRescueJobId: config.lastRescueJobId,
+      integrationMode: config.integrationMode,
+      integrationConsent: config.integrationConsent === true,
+      prefsSources: config.prefsSources ?? {},
     },
     jobs,
   };
@@ -156,30 +419,194 @@ function saveIndex(cwd, index, env = process.env) {
   return payload;
 }
 
+/**
+ * Effective run mode.
+ * Precedence: GROK_SKILLS_MODE (process override) > setup prefs >
+ * CLAUDE_PLUGIN_OPTION_RUNMODE env > built-in default.
+ */
 export function getRunMode(cwd, env = process.env) {
   const fromEnv = (env.GROK_SKILLS_MODE ?? "").trim().toLowerCase();
   if (fromEnv === "direct" || fromEnv === "hardened") {
     return fromEnv;
   }
-  return loadIndex(cwd, env).config.runMode === "direct" ? "direct" : "hardened";
+  const config = loadIndex(cwd, env).config;
+  if (isSetupAuthored(config, "runMode")) {
+    return config.runMode === "direct" ? "direct" : "hardened";
+  }
+  const opt = readPluginOption(env, PLUGIN_OPTION_RUNMODE_KEYS);
+  if (opt) {
+    const mode = opt.value.toLowerCase();
+    if (mode === "direct" || mode === "hardened") {
+      return mode;
+    }
+    noteInvalidPluginOption(opt.name, opt.value);
+  }
+  return DEFAULT_JOBS_CONFIG.runMode;
 }
 
 export function setRunMode(cwd, mode, env = process.env) {
   const index = loadIndex(cwd, env);
   index.config.runMode = mode === "direct" ? "direct" : "hardened";
+  index.config.prefsSources = { ...(index.config.prefsSources ?? {}), runMode: "setup" };
   saveIndex(cwd, index, env);
   return index.config.runMode;
 }
 
 /**
+ * Effective integration mode (how edits land: direct|worktree|auto|review).
+ * Precedence: setup prefs > CLAUDE_PLUGIN_OPTION_INTEGRATIONMODE > default.
+ * Orthogonal to runMode. Env alone is a default hint, never consent.
+ * @returns {"direct"|"worktree"|"auto"|"review"}
+ */
+export function getIntegrationMode(cwd, env = process.env) {
+  const config = loadIndex(cwd, env).config;
+  if (isSetupAuthored(config, "integrationMode")) {
+    return (
+      parseIntegrationMode(config.integrationMode) ?? DEFAULT_JOBS_CONFIG.integrationMode
+    );
+  }
+  const opt = readPluginOption(env, PLUGIN_OPTION_INTEGRATIONMODE_KEYS);
+  if (opt) {
+    const mode = parseIntegrationMode(opt.value);
+    if (mode) {
+      return mode;
+    }
+    noteInvalidPluginOption(opt.name, opt.value);
+  }
+  return DEFAULT_JOBS_CONFIG.integrationMode;
+}
+
+/**
+ * True only when setup --integration direct recorded operator consent.
+ * Env / userConfig alone never satisfies this gate.
+ */
+export function getIntegrationConsent(cwd, env = process.env) {
+  const config = loadIndex(cwd, env).config;
+  return config.integrationConsent === true && isSetupAuthored(config, "integrationConsent");
+}
+
+/**
+ * Persist integrationMode via setup. For direct, also records integrationConsent.
+ * Does not touch runMode.
+ * @param {string} cwd
+ * @param {string} mode
+ * @returns {"direct"|"worktree"|"auto"|"review"|null} null when mode invalid
+ */
+export function setIntegrationMode(cwd, mode, env = process.env) {
+  const parsed = parseIntegrationMode(mode);
+  if (!parsed) {
+    return null;
+  }
+  const index = loadIndex(cwd, env);
+  if (!index.config.prefsSources || typeof index.config.prefsSources !== "object") {
+    index.config.prefsSources = {};
+  }
+  index.config.integrationMode = parsed;
+  index.config.prefsSources.integrationMode = "setup";
+  if (parsed === "direct") {
+    index.config.integrationConsent = true;
+    index.config.prefsSources.integrationConsent = "setup";
+  }
+  saveIndex(cwd, index, env);
+  return parsed;
+}
+
+/**
+ * One-screen refuse when effective integration is direct without setup consent.
+ * When the resolved target workspace differs from companion cwd, the accept
+ * command includes `--target <workspace>` so consent is recorded for the repo
+ * that will be edited (not the companion cwd).
+ *
+ * @param {{ targetWorkspace?: string, companionCwd?: string }} [opts]
+ * @returns {string}
+ */
+export function formatDirectIntegrationConsentMsg(opts = {}) {
+  const targetWorkspace =
+    opts.targetWorkspace != null && String(opts.targetWorkspace).trim() !== ""
+      ? path.resolve(String(opts.targetWorkspace))
+      : null;
+  const companionCwd =
+    opts.companionCwd != null && String(opts.companionCwd).trim() !== ""
+      ? path.resolve(String(opts.companionCwd))
+      : null;
+  let targetFlag = "";
+  if (targetWorkspace && companionCwd) {
+    const cwdWorkspace = resolveTargetWorkspaceRoot(companionCwd, ".");
+    if (path.resolve(targetWorkspace) !== path.resolve(cwdWorkspace)) {
+      targetFlag = ` --target ${targetWorkspace}`;
+    }
+  } else if (targetWorkspace && !companionCwd) {
+    targetFlag = ` --target ${targetWorkspace}`;
+  }
+  const targetLine = targetWorkspace
+    ? ` Target workspace: ${targetWorkspace}.`
+    : "";
+  return (
+    "Direct integration is the consented landing default: one-shot code edits " +
+    "THIS working tree live (no worktree isolation, no pre-apply review); ACP " +
+    "peer always uses an external worktree and applies a verified ready patch " +
+    "only at peer-stop. Protected paths (.git config/HEAD/hooks/refs, .env, and " +
+    "key files) are detected and rolled back if touched on code-direct live " +
+    "edits." +
+    targetLine +
+    " To accept and make direct the default here: /grok:setup --integration direct" +
+    targetFlag +
+    " (or: companion setup --integration direct" +
+    targetFlag +
+    "). Or run this once with --integration worktree (isolated) or --integration review."
+  );
+}
+
+/** Default (cwd-scoped) refuse copy; prefer formatDirectIntegrationConsentMsg for gates. */
+export const DIRECT_INTEGRATION_CONSENT_MSG = formatDirectIntegrationConsentMsg();
+
+// Integration gate + continue-run target live in integration-gate.mjs (900-line
+// cap). Re-export for existing import paths (jobs.mjs remains the public surface).
+export {
+  gateIntegrationForCodeish,
+  resolveContinueRunTargetWorkspace,
+  withExplicitIntegration,
+} from "./integration-gate.mjs";
+
+/**
+ * Effective notification prefs.
+ * Precedence per field: setup > CLAUDE_PLUGIN_OPTION_* env > built-in default.
  * @returns {{ notificationMode: string, notificationWebhookUrl: string|null }}
  */
 export function getNotificationConfig(cwd, env = process.env) {
   const config = loadIndex(cwd, env).config;
-  return {
-    notificationMode: config.notificationMode,
-    notificationWebhookUrl: config.notificationWebhookUrl,
-  };
+
+  let notificationMode = DEFAULT_JOBS_CONFIG.notificationMode;
+  if (isSetupAuthored(config, "notificationMode")) {
+    notificationMode = config.notificationMode;
+  } else {
+    const opt = readPluginOption(env, PLUGIN_OPTION_NOTIFICATIONMODE_KEYS);
+    if (opt) {
+      const mode = parseNotificationMode(opt.value);
+      if (mode) {
+        notificationMode = mode;
+      } else {
+        noteInvalidPluginOption(opt.name, opt.value);
+      }
+    }
+  }
+
+  let notificationWebhookUrl = DEFAULT_JOBS_CONFIG.notificationWebhookUrl;
+  if (isSetupAuthored(config, "notificationWebhookUrl")) {
+    notificationWebhookUrl = config.notificationWebhookUrl;
+  } else {
+    const opt = readPluginOption(env, PLUGIN_OPTION_WEBHOOK_KEYS);
+    if (opt) {
+      const parsed = parseWebhookUrl(opt.value);
+      if (parsed.ok) {
+        notificationWebhookUrl = parsed.url;
+      } else {
+        noteInvalidPluginOption(opt.name, opt.value);
+      }
+    }
+  }
+
+  return { notificationMode, notificationWebhookUrl };
 }
 
 /**
@@ -188,11 +615,15 @@ export function getNotificationConfig(cwd, env = process.env) {
  */
 export function setNotificationConfig(cwd, patch, env = process.env) {
   const index = loadIndex(cwd, env);
+  if (!index.config.prefsSources || typeof index.config.prefsSources !== "object") {
+    index.config.prefsSources = {};
+  }
   if (patch.notificationMode !== undefined) {
     // Invalid modes leave prior prefs unchanged (never clobber auto -> off).
     const mode = parseNotificationMode(patch.notificationMode);
     if (mode) {
       index.config.notificationMode = mode;
+      index.config.prefsSources.notificationMode = "setup";
     }
   }
   if (patch.notificationWebhookUrl !== undefined) {
@@ -200,6 +631,7 @@ export function setNotificationConfig(cwd, patch, env = process.env) {
     const parsed = parseWebhookUrl(patch.notificationWebhookUrl);
     if (parsed.ok) {
       index.config.notificationWebhookUrl = parsed.url;
+      index.config.prefsSources.notificationWebhookUrl = "setup";
     }
   }
   saveIndex(cwd, index, env);
@@ -307,6 +739,32 @@ export function getJob(cwd, jobId, env = process.env) {
     }
   }
   return listJobs(cwd, env).find((j) => j.id === jobId) ?? null;
+}
+
+/**
+ * Resolve a job by its stored wrapper/direct runId (newest-first index order).
+ * @returns {object|null}
+ */
+export function findJobByRunId(cwd, runId, env = process.env) {
+  if (!runId) return null;
+  const jobs = listJobs(cwd, env); // newest-first ordering already used by the table
+  return jobs.find((j) => j.runId === runId) || null;
+}
+
+/**
+ * Resolve a job from a positional that may be a job id or a runId.
+ * Same id shape (JOB_ID_RE / RUN_ID_RE); exact job-id match wins, then runId.
+ * Collision: job A id === job B runId returns A (getJob), not B.
+ * @returns {object|null}
+ */
+export function resolveJobByIdOrRunId(cwd, idOrRunId, env = process.env) {
+  // Prefer exact job-id match so a job id that collides with another job's
+  // runId never resolves to the wrong record (shared YYYYMMDDTHHMMSSZ shape).
+  let job = getJob(cwd, idOrRunId, env);
+  if (!job && idOrRunId) {
+    job = findJobByRunId(cwd, idOrRunId, env);
+  }
+  return job;
 }
 
 export function readJobStdout(cwd, jobId, env = process.env) {

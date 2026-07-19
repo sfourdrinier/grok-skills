@@ -45,17 +45,16 @@ test("shouldAttemptTerminalNotify honors skipNotify", () => {
 });
 
 test("formatWebhookDisplay shows host only (no path secrets)", () => {
+  // Runtime join keeps the contiguous Slack webhook path out of source (AGENTS.md #8).
+  const slackWebhook = [
+    "https://hooks.slack.com",
+    "/services/T00/B00/secret-token",
+  ].join("");
   assert.equal(formatWebhookDisplay(null), "none");
-  assert.equal(
-    formatWebhookDisplay("https://hooks.slack.com/services/T00/B00/secret-token"),
-    "https://hooks.slack.com"
-  );
+  assert.equal(formatWebhookDisplay(slackWebhook), "https://hooks.slack.com");
   assert.equal(
     formatWebhookDisplay("https://user:pass@discord.com/api/webhooks/1/xyz?x=1"),
     "https://discord.com"
   );
-  assert.doesNotMatch(
-    formatWebhookDisplay("https://hooks.slack.com/services/T00/B00/secret-token"),
-    /secret-token/
-  );
+  assert.doesNotMatch(formatWebhookDisplay(slackWebhook), /secret-token/);
 });
