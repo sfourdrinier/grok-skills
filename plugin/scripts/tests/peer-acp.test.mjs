@@ -82,6 +82,85 @@ test("peer-start background: running envelope exits 0", async () => {
   }
 });
 
+test("peer-start background: running resident detaches stdout so library await does not hang", async () => {
+  // Confirmed medium finding: after the first status=running envelope,
+  // runPeerStartBackground only child.unref()s and leaves the stdout pipe
+  // listener/socket attached. Library callers without an outer process.exit
+  // then hang even though the helper already resolved. The resident must stay
+  // alive; only the companion-side capture handles detach.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "peer-start-detach-"));
+  const pidPath = path.join(dir, "resident.pid");
+  const resultPath = path.join(dir, "harness-result.json");
+  const fake = path.join(dir, "resident.mjs");
+  const harness = path.join(dir, "harness.mjs");
+  const peerAcpUrl = path.resolve(SCRIPT_DIR, "../lib/peer-acp.mjs");
+  fs.writeFileSync(
+    fake,
+    `
+import fs from "node:fs";
+fs.writeFileSync(${JSON.stringify(pidPath)}, String(process.pid));
+process.stdout.write(${JSON.stringify(
+      JSON.stringify({ status: "running", mode: "peer-start", runId: "detach-x" }) + "\n"
+    )});
+// Stay resident (control-socket stand-in). Do not exit.
+setInterval(() => {}, 1 << 30);
+`
+  );
+  fs.writeFileSync(
+    harness,
+    `
+import fs from "node:fs";
+import { runPeerStartBackground } from ${JSON.stringify(peerAcpUrl)};
+const code = await runPeerStartBackground(process.execPath, ${JSON.stringify(fake)}, [], {
+  spawnFailedMessage: () => "",
+  signalExit: 1,
+  spawnFailedExit: 4,
+});
+fs.writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify({ code }));
+// Natural event-loop drain - no process.exit. Attached stdout/listeners on a
+// live resident must not keep this harness alive.
+`
+  );
+  let residentPid = null;
+  try {
+    const harnessProc = spawnSync(process.execPath, [harness], {
+      encoding: "utf8",
+      timeout: 4000,
+      env: process.env,
+    });
+    assert.notEqual(
+      harnessProc.error?.code,
+      "ETIMEDOUT",
+      "library await must not hang after the running envelope (stdout still attached?)"
+    );
+    assert.equal(
+      harnessProc.status,
+      0,
+      `harness must exit 0 after resolve; status=${harnessProc.status} stderr=${harnessProc.stderr}`
+    );
+    assert.ok(fs.existsSync(resultPath), "harness must record the resolved exit code");
+    const { code } = JSON.parse(fs.readFileSync(resultPath, "utf8"));
+    assert.equal(code, 0, "running envelope must resolve 0");
+    assert.ok(fs.existsSync(pidPath), "resident must have written its pid");
+    residentPid = Number(fs.readFileSync(pidPath, "utf8"));
+    assert.ok(Number.isInteger(residentPid) && residentPid > 0, "resident pid");
+    // Detach must not kill the resident - only drop companion capture handles.
+    assert.doesNotThrow(
+      () => process.kill(residentPid, 0),
+      "resident must still be alive after successful running-path detach"
+    );
+  } finally {
+    if (residentPid) {
+      try {
+        process.kill(residentPid, "SIGTERM");
+      } catch {
+        /* already gone */
+      }
+    }
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("peer-start background: durable stderr log is created private (0600)", async () => {
   // The resident peer later writes repo paths + operational diagnostics to this
   // long-lived /tmp file; another local user must not be able to read it.

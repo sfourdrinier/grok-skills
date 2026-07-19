@@ -121,6 +121,18 @@ export function runPeerStartBackground(python, wrapper, args, {
             running = false;
           }
           if (running) {
+            // Drop capture handles so library callers (no outer process.exit)
+            // can drain the event loop while the resident keeps serving the
+            // control socket. child.unref alone leaves the stdout pipe/listener
+            // attached and can hang the awaiter. Do not kill the resident.
+            try {
+              if (child.stdout) {
+                child.stdout.removeAllListeners("data");
+                child.stdout.destroy();
+              }
+            } catch {
+              /* ignore */
+            }
             try {
               child.unref();
             } catch {
