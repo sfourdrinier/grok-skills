@@ -154,8 +154,14 @@ with `applied=true`. Peer-stop is **not** completion-notification eligible
   `acp-failure` with reattach hint (peer-stop still finalizes artifacts from
   the worktree state).
 - Timeouts per prompt (default 900s) -> session/cancel + acp-failure.
-- Stale peer sessions: the stale-home reaper treats peer-active runs as
-  leased while pid is alive AND younger than MAX_PEER_LEASE; else reaps.
+- Stale peer sessions: the stale-home reaper keeps a home alive when
+  `peer.lease` is parseable, unexpired, and the child pid/start-token still
+  match (keepalive). A LIVE `owner.pid` is never reaped regardless of lease
+  age. UNKNOWN owner (missing/unreadable `owner.pid`) stays fail-closed
+  within the hard cap; an expired/malformed `peer.lease` alone does NOT
+  force DEAD. Only parseable lease evidence that positively proves the
+  child is gone may shorten UNKNOWN to DEAD so the home is reapable in the
+  live-start window; otherwise the hard-cap path applies.
 - Every error maps to existing ERROR_CLASSES + `acp-failure`.
 - `GROK_DISABLE_ACP=1` in the wrapper or companion -> `usage-error` / refuse.
 
