@@ -56,7 +56,9 @@ from groklib.modes.peer_process import (
     assert_start_parity as _assert_start_parity,
     build_acp_stdio_argv as _build_acp_stdio_argv,
     kill_recorded_child as _kill_recorded_child,
+    require_process_identity_token as _require_process_identity_token,
     spawn_acp_child as _spawn_acp_child,
+    unregister_active_child as _unregister_active_child,
 )
 from groklib.peer_doc import (
     mark_peer_died_if_allowed,
@@ -112,7 +114,13 @@ class PeerSession:
     _prompt_in_flight: bool = False
     _stop_requested: bool = False
 
-    def renew_lease(self) -> None:
+    def renew_lease(self, *, require_prompts_persist: bool = False) -> None:
+        """Renew home lease + peer.json leaseExpiresAt (and optional promptsHandled).
+
+        When ``require_prompts_persist`` is True (pre-ACP prompt attempt), a
+        promptsHandled / peer.json write failure raises instead of logging: the
+        sentinel proof depends on durable promptsHandled before model tools run.
+        """
         runstate.write_peer_lease(
             self.home.home_dir,
             child_pid=int(self.peer_doc["child"]["pid"]),
@@ -137,8 +145,27 @@ class PeerSession:
             )
             self.peer_doc["leaseExpiresAt"] = disk.get("leaseExpiresAt", expires)
             if "promptsHandled" in disk:
-                self.peer_doc["promptsHandled"] = disk["promptsHandled"]
+                # Finalization / sentinel use max(safe disk, in-memory proposed).
+                disk_n = disk.get("promptsHandled")
+                mem_n = prompts_handled
+                if isinstance(disk_n, (int, float)) and not isinstance(disk_n, bool):
+                    safe = int(disk_n)
+                    if isinstance(mem_n, (int, float)) and not isinstance(mem_n, bool):
+                        safe = max(safe, int(mem_n))
+                    self.peer_doc["promptsHandled"] = safe
+                else:
+                    self.peer_doc["promptsHandled"] = disk_n
         except (OSError, GrokWrapperError) as exc:
+            if require_prompts_persist:
+                raise GrokWrapperError(
+                    "acp-failure",
+                    "could not persist promptsHandled before ACP prompt: {}".format(exc),
+                    {
+                        "runId": self.run_id,
+                        "reason": "prompts-handled-persist-failed",
+                        "promptsHandled": prompts_handled,
+                    },
+                ) from exc
             _log("renew_lease", "could not refresh peer.json: {}".format(exc))
 
 
@@ -260,9 +287,9 @@ def _handle_prompt(session: PeerSession, task: str) -> dict:
         # promptsHandled left at 0 would make peer-stop SKIP the mandatory cwd
         # sentinel proof and finalize a mutated worktree unverified. Recording the
         # attempt up front forces sentinel enforcement at stop (fail closed) for
-        # any turn that reached the model.
+        # any turn that reached the model. Persist failure refuses the ACP call.
         session.peer_doc["promptsHandled"] = prompts_handled + 1
-        session.renew_lease()
+        session.renew_lease(require_prompts_persist=True)
         result = session.acp.session_prompt(
             session_id=session.session_id,
             text=prompt_text,
@@ -574,6 +601,8 @@ def run_peer_start(args: argparse.Namespace) -> dict:
             )
         wrapper_pid = os.getpid()
         child_pid = int(child.pid)
+        wrapper_token = _require_process_identity_token(wrapper_pid, role="wrapper")
+        child_token = _require_process_identity_token(child_pid, role="child")
         peer_doc = {
             "schemaVersion": 1,
             "lifecycle": "running",
@@ -581,11 +610,11 @@ def run_peer_start(args: argparse.Namespace) -> dict:
             "socketPath": str(socket_path),
             "wrapper": {
                 "pid": wrapper_pid,
-                "startToken": platformsupport.process_start_token(wrapper_pid),
+                "startToken": wrapper_token,
             },
             "child": {
                 "pid": child_pid,
-                "startToken": platformsupport.process_start_token(child_pid),
+                "startToken": child_token,
             },
             "homePath": str(home.home_dir),
             "worktreePath": str(worktree.path),

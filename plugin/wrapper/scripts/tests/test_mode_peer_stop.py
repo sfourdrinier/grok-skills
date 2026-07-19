@@ -458,7 +458,13 @@ class PeerStopLifecycleTests(PeerTestBase):
 
         def _fake_finalize(**kwargs):
             finalize_calls.append(kwargs)
-            return self._terminal_success_env(run_paths.run_id)
+            env = self._terminal_success_env(run_paths.run_id)
+            # Durable terminal is required before peer.json may become stopped.
+            try:
+                self._persist_terminal(run_paths, env)
+            except Exception:
+                pass
+            return env
 
         def _connect_fail(socket_path, payload, timeout=900.0):
             raise GrokWrapperError("acp-failure", "control socket connect failed")

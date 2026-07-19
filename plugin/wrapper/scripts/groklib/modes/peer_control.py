@@ -14,6 +14,7 @@ import struct
 from typing import Any, Dict, Optional
 
 from groklib import GrokWrapperError, log_stderr, platformsupport, runstate
+from groklib.acp import MAX_FRAME_BYTES
 from groklib.envelope import assert_no_secret_material, redact_secret_material
 from groklib.peer_doc import mark_peer_died_if_allowed
 
@@ -167,8 +168,12 @@ def read_json_line(conn: socket.socket, timeout: float = 30.0) -> dict:
         if not chunk:
             raise GrokWrapperError("acp-failure", "control socket closed by peer")
         buf += chunk
-        if len(buf) > 4 * 1024 * 1024:
-            raise GrokWrapperError("acp-failure", "control socket frame too large")
+        if len(buf) > MAX_FRAME_BYTES:
+            raise GrokWrapperError(
+                "acp-failure",
+                "control socket frame too large (>{} bytes)".format(MAX_FRAME_BYTES),
+                {"maxFrameBytes": MAX_FRAME_BYTES},
+            )
     line, _rest = buf.split(b"\n", 1)
     try:
         obj = json.loads(line.decode("utf-8"))
@@ -209,10 +214,27 @@ def connect_control(socket_path: str, payload: dict, timeout: float = 900.0) -> 
         client.sendall((json.dumps(safe_payload, separators=(",", ":")) + "\n").encode("utf-8"))
         buf = b""
         while b"\n" not in buf:
-            chunk = client.recv(8192)
+            try:
+                chunk = client.recv(8192)
+            except socket.timeout as exc:
+                raise GrokWrapperError(
+                    "acp-failure",
+                    "control socket response timed out",
+                    {"socketPath": socket_path},
+                ) from exc
             if not chunk:
                 break
             buf += chunk
+            if len(buf) > MAX_FRAME_BYTES:
+                raise GrokWrapperError(
+                    "acp-failure",
+                    "control socket response frame too large (>{} bytes)".format(
+                        MAX_FRAME_BYTES
+                    ),
+                    {"socketPath": socket_path, "maxFrameBytes": MAX_FRAME_BYTES},
+                )
+    except GrokWrapperError:
+        raise
     except OSError as exc:
         raise GrokWrapperError(
             "acp-failure",
@@ -251,11 +273,17 @@ def serve_until_stop(
     handle_connection=None,
     stop_session=None,
 ) -> dict:
-    """Block serving the control socket until stop; return the final envelope."""
+    """Block serving the control socket until stop; return the final envelope.
+
+    Always tears the control socket and peer session down on OSError /
+    BaseException (including KeyboardInterrupt / SystemExit), while re-raising
+    BaseException after teardown so signal semantics stay intact.
+    """
     if handle_connection is None or stop_session is None:
         raise GrokWrapperError("cli-failure", "serve_until_stop missing handlers")
     srv = open_socket(session.socket_path)
     final: Optional[dict] = None
+    interrupt: Optional[BaseException] = None
     try:
         while final is None and not session._stop_requested:
             try:
@@ -274,6 +302,13 @@ def serve_until_stop(
                     except (OSError, GrokWrapperError):
                         pass
                 continue
+            except OSError as exc:
+                # Accept path is hard-broken (EMFILE, EBADF, ...): exit the loop and
+                # tear down via stop_session so ACP child / private home are not left
+                # orphaned under a dead control plane.
+                _log("serve_until_stop", "accept OSError; stopping peer: {}".format(exc))
+                session._stop_requested = True
+                break
             with conn:
                 try:
                     final = handle_connection(session, conn)
@@ -288,6 +323,15 @@ def serve_until_stop(
                         )
                     except OSError:
                         pass
+    except BaseException as exc:
+        # KeyboardInterrupt / SystemExit / other BaseException: remember and
+        # continue through teardown, then re-raise after stop.
+        interrupt = exc
+        session._stop_requested = True
+        _log(
+            "serve_until_stop",
+            "BaseException during serve; tearing down: {}".format(type(exc).__name__),
+        )
     finally:
         try:
             srv.close()
@@ -299,5 +343,19 @@ def serve_until_stop(
         except OSError:
             pass
     if final is None:
-        final = stop_session(session)
+        try:
+            final = stop_session(session)
+        except Exception as stop_exc:
+            _log("serve_until_stop", "stop_session during teardown failed: {}".format(stop_exc))
+            if interrupt is None:
+                raise
+            final = None
+    if interrupt is not None:
+        raise interrupt
+    if final is None:
+        raise GrokWrapperError(
+            "acp-failure",
+            "peer control plane exited without a terminal envelope",
+            {"runId": getattr(session, "run_id", None)},
+        )
     return final

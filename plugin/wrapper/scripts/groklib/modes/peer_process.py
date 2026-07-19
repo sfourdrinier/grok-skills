@@ -66,6 +66,53 @@ def build_acp_stdio_argv(
     return argv
 
 
+def register_active_child(proc: subprocess.Popen) -> None:
+    """Register ACP child on the SIGTERM active-process SSOT (grokcli)."""
+    grokcli._register_active_proc(proc)
+
+
+def unregister_active_child(proc_or_pid: Any = None) -> None:
+    """Drop ACP child from the SIGTERM active-process SSOT (best-effort).
+
+    Accepts a ``Popen`` handle or an int pid. Pid form scans the shared registry
+    (needed when peer-stop only has peer.json identity, not the resident handle).
+    """
+    try:
+        if proc_or_pid is None:
+            return
+        if isinstance(proc_or_pid, int) and not isinstance(proc_or_pid, bool):
+            with grokcli._ACTIVE_PROCS_LOCK:
+                victims = [
+                    p
+                    for p in list(grokcli._ACTIVE_PROCS)
+                    if getattr(p, "pid", None) == proc_or_pid
+                ]
+            for proc in victims:
+                grokcli._unregister_active_proc(proc)
+            return
+        grokcli._unregister_active_proc(proc_or_pid)
+    except Exception as exc:  # pragma: no cover - defensive
+        _log("unregister_active_child", "unregister failed: {}".format(exc))
+
+
+def require_process_identity_token(pid: int, *, role: str) -> str:
+    """Return a non-empty process startToken or fail closed.
+
+    Peer kill / lease / stopOwner identity depends on startToken; null or empty
+    would fail-open toward pid-only matching (unsafe under pid reuse).
+    """
+    token = platformsupport.process_start_token(pid)
+    if not isinstance(token, str) or not token:
+        raise GrokWrapperError(
+            "acp-failure",
+            "missing {} startToken for pid {}; refusing peer identity record".format(
+                role, pid
+            ),
+            {"role": role, "pid": pid, "startToken": token},
+        )
+    return token
+
+
 def spawn_acp_child(
     *,
     binary: pathlib.Path,
@@ -85,6 +132,10 @@ def spawn_acp_child(
     operator credentials into the long-lived model process, and omitting those
     globals let the child run under CLI defaults while the envelope advertised
     confinement. Flags are global before ``agent`` (probe-accepted placement).
+
+    Spawn + active-proc registration is SIGTERM-blocked (same SSOT as code-mode
+    grokcli.spawn) so a harness SIGTERM cannot orphan the credential-bearing
+    long-lived ACP child.
     """
     env = grokcli._minimal_env(home, binary)
     argv = build_acp_stdio_argv(
@@ -96,21 +147,26 @@ def spawn_acp_child(
         web_access=web_access,
     )
     try:
-        proc = subprocess.Popen(
-            argv,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,  # amendment 4: drop or redact child stderr
-            cwd=str(worktree.path),
-            env=env,
-            **platformsupport.spawn_kwargs_new_group(),
-        )
-    except OSError as exc:
-        raise GrokWrapperError(
-            "acp-failure",
-            "could not spawn grok agent stdio: {}".format(exc),
-            {"binary": str(binary)},
-        ) from exc
+        with grokcli._sigterm_blocked():
+            try:
+                proc = subprocess.Popen(
+                    argv,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,  # amendment 4: drop or redact child stderr
+                    cwd=str(worktree.path),
+                    env=env,
+                    **platformsupport.spawn_kwargs_new_group(),
+                )
+            except OSError as exc:
+                raise GrokWrapperError(
+                    "acp-failure",
+                    "could not spawn grok agent stdio: {}".format(exc),
+                    {"binary": str(binary)},
+                ) from exc
+            register_active_child(proc)
+    except GrokWrapperError:
+        raise
     return proc
 
 
@@ -159,21 +215,28 @@ def assert_start_parity(
             )
 
 
-def kill_recorded_child(doc: dict) -> None:
+def kill_recorded_child(doc: dict, *, proc: Any = None) -> None:
     """Kill the peer.json-recorded ACP child ONLY on positively-confirmed identity.
 
     Fail safe: a kill sends SIGKILL to a whole process group, so unless the
     recorded start-token is present AND still matches the live pid's token, do
     nothing - never kill a pid we cannot prove is our child (it may be recycled
-    to an unrelated process). Best-effort; never raises.
+    to an unrelated process). Best-effort; never raises. When ``proc`` is the
+    live Popen (or after a confirmed pid kill), unregister from the SIGTERM
+    active-process registry so terminate_active_processes does not retain a
+    stale handle.
     """
     child = doc.get("child") or {}
     child_pid = child.get("pid")
     child_token = child.get("startToken")
     if not isinstance(child_pid, int) or not isinstance(child_token, str) or not child_token:
+        if proc is not None:
+            unregister_active_child(proc)
         return
     try:
         if not platformsupport.process_is_alive(child_pid):
+            if proc is not None:
+                unregister_active_child(proc)
             return
         current = platformsupport.process_start_token(child_pid)
         if current is None or current != child_token:
@@ -189,6 +252,7 @@ def kill_recorded_child(doc: dict) -> None:
             except OSError:
                 return
         platformsupport.kill_process_tree_by_pid(child_pid)
+        unregister_active_child(proc if proc is not None else child_pid)
     except Exception as exc:
         _log("kill_recorded_child", "could not kill child {}: {}".format(child_pid, exc))
 
@@ -222,6 +286,10 @@ def abort_peer_start(*, run_paths, progress, res, error) -> None:
             platformsupport.kill_process_tree(res.child)
         except Exception as exc:
             _log("abort_peer_start", "kill child failed: {}".format(exc))
+        try:
+            unregister_active_child(res.child)
+        except Exception as exc:
+            _log("abort_peer_start", "unregister child failed: {}".format(exc))
     if res.home is not None:
         try:
             destroy_private_home(res.home)

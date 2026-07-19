@@ -19,11 +19,12 @@ from typing import Any, List, Optional, Tuple
 from groklib import GrokWrapperError, log_stderr, platformsupport, runstate
 from groklib.envelope import validate_envelope
 from groklib.modes import peer_control
-from groklib.modes.peer_process import kill_recorded_child
+from groklib.modes.peer_process import kill_recorded_child, unregister_active_child
 from groklib.peer_doc import (
     TERMINAL_PEER_LIFECYCLES as _TERMINAL_PEER_LIFECYCLES,
     mutate_peer_doc,
     read_peer_doc_unlocked,
+    sync_prompts_handled_for_finalize,
     write_peer_doc_unlocked,
 )
 from groklib.progress import ProgressWriter
@@ -343,28 +344,38 @@ def kill_recorded_wrapper(doc: dict) -> bool:
 
 
 def wrapper_still_live(doc: dict) -> bool:
-    """True when peer.json wrapper pid is alive with matching startToken.
+    """True when peer.json wrapper pid must be treated as a live resident.
 
+    Fail closed for fallback finalize/kill:
+      - missing/empty startToken while PID is alive => live (never finalize/kill)
+      - unreadable current token while PID is alive => live
+      - exception during probe => live
     The current process is never treated as a foreign resident (peer-stop client
     fixtures and mis-records may reuse this pid; local finalize is owned here).
     """
     wrapper = doc.get("wrapper") or {}
     wrapper_pid = wrapper.get("pid")
-    wrapper_token = wrapper.get("startToken")
-    if not isinstance(wrapper_pid, int) or not isinstance(wrapper_token, str) or not wrapper_token:
+    if not isinstance(wrapper_pid, int) or isinstance(wrapper_pid, bool):
         return False
     try:
         if wrapper_pid == os.getpid():
             return False
         if not platformsupport.process_is_alive(wrapper_pid):
             return False
+    except Exception:
+        return True
+    wrapper_token = wrapper.get("startToken")
+    # Alive PID with missing/empty recorded token: cannot positively prove dead.
+    if not isinstance(wrapper_token, str) or not wrapper_token:
+        return True
+    try:
         current = platformsupport.process_start_token(wrapper_pid)
         if current is None:
             # Alive but token unreadable: treat as possibly live (fail closed).
             return True
         return current == wrapper_token
     except Exception:
-        return False
+        return True
 
 
 def ensure_wrapper_down_for_fallback(doc: dict) -> None:
@@ -414,6 +425,56 @@ def _lifecycle_for_envelope(env: dict) -> str:
     return "stopped" if env.get("status") == "success" else "failed"
 
 
+def _persist_minimal_terminal_failure(
+    run_paths: runstate.RunPaths,
+    *,
+    message: str,
+    detail: Optional[dict] = None,
+) -> Optional[dict]:
+    """Best-effort durable failure envelope so reclaim does not re-finalize forever."""
+    from groklib.envelope import failure_envelope
+    from groklib.modes import peer_finalize
+
+    try:
+        env = failure_envelope(
+            run_id=run_paths.run_id,
+            mode="peer-stop",
+            error_class="acp-failure",
+            message=message,
+            detail=detail or {"reason": "finalize-exception-no-durable"},
+            progressStreamPath=str(run_paths.progress_path),
+        )
+        if peer_finalize._terminalize_peer_run(run_paths, env):
+            return env
+    except Exception as exc:
+        _log(
+            "_persist_minimal_terminal_failure",
+            "could not persist minimal failure: {}".format(exc),
+        )
+    return None
+
+
+def _mark_terminal_if_durable(
+    run_paths: runstate.RunPaths,
+    env: dict,
+) -> Tuple[bool, Optional[dict]]:
+    """Mark stopped/failed only when a durable terminal envelope is on disk.
+
+    Returns ``(marked, durable_or_none)``. Never trusts the in-memory env alone:
+    a success/failure return without durable evidence must leave reclaimable
+    stopping ownership (or a separately-persisted minimal failure).
+    """
+    durable = load_durable_terminal_envelope(run_paths)
+    if durable is None:
+        return False, None
+    try:
+        mark_peer_lifecycle(run_paths, _lifecycle_for_envelope(durable))
+        return True, durable
+    except Exception as exc:
+        _log("_mark_terminal_if_durable", "post-durable lifecycle mark: {}".format(exc))
+        return False, durable
+
+
 def _finalize_and_mark(
     *,
     run_paths: runstate.RunPaths,
@@ -426,6 +487,16 @@ def _finalize_and_mark(
 ) -> dict:
     from groklib.modes import peer_finalize
 
+    # Sentinel enforcement uses max(safe disk, in-memory) under lock so a stale
+    # lower resident counter cannot skip the cwd proof after a successful prompt.
+    try:
+        peer_doc = sync_prompts_handled_for_finalize(run_paths, peer_doc)
+    except Exception as exc:
+        _log(
+            "_finalize_and_mark",
+            "promptsHandled sync before finalize: {}".format(exc),
+        )
+
     try:
         env = peer_finalize.finalize_peer_session(
             run_paths=run_paths,
@@ -436,16 +507,54 @@ def _finalize_and_mark(
             original_baseline=original_baseline,
             stage=stage,
         )
-    except Exception:
-        try:
-            mark_peer_lifecycle(run_paths, "failed")
-        except Exception as mark_exc:
-            _log("_finalize_and_mark", "could not mark failed: {}".format(mark_exc))
-        raise
-    try:
-        mark_peer_lifecycle(run_paths, _lifecycle_for_envelope(env))
     except Exception as exc:
-        _log("_finalize_and_mark", "post-finalize peer lifecycle: {}".format(exc))
+        # Exception/no durable: keep reclaimable stopping owner, or persist a
+        # minimal durable failure and mark failed under lock when possible.
+        durable = load_durable_terminal_envelope(run_paths)
+        if durable is None:
+            durable = _persist_minimal_terminal_failure(
+                run_paths,
+                message="peer finalize raised before durable terminal envelope: {}".format(
+                    exc
+                ),
+                detail={
+                    "reason": "finalize-exception",
+                    "errorType": type(exc).__name__,
+                },
+            )
+        if durable is not None:
+            try:
+                mark_peer_lifecycle(run_paths, _lifecycle_for_envelope(durable))
+            except Exception as mark_exc:
+                _log(
+                    "_finalize_and_mark",
+                    "could not mark failed after exception: {}".format(mark_exc),
+                )
+        # Leave lifecycle=stopping + stopOwner when no durable could be written so
+        # a later stopper can reclaim after grace (never poison as terminal).
+        raise
+    marked, durable = _mark_terminal_if_durable(run_paths, env)
+    if marked and durable is not None:
+        return durable
+    # Finalize returned an envelope but durable evidence is missing: do NOT mark
+    # peer.json terminal. Prefer returning a failure shape so callers do not treat
+    # undurable success as complete; keep stopping reclaimable.
+    if env.get("status") == "success":
+        _log(
+            "_finalize_and_mark",
+            "finalize returned success without durable envelope; refusing terminal mark",
+        )
+        from groklib.envelope import failure_envelope
+
+        return failure_envelope(
+            run_id=run_paths.run_id,
+            mode="peer-stop",
+            error_class="state-ownership-violation",
+            message="peer-stop finalize lacked durable terminal evidence; leaving reclaimable stopping",
+            detail={"reason": "terminalize-missing-after-finalize"},
+            progressStreamPath=str(run_paths.progress_path),
+            response=env.get("response") if isinstance(env.get("response"), dict) else None,
+        )
     return env
 
 
@@ -490,6 +599,10 @@ def stop_session(session: Any) -> dict:
             child.wait(timeout=5)
         except Exception:
             pass
+        try:
+            unregister_active_child(child)
+        except Exception as exc:
+            _log("stop_session", "unregister active child: {}".format(exc))
 
     stage = build_empty_stop_stage(
         run_id=session.run_id,

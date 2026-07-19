@@ -464,9 +464,12 @@ class PeerLifecycleTests(PeerTestBase):
         }
         # Record promptsHandled at each renew_lease (persist) call.
         persisted = []
-        session.renew_lease = mock.Mock(
-            side_effect=lambda: persisted.append(int(session.peer_doc.get("promptsHandled", 0)))
-        )
+
+        def _renew(*, require_prompts_persist=False):
+            del require_prompts_persist
+            persisted.append(int(session.peer_doc.get("promptsHandled", 0)))
+
+        session.renew_lease = mock.Mock(side_effect=_renew)
         session.acp = mock.Mock()
         session.acp.session_prompt = mock.Mock(
             side_effect=RuntimeError("ACP error after Grok ran tools")

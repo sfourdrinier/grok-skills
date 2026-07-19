@@ -391,12 +391,29 @@ class PeerFinalizeTests(PeerTestBase):
 
         def _fake_finalize(**kwargs):
             captured["baseline"] = kwargs.get("original_baseline")
-            return envelope_mod.build_envelope(
+            env = envelope_mod.build_envelope(
                 run_id=run_paths.run_id,
                 mode="peer-stop",
                 status="success",
                 response={"ok": True},
             )
+            # Terminal mark requires durable evidence (run_lifecycle SSOT).
+            durable = dict(env)
+            durable["mode"] = "peer-start"
+            rec = runstate.load_run_record(run_paths.run_id)
+            rev = int(rec.get("recordRevision", 0))
+            life = rec.get("lifecycle")
+            if life == "created":
+                rec = runstate.set_lifecycle(run_paths, rev, "running")
+                rev = int(rec["recordRevision"])
+                life = "running"
+            if life == "running":
+                rec = runstate.set_lifecycle(run_paths, rev, "finalizing")
+                rev = int(rec["recordRevision"])
+            runstate.persist_terminal_envelope(
+                run_paths, rev, durable, lifecycle="completed"
+            )
+            return env
 
         with mock.patch(
             "groklib.modes.peer_finalize.finalize_peer_session", side_effect=_fake_finalize

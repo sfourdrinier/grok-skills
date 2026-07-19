@@ -17,6 +17,8 @@ from groklib import platformsupport
 
 _PROTOCOL_VERSION = 1
 _JSONRPC = "2.0"
+# Shared hard cap for one ndjson control/ACP frame (peer_control imports this SSOT).
+MAX_FRAME_BYTES = 4 * 1024 * 1024
 
 
 def _log(function: str, message: str) -> None:
@@ -190,6 +192,13 @@ class AcpClient:
                 time.sleep(0.01)
                 continue
             self._rx_buf.extend(chunk)
+            if len(self._rx_buf) > MAX_FRAME_BYTES:
+                self._kill_tree()
+                raise GrokWrapperError(
+                    "acp-failure",
+                    "ACP frame too large (>{} bytes)".format(MAX_FRAME_BYTES),
+                    {"method": method, "maxFrameBytes": MAX_FRAME_BYTES},
+                )
         if b"\n" in self._rx_buf:
             idx = self._rx_buf.index(b"\n")
             line = bytes(self._rx_buf[: idx + 1])

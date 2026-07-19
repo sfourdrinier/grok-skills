@@ -143,3 +143,54 @@ def mark_peer_died_if_allowed(run_paths: "runstate.RunPaths") -> Tuple[dict, boo
         only_if_lifecycle_in=set(_DEATH_ALLOWED_FROM),
         skip_if_lifecycle_in=set(_STOP_OWNED_OR_TERMINAL),
     )
+
+
+def _as_nonneg_int(value: Any) -> Optional[int]:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+    return None
+
+
+def max_prompts_handled(memory_value: Any, disk_value: Any) -> int:
+    """Return the safe max of in-memory and on-disk promptsHandled counts."""
+    mem = _as_nonneg_int(memory_value)
+    disk = _as_nonneg_int(disk_value)
+    if mem is None and disk is None:
+        return 0
+    if mem is None:
+        return int(disk)
+    if disk is None:
+        return int(mem)
+    return max(mem, disk)
+
+
+def sync_prompts_handled_for_finalize(
+    run_paths: "runstate.RunPaths",
+    peer_doc: dict,
+) -> dict:
+    """Under lock: set peer_doc.promptsHandled to max(memory, disk).
+
+    Sentinel enforcement at stop must never use a stale lower in-memory count
+    after a concurrent renew raised the durable counter (or vice versa).
+    """
+    memory = peer_doc.get("promptsHandled")
+
+    def _mutator(doc: dict) -> Optional[dict]:
+        safe = max_prompts_handled(memory, doc.get("promptsHandled"))
+        current = _as_nonneg_int(doc.get("promptsHandled"))
+        if current is not None and current >= safe:
+            peer_doc["promptsHandled"] = current
+            return None
+        patched = dict(doc)
+        patched["promptsHandled"] = safe
+        peer_doc["promptsHandled"] = safe
+        return patched
+
+    try:
+        mutate_peer_doc(run_paths, _mutator)
+    except GrokWrapperError:
+        # Fall back to max with whatever is already in memory if peer.json is gone.
+        peer_doc["promptsHandled"] = max_prompts_handled(memory, None)
+    return peer_doc
