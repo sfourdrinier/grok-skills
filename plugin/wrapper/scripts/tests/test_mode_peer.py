@@ -303,6 +303,89 @@ class PeerLifecycleTests(PeerTestBase):
         self.assertNotIn(str(home), removed)
         self.assertTrue(home.exists())
 
+    def test_reaper_keeps_unknown_owner_with_stale_peer_lease_in_window(self) -> None:
+        # owner.pid missing/unreadable is UNKNOWN (possibly-active). A present but
+        # expired/malformed peer.lease must NOT force DEAD and reap inside the
+        # live-start window - only a parseable lease that proves the child is
+        # gone may shorten UNKNOWN liveness.
+        import json
+        import shutil
+        from unittest import mock
+
+        fake_temp_root = tempfile.mkdtemp(prefix="grok-cli-faketemp-unknown-peer-")
+        self.addCleanup(shutil.rmtree, fake_temp_root, True)
+        home = pathlib.Path(fake_temp_root) / "gs-unknown-stale-lease"
+        home.mkdir(mode=0o700)
+        os.chmod(str(home), 0o700)
+        runstate.write_owner_marker(home, runstate.new_run_id())
+        # No owner.pid => UNKNOWN owner liveness.
+        # Write an explicitly expired peer.lease (write_peer_lease clamps seconds >= 1).
+        lease_path = home / "peer.lease"
+        lease_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "childPid": os.getpid(),
+                    "childStartToken": platformsupport.process_start_token(os.getpid()),
+                    "leaseExpiresAt": time.time() - 10,
+                    "maxPeerLeaseSeconds": 3600,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        past = time.time() - (runstate.LIVE_START_STALE_HOME_MAX_AGE_SECONDS + 100)
+        os.utime(home, (past, past))
+        with mock.patch("tempfile.gettempdir", return_value=fake_temp_root):
+            removed = runstate.audit_stale_temp_homes(
+                runstate.LIVE_START_STALE_HOME_MAX_AGE_SECONDS
+            )
+        self.assertNotIn(str(home), removed)
+        self.assertTrue(home.exists())
+
+    def test_reaper_reaps_unknown_owner_when_peer_lease_proves_child_gone(self) -> None:
+        # Symmetric control: UNKNOWN owner + parseable peer.lease binding a dead
+        # child may shorten to DEAD and reap inside the live-start window.
+        import json
+        import shutil
+        from unittest import mock
+
+        fake_temp_root = tempfile.mkdtemp(prefix="grok-cli-faketemp-unknown-dead-child-")
+        self.addCleanup(shutil.rmtree, fake_temp_root, True)
+        home = pathlib.Path(fake_temp_root) / "gs-unknown-dead-child"
+        home.mkdir(mode=0o700)
+        os.chmod(str(home), 0o700)
+        runstate.write_owner_marker(home, runstate.new_run_id())
+        dead_proc = __import__("subprocess").Popen(["true"])
+        dead_proc.wait()
+        lease_path = home / "peer.lease"
+        lease_path.write_text(
+            json.dumps(
+                {
+                    "schemaVersion": 1,
+                    "childPid": dead_proc.pid,
+                    "childStartToken": "dead-child-token",
+                    "leaseExpiresAt": time.time() + 3600,
+                    "maxPeerLeaseSeconds": 3600,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        past = time.time() - (runstate.LIVE_START_STALE_HOME_MAX_AGE_SECONDS + 100)
+        os.utime(home, (past, past))
+        with mock.patch("tempfile.gettempdir", return_value=fake_temp_root):
+            removed = runstate.audit_stale_temp_homes(
+                runstate.LIVE_START_STALE_HOME_MAX_AGE_SECONDS
+            )
+        self.assertIn(str(home), removed)
+        self.assertFalse(home.exists())
+
+
     def test_session_update_chunk_redacted_in_progress_and_envelope(self) -> None:
         secret = _split_bearer_fixture()
         self.fake_acp.chunk_secret = secret

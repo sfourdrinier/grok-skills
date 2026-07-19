@@ -196,6 +196,20 @@ pipeline; live evidence in docs/checklists/2.0-live-smoke-ledger.md.
 
 ### Fixed / hardened (Phase 7 - final review remediation)
 
+- **Abort re-diff fallback for protected deny paths:** when hardened-direct abort
+  rollback cannot trust `repo_change_fingerprint` (e.g. corrupted `.git/HEAD`),
+  compare protected snapshot entries against disk (and still run the git-dir
+  guard) so deny-listed files like `.env` are restored/reported instead of a
+  silent clean summary after `.git` restore alone.
+- **Unknown peer-home liveness:** a present but expired/malformed `peer.lease`
+  no longer forces UNKNOWN `owner.pid` liveness to DEAD. Only a parseable lease
+  that proves the ACP child is gone may shorten UNKNOWN and reap inside the
+  live-start window.
+- **Symlinked session roots refused:** `archive_session` lstats
+  `<home>/.grok/sessions` and refuses when the sessions root itself is a
+  symlink, so a poisoned root cannot archive arbitrary readable directories into
+  run state (per-entry ignore still covers children under a real directory).
+
 - **Direct protected git scope (nested / modules / in-workspace gitfile):**
   snapshot, restore, and git-dir guard cover root `.git`, nested workspace
   gitdirs (`vendor/.../.git`), `.git/modules/**`, and in-workspace gitfile

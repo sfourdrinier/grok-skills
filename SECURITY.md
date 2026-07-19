@@ -221,7 +221,10 @@ Each live Grok spawn may leave a session store under the private home at
 and root `session_search.sqlite`). Before private-home destroy, the wrapper
 copies that whole tree into the run directory at
 `runs/<runId>/session/sessions/` (dirs `0700`, files `0600`) and writes
-`session/session-meta.json` with the argv session id. The archive holds
+`session/session-meta.json` with the argv session id. The archive refuses a
+symlinked sessions **root** (`lstat`; not followed) and still skips symlinked
+entries under a real sessions directory, so a poisoned private home cannot
+archive arbitrary readable directories into run state. The archive holds
 **operator prompt / conversation content** (task text and related model state).
 It is run-dir private state only - never emitted on stdout - so envelope secret
 redaction does not apply to the on-disk archive. Treat the state root as

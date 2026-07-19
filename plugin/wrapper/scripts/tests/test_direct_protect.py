@@ -878,6 +878,28 @@ class DirectAbortSweepTests(unittest.TestCase):
         self.assertIn(".git/modules/sub/hooks/pre-commit", res["restored"])
 
 
+    def test_sweep_restores_env_when_rediff_fails_after_head_corruption(self) -> None:
+        # Re-diff can fail when Grok corrupts .git/HEAD; git-dir guard still restores
+        # HEAD, but deny-listed .env must not stay dirty with a silent clean summary.
+        from groklib.modes.direct_finalize import restore_protected_on_abort
+
+        env = self.repo / ".env"
+        original = "KEEP=1\n"
+        env.write_text(original, encoding="utf-8")
+        base_fp, base_git = self._baseline()
+        snap = direct_protect.snapshot_protected_paths(self.repo, self.run_dir)
+        original_head = (self.repo / ".git" / "HEAD").read_text(encoding="utf-8")
+        env.write_text("KEEP=1\nLEAK=yes\n", encoding="utf-8")
+        (self.repo / ".git" / "HEAD").write_text("not-a-valid-ref\n", encoding="utf-8")
+        res = restore_protected_on_abort(self.repo, base_fp, base_git, snap)
+        self.assertEqual(env.read_text(encoding="utf-8"), original)
+        self.assertIn(".env", res["restored"])
+        self.assertEqual(
+            (self.repo / ".git" / "HEAD").read_text(encoding="utf-8"), original_head
+        )
+        self.assertIn(".git/HEAD", res["restored"])
+
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -69,6 +69,27 @@ class TestSessionStore(unittest.TestCase):
             self.assertIsNone(session_store.load_session_meta(run_dir))
             self.assertFalse(session_store.seed_sessions(run_dir, home))
 
+    def test_archive_refuses_symlinked_sessions_root(self) -> None:
+        # A poisoned ~/.grok/sessions root that is itself a symlink must not be
+        # followed into the retained run archive (per-entry ignore only covers
+        # children, not the root).
+        with tempfile.TemporaryDirectory() as td:
+            root = pathlib.Path(td)
+            home = root / "home"
+            outside = root / "outside-secret"
+            outside.mkdir()
+            (outside / "stolen.txt").write_text("secret-material\n", encoding="utf-8")
+            grok = home / ".grok"
+            grok.mkdir(parents=True)
+            (grok / "sessions").symlink_to(outside, target_is_directory=True)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            meta = session_store.archive_session(home, run_dir, "abc")
+            self.assertIsNone(meta)
+            archived = run_dir / "session" / "sessions"
+            self.assertFalse(archived.exists())
+            self.assertFalse((run_dir / "session" / "sessions" / "stolen.txt").exists())
+
 
 def _make_mode_run(**overrides) -> ModeRun:
     fields = dict(

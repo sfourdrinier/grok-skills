@@ -4,6 +4,10 @@
 # (<home>/.grok/sessions) into the run directory, and seed of that archive
 # into a fresh private home for continuation runs.
 #
+# Symlinked sessions roots are refused (lstat) so a poisoned root cannot
+# archive arbitrary readable directories into run state; per-entry ignore
+# still drops symlinks under a real sessions directory.
+#
 # The archive contains MODEL CONVERSATION CONTENT: operator task text in
 # prompt_history.jsonl, plus per-session state under cwd-bucketed UUID
 # dirs and session_search.sqlite at the sessions root. It inherits the
@@ -18,6 +22,7 @@ import json
 import os
 import pathlib
 import shutil
+import stat
 from typing import List, Optional
 
 from groklib import log_stderr
@@ -79,7 +84,24 @@ def archive_session(
     """
     try:
         src = pathlib.Path(home_dir) / ".grok" / _SESSIONS_NAME
-        if not src.is_dir():
+        try:
+            src_lstat = src.lstat()
+        except OSError:
+            _log(
+                "archive_session",
+                "no sessions store under {}; skipping archive".format(home_dir),
+            )
+            return None
+        if stat.S_ISLNK(src_lstat.st_mode):
+            # Refuse a symlinked sessions ROOT. is_dir() would follow it and
+            # copytree would archive the target; per-entry ignore only skips
+            # symlinks under the root, not the root itself.
+            _log(
+                "archive_session",
+                "sessions root is a symlink under {}; refusing archive".format(home_dir),
+            )
+            return None
+        if not stat.S_ISDIR(src_lstat.st_mode):
             _log(
                 "archive_session",
                 "no sessions store under {}; skipping archive".format(home_dir),

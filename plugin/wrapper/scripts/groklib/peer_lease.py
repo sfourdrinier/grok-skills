@@ -79,5 +79,36 @@ def peer_lease_keeps_home_alive(candidate: pathlib.Path) -> bool:
     return True
 
 
+def peer_lease_proves_child_gone(candidate: pathlib.Path) -> bool:
+    """True when a parseable peer.lease proves the ACP child process is gone.
+
+    Used to shorten UNKNOWN owner liveness only when the lease is readable and
+    binds a child pid that is dead (or recycled onto another process). A missing,
+    unreadable, malformed, or merely-expired lease must NOT count as proof of
+    death - an idle peer with a failed owner.pid write could otherwise be reaped
+    inside the live-start window.
+    """
+    lease_path = candidate / PEER_LEASE_FILENAME
+    if not lease_path.is_file():
+        return False
+    try:
+        with open(lease_path, "r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+    child_pid = payload.get("childPid")
+    if not isinstance(child_pid, int) or isinstance(child_pid, bool):
+        return False
+    if not platformsupport.process_is_alive(child_pid):
+        return True
+    stored_token = payload.get("childStartToken")
+    current_token = platformsupport.process_start_token(child_pid)
+    if isinstance(stored_token, str) and current_token is not None and stored_token != current_token:
+        return True
+    return False
+
+
 def peer_lease_present(candidate: pathlib.Path) -> bool:
     return (candidate / PEER_LEASE_FILENAME).is_file()

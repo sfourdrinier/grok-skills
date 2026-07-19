@@ -28,6 +28,8 @@
 # rewrites on ordinary reads like `git status`); loose .git/objects are not
 # tracked (content-addressed, inert until a watched ref points at them). Reads
 # of .env/keys are NOT blocked (D-SECRETREAD gap).
+# Abort rollback falls back to snapshot-vs-disk when re-diff is untrusted
+# (e.g. corrupted .git/HEAD) so deny paths are never silently left dirty.
 # Backlog: probe seatbelt write-deny subpaths for true prevention.
 
 import errno
@@ -611,15 +613,44 @@ def restore_protected_on_abort(
     build-gate / requiredValidation command writes a protected path then fails,
     the credential/.git writes would be left live. This re-diffs the tree + the
     .git guard and restores every protected offender from the pre-run snapshot.
+    When the full changed-set re-diff is unavailable/untrusted, compare protected
+    snapshot entries against disk (and still run the git-dir guard) so deny-listed
+    paths are never silently left dirty with a clean summary.
     Idempotent: after a protected-path-write already restored, the re-diff finds
     nothing to restore. Never raises (returns a summary; logs failures).
     """
     offenders: Set[str] = set()
+    re_diff_ok = False
     try:
         after_fp = worktree_escape.repo_change_fingerprint(repo_root)
         offenders |= {p for p in _changed_paths(baseline_fp, after_fp) if path_matches_deny(p)}
+        re_diff_ok = True
     except Exception as exc:
         _log("restore_protected_on_abort", "changed-set re-diff failed: {}".format(exc))
+        # Re-diff untrusted: compare protected snapshot against disk so deny-listed
+        # checkout files (e.g. .env) are still restored/reported instead of silent clean.
+        if protect_snapshot is not None:
+            try:
+                offenders |= set(
+                    direct_protect.protected_paths_diverged_from_snapshot(
+                        repo_root, protect_snapshot
+                    )
+                )
+            except Exception as snap_exc:
+                _log(
+                    "restore_protected_on_abort",
+                    "snapshot disk compare failed: {}".format(snap_exc),
+                )
+                # Last resort: every snapshotted protected key is suspect.
+                offenders |= {
+                    p for p in protect_snapshot.entries.keys() if path_matches_deny(p)
+                    or direct_protect.is_snapshot_scope(p)
+                }
+        else:
+            _log(
+                "restore_protected_on_abort",
+                "no snapshot for deny-path fallback after re-diff failure",
+            )
     try:
         baseline_roots = None
         if protect_snapshot is not None and protect_snapshot.git_roots:
@@ -628,6 +659,13 @@ def restore_protected_on_abort(
         offenders |= set(_changed_paths(baseline_git_fp, after_git))
     except Exception as exc:
         _log("restore_protected_on_abort", "git-dir guard re-scan failed: {}".format(exc))
+        # If git guard also fails and re-diff already failed, snapshot compare above
+        # still covers snapshotted sensitive git keys; keep re_diff_ok for logs.
+    if not re_diff_ok:
+        _log(
+            "restore_protected_on_abort",
+            "using snapshot/disk compare fallback offenders={}".format(sorted(offenders)),
+        )
 
     ordered = sorted(offenders)
     if not ordered:

@@ -595,7 +595,7 @@ def list_run_ids() -> List[str]:
 
 from groklib.peer_lease import (  # noqa: E402
     peer_lease_keeps_home_alive as _peer_lease_keeps_home_alive,
-    peer_lease_present as _peer_lease_present,
+    peer_lease_proves_child_gone as _peer_lease_proves_child_gone,
     write_peer_lease,
 )
 
@@ -715,18 +715,15 @@ def _is_removable_stale_home(candidate: pathlib.Path, now: float, max_age_second
         _log_stderr("_is_removable_stale_home", "skipping {} (peer lease live)".format(candidate))
         return False
     liveness = _home_owner_liveness(candidate)
-    # A LIVE owner is never reaped, regardless of peer-lease staleness: the lease
-    # is a keepalive hint, NOT evidence of death (review). A long-idle peer whose
-    # resident peer-start wrapper is still alive would otherwise have its live
-    # credential home + control socket deleted once the lease expired.
+    # LIVE owner is never reaped (lease is keepalive, not death evidence).
     if liveness == _LIVENESS_ALIVE:
         _log_stderr("_is_removable_stale_home", "skipping {} (owner is alive)".format(candidate))
         return False
-    # Owner is NOT alive: a stale/expired peer lease confirms definitely-dead
-    # (rather than possibly-active-unknown), so it becomes reapable in-window.
-    if _peer_lease_present(candidate) and not _peer_lease_keeps_home_alive(candidate):
+    # UNKNOWN owner: only a parseable peer.lease that proves the child is gone
+    # may shorten to DEAD (expired/malformed lease is not death evidence).
+    if liveness == _LIVENESS_UNKNOWN and _peer_lease_proves_child_gone(candidate):
         liveness = _LIVENESS_DEAD
-        _log_stderr("_is_removable_stale_home", "peer lease stale/dead for {}".format(candidate))
+        _log_stderr("_is_removable_stale_home", "peer lease proves child gone for {}".format(candidate))
     reap_age_threshold = (
         max_age_seconds if liveness == _LIVENESS_DEAD else UNKNOWN_LEASE_HARD_REAP_AGE_SECONDS
     )

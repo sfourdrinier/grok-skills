@@ -364,6 +364,127 @@ def snapshot_protected_paths(
     )
 
 
+def protected_paths_diverged_from_snapshot(
+    repo_root: pathlib.Path,
+    snapshot: ProtectedSnapshot,
+) -> List[str]:
+    """Logical protected keys whose on-disk state diverges from ``snapshot``.
+
+    Fallback when a full tree re-diff is unavailable or untrusted (for example
+    corrupted ``.git/HEAD``). Compares snapshotted content/mode/symlink targets
+    and treats post-snapshot plants under the protected inventory as changed.
+    Never silently reports clean for covered deny/sensitive paths.
+    """
+    root = pathlib.Path(repo_root)
+    baseline_roots = dict(snapshot.git_roots or {})
+    merged: Dict[str, pathlib.Path] = {
+        pfx: pathlib.Path(abs_s) for pfx, abs_s in baseline_roots.items()
+    }
+    try:
+        for pfx, abs_dir in discover_workspace_git_roots(root):
+            key = _posix_rel(pfx).rstrip("/")
+            if key and key not in merged:
+                merged[key] = abs_dir
+    except GrokWrapperError as exc:
+        _log(
+            "protected_paths_diverged_from_snapshot",
+            "git root rediscovery failed: {}".format(exc),
+        )
+
+    def _abs_for(rel: str) -> pathlib.Path:
+        return resolve_protected_abs_path(
+            root,
+            rel,
+            git_roots=merged,
+            abs_paths=snapshot.abs_paths or {},
+        )
+
+    def _on_disk_mode(path: pathlib.Path) -> Optional[int]:
+        try:
+            return stat.S_IMODE(path.lstat().st_mode)
+        except OSError:
+            return None
+
+    diverged: Set[str] = set()
+
+    for rel, entry in snapshot.entries.items():
+        rel = _posix_rel(rel)
+        if not rel:
+            continue
+        abs_path = _abs_for(rel)
+        try:
+            exists = abs_path.exists() or abs_path.is_symlink()
+        except OSError:
+            exists = False
+        if not entry.existed:
+            if exists:
+                diverged.add(rel)
+            continue
+        if not exists:
+            diverged.add(rel)
+            continue
+        if entry.symlink_target is not None:
+            try:
+                if not abs_path.is_symlink() or os.readlink(str(abs_path)) != entry.symlink_target:
+                    diverged.add(rel)
+            except OSError:
+                diverged.add(rel)
+            continue
+        if not entry.snapshotted:
+            # Unsnapshottable: compare size + mode; any mismatch is an offender so
+            # restore can report unrestored instead of silent clean.
+            try:
+                lst = abs_path.lstat()
+            except OSError:
+                diverged.add(rel)
+                continue
+            if not stat.S_ISREG(lst.st_mode):
+                diverged.add(rel)
+                continue
+            if lst.st_size != entry.size or (
+                entry.mode and stat.S_IMODE(lst.st_mode) != entry.mode
+            ):
+                diverged.add(rel)
+            continue
+        src = snapshot.snapshot_dir / _snapshot_store_rel(rel, abs_path)
+        if not src.is_file():
+            legacy = snapshot.snapshot_dir / rel
+            if legacy.is_file():
+                src = legacy
+        try:
+            if not src.is_file():
+                diverged.add(rel)
+                continue
+            if abs_path.is_symlink() or not abs_path.is_file():
+                diverged.add(rel)
+                continue
+            if abs_path.read_bytes() != src.read_bytes():
+                diverged.add(rel)
+                continue
+            mode = _on_disk_mode(abs_path)
+            if entry.mode and mode is not None and mode != entry.mode:
+                diverged.add(rel)
+        except OSError:
+            diverged.add(rel)
+
+    # Plants created after the snapshot (not in the pre-run index).
+    try:
+        live_map = iter_existing_protected_path_map(root)
+    except Exception as exc:
+        _log(
+            "protected_paths_diverged_from_snapshot",
+            "live protected inventory failed: {}".format(exc),
+        )
+        live_map = {}
+    for rel in live_map:
+        key = _posix_rel(rel)
+        if key and key not in snapshot.entries:
+            diverged.add(key)
+
+    return sorted(diverged)
+
+
+
 def restore_protected_paths(
     repo_root: pathlib.Path,
     snapshot: ProtectedSnapshot,
