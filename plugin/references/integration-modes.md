@@ -145,18 +145,24 @@ Per `(runId, targetKey)`:
    numstat makes headers **load-bearing**: empty/unparseable headers or a
    numstat path not corroborated by headers => **`blocked-patch-headers`**
    (no numstat-only fallback). Pure renames put **both** old and new paths in
-   the dirty-overlap set so a dirty source cannot fail the guard open.
-5. **Dirty overlap** - any touch path already dirty in the operator checkout =>
+   the touch set (dirty-overlap + protected-path) so a dirty or protected
+   source/destination cannot fail open.
+5. **Protected-path pre-block** - any touch-set path matching the shared
+   deny-write globs ([deny-write-globs.json](deny-write-globs.json); same list
+   Python direct-mode finalize uses) => `blocked-protected-path` **before**
+   `git apply --check` / apply. Tree unchanged. Pre-apply refuse only - not
+   direct-mode snapshot/rollback and not a `protected-path-write` class.
+6. **Dirty overlap** - any touch path already dirty in the operator checkout =>
    `blocked-dirty-overlap` (operator commits/stashes, then re-runs).
-6. **`git apply --check --binary`** then **`git apply --binary`**; on apply
+7. **`git apply --check --binary`** then **`git apply --binary`**; on apply
    failure reverse with `git apply -R` when possible (`rolled-back` /
    `manual-needed`).
 
 Published outcomes include: `already-applied`, `applied`,
 `blocked-dirty-status`, `blocked-numstat`, `blocked-patch-headers`,
-`blocked-dirty-overlap`, `blocked-apply-check`, `rolled-back`,
-`marker-persist-failure`, `manual-needed`, plus caller-owned readiness /
-consent / integrity failures.
+`blocked-protected-path`, `blocked-dirty-overlap`, `blocked-apply-check`,
+`rolled-back`, `marker-persist-failure`, `manual-needed`, plus caller-owned
+readiness / consent / integrity failures.
 
 ### `implement` always forces worktree + verify-only
 

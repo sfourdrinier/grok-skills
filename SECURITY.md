@@ -78,8 +78,10 @@ over. It is **not** a complete sandbox against an adversarial model.
   the **shared auto/peer apply spine** (exclusive apply lock + durable applied
   marker, best-effort patch integrity recheck under trusted local state,
   NUL-safe dirty status, numstat + header-union touch set with pure-rename both
-  sides and `blocked-patch-headers` fail-closed, dirty-overlap, `git apply
-  --check`, apply, reverse-on-failure - see
+  sides and `blocked-patch-headers` fail-closed, protected-path pre-block via
+  [deny-write-globs.json](plugin/references/deny-write-globs.json)
+  (`blocked-protected-path` before check/apply; tree unchanged), dirty-overlap,
+  `git apply --check`, apply, reverse-on-failure - see
   [integration-modes.md](plugin/references/integration-modes.md) Shared apply
   spine): `direct` and `auto` both apply the verified ready patch (`direct`
   additionally requires per-repo direct consent); `review` / `worktree` retain

@@ -31,6 +31,7 @@ import {
   clearApplyMarker,
   acquireApplyLock,
 } from "./integrate-apply-state.mjs";
+import { protectedPathsIn } from "./deny-write.mjs";
 
 /**
  * Resolve runs/<runId>/artifacts/implementation.patch under the wrapper state
@@ -150,6 +151,12 @@ export {
   clearApplyMarker,
   acquireApplyLock,
 } from "./integrate-apply-state.mjs";
+export {
+  pathMatchesDeny,
+  protectedPathsIn,
+  denyWriteGlobs,
+  DENY_WRITE_SSOT_PATH,
+} from "./deny-write.mjs";
 
 /**
  * True when the working tree still contains the applied patch (reverse --check
@@ -213,12 +220,14 @@ function finalizeAppliedWithMarker({
 
 /**
  * Shared dirty-guard + apply spine used by both auto and peer.
- * Status fail-closed, numstat fail-closed, header-union fail-closed, dirty-overlap,
- * apply --check, apply, reverse rollback. Callers keep readiness / consent /
- * target identity / patch-integrity gates outside this helper.
+ * Status fail-closed, numstat fail-closed, header-union fail-closed,
+ * protected-path pre-block, dirty-overlap, apply --check, apply, reverse
+ * rollback. Callers keep readiness / consent / target identity /
+ * patch-integrity gates outside this helper.
  *
  * Published outcomes: blocked-dirty-status, blocked-numstat, blocked-patch-headers,
- * blocked-dirty-overlap, blocked-apply-check, applied, rolled-back, manual-needed.
+ * blocked-protected-path, blocked-dirty-overlap, blocked-apply-check, applied,
+ * rolled-back, manual-needed.
  *
  * @param {object} opts
  * @param {string} opts.targetRepo absolute target workspace root
@@ -232,6 +241,7 @@ function finalizeAppliedWithMarker({
  *   reason?: string,
  *   patchPath?: string,
  *   overlap?: string[],
+ *   protectedPaths?: string[],
  *   preStatus?: string,
  *   postStatus?: string,
  *   checkStderr?: string,
@@ -282,6 +292,7 @@ function applyPatchWithGuards({
   // numstat is destination-biased on pure renames; union diff --git / rename-copy
   // from/to sides so a dirty SOURCE cannot fail the overlap guard open. Header
   // read/parse failure after successful numstat fails closed (never numstat-only).
+  // Same full touch set feeds the protected-path pre-block (rename source/dest).
   const touch = loadPatchTouchPaths(patchPath, numstat.stdout);
   if (!touch.ok) {
     stderrLine(
@@ -295,6 +306,38 @@ function applyPatchWithGuards({
     };
   }
   const patchPaths = touch.paths;
+  // Pre-apply refuse: any deny-listed touched path blocks before apply --check.
+  // Shared SSOT with direct-mode deny scan (plugin/references/deny-write-globs.json).
+  // Pre-block only - no snapshot/rollback; tree stays unchanged.
+  let protectedPaths;
+  try {
+    protectedPaths = protectedPathsIn(patchPaths);
+  } catch (err) {
+    stderrLine(
+      `${tag} BLOCKED: deny-write SSOT unavailable; refuse apply (${err.message})`
+    );
+    return {
+      ok: false,
+      outcome: "blocked-protected-path",
+      reason: "deny-write SSOT unavailable; refuse apply",
+      patchPath,
+      preStatus: preStatus.stdout,
+    };
+  }
+  if (protectedPaths.length > 0) {
+    stderrLine(
+      `${tag} BLOCKED: patch touches protected path(s): ${protectedPaths.join(", ")}. ` +
+        `No apply attempted; tree unchanged.`
+    );
+    return {
+      ok: false,
+      outcome: "blocked-protected-path",
+      reason: "patch touches deny-listed protected path(s)",
+      patchPath,
+      protectedPaths,
+      preStatus: preStatus.stdout,
+    };
+  }
   const overlap = patchPaths.filter((p) => dirtyPaths.has(p)).sort();
   if (overlap.length > 0) {
     stderrLine(

@@ -259,10 +259,16 @@ post-smoke (see live-smoke ledger).
 
 - **Shared fail-closed apply spine (auto + peer):** one dirty-guard ladder for
   both `code --integration auto` and ready peer-stop apply - `git status
-  --porcelain -z` fail-closed, `git apply --numstat` fail-closed, dirty-overlap
-  block, `git apply --check --binary`, apply, reverse-on-failure. Outcomes
-  include `blocked-dirty-status` / `blocked-numstat` / `blocked-dirty-overlap`
-  (no blind apply when status cannot be trusted).
+  --porcelain -z` fail-closed, `git apply --numstat` fail-closed (touch set =
+  numstat union diff/rename headers), **protected-path pre-block** before
+  `git apply --check`/`apply` (`blocked-protected-path`; tree unchanged;
+  shared deny-write SSOT
+  [deny-write-globs.json](plugin/references/deny-write-globs.json) with Python
+  direct finalize - not snapshot/rollback), dirty-overlap block,
+  `git apply --check --binary`, apply, reverse-on-failure. Outcomes include
+  `blocked-dirty-status` / `blocked-numstat` / `blocked-protected-path` /
+  `blocked-dirty-overlap` (no blind apply when status cannot be trusted; no
+  land of deny-listed paths).
 - **Patch integrity recheck before apply:** after apply-time handoff ready,
   auto rechecks `implementation.patch` bytes/size/hash against the revalidated
   manifest (`verifyPatchAgainstManifest`, same SSOT as peer) and fails closed

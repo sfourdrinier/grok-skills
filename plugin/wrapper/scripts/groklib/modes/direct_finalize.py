@@ -30,7 +30,6 @@
 # of .env/keys are NOT blocked (D-SECRETREAD gap).
 # Backlog: probe seatbelt write-deny subpaths for true prevention.
 
-import fnmatch
 import hashlib
 import os
 import pathlib
@@ -42,37 +41,16 @@ from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 from groklib import GrokWrapperError, log_stderr
 from groklib import worktree as worktree_mod
 from groklib import worktree_escape
+from groklib.deny_write import DENY_WRITE_GLOBS, path_matches_deny
 from groklib.implementation_contract import normalize_repo_relative, path_in_scopes
 from groklib.modes import code as code_mode
 from groklib.modes import code_continue
 from groklib.modes import direct_protect
 from groklib.modes._direct import DirectFinalizeStage
 
-# Paths Grok must never write in direct mode (operator's real .git/.env/keys/hooks
-# sit INSIDE the sandbox writable root). Matched via fnmatch on POSIX-normalized
-# repo-relative paths, plus a first-component check for ".git".
-DENY_WRITE_GLOBS: Tuple[str, ...] = (
-    ".git",
-    ".git/**",
-    ".env",
-    ".env.*",
-    ".env/**",
-    "*.pem",
-    "*.key",
-    "*.p12",
-    "*.p8",
-    ".git/hooks/**",
-    ".githooks/**",
-    # Credential/secret files that carry tokens or private keys.
-    "id_rsa",
-    "id_dsa",
-    "id_ecdsa",
-    "id_ed25519",
-    ".netrc",
-    ".npmrc",
-    ".envrc",
-    "credentials.json",
-)
+# Re-export SSOT for historical importers (tests, direct_protect late imports).
+# Data + match algorithm live in groklib.deny_write /
+# plugin/references/deny-write-globs.json.
 
 # Cap hooks/refs fingerprint walks (SSOT: direct_protect.MAX_GIT_TREE_WALK_FILES)
 # so a pathological tree cannot stall finalize; over-cap still detects
@@ -82,34 +60,6 @@ _MAX_GIT_TREE_FILES = direct_protect.MAX_GIT_TREE_WALK_FILES
 
 def _log(function: str, message: str) -> None:
     log_stderr("modes.direct_finalize", function, message)
-
-
-def _posix_rel(path: str) -> str:
-    """POSIX-normalize a repo-relative path WITHOUT stripping a leading dotfile name.
-
-    Do not use ``str.lstrip('./')``: that treats '.' as a character class and
-    would turn ``.env`` into ``env`` and ``.git/config`` into ``git/config``.
-    """
-    norm = path.replace("\\", "/")
-    while norm.startswith("./"):
-        norm = norm[2:]
-    return norm
-
-
-def path_matches_deny(path: str) -> bool:
-    """True when a repo-relative path matches DENY_WRITE_GLOBS or any workspace .git."""
-    norm = _posix_rel(path)
-    if not norm:
-        return False
-    parts = [p for p in norm.split("/") if p]
-    # Any path component named .git (root, nested vendor repo, submodule gitdir).
-    if ".git" in parts:
-        return True
-    base = parts[-1] if parts else ""
-    for pattern in DENY_WRITE_GLOBS:
-        if fnmatch.fnmatch(norm, pattern) or fnmatch.fnmatch(base, pattern):
-            return True
-    return False
 
 
 # Hash git files up to this size; above it, fall back to a stat signature (refs,

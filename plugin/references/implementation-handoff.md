@@ -135,10 +135,13 @@ Mode-aware integrate (canonical:
 3. Dirty overlap inventory on target paths (`git status --porcelain -z`)
 4. Explicit patch integrity recheck: on-disk patch bytes/size/sha still match the
    handoff manifest (same integrity gate auto/peer re-run before apply)
-5. `git apply --check --binary path/to/implementation.patch`
-6. Explicit apply only with operator intent
-7. Re-run project validation on parent
-8. Record runId + patch sha256
+5. Refuse if the patch touch set includes a protected path (same deny-write SSOT
+   auto/peer use: [deny-write-globs.json](deny-write-globs.json) - `.env` /
+   keys / `.git/**` / credentials, including rename source or destination)
+6. `git apply --check --binary path/to/implementation.patch`
+7. Explicit apply only with operator intent
+8. Re-run project validation on parent
+9. Record runId + patch sha256
 
 **Never** auto-commit, merge, cherry-pick, or push from this plugin in any mode.
 

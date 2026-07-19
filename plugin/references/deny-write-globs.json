@@ -1,0 +1,250 @@
+{
+  "schemaVersion": 1,
+  "title": "Protected write-deny globs (direct finalize + auto/peer apply pre-block)",
+  "description": "Single-source deny-write glob list and golden match vectors for Python groklib.deny_write / direct_finalize.path_matches_deny and Node scripts/lib/deny-write.mjs. Match algorithm: POSIX-normalize by stripping a leading ./ prefix only (never strip a leading dotfile name), treat any path that has a path component named .git as denied (root, nested vendor/lib/.git, modules), then fnmatch each glob against the full normalized path OR the basename. Python uses stdlib fnmatch (where * matches /). Node mirrors that star-matches-slash semantics. Used by direct post-run deny scan/rollback and by the shared auto/peer apply spine pre-block (blocked-protected-path before git apply --check/apply). Do not copy this list into code.",
+  "globs": [
+    ".git",
+    ".git/**",
+    ".env",
+    ".env.*",
+    ".env/**",
+    "*.pem",
+    "*.key",
+    "*.p12",
+    "*.p8",
+    ".git/hooks/**",
+    ".githooks/**",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    ".netrc",
+    ".npmrc",
+    ".envrc",
+    "credentials.json"
+  ],
+  "matchVectors": [
+    {
+      "id": "env-root",
+      "path": ".env",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "env-local",
+      "path": ".env.local",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "env-production",
+      "path": ".env.production",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "env-dir-nested",
+      "path": ".env/secret",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "env-subdir-file",
+      "path": "subdir/.env",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "env-subdir-local",
+      "path": "subdir/.env.local",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "dot-slash-env",
+      "path": "./.env",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "git-root",
+      "path": ".git",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "git-config",
+      "path": ".git/config",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "git-index",
+      "path": ".git/index",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "git-hooks-nested",
+      "path": ".git/hooks/vendor/pre-commit",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "git-refs",
+      "path": ".git/refs/heads/main",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "nested-vendor-git-hook",
+      "path": "vendor/lib/.git/hooks/pre-commit",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "nested-vendor-git-head",
+      "path": "vendor/lib/.git/HEAD",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "git-modules-hook",
+      "path": ".git/modules/sub/hooks/pre-commit",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "githooks-pre-push",
+      "path": ".githooks/pre-push",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "id-rsa-root",
+      "path": "id_rsa",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "id-rsa-nested",
+      "path": "keys/id_rsa",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "id-ed25519",
+      "path": "id_ed25519",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "id-ecdsa-nested",
+      "path": "sub/dir/id_ecdsa",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "pem-nested",
+      "path": "pkg/server.pem",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "key-nested",
+      "path": "keys/id_rsa.key",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "p12-root",
+      "path": "bundle.p12",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "p8-root",
+      "path": "key.p8",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "netrc",
+      "path": ".netrc",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "npmrc-nested",
+      "path": "deep/nested/.npmrc",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "envrc",
+      "path": ".envrc",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "credentials-json",
+      "path": "credentials.json",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "credentials-json-nested",
+      "path": "dir/credentials.json",
+      "expected": true,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "safe-src",
+      "path": "src/app.py",
+      "expected": false,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "safe-readme",
+      "path": "README.md",
+      "expected": false,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "safe-package-json",
+      "path": "package.json",
+      "expected": false,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "safe-env-local-without-dot",
+      "path": "env.local",
+      "expected": false,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "safe-not-env",
+      "path": "not.env",
+      "expected": false,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "safe-envbackup",
+      "path": ".envbackup",
+      "expected": false,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "safe-gitconfig",
+      "path": ".gitconfig",
+      "expected": false,
+      "appliesTo": ["python", "node"]
+    },
+    {
+      "id": "safe-foo-git-bar",
+      "path": "foo.git/bar",
+      "expected": false,
+      "appliesTo": ["python", "node"]
+    }
+  ]
+}
