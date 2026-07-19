@@ -99,6 +99,9 @@ export function createCaptureAndTrack({
     // Capture wrapper output first. onStdout (e.g. peer-stop apply) may rewrite the
     // envelope + effective code BEFORE first stdout write / store / notify so a
     // blocked apply never looks like a successful ready peer-stop.
+    // Hook throws synthesize ONE complete failure envelope (applied=false,
+    // integration-error), nonzero code - never leave raw ready success on
+    // stdout/store/notify.
     let emitStdout = rawStdout;
     let effectiveCode = code;
     if (typeof onStdout === "function") {
@@ -112,6 +115,43 @@ export function createCaptureAndTrack({
         }
       } catch (err) {
         stderrLine(`[grok-companion] onStdout hook failed: ${err.message}`);
+        effectiveCode = 1;
+        const raw = tryParseEnvelope(rawStdout);
+        const base =
+          raw && typeof raw === "object"
+            ? { ...raw }
+            : {
+                schemaVersion: 1,
+                mode: mode || "run",
+                status: "failure",
+                runId: null,
+                response: null,
+              };
+        const baseResp =
+          base.response && typeof base.response === "object" ? base.response : {};
+        const baseInteg =
+          baseResp.integration && typeof baseResp.integration === "object"
+            ? baseResp.integration
+            : {};
+        const failEnv = {
+          ...base,
+          schemaVersion: typeof base.schemaVersion === "number" ? base.schemaVersion : 1,
+          status: "failure",
+          error: {
+            class: "integration-error",
+            message: `onStdout hook failed: ${err.message}`,
+          },
+          response: {
+            ...baseResp,
+            integration: {
+              ...baseInteg,
+              applied: false,
+              ready: false,
+              outcome: "integration-error",
+            },
+          },
+        };
+        emitStdout = `${JSON.stringify(failEnv)}\n`;
       }
     }
     if (emitStdout) {

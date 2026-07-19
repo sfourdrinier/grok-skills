@@ -219,10 +219,16 @@ export async function runImplementCombo(wrapper, rest, runMode, track, {
   // implement's LIVE stdout stays two envelopes (code then handoff, documented),
   // but the STORED stdout.json becomes the handoff envelope so /grok:result shows
   // the true readiness/blockers, not a stale SUCCESS code envelope.
-  const finalEnvelopeText =
-    result.handoffEnvelope && typeof result.handoffEnvelope === "object"
-      ? `${JSON.stringify(result.handoffEnvelope)}\n`
-      : "";
+  // Missing/null handoff reuses the auto fallback SSOT so store never keeps the
+  // code-leg success payload when handoff is unavailable.
+  let finalEnvelopeText;
+  if (result.handoffEnvelope && typeof result.handoffEnvelope === "object") {
+    finalEnvelopeText = `${JSON.stringify(result.handoffEnvelope)}\n`;
+  } else if (finalCode !== 0) {
+    finalEnvelopeText = `${JSON.stringify(buildAutoCodeFallbackEnvelope(result))}\n`;
+  } else {
+    finalEnvelopeText = "";
+  }
   // Finalize the job status + fire ONE notification on the true outcome (the
   // code-leg notify was suppressed), so /grok:jobs and notifications never
   // report success for a not-ready implement.

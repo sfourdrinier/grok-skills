@@ -10,6 +10,29 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { runsDirFor, safeRunIdForRunsDir } from "../progress-relay.mjs";
+import { tryParseEnvelope } from "./render.mjs";
+import { sanitizeRunId } from "./companion-terminal-notify.mjs";
+import {
+  parseIntegrationMode,
+  getIntegrationMode,
+  getIntegrationConsent,
+  formatDirectIntegrationConsentMsg,
+} from "./jobs.mjs";
+import { resolveTargetWorkspaceRoot, parseTargetFlag } from "./git-context.mjs";
+import {
+  unquoteGitPath,
+  parseDirtyStatusPaths,
+  parseNumstatPaths,
+  parseDiffGitHeaderPaths,
+  pathsFromGitPatch,
+} from "./integrate-paths.mjs";
+import {
+  targetIdentityKey,
+  locateApplyMarker,
+  readMatchingApplyMarker,
+  writeApplyMarker,
+  acquireApplyLock,
+} from "./integrate-apply-state.mjs";
 
 /**
  * Resolve runs/<runId>/artifacts/implementation.patch under the wrapper state
@@ -111,126 +134,21 @@ function git(cwd, args) {
   };
 }
 
-/**
- * Decode one git core.quotePath C-style token (`"..."` with `\\NNN` octal and
- * named escapes). Shared golden vectors: plugin/references/git-c-quoted-path-vectors.json
- * (parity with Python groklib.git_path_quote). Do **not** apply to NUL-safe
- * `-z` path_inventory payloads (already raw).
- *
- * @param {string} p
- * @returns {string}
- */
-export function unquoteGitPath(p) {
-  const s = String(p).trim();
-  if (!(s.startsWith('"') && s.endsWith('"'))) return s;
-  // git core.quotePath C-style: the path is wrapped in "..." with non-ASCII bytes
-  // rendered as \NNN OCTAL (e.g. UTF-8 "é.txt" -> "\303\251.txt") plus the named
-  // escapes \a \b \t \n \v \f \r \" \\. JSON.parse does NOT understand \NNN, so a
-  // UTF-8/special path must be decoded byte-by-byte and re-read as UTF-8, else it
-  // never matches the raw path from `git status --porcelain -z` (dirty guard fails
-  // open on that file).
-  const body = s.slice(1, -1);
-  const named = { a: 7, b: 8, t: 9, n: 10, v: 11, f: 12, r: 13, '"': 34, "\\": 92 };
-  const bytes = [];
-  for (let i = 0; i < body.length; i++) {
-    const ch = body[i];
-    if (ch !== "\\") {
-      bytes.push(body.charCodeAt(i) & 0xff);
-      continue;
-    }
-    const next = body[i + 1];
-    if (next >= "0" && next <= "7") {
-      // up to 3 octal digits (git emits 3 for a high byte)
-      let j = i + 1;
-      let oct = "";
-      while (j < body.length && oct.length < 3 && body[j] >= "0" && body[j] <= "7") {
-        oct += body[j];
-        j += 1;
-      }
-      bytes.push(parseInt(oct, 8) & 0xff);
-      i = j - 1;
-    } else if (next in named) {
-      bytes.push(named[next]);
-      i += 1;
-    } else if (next !== undefined) {
-      bytes.push(body.charCodeAt(i + 1) & 0xff);
-      i += 1;
-    }
-  }
-  return Buffer.from(bytes).toString("utf8");
-}
-
-/**
- * Both sides of a numstat rename form ("old => new", "{a => b}/f") - a dirty
- * `old` path being renamed carries the operator's edits into `new`, so the
- * dirty-overlap guard must consider both (review). Non-renames return [p].
- */
-function renamePathSides(p) {
-  const s = String(p);
-  const collapse = (x) => x.replace(/\/{2,}/g, "/");
-  const brace = s.match(/^(.*)\{([^}]*?) => ([^}]*?)\}(.*)$/);
-  if (brace) {
-    const [, pre, oldMid, newMid, post] = brace;
-    return [collapse(pre + oldMid + post), collapse(pre + newMid + post)];
-  }
-  const idx = s.indexOf(" => ");
-  if (idx >= 0) return [collapse(s.slice(0, idx)), collapse(s.slice(idx + 4))];
-  return [collapse(s)];
-}
-
-/**
- * Repo-relative dirty paths from `git status --porcelain -z --untracked-files=all`.
- * @param {string} statusOutput
- * @returns {Set<string>}
- */
-export function parseDirtyStatusPaths(statusOutput) {
-  // Input is `git status --porcelain -z --untracked-files=all`: NUL-TERMINATED
-  // entries with paths NOT quoted (no `"..."`, no ` -> ` arrow). A rename/copy
-  // entry (R/C in either status column) is followed by a SECOND NUL-token holding
-  // the paired path. We add BOTH the status-line path and any paired path
-  // (direction-agnostic), so the overlap guard catches either name - and a literal
-  // ` -> ` (even a quoted one) inside a filename can never be mis-split.
-  const set = new Set();
-  const entries = String(statusOutput || "").split("\0");
-  for (let i = 0; i < entries.length; i++) {
-    const raw = entries[i];
-    if (!raw) continue; // trailing empty token after the final NUL
-    const xy = raw.slice(0, 2);
-    const p = raw.slice(3); // "XY " prefix: 2 status columns + 1 space
-    if (p) set.add(p);
-    if (xy[0] === "R" || xy[0] === "C" || xy[1] === "R" || xy[1] === "C") {
-      i += 1;
-      const paired = entries[i]; // the rename/copy source path (raw, no prefix)
-      if (paired) set.add(paired);
-    }
-  }
-  return set;
-}
-
-/**
- * Repo-relative paths a patch touches, from `git apply --numstat --binary`.
- * @param {string} numstatOutput
- * @returns {string[]}
- */
-export function parseNumstatPaths(numstatOutput) {
-  const paths = [];
-  for (const raw of String(numstatOutput || "").split("\n")) {
-    if (!raw.trim()) continue;
-    const parts = raw.split("\t"); // "<added>\t<deleted>\t<path>"
-    if (parts.length < 3) continue;
-    const pathField = parts.slice(2).join("\t");
-    const sides = renamePathSides(pathField);
-    for (const side of sides) paths.push(unquoteGitPath(side));
-    // If the field LOOKED like a rename (split changed it), also keep the raw
-    // field: a real filename literally containing " => " / "{...}" (git does not
-    // quote those) would be mis-split, so the raw path keeps the dirty-overlap
-    // guard from failing open. No duplicate for ordinary paths.
-    if (sides.length !== 1 || sides[0] !== pathField) {
-      paths.push(unquoteGitPath(pathField));
-    }
-  }
-  return paths;
-}
+// Re-export path/lock SSOTs for tests and callers that import from integrate.mjs.
+export {
+  unquoteGitPath,
+  parseDirtyStatusPaths,
+  parseNumstatPaths,
+  parseDiffGitHeaderPaths,
+  pathsFromGitPatch,
+} from "./integrate-paths.mjs";
+export {
+  targetIdentityKey,
+  locateApplyMarker,
+  readMatchingApplyMarker,
+  writeApplyMarker,
+  acquireApplyLock,
+} from "./integrate-apply-state.mjs";
 
 /**
  * Shared dirty-guard + apply spine used by both auto and peer.
@@ -300,7 +218,18 @@ function applyPatchWithGuards({
       reason: "numstat failed; cannot compute dirty overlap",
     };
   }
-  const patchPaths = parseNumstatPaths(numstat.stdout);
+  // numstat is destination-biased on pure renames; union diff --git / rename-copy
+  // from/to sides so a dirty SOURCE cannot fail the overlap guard open.
+  const patchPathSet = new Set(parseNumstatPaths(numstat.stdout));
+  try {
+    for (const p of pathsFromGitPatch(fs.readFileSync(patchPath))) {
+      patchPathSet.add(p);
+    }
+  } catch {
+    // Patch unreadable here is unexpected (numstat just opened it); keep numstat
+    // set and continue - integrity gates already ran for peer/auto callers.
+  }
+  const patchPaths = [...patchPathSet];
   const overlap = patchPaths.filter((p) => dirtyPaths.has(p)).sort();
   if (overlap.length > 0) {
     stderrLine(
@@ -498,44 +427,84 @@ export function applyVerifiedPatch({
     };
   }
 
-  // 3. Shared dirty-guard + apply spine (status / numstat / overlap / --check /
-  // apply / reverse). Auto-only fields (runId, patchSha, APPLIED log) are layered
-  // on top of the shared outcome.
-  const spine = applyPatchWithGuards({
-    targetRepo,
-    patchPath,
-    stderrLine,
-    logTag: "grok-auto",
-    onApplied: ({ preStatus, postStatus }) => {
-      stderrLine(
-        `[grok-auto] APPLIED runId=${runId} patchSha=${patchSha}\n` +
-          `pre-status:\n${preStatus || "(clean)"}\n` +
-          `post-status:\n${postStatus || "(clean)"}`
-      );
-    },
-  });
-  const out = { ...spine, runId };
-  if (
-    spine.outcome !== "blocked-dirty-status" &&
-    spine.outcome !== "blocked-numstat"
-  ) {
-    out.patchPath = spine.patchPath || patchPath;
-    out.patchSha = patchSha;
+  // 3. Exclusive per-(runId, target) apply lock + durable marker (idempotent restop).
+  // Under lock: re-check marker/integrity, then shared dirty-guard + apply spine.
+  // Never reverse another winner; rollback only mid-apply failure of this holder.
+  const targetKey = targetIdentityKey(targetRepo);
+  let releaseLock = null;
+  try {
+    releaseLock = acquireApplyLock(runId, targetKey, env);
+  } catch (err) {
+    stderrLine(`[grok-auto] BLOCKED: cannot acquire apply lock for ${runId}: ${err.message}`);
+    return {
+      ok: false,
+      outcome: "blocked-apply-lock",
+      reason: err.message || "apply lock failed",
+      runId,
+      patchPath,
+      patchSha,
+    };
   }
-  return out;
+  try {
+    const prior = readMatchingApplyMarker(runId, targetKey, patchSha, env);
+    if (prior.matched) {
+      stderrLine(
+        `[grok-auto] already-applied runId=${runId} patchSha=${patchSha} target=${targetKey}`
+      );
+      return {
+        ok: true,
+        outcome: "already-applied",
+        runId,
+        patchPath,
+        patchSha,
+      };
+    }
+    // Re-verify integrity under lock (artifact can change between pre-lock hash and apply).
+    const lockedIntegrity = verifyPatchAgainstManifest(runId, patchPath, env);
+    if (!lockedIntegrity.ok) {
+      stderrLine(
+        `[grok-auto] BLOCKED: patch integrity check failed under lock for ${runId}: ${lockedIntegrity.reason}`
+      );
+      return {
+        ok: false,
+        outcome: "patch-integrity-failure",
+        reason: lockedIntegrity.reason || "patch integrity check failed",
+        runId,
+        patchPath,
+        patchSha,
+      };
+    }
+    const spine = applyPatchWithGuards({
+      targetRepo,
+      patchPath,
+      stderrLine,
+      logTag: "grok-auto",
+      onApplied: ({ preStatus, postStatus }) => {
+        stderrLine(
+          `[grok-auto] APPLIED runId=${runId} patchSha=${patchSha}\n` +
+            `pre-status:\n${preStatus || "(clean)"}\n` +
+            `post-status:\n${postStatus || "(clean)"}`
+        );
+      },
+    });
+    if (spine.ok && spine.outcome === "applied") {
+      writeApplyMarker(runId, targetKey, patchSha, env);
+    }
+    const out = { ...spine, runId };
+    if (
+      spine.outcome !== "blocked-dirty-status" &&
+      spine.outcome !== "blocked-numstat"
+    ) {
+      out.patchPath = spine.patchPath || patchPath;
+      out.patchSha = patchSha;
+    }
+    return out;
+  } finally {
+    if (typeof releaseLock === "function") releaseLock();
+  }
 }
 
-// --- Peer-stop integration (Task 7.4, extracted from grok-companion.mjs to
-// keep the companion under the 900-line cap; reuses applyVerifiedPatch). ---
-import { tryParseEnvelope } from "./render.mjs";
-import { sanitizeRunId } from "./companion-terminal-notify.mjs";
-import {
-  parseIntegrationMode,
-  getIntegrationMode,
-  getIntegrationConsent,
-  formatDirectIntegrationConsentMsg,
-} from "./jobs.mjs";
-import { resolveTargetWorkspaceRoot, parseTargetFlag } from "./git-context.mjs";
+// --- Peer-stop integration (Task 7.4). ---
 
 /**
  * Exit code for a peer-stop: a requested peer-stop apply that FAILED (moved tree
@@ -640,16 +609,49 @@ export function maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stder
     );
     return { attempted: true, ok: false, outcome: "patch-integrity-failure" };
   }
-  // Shared dirty-guard + apply spine with auto: status fail-closed, numstat
-  // fail-closed, dirty-overlap, apply --check, apply, reverse rollback. Peer
-  // readiness / consent / target identity / integrity stay outside (above).
-  const spine = applyPatchWithGuards({
-    targetRepo: repo,
-    patchPath,
-    stderrLine,
-    logTag: "grok-peer",
-  });
-  return { attempted: true, ok: spine.ok, outcome: spine.outcome };
+  // Exclusive per-(runId, target) apply lock + durable marker so concurrent dual
+  // peer-stop cannot reverse a winner, and sequential restop is idempotent.
+  const patchSha = sha256File(patchPath);
+  const targetKey = targetIdentityKey(repo);
+  let releaseLock = null;
+  try {
+    releaseLock = acquireApplyLock(runId, targetKey);
+  } catch (err) {
+    stderrLine(`[grok-peer] BLOCKED: cannot acquire apply lock for ${runId}: ${err.message}`);
+    return { attempted: true, ok: false, outcome: "blocked-apply-lock" };
+  }
+  try {
+    const prior = readMatchingApplyMarker(runId, targetKey, patchSha);
+    if (prior.matched) {
+      stderrLine(
+        `[grok-peer] already-applied runId=${runId} patchSha=${patchSha} target=${targetKey}`
+      );
+      return { attempted: true, ok: true, outcome: "already-applied" };
+    }
+    // Re-verify integrity under lock (artifact may change between pre-lock check and apply).
+    const lockedIntegrity = verifyPatchAgainstManifest(runId, patchPath);
+    if (!lockedIntegrity.ok) {
+      stderrLine(
+        `[grok-peer] BLOCKED: patch integrity check failed under lock for ${runId}: ${lockedIntegrity.reason}`
+      );
+      return { attempted: true, ok: false, outcome: "patch-integrity-failure" };
+    }
+    // Shared dirty-guard + apply spine with auto: status fail-closed, numstat
+    // fail-closed, dirty-overlap, apply --check, apply, reverse rollback.
+    // Rollback only undoes THIS holder's mid-apply failure (never another winner).
+    const spine = applyPatchWithGuards({
+      targetRepo: repo,
+      patchPath,
+      stderrLine,
+      logTag: "grok-peer",
+    });
+    if (spine.ok && spine.outcome === "applied") {
+      writeApplyMarker(runId, targetKey, patchSha);
+    }
+    return { attempted: true, ok: spine.ok, outcome: spine.outcome };
+  } finally {
+    if (typeof releaseLock === "function") releaseLock();
+  }
 }
 
 /**

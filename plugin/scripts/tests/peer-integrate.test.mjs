@@ -17,8 +17,12 @@ import { test } from "node:test";
 import {
   integratePeerStopFailClosed,
   maybeIntegratePeerStop,
+  parseNumstatPaths,
+  pathsFromGitPatch,
   peerStopExitCode,
 } from "../lib/integrate.mjs";
+import { Worker } from "node:worker_threads";
+import { fileURLToPath } from "node:url";
 
 const RUN_ID = "20260717T130000Z-abc123";
 
@@ -329,6 +333,175 @@ test("peer-stop: --target that differs from the peer repo is refused (no cross-r
       "hello\n",
       "repoB (the peer repo) must be untouched"
     );
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function pureRenamePatchText() {
+  return [
+    "diff --git a/old.txt b/new.txt",
+    "similarity index 100%",
+    "rename from old.txt",
+    "rename to new.txt",
+    "",
+  ].join("\n");
+}
+
+test("unit: pathsFromGitPatch includes both rename header sides (pure rename)", () => {
+  const paths = pathsFromGitPatch(Buffer.from(pureRenamePatchText(), "utf8"));
+  assert.ok(paths.has("old.txt"), "source side must be in touch set");
+  assert.ok(paths.has("new.txt"), "destination side must be in touch set");
+});
+
+test("unit: pure-rename numstat is destination-only (documents the bug class)", () => {
+  // Live git apply --numstat for 100% rename reports only the destination.
+  assert.deepEqual(parseNumstatPaths("0\t0\tnew.txt\n"), ["new.txt"]);
+  assert.ok(!parseNumstatPaths("0\t0\tnew.txt\n").includes("old.txt"));
+});
+
+test("peer-stop auto: pure rename + dirty SOURCE blocks apply (not destination-only)", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-peer-int-rename-"));
+  const repo = path.join(root, "repo");
+  fs.mkdirSync(repo, { recursive: true });
+  git(repo, ["init"]);
+  git(repo, ["config", "user.email", "t@t.t"]);
+  git(repo, ["config", "user.name", "T"]);
+  fs.writeFileSync(path.join(repo, "old.txt"), "hello\n");
+  git(repo, ["add", "-A"]);
+  git(repo, ["commit", "-m", "init"]);
+  const xdg = path.join(root, "xdg");
+  // Stage a real format-patch pure rename so git apply --check/--numstat accept it.
+  git(repo, ["mv", "old.txt", "new.txt"]);
+  git(repo, ["commit", "-m", "ren"]);
+  const patchBody = spawnSync("git", ["format-patch", "-1", "--stdout"], {
+    cwd: repo,
+    encoding: "utf8",
+  });
+  assert.equal(patchBody.status, 0, patchBody.stderr);
+  // Restore pre-rename tree so apply can land (or be blocked by dirty source).
+  git(repo, ["checkout", "HEAD~1"]);
+  stagePatch(xdg, RUN_ID, patchBody.stdout);
+  fs.writeFileSync(path.join(repo, "old.txt"), "operator-dirty\n");
+  const lines = [];
+  try {
+    const res = withXdg(xdg, () =>
+      maybeIntegratePeerStop(peerStopEnvelope(repo), repo, "auto", ["--target", repo], (l) =>
+        lines.push(l)
+      )
+    );
+    assert.equal(res.attempted, true);
+    assert.equal(res.ok, false, "dirty rename SOURCE must block apply");
+    assert.equal(res.outcome, "blocked-dirty-overlap");
+    assert.equal(
+      fs.readFileSync(path.join(repo, "old.txt"), "utf8"),
+      "operator-dirty\n",
+      "must not apply over a dirty rename source"
+    );
+    assert.ok(!fs.existsSync(path.join(repo, "new.txt")), "destination must not appear");
+    assert.ok(lines.some((l) => /dirty|overlap|old\.txt/i.test(l)), lines.join("\n"));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("peer-stop sequential restop: second apply is already-applied (idempotent)", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-peer-int-restop-"));
+  const repo = initRepo(path.join(root, "repo"));
+  const xdg = path.join(root, "xdg");
+  stagePatch(xdg, RUN_ID, capturePatch(repo));
+  const lines = [];
+  try {
+    const first = withXdg(xdg, () =>
+      maybeIntegratePeerStop(peerStopEnvelope(repo), repo, "auto", ["--target", repo], (l) =>
+        lines.push(l)
+      )
+    );
+    assert.equal(first.ok, true);
+    assert.equal(first.outcome, "applied");
+    assert.equal(fs.readFileSync(path.join(repo, "foo.txt"), "utf8"), "hello world\n");
+    const second = withXdg(xdg, () =>
+      maybeIntegratePeerStop(peerStopEnvelope(repo), repo, "auto", ["--target", repo], (l) =>
+        lines.push(l)
+      )
+    );
+    assert.equal(second.attempted, true);
+    assert.equal(second.ok, true, "restop must be idempotent success");
+    assert.equal(second.outcome, "already-applied");
+    assert.equal(fs.readFileSync(path.join(repo, "foo.txt"), "utf8"), "hello world\n");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("peer-stop concurrent dual apply: one winner, no reverse of winner", async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-peer-int-dual-"));
+  const repo = initRepo(path.join(root, "repo"));
+  const xdg = path.join(root, "xdg");
+  stagePatch(xdg, RUN_ID, capturePatch(repo));
+  const barrier = new Int32Array(new SharedArrayBuffer(4));
+  const integratePath = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "../lib/integrate.mjs"
+  );
+  const workerFile = path.join(root, "worker.mjs");
+  fs.writeFileSync(
+    workerFile,
+    `import { parentPort, workerData } from "node:worker_threads";
+import { pathToFileURL } from "node:url";
+const view = new Int32Array(workerData.barrier);
+Atomics.add(view, 0, 1);
+while (Atomics.load(view, 0) < 2) {
+  // spin until both workers arrive
+}
+const prev = process.env.XDG_STATE_HOME;
+process.env.XDG_STATE_HOME = workerData.xdg;
+try {
+  const { maybeIntegratePeerStop } = await import(pathToFileURL(workerData.integratePath).href);
+  const res = maybeIntegratePeerStop(
+    workerData.envelope,
+    workerData.repo,
+    "auto",
+    ["--target", workerData.repo],
+    () => {}
+  );
+  parentPort.postMessage(res);
+} catch (err) {
+  parentPort.postMessage({ error: String((err && err.stack) || err) });
+} finally {
+  if (prev === undefined) delete process.env.XDG_STATE_HOME;
+  else process.env.XDG_STATE_HOME = prev;
+}
+`
+  );
+  const envelope = peerStopEnvelope(repo);
+  const mkWorker = () =>
+    new Promise((resolve, reject) => {
+      const w = new Worker(workerFile, {
+        workerData: {
+          barrier: barrier.buffer,
+          integratePath,
+          envelope,
+          repo,
+          xdg,
+        },
+      });
+      w.on("message", resolve);
+      w.on("error", reject);
+      w.on("exit", (code) => {
+        if (code !== 0) reject(new Error(`worker exit ${code}`));
+      });
+    });
+  try {
+    const results = await Promise.all([mkWorker(), mkWorker()]);
+    for (const r of results) {
+      assert.ok(!r.error, r.error);
+      assert.equal(r.attempted, true);
+      assert.equal(r.ok, true, JSON.stringify(r));
+    }
+    const outcomes = results.map((r) => r.outcome).sort();
+    assert.deepEqual(outcomes, ["already-applied", "applied"]);
+    assert.equal(fs.readFileSync(path.join(repo, "foo.txt"), "utf8"), "hello world\n");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

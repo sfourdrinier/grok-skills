@@ -17,6 +17,7 @@ import {
   runImplementCombo,
   runHandoffCaptured,
 } from "../lib/implement.mjs";
+import { listJobs, readJobStdout } from "../lib/jobs.mjs";
 import { makeFakeWrapper, readCalls, runCompanion } from "./helpers/fake-wrapper.mjs";
 
 const RUN_ID = "20260716T000000Z-abc123";
@@ -531,4 +532,53 @@ test("auto: empty code envelope yields one complete failure envelope on stdout +
   assert.equal(typeof stored.error?.class, "string");
   assert.equal(stored.response?.integration?.applied, false);
   assert.notEqual(stored.status, "success");
+});
+
+
+test("implement missing handoff envelope stores fallback failure (not code-leg success)", () => {
+  // Handoff returns non-JSON (null parse) after a successful code leg with runId.
+  // Stored finalEnvelopeText must be the fallback SSOT failure envelope, never the
+  // code-leg success payload, so /grok:result cannot claim success without handoff.
+  const cwd = tempCwd();
+  const codeOut = codeEnvelope();
+  const callsPath = path.join(cwd, "calls.log");
+  const { env, cleanup } = makeFakeWrapper({
+    code: { stdout: `${codeOut}\n`, exitCode: 0 },
+    // Non-JSON handoff stdout -> tryParseEnvelope null
+    handoff: { stdout: "not-json-handoff\n", exitCode: 0 },
+  });
+  try {
+    const res = runCompanion(
+      [
+        "implement",
+        "--integration",
+        "worktree",
+        "--target",
+        ".",
+        "--base",
+        "HEAD",
+        "--task",
+        "fix it",
+      ],
+      { cwd, env: companionEnv(env, cwd, callsPath) }
+    );
+    assert.equal(res.code, 1, `expected exit 1; stderr: ${res.stderr}`);
+    const pluginData = path.join(cwd, "pdata");
+    const jobs = listJobs(cwd, { CLAUDE_PLUGIN_DATA: pluginData });
+    assert.ok(jobs.length >= 1, "implement must create a job");
+    const job = jobs[0];
+    assert.equal(job.status, "failure", "job status must reflect missing handoff");
+    const stored = readJobStdout(cwd, job.id, { CLAUDE_PLUGIN_DATA: pluginData });
+    assert.ok(stored, "job stdout must be stored");
+    const envStored = JSON.parse(String(stored).trim().split("\n").filter(Boolean).pop());
+    assert.equal(envStored.status, "failure", "stored must NOT be code-leg success");
+    assert.notEqual(envStored.status, "success");
+    assert.equal(envStored.mode, "code");
+    assert.equal(envStored.response?.integration?.applied, false);
+    assert.equal(typeof envStored.error?.class, "string");
+    assert.ok(envStored.error.class.length > 0);
+  } finally {
+    cleanup();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
 });
