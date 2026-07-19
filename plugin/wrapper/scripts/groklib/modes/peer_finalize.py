@@ -342,13 +342,9 @@ def finalize_peer_session(
             {"reason": "auth-teardown-failed", "cleanupStatus": "failed"},
         )
 
-    # Mark peer lifecycle stopped.
-    try:
-        peer_doc = dict(peer_doc)
-        peer_doc["lifecycle"] = "stopped"
-        runstate.write_json_atomic(run_paths.run_dir / "peer.json", peer_doc)
-    except OSError as exc:
-        _log("finalize_peer_session", "could not update peer.json: {}".format(exc))
+    # peer.json lifecycle ownership lives in peer_stop (single terminal owner).
+    # Do not write lifecycle here: success/failure marking happens after the
+    # durable envelope is known so failure ends as failed, never stopped.
 
     result = getattr(stage, "result", None)
     response: dict = {

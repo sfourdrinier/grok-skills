@@ -48,6 +48,7 @@ from groklib.grokcli import check_version
 from groklib.implementation_contract import assert_target_matches, load_contract_file
 from groklib.modes import _shared
 from groklib.modes import peer_control
+from groklib.modes import peer_stop
 from groklib.modes import code as code_mode
 from groklib.modes._envelope import _policy_field
 from groklib.modes.peer_process import (
@@ -310,7 +311,20 @@ def _handle_control_connection(session: PeerSession, conn: Any) -> Optional[dict
     if op == "stop":
         session._stop_requested = True
         final = _stop_session(session)
-        peer_control.write_json_line(conn, {"type": "result", "envelope": final})
+        # Write failure after finalize must NOT re-enter stop (serve_until_stop
+        # would otherwise treat the exception as "no final" and call stop again).
+        try:
+            peer_control.write_json_line(conn, {"type": "result", "envelope": final})
+        except GrokWrapperError as exc:
+            _log(
+                "_handle_control_connection",
+                "post-stop control write failed (terminal already produced): {}".format(exc),
+            )
+        except OSError as exc:
+            _log(
+                "_handle_control_connection",
+                "post-stop control write OSError (terminal already produced): {}".format(exc),
+            )
         return final
     peer_control.write_json_line(
         conn,
@@ -321,70 +335,7 @@ def _handle_control_connection(session: PeerSession, conn: Any) -> Optional[dict
 
 def _stop_session(session: PeerSession) -> dict:
     """session/cancel, tear down child, code finalize path, destroy home."""
-    from groklib.modes import peer_finalize
-
-    try:
-        session.acp.session_cancel(session_id=session.session_id)
-    except Exception as exc:
-        _log("_stop_session", "cancel: {}".format(exc))
-    try:
-        session.acp.close()
-    except Exception as exc:
-        _log("_stop_session", "acp close: {}".format(exc))
-    child = session.child
-    if child is not None:
-        try:
-            platformsupport.kill_process_tree(child)
-        except Exception as exc:
-            _log("_stop_session", "kill child: {}".format(exc))
-        try:
-            child.wait(timeout=5)
-        except Exception:
-            pass
-
-    # Build a finalize stage compatible with code_handoff_finalize.
-    class _Acc:
-        def __init__(self) -> None:
-            self.commands: List[dict] = []
-            self.changed_files: List[str] = []
-            self.diff_summary: Optional[str] = None
-            self.effective_working_directory = str(session.worktree.path)
-            self.warnings: List[str] = []
-            self.verifier = None
-
-    class _Stage:
-        pass
-
-    stage = _Stage()
-    stage.worktree = session.worktree
-    stage.run_id = session.run_id
-    stage.acc = _Acc()
-    stage.progress = session.progress
-    stage.result = type(
-        "R",
-        (),
-        {
-            "answer": "",
-            "session_id": session.session_id,
-            "request_id": None,
-            "stop_reason": "cancelled",
-            "model_usage": None,
-            "turns": None,
-            "raw_usage": None,
-            "parsed": {},
-            "stderr": "",
-        },
-    )()
-
-    return peer_finalize.finalize_peer_session(
-        run_paths=session.run_paths,
-        peer_doc=session.peer_doc,
-        home_path=session.home.home_dir,
-        worktree=session.worktree,
-        contract=session.contract,
-        original_baseline=session.original_baseline,
-        stage=stage,
-    )
+    return peer_stop.stop_session(session)
 
 
 def _serve_control_plane(
@@ -802,86 +753,11 @@ def _run_peer_prompt_body(args: argparse.Namespace, run_id: str) -> dict:
 
 
 def run_peer_stop(args: argparse.Namespace) -> dict:
-    _require_experimental_acp()
-    run_id = getattr(args, "run_id", None)
-    if not run_id:
-        raise GrokWrapperError("usage-error", "peer-stop requires --run-id")
-    paths, doc = _load_peer_doc(str(run_id))
-    socket_path = doc.get("socketPath")
-    if isinstance(socket_path, str) and pathlib.Path(socket_path).exists():
-        try:
-            return _connect_control(socket_path, {"op": "stop"}, timeout=1800.0)
-        except GrokWrapperError as exc:
-            _log("run_peer_stop", "socket stop failed, attempting local finalize: {}".format(exc))
-    # Kill the recorded ACP child if still alive (start-token match) so a stale
-    # `grok agent stdio` does not keep running in the retained worktree after
-    # peer-stop. The resident stop path kills it; the fallback must too.
-    _kill_recorded_child(doc)
-    # Fallback: local finalize when resident wrapper is already gone.
-    # MUST use original_baseline from peer-start (never re-capture: closes escape window).
-    from groklib.modes import peer_finalize
-    from groklib.worktree import ExternalWorktree
-
-    home_path = pathlib.Path(str(doc.get("homePath") or ""))
-    wt_path = pathlib.Path(str(doc.get("worktreePath") or ""))
-    if not wt_path.is_dir():
-        raise GrokWrapperError(
-            "acp-failure",
-            "peer-stop cannot finalize: worktree missing and control socket unavailable",
-            {"runId": run_id},
-        )
-    worktree = ExternalWorktree(
-        path=wt_path,
-        branch=str(doc.get("worktreeBranch") or ""),
-        base_revision=str(doc.get("baseRevision") or ""),
-        repo_root=pathlib.Path(str(doc.get("repoRoot") or wt_path)),
-    )
-
-    class _Acc:
-        commands: List[dict] = []
-        changed_files: List[str] = []
-        diff_summary = None
-        effective_working_directory = str(wt_path)
-        warnings: List[str] = []
-        verifier = None
-
-    class _Stage:
-        pass
-
-    stage = _Stage()
-    stage.worktree = worktree
-    stage.run_id = paths.run_id
-    stage.acc = _Acc()
-    stage.progress = ProgressWriter(paths.run_id, paths.progress_path)
-    stage.result = type(
-        "R",
-        (),
-        {
-            "answer": "",
-            "session_id": doc.get("sessionId"),
-            "request_id": None,
-            "stop_reason": "cancelled",
-            "model_usage": None,
-            "turns": None,
-            "raw_usage": None,
-            "parsed": {},
-            "stderr": "",
-        },
-    )()
-    contract = doc.get("contract") if isinstance(doc.get("contract"), dict) else None
-    baseline = _load_original_baseline(doc)
-    if not home_path.is_dir():
-        # Home already gone; still label + finalize artifacts.
-        home_path = pathlib.Path(tempfile.mkdtemp(prefix=runstate.TEMP_HOME_PREFIX))
-        runstate.write_owner_marker(home_path, paths.run_id)
-    return peer_finalize.finalize_peer_session(
-        run_paths=paths,
-        peer_doc=doc,
-        home_path=home_path,
-        worktree=worktree,
-        contract=contract,
-        original_baseline=baseline,
-        stage=stage,
+    return peer_stop.run_peer_stop(
+        args,
+        load_peer_doc=_load_peer_doc,
+        connect_control=_connect_control,
+        require_experimental_acp=_require_experimental_acp,
     )
 
 
