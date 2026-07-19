@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import process from "node:process";
 
+import { flagValue, hasFlagOrEquals } from "./companion-args.mjs";
 import {
   getCodexAgentsScope,
   installCodexAgents,
@@ -53,27 +54,29 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
   const removeCodexAgents = args.includes("--remove-codex-agents");
   // Capture scope before other prefs writes (jobs-index may drop unknown keys).
   const priorCodexAgentsScope = getCodexAgentsScope(cwd, process.env);
-  const scopeIdx = args.indexOf("--codex-agents-scope");
   let scopeFlag = null;
   let invalidCodexAgentsScope = null;
-  if (scopeIdx >= 0) {
-    const rawScope = args[scopeIdx + 1];
-    if (rawScope === undefined || String(rawScope).startsWith("--")) {
-      invalidCodexAgentsScope = "(missing value)";
-    } else {
-      scopeFlag = parseCodexAgentsScope(rawScope);
-      if (!scopeFlag) {
-        invalidCodexAgentsScope = String(rawScope).trim() || rawScope;
+  {
+    // Presence SSOT (split OR equals) - never re-open local startsWith loops.
+    if (hasFlagOrEquals(args, "--codex-agents-scope")) {
+      const rawScope = flagValue(args, "--codex-agents-scope");
+      if (rawScope === null) {
+        invalidCodexAgentsScope = "(missing value)";
+      } else {
+        scopeFlag = parseCodexAgentsScope(rawScope);
+        if (!scopeFlag) {
+          invalidCodexAgentsScope = String(rawScope).trim() || rawScope;
+        }
       }
     }
   }
   // runMode is security posture (hardened|direct). Do not treat --integration
-  // direct/worktree/... values as run-mode (orthogonal axis).
+  // direct/worktree/... values as run-mode (orthogonal axis). Split AND equals
+  // forms are accepted (argv SSOT / wrapper argparse parity).
   {
-    const idx = args.indexOf("--run-mode");
     let mode = null;
-    if (idx >= 0) {
-      mode = args[idx + 1];
+    if (hasFlagOrEquals(args, "--run-mode")) {
+      mode = flagValue(args, "--run-mode");
     } else {
       // Bare convenience: setup direct | setup hardened (not a flag value).
       for (let i = 0; i < args.length; i++) {
@@ -111,50 +114,54 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
     parseTargetFlag(args)
   );
   let invalidIntegrationMode = null;
-  const integrationIdx = args.indexOf("--integration");
-  if (integrationIdx >= 0) {
-    const rawIntegration = args[integrationIdx + 1];
-    if (rawIntegration === undefined || String(rawIntegration).startsWith("--")) {
-      invalidIntegrationMode = "(missing value)";
-    } else {
-      const parsedIntegration = parseIntegrationMode(rawIntegration);
-      if (!parsedIntegration) {
-        invalidIntegrationMode = String(rawIntegration).trim() || rawIntegration;
+  {
+    if (hasFlagOrEquals(args, "--integration")) {
+      const rawIntegration = flagValue(args, "--integration");
+      if (rawIntegration === null) {
+        invalidIntegrationMode = "(missing value)";
       } else {
-        setIntegrationMode(integrationTargetWorkspace, parsedIntegration);
+        const parsedIntegration = parseIntegrationMode(rawIntegration);
+        if (!parsedIntegration) {
+          invalidIntegrationMode = String(rawIntegration).trim() || rawIntegration;
+        } else {
+          setIntegrationMode(integrationTargetWorkspace, parsedIntegration);
+        }
       }
     }
   }
   // Notification prefs: parse all flags first; apply atomically or apply none.
+  // Equals forms (`--notification-mode=auto`) are accepted via the argv SSOT.
   let invalidNotificationMode = null;
   let invalidWebhookUrl = null;
   /** @type {{ notificationMode?: string, notificationWebhookUrl?: string|null }} */
   const notifyPatch = {};
-  const notifyModeIdx = args.indexOf("--notification-mode");
-  if (notifyModeIdx >= 0) {
-    const rawMode = args[notifyModeIdx + 1];
-    if (rawMode === undefined || String(rawMode).startsWith("--")) {
-      invalidNotificationMode = "(missing value)";
-    } else {
-      const parsedMode = parseNotificationMode(rawMode);
-      if (!parsedMode) {
-        invalidNotificationMode = String(rawMode).trim().toLowerCase() || rawMode;
+  {
+    if (hasFlagOrEquals(args, "--notification-mode")) {
+      const rawMode = flagValue(args, "--notification-mode");
+      if (rawMode === null) {
+        invalidNotificationMode = "(missing value)";
       } else {
-        notifyPatch.notificationMode = parsedMode;
+        const parsedMode = parseNotificationMode(rawMode);
+        if (!parsedMode) {
+          invalidNotificationMode = String(rawMode).trim().toLowerCase() || rawMode;
+        } else {
+          notifyPatch.notificationMode = parsedMode;
+        }
       }
     }
   }
-  const webhookIdx = args.indexOf("--notification-webhook-url");
-  if (webhookIdx >= 0) {
-    const rawUrl = args[webhookIdx + 1];
-    if (rawUrl === undefined || String(rawUrl).startsWith("--")) {
-      invalidWebhookUrl = "webhook-url-missing-value";
-    } else {
-      const parsedWebhook = parseWebhookUrl(rawUrl);
-      if (!parsedWebhook.ok) {
-        invalidWebhookUrl = parsedWebhook.reason || "webhook-url-invalid";
+  {
+    if (hasFlagOrEquals(args, "--notification-webhook-url")) {
+      const rawUrl = flagValue(args, "--notification-webhook-url");
+      if (rawUrl === null) {
+        invalidWebhookUrl = "webhook-url-missing-value";
       } else {
-        notifyPatch.notificationWebhookUrl = parsedWebhook.url;
+        const parsedWebhook = parseWebhookUrl(rawUrl);
+        if (!parsedWebhook.ok) {
+          invalidWebhookUrl = parsedWebhook.reason || "webhook-url-invalid";
+        } else {
+          notifyPatch.notificationWebhookUrl = parsedWebhook.url;
+        }
       }
     }
   }

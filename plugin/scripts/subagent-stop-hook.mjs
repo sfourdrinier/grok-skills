@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // plugin/scripts/subagent-stop-hook.mjs
 //
-// SubagentStop handoff nudge (non-blocking, read-only).
+// SubagentStop mode-aware nudge (non-blocking, read-only).
 //
 // Host contract (Claude Code hooks, July 2026):
 //   stdin JSON fields include: last_assistant_message, agent_id, agent_type
@@ -20,6 +20,12 @@
 //      tokens; use the LAST one whose run dir exists under runs/.
 //   2. Else fall back to newest kind "code" job with an unconsumed run dir,
 //      and soften the reminder text to "most recent code run in this workspace".
+//   3. Mode-aware text:
+//      - durable peer (peer.json or peer job kind/mode) -> peer-stop outcome
+//        (never handoff, never apply)
+//      - durable code job kind -> handoff --run-id + dual-condition ready
+//        (never auto-apply); peer-stop wording alone cannot override this
+//      - peer wording without durable code evidence may classify as peer
 // Garbage input / no match / any error: silent exit 0. Does not write markers.
 
 import fs from "node:fs";
@@ -41,6 +47,7 @@ const RUN_ID_TOKEN_RE = new RegExp(
   RUN_ID_RE.source.replace(/^\^/, "").replace(/\$$/, ""),
   "g"
 );
+
 /**
  * @param {unknown} agentType
  * @returns {boolean}
@@ -52,6 +59,91 @@ export function isGrokEngineerCoder(agentType) {
     agentType === ENGINEER_BARE ||
     agentType.endsWith(ENGINEER_SUFFIX)
   );
+}
+
+/**
+ * True when free text clearly describes a peer-channel run (not one-shot code).
+ * Used to mode-switch the engineer-coder nudge away from handoff.
+ * @param {unknown} message
+ * @returns {boolean}
+ */
+export function messageLooksLikePeerRun(message) {
+  if (typeof message !== "string" || !message) return false;
+  // peer stop / peer-stop / peer start / mode peer-stop / "peer stop --run-id"
+  return /\bpeer[\s_-]*(start|prompt|stop)\b/i.test(message) || /\bpeer-stop\b/i.test(message);
+}
+
+/**
+ * True when the durable run dir is a peer channel run (peer.json present) or
+ * a workspace job for that runId is kind/mode peer*.
+ * @param {string} runId
+ * @param {string} cwd
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {boolean}
+ */
+export function isPeerRunId(runId, cwd, env = process.env) {
+  const runsDir = runsDirFor(env);
+  const safe = safeRunIdForRunsDir(runId, runsDir);
+  if (!safe) return false;
+  try {
+    if (fs.existsSync(path.join(runsDir, safe, "peer.json"))) return true;
+  } catch {
+    // ignore
+  }
+  try {
+    const jobs = listJobs(cwd, env);
+    for (const job of jobs) {
+      if (!job || job.runId !== safe) continue;
+      const kind = String(job.kind || "");
+      const mode = String(job.mode || "");
+      if (kind.startsWith("peer") || mode.startsWith("peer")) return true;
+    }
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
+/**
+ * True when a workspace job for that runId is durable kind "code".
+ * Used so peer-stop wording cannot override a real code handoff nudge.
+ * @param {string} runId
+ * @param {string} cwd
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {boolean}
+ */
+export function isCodeRunId(runId, cwd, env = process.env) {
+  const runsDir = runsDirFor(env);
+  const safe = safeRunIdForRunsDir(runId, runsDir);
+  if (!safe) return false;
+  try {
+    const jobs = listJobs(cwd, env);
+    for (const job of jobs) {
+      if (!job || job.runId !== safe) continue;
+      if (String(job.kind || "") === "code") return true;
+    }
+  } catch {
+    // ignore
+  }
+  return false;
+}
+
+/**
+ * Mode-aware SubagentStop advisory text.
+ * - code: handoff --run-id + dual-condition ready (never auto-apply)
+ * - peer: refer to peer-stop outcome (never handoff, never apply)
+ * @param {string} runId
+ * @param {{ fromMessage?: boolean, peer?: boolean }} [opts]
+ * @returns {string}
+ */
+export function reminderContextForAgent(runId, opts = {}) {
+  if (opts.peer) {
+    return (
+      `Grok peer run ${runId} finished. Use the peer-stop outcome as the ready signal ` +
+      "(do not run handoff; peer-stop owns ready + integrate). Never auto-apply."
+    );
+  }
+  return handoffReminderContext(runId, { fromMessage: opts.fromMessage });
 }
 
 /**
@@ -177,6 +269,7 @@ function main() {
     process.exit(0);
   }
 
+  // Only engineer-coder (the dual peer/code implementer) receives this nudge.
   if (!isGrokEngineerCoder(input.agent_type)) {
     process.exit(0);
   }
@@ -204,10 +297,24 @@ function main() {
     process.exit(0);
   }
 
+  // Mode-aware: peer runs must NEVER be told to handoff/auto-apply.
+  // Peer classification requires durable peer.json or peer job kind.
+  // Peer-stop wording alone may classify as peer ONLY when there is no durable
+  // code job evidence for this runId (wording cannot override a real code run).
+  const durablePeer = isPeerRunId(runId, cwd, process.env);
+  const durableCode = isCodeRunId(runId, cwd, process.env);
+  const peer =
+    durablePeer ||
+    (!durableCode &&
+      fromMessage &&
+      messageLooksLikePeerRun(input.last_assistant_message));
+
+  const context = reminderContextForAgent(runId, { fromMessage, peer });
+
   process.stdout.write(
     `${JSON.stringify({
       hookSpecificOutput: {
-        additionalContext: handoffReminderContext(runId, { fromMessage }),
+        additionalContext: context,
       },
     })}\n`
   );

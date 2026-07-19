@@ -10,7 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { flagValue } from "./companion-args.mjs";
+import { dropValueFlags, flagOccurrences, flagValue } from "./companion-args.mjs";
 import { readAllStdinSync } from "./read-stdin.mjs";
 
 /**
@@ -71,29 +71,21 @@ export function stageStdinTaskFile(args) {
   // sentinels (parity with extractTask/injectTaskFile, which are equals-aware):
   // the wrapper's argparse takes both, so the companion must stage stdin for both
   // or the literal "-" reaches the wrapper and fails as a missing task file.
-  // Last occurrence wins: an earlier sentinel is ignored when a later real path
-  // (or later sentinel) is present.
-  let valueIndex = -1;
-  let equalsForm = false;
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a === "--task-file" && args[i + 1] !== undefined) {
-      valueIndex = i + 1;
-      equalsForm = false;
-    } else if (typeof a === "string" && a.startsWith("--task-file=")) {
-      valueIndex = i;
-      equalsForm = true;
-    }
+  // Last *valid* occurrence wins via the argv SSOT (a following flag is never a value).
+  const occ = flagOccurrences(args, "--task-file");
+  let last = null;
+  for (const o of occ) {
+    if (o.value !== null) last = o;
   }
-  if (valueIndex < 0) return null;
-  const lastVal = equalsForm
-    ? String(args[valueIndex]).slice("--task-file=".length)
-    : args[valueIndex];
-  if (lastVal !== "-") return null;
+  if (!last || last.value !== "-") return null;
   const taskBytes = readAllStdinSync();
   const { taskPath, cleanup } = stageTaskFile(taskBytes);
   const staged = args.slice();
-  staged[valueIndex] = equalsForm ? `--task-file=${taskPath}` : taskPath;
+  if (last.form === "equals") {
+    staged[last.index] = `--task-file=${taskPath}`;
+  } else {
+    staged[last.valueIndex] = taskPath;
+  }
   return { args: staged, cleanup };
 }
 
@@ -105,18 +97,8 @@ export function stageStdinTaskFile(args) {
  * @returns {{ args: string[], cleanup: () => void }}
  */
 export function injectTaskFile(args, taskText) {
-  const cleaned = [];
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a === "--task" || a === "--task-file") {
-      i += 1;
-      continue;
-    }
-    if (a.startsWith("--task=") || a.startsWith("--task-file=")) {
-      continue;
-    }
-    cleaned.push(a);
-  }
+  // Shared strip: never consume a following flag as --task / --task-file value.
+  const cleaned = dropValueFlags(Array.isArray(args) ? args : [], ["--task", "--task-file"]);
   const { taskPath, cleanup } = stageTaskFile(taskText);
   cleaned.push("--task-file", taskPath);
   return { args: cleaned, cleanup };

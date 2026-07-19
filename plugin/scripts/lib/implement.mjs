@@ -8,6 +8,7 @@
 
 import { spawnSync } from "node:child_process";
 
+import { flagValue } from "./companion-args.mjs";
 import { sanitizeRunId } from "./companion-terminal-notify.mjs";
 import { DIRECT_NO_HANDOFF_MSG, writeDirectNoHandoffRefuse } from "./direct-grok.mjs";
 import { parseTargetFlag, resolveTargetWorkspaceRoot } from "./git-context.mjs";
@@ -31,25 +32,13 @@ export function companionIntegrationToWrapper(mode) {
 }
 
 /**
- * Parse the last --integration value from argv (supports --integration=).
+ * Parse the last valid --integration value from argv (supports --integration=).
+ * Shared argv SSOT: a following flag is never treated as the value.
  * @param {string[]} args
  * @returns {string|null}
  */
 function parseIntegrationFromArgs(args) {
-  if (!Array.isArray(args)) return null;
-  let found = null;
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a === "--integration" && args[i + 1] !== undefined) {
-      found = String(args[i + 1]);
-      i += 1;
-      continue;
-    }
-    if (typeof a === "string" && a.startsWith("--integration=")) {
-      found = a.slice("--integration=".length);
-    }
-  }
-  return found;
+  return flagValue(args, "--integration");
 }
 
 /**

@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 
+import { flagValue } from "./companion-args.mjs";
 import { resolveWorkspaceRoot } from "./gate-state.mjs";
 
 function git(cwd, args) {
@@ -27,22 +28,11 @@ export function isGitRepo(cwd) {
  * @returns {string}
  */
 export function parseTargetFlag(args) {
-  if (!Array.isArray(args)) return ".";
-  // Last-wins, matching the wrapper's argparse single-value --target: a command
-  // with duplicate --target must gate consent/target on the SAME repo the
-  // wrapper actually edits (review: first-vs-last mismatch).
-  let found = null;
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a === "--target" && args[i + 1] !== undefined) {
-      const v = String(args[i + 1]);
-      found = v.startsWith("-") ? "." : v;
-    } else if (typeof a === "string" && a.startsWith("--target=")) {
-      const v = a.slice("--target=".length);
-      found = v || ".";
-    }
-  }
-  return found === null ? "." : found;
+  // Last *valid* wins via the companion argv SSOT (split/equals; never consume a
+  // following flag as the value). Empty / missing -> ".".
+  const v = flagValue(args, "--target");
+  if (v == null || v === "") return ".";
+  return v;
 }
 
 /**

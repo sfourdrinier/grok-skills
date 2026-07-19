@@ -12,7 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { flagValue, resolveWebFlag } from "./companion-args.mjs";
+import { firstFlagValue, flagValue, resolveWebFlag } from "./companion-args.mjs";
 import { extractTask, stageTaskFile } from "./task-file.mjs";
 
 /** Honest refusal when handoff artifacts are requested for a direct-mode run. */
@@ -26,15 +26,10 @@ export function isDirectRunId(id) {
   return typeof id === "string" && DIRECT_RUN_ID_RE.test(id);
 }
 
-/** Raw --run-id value (no hardened-shape filter). Used for direct-id refusal. */
+/** Raw --run-id value (no hardened-shape filter). Used for direct-id refusal.
+ *  First valid wins: a later hardened run id must not hide an earlier direct-* id. */
 export function rawRunIdFlag(args) {
-  if (!Array.isArray(args)) return null;
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a === "--run-id" && typeof args[i + 1] === "string") return args[i + 1];
-    if (typeof a === "string" && a.startsWith("--run-id=")) return a.slice("--run-id=".length);
-  }
-  return null;
+  return firstFlagValue(args, "--run-id");
 }
 
 /** First bare positional after argv[0] that looks like a direct run id. */

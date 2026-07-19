@@ -13,6 +13,7 @@ import { test } from "node:test";
 import {
   getIntegrationConsent,
   getIntegrationMode,
+  getNotificationConfig,
   getRunMode,
   setIntegrationMode,
   setRunMode,
@@ -561,4 +562,45 @@ test("non-git target: consent keyed on absolute target dir (per-target)", () => 
     cleanup();
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("setup equals-form --integration=worktree persists mode", () => {
+  const cwd = tempCwd();
+  const pluginData = path.join(cwd, "pdata");
+  const envBase = { CLAUDE_PLUGIN_DATA: pluginData };
+  const res = runCompanion(
+    ["setup", "--integration=worktree", "--skip-codex-agents"],
+    { cwd, env: envBase }
+  );
+  assert.ok(res.code === 0 || res.code === 1, res.stderr);
+  assert.equal(
+    getIntegrationMode(cwd, envBase),
+    "worktree",
+    "equals-form --integration= must be accepted by setup"
+  );
+});
+
+test("setup equals-form --run-mode=direct persists posture", () => {
+  const cwd = tempCwd();
+  const pluginData = path.join(cwd, "pdata");
+  const envBase = { CLAUDE_PLUGIN_DATA: pluginData };
+  assert.equal(getRunMode(cwd, envBase), "hardened");
+  const res = runCompanion(
+    ["setup", "--run-mode=direct", "--skip-codex-agents"],
+    { cwd, env: envBase }
+  );
+  assert.ok(res.code === 0 || res.code === 1, res.stderr);
+  assert.equal(getRunMode(cwd, envBase), "direct");
+});
+
+test("setup equals-form --notification-mode=auto persists prefs", () => {
+  const cwd = tempCwd();
+  const pluginData = path.join(cwd, "pdata");
+  const envBase = { CLAUDE_PLUGIN_DATA: pluginData };
+  const res = runCompanion(
+    ["setup", "--notification-mode=auto", "--skip-codex-agents"],
+    { cwd, env: envBase }
+  );
+  assert.ok(res.code === 0 || res.code === 1, res.stderr);
+  assert.equal(getNotificationConfig(cwd, envBase).notificationMode, "auto");
 });

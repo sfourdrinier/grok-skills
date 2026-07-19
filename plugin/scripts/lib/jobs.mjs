@@ -10,10 +10,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { resolveWorkspaceRoot } from "./gate-state.mjs";
-import {
-  parseTargetFlag,
-  resolveTargetWorkspaceRoot,
-} from "./git-context.mjs";
+import { resolveTargetWorkspaceRoot } from "./git-context.mjs";
 import {
   isNotificationMode,
   NOTIFICATION_MODES,
@@ -563,97 +560,13 @@ export function formatDirectIntegrationConsentMsg(opts = {}) {
 /** Default (cwd-scoped) refuse copy; prefer formatDirectIntegrationConsentMsg for gates. */
 export const DIRECT_INTEGRATION_CONSENT_MSG = formatDirectIntegrationConsentMsg();
 
-/**
- * Drop any existing --integration flag(s) then append the resolved effective mode.
- * Ensures the wrapper never silently defaults behind the companion gate.
- * @param {string[]} args
- * @param {string} mode
- * @returns {string[]}
- */
-export function withExplicitIntegration(args, mode) {
-  const out = [];
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i];
-    if (a === "--integration" && args[i + 1] !== undefined) {
-      i += 1;
-      continue;
-    }
-    if (typeof a === "string" && a.startsWith("--integration=")) {
-      continue;
-    }
-    out.push(a);
-  }
-  out.push("--integration", mode);
-  return out;
-}
-
-/**
- * Resolve effective integration for code/implement and enforce the one-time
- * direct consent gate. Consent and integrationMode are keyed on the resolved
- * TARGET repo root (git toplevel of --target, defaulting to '.'), not companion
- * cwd - so consent for repo A never authorizes a direct run against repo B.
- * worktree|auto|review need no consent; direct needs setup for that target.
- * @returns {{ ok: true, effective: string|null, rest: string[] } | { ok: false, code: number, message: string }}
- */
-export function gateIntegrationForCodeish(mode, rest, integrationFlag, cwd, env = process.env) {
-  if (mode !== "code" && mode !== "implement") {
-    return { ok: true, rest, effective: null };
-  }
-  // continue-run is worktree-only in the wrapper (it loads the retained
-  // worktree lineage and forbids --target/--base/--contract-file), so it never
-  // does a live direct edit - exempt it from direct-integration consent, which
-  // would otherwise refuse the documented continuation command in a fresh
-  // workspace where the default mode resolves to direct.
-  if (
-    rest.includes("--continue-run") ||
-    rest.some((a) => typeof a === "string" && a.startsWith("--continue-run="))
-  ) {
-    return { ok: true, rest, effective: null };
-  }
-  // implement is verify-only (code + handoff, never applies to the live tree),
-  // so it ALWAYS takes the worktree path: never direct (which would record the
-  // code leg as mode=direct and make the immediate handoff refuse it after
-  // mutating the tree) and never the direct-consent gate.
-  if (mode === "implement") {
-    return { ok: true, effective: "worktree", rest: withExplicitIntegration(rest, "worktree") };
-  }
-  // SECURITY: key consent on the repo being edited, not process.cwd().
-  const targetArg = parseTargetFlag(rest);
-  const targetWorkspace = resolveTargetWorkspaceRoot(cwd, targetArg);
-  let effective;
-  if (integrationFlag != null && String(integrationFlag).trim() !== "") {
-    const parsed = parseIntegrationMode(integrationFlag);
-    if (!parsed) {
-      return {
-        ok: false,
-        code: 1,
-        message:
-          `[grok-companion] invalid --integration ${JSON.stringify(integrationFlag)} ` +
-          `(valid: direct|worktree|auto|review)\n`,
-      };
-    }
-    effective = parsed;
-  } else {
-    effective = getIntegrationMode(targetWorkspace, env);
-  }
-  // auto/review: treat like worktree for gating (no live unverified tree writes).
-  if (effective === "direct" && !getIntegrationConsent(targetWorkspace, env)) {
-    return {
-      ok: false,
-      code: 1,
-      message:
-        formatDirectIntegrationConsentMsg({
-          targetWorkspace,
-          companionCwd: cwd,
-        }) + "\n",
-    };
-  }
-  return {
-    ok: true,
-    effective,
-    rest: withExplicitIntegration(rest, effective),
-  };
-}
+// Integration gate + continue-run target live in integration-gate.mjs (900-line
+// cap). Re-export for existing import paths (jobs.mjs remains the public surface).
+export {
+  gateIntegrationForCodeish,
+  resolveContinueRunTargetWorkspace,
+  withExplicitIntegration,
+} from "./integration-gate.mjs";
 
 /**
  * Effective notification prefs.

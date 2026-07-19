@@ -7,12 +7,17 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { parseTargetFlag } from "../lib/git-context.mjs";
 import { parseDirtyStatusPaths, parseNumstatPaths } from "../lib/integrate.mjs";
-import { gateIntegrationForCodeish } from "../lib/jobs.mjs";
+import { gateIntegrationForCodeish, resolveContinueRunTargetWorkspace } from "../lib/jobs.mjs";
+import { runsDirFor } from "../progress-relay.mjs";
 import { writeHandoffConsumedMarker } from "../subagent-stop-hook.mjs";
+import { makeFakeWrapper, runCompanion } from "./helpers/fake-wrapper.mjs";
+
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 test("parseTargetFlag: last --target wins (matches wrapper argparse)", () => {
   assert.equal(parseTargetFlag(["--target", "a", "--target", "b"]), "b");
@@ -23,7 +28,7 @@ test("parseTargetFlag: last --target wins (matches wrapper argparse)", () => {
 
 test("gateIntegrationForCodeish: continue-run is exempt from direct consent", () => {
   // Fresh workspace (no consent recorded) + default direct would normally refuse;
-  // continue-run must pass through untouched.
+  // continue-run stays consent-exempt but still resolves effective integration.
   const res = gateIntegrationForCodeish(
     "code",
     ["--continue-run", "20260101T000000Z-abc123", "--task-file", "-"],
@@ -32,7 +37,12 @@ test("gateIntegrationForCodeish: continue-run is exempt from direct consent", ()
     {}
   );
   assert.equal(res.ok, true);
-  assert.equal(res.effective, null);
+  assert.equal(res.continueRun, true);
+  // Default integration is direct: companion maps wrapper lineage to worktree
+  // without auto apply, while preserving effective=direct for mode awareness.
+  assert.equal(res.effective, "direct");
+  const i = res.rest.indexOf("--integration");
+  assert.ok(i >= 0 && res.rest[i + 1] === "worktree", res.rest.join(" "));
 });
 
 test("[3] gateIntegrationForCodeish routes implement to worktree (never direct)", () => {
@@ -58,7 +68,41 @@ test("[11] gateIntegrationForCodeish exempts --continue-run= (equals form)", () 
     {}
   );
   assert.equal(res.ok, true);
-  assert.equal(res.effective, null);
+  assert.equal(res.continueRun, true);
+  assert.equal(res.effective, "direct");
+  const i = res.rest.indexOf("--integration");
+  assert.ok(i >= 0 && res.rest[i + 1] === "worktree", res.rest.join(" "));
+});
+
+test("gateIntegrationForCodeish: continue-run auto keeps effective=auto (apply-on-ready)", () => {
+  const res = gateIntegrationForCodeish(
+    "code",
+    ["--continue-run", "20260101T000000Z-abc123", "--task-file", "-"],
+    "auto",
+    os.tmpdir(),
+    {}
+  );
+  assert.equal(res.ok, true);
+  assert.equal(res.continueRun, true);
+  assert.equal(res.effective, "auto");
+  // Wrapper still receives worktree lineage; companion auto path uses effective.
+  const i = res.rest.indexOf("--integration");
+  assert.ok(i >= 0 && res.rest[i + 1] === "worktree", res.rest.join(" "));
+});
+
+test("gateIntegrationForCodeish: continue-run review retains (effective=review)", () => {
+  const res = gateIntegrationForCodeish(
+    "code",
+    ["--continue-run=20260101T000000Z-abc123"],
+    "review",
+    os.tmpdir(),
+    {}
+  );
+  assert.equal(res.ok, true);
+  assert.equal(res.continueRun, true);
+  assert.equal(res.effective, "review");
+  const i = res.rest.indexOf("--integration");
+  assert.ok(i >= 0 && res.rest[i + 1] === "worktree", res.rest.join(" "));
 });
 
 test("parseDirtyStatusPaths: extracts modified/untracked/renamed paths (-z)", () => {
@@ -155,4 +199,114 @@ test("importing subagent-stop-hook does not run the hook (no stdin read/exit)", 
   );
   assert.equal(res.status, 0, res.stderr);
   assert.match(res.stdout, /function/);
+});
+
+test("resolveContinueRunTargetWorkspace reads prior run.json repository", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-continue-tgt-"));
+  const stateHome = fs.mkdtempSync(path.join(os.tmpdir(), "grok-continue-xdg-"));
+  const env = { ...process.env, XDG_STATE_HOME: stateHome, CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata") };
+  const runId = "20260717T120000Z-abcdef";
+  const runsDir = runsDirFor(env);
+  const runDir = path.join(runsDir, runId);
+  fs.mkdirSync(runDir, { recursive: true });
+  const repo = path.join(cwd, "other-repo");
+  fs.mkdirSync(repo, { recursive: true });
+  fs.writeFileSync(
+    path.join(runDir, "run.json"),
+    JSON.stringify({ repository: repo, targetWorkspace: repo }) + "\n"
+  );
+  const resolved = resolveContinueRunTargetWorkspace(runId, cwd, env);
+  assert.equal(path.resolve(resolved), path.resolve(repo));
+  // Missing prior run falls back to cwd workspace root.
+  const missing = resolveContinueRunTargetWorkspace("20260717T120000Z-000000", cwd, env);
+  assert.equal(path.resolve(missing), path.resolve(cwd));
+  fs.rmSync(cwd, { recursive: true, force: true });
+  fs.rmSync(stateHome, { recursive: true, force: true });
+});
+
+// runHandoff must stamp handoff-consumed via shared last-valid flagValue SSOT
+// (split AND equals). indexOf("--run-id") misses --run-id=<id>.
+test("runHandoff consumed marker parses --run-id split and equals (shared SSOT)", () => {
+  const companionSrc = fs.readFileSync(
+    path.join(SCRIPT_DIR, "..", "grok-companion.mjs"),
+    "utf8"
+  );
+  const handoffFn = companionSrc.slice(companionSrc.indexOf("function runHandoff"));
+  // Must use shared flagValue (last-valid) - not raw indexOf split-only.
+  assert.match(handoffFn, /flagValue\([^)]*--run-id/, "runHandoff must use flagValue(--run-id)");
+  assert.doesNotMatch(
+    handoffFn,
+    /indexOf\(["']--run-id["']\)/,
+    "runHandoff must not use indexOf('--run-id') (misses equals form)"
+  );
+
+  // Behavioral: prove companion handoff path stamps for --run-id= via fake wrapper.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-handoff-marker-"));
+  const xdg = path.join(root, "xdg");
+  const runId = "20260717T120000Z-abcdef";
+  const runDir = path.join(xdg, "grok-skills", "runs", runId);
+  fs.mkdirSync(runDir, { recursive: true });
+  const { env, cleanup } = makeFakeWrapper({
+    handoff: {
+      stdout:
+        JSON.stringify({
+          schemaVersion: 1,
+          status: "success",
+          mode: "handoff",
+          runId,
+          response: { integration: { ready: true, blockers: [] } },
+        }) + "\n",
+      exitCode: 0,
+    },
+  });
+  try {
+    const res = runCompanion(["handoff", `--run-id=${runId}`], {
+      cwd: root,
+      env: {
+        ...env,
+        XDG_STATE_HOME: xdg,
+        CLAUDE_PLUGIN_DATA: path.join(root, "pdata"),
+        GROK_COMPANION_EXECUTION_CONTEXT: "foreground",
+      },
+    });
+    assert.equal(res.code, 0, res.stderr);
+    assert.ok(
+      fs.existsSync(path.join(runDir, "handoff-consumed.json")),
+      "equals-form --run-id= must stamp handoff-consumed.json"
+    );
+  } finally {
+    cleanup();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// companion-setup must reuse hasFlagOrEquals rather than local startsWith loops.
+test("companion-setup uses hasFlagOrEquals SSOT (no local startsWith presence loops)", () => {
+  const src = fs.readFileSync(path.join(SCRIPT_DIR, "..", "lib", "companion-setup.mjs"), "utf8");
+  assert.match(src, /hasFlagOrEquals/, "must import/use hasFlagOrEquals");
+  assert.doesNotMatch(
+    src,
+    /a\.startsWith\("--codex-agents-scope="\)/,
+    "no local startsWith for --codex-agents-scope="
+  );
+  assert.doesNotMatch(
+    src,
+    /a\.startsWith\("--run-mode="\)/,
+    "no local startsWith for --run-mode="
+  );
+  assert.doesNotMatch(
+    src,
+    /a\.startsWith\("--integration="\)/,
+    "no local startsWith for --integration="
+  );
+  assert.doesNotMatch(
+    src,
+    /a\.startsWith\("--notification-mode="\)/,
+    "no local startsWith for --notification-mode="
+  );
+  assert.doesNotMatch(
+    src,
+    /a\.startsWith\("--notification-webhook-url="\)/,
+    "no local startsWith for --notification-webhook-url="
+  );
 });

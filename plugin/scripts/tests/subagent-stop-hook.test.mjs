@@ -14,6 +14,11 @@ import { test } from "node:test";
 
 import { createJob, updateJob } from "../lib/jobs.mjs";
 import { runsDirFor } from "../progress-relay.mjs";
+import {
+  isPeerRunId,
+  messageLooksLikePeerRun,
+  reminderContextForAgent,
+} from "../subagent-stop-hook.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const HOOK = path.resolve(SCRIPT_DIR, "..", "subagent-stop-hook.mjs");
@@ -243,4 +248,103 @@ test("hooks.json registers SubagentStop with timeout 5 and handoff statusMessage
   assert.match(cmd.command, /subagent-stop-hook\.mjs/);
   assert.equal(cmd.timeout, 5);
   assert.equal(cmd.statusMessage, "Grok handoff reminder");
+});
+
+
+test("messageLooksLikePeerRun detects peer channel wording", () => {
+  assert.equal(messageLooksLikePeerRun("peer stop --run-id x finished"), true);
+  assert.equal(messageLooksLikePeerRun("peer-stop ready"), true);
+  assert.equal(messageLooksLikePeerRun("peer start launched"), true);
+  assert.equal(messageLooksLikePeerRun("code run finished handoff next"), false);
+});
+
+test("reminderContextForAgent peer mode never tells handoff/apply", () => {
+  const peer = reminderContextForAgent(VALID_RUN_ID, { peer: true });
+  assert.match(peer, /peer-stop/);
+  assert.doesNotMatch(peer, /handoff --run-id/);
+  assert.match(peer, /Never auto-apply|never auto-apply/i);
+  const code = reminderContextForAgent(VALID_RUN_ID, { fromMessage: true });
+  assert.match(code, /handoff --run-id/);
+});
+
+test("peer runId (peer.json) nudges peer-stop outcome, not handoff", () => {
+  const cwd = makeWorkspace();
+  const env = seedEnv(cwd);
+  seedCodeJob(cwd, env, VALID_RUN_ID);
+  const runDir = seedRunDir(env, VALID_RUN_ID);
+  fs.writeFileSync(path.join(runDir, "peer.json"), "{}\n");
+
+  const payload = subagentStopPayload(cwd);
+  payload.last_assistant_message = `peer stop complete for ${VALID_RUN_ID}`;
+  const res = runHook(payload, env);
+  assert.equal(res.status, 0, res.stderr);
+  const out = JSON.parse(res.stdout.trim());
+  assert.match(out.hookSpecificOutput.additionalContext, /peer-stop/);
+  assert.doesNotMatch(out.hookSpecificOutput.additionalContext, /handoff --run-id/);
+  assert.equal(isPeerRunId(VALID_RUN_ID, cwd, env), true);
+});
+
+// RED / reviewer blocker: durable code job + run dir must still emit the code
+// handoff nudge even when the assistant message mentions peer-stop. Peer
+// classification requires durable peer.json or peer job kind; wording alone
+// cannot override durable code evidence.
+test("durable code job/run + peer-stop wording still emits code handoff nudge", () => {
+  const cwd = makeWorkspace();
+  const env = seedEnv(cwd);
+  seedCodeJob(cwd, env, VALID_RUN_ID, { kind: "code" });
+  seedRunDir(env, VALID_RUN_ID); // no peer.json
+
+  const payload = subagentStopPayload(cwd);
+  payload.last_assistant_message =
+    `code finished for ${VALID_RUN_ID}; note: peer-stop is for peer channel only`;
+  const res = runHook(payload, env);
+  assert.equal(res.status, 0, res.stderr);
+  assert.ok(res.stdout.trim(), "expected additionalContext for durable code run");
+  const out = JSON.parse(res.stdout.trim());
+  assert.match(
+    out.hookSpecificOutput.additionalContext,
+    /handoff --run-id/,
+    "durable code evidence must keep handoff nudge"
+  );
+  assert.match(out.hookSpecificOutput.additionalContext, new RegExp(VALID_RUN_ID));
+  assert.doesNotMatch(
+    out.hookSpecificOutput.additionalContext,
+    /Use the peer-stop outcome/,
+    "peer-stop wording alone must not flip durable code to peer"
+  );
+  assert.equal(isPeerRunId(VALID_RUN_ID, cwd, env), false);
+});
+
+// Peer job kind (no peer.json) is durable peer evidence.
+test("durable peer job kind (no peer.json) nudges peer-stop, not handoff", () => {
+  const cwd = makeWorkspace();
+  const env = seedEnv(cwd);
+  seedCodeJob(cwd, env, VALID_RUN_ID, { kind: "peer" });
+  seedRunDir(env, VALID_RUN_ID); // no peer.json
+
+  const payload = subagentStopPayload(cwd);
+  payload.last_assistant_message = `peer stop complete for ${VALID_RUN_ID}`;
+  const res = runHook(payload, env);
+  assert.equal(res.status, 0, res.stderr);
+  const out = JSON.parse(res.stdout.trim());
+  assert.match(out.hookSpecificOutput.additionalContext, /peer-stop/);
+  assert.doesNotMatch(out.hookSpecificOutput.additionalContext, /handoff --run-id/);
+  assert.equal(isPeerRunId(VALID_RUN_ID, cwd, env), true);
+});
+
+// Wording may classify as peer only when there is no durable code job evidence
+// (run dir exists with a validated runId, but jobs index has no kind=code row).
+test("peer-stop wording classifies peer only without durable code job evidence", () => {
+  const cwd = makeWorkspace();
+  const env = seedEnv(cwd);
+  // Run dir only - no jobs row of kind code (and no peer.json).
+  seedRunDir(env, VALID_RUN_ID);
+
+  const payload = subagentStopPayload(cwd);
+  payload.last_assistant_message = `peer-stop ready for ${VALID_RUN_ID}`;
+  const res = runHook(payload, env);
+  assert.equal(res.status, 0, res.stderr);
+  const out = JSON.parse(res.stdout.trim());
+  assert.match(out.hookSpecificOutput.additionalContext, /peer-stop/);
+  assert.doesNotMatch(out.hookSpecificOutput.additionalContext, /handoff --run-id/);
 });

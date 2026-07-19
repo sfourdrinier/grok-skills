@@ -67,7 +67,7 @@ import {
   runAutoIntegrate,
   runImplementCombo,
 } from "./lib/implement.mjs";
-import { hasFlagOrEquals, stripFlags } from "./lib/companion-args.mjs";
+import { flagValue, hasFlagOrEquals, stripFlags } from "./lib/companion-args.mjs";
 import { renderEnvelopePretty, tryParseEnvelope } from "./lib/render.mjs";
 import { terminateReviewTree } from "./lib/gate-kill.mjs";
 import {
@@ -297,9 +297,9 @@ function runHandoff(wrapper, args) {
   const code = runPassthrough(wrapper, args);
   // On a ready handoff (exit 0), stamp the consumed marker so the SubagentStop
   // fallback stops re-suggesting this run (the marker had no writer before).
+  // Shared last-valid SSOT: split (`--run-id X`) AND equals (`--run-id=X`).
   if (code === 0) {
-    const i = args.indexOf("--run-id");
-    const runId = i >= 0 ? args[i + 1] : undefined;
+    const runId = flagValue(args, "--run-id");
     if (runId) {
       try {
         writeHandoffConsumedMarker(runId);
@@ -412,7 +412,9 @@ function prepareReviewishArgs(mode, args, cwd, base, runMode) {
   return { args: next, cleanup: null, wrapperMode: mode === "adversarial-review" ? "review" : mode };
 }
 function hasFlag(args, name) {
-  return args.includes(name);
+  // Presence SSOT: split OR equals (wrapper argparse parity). Bare includes()
+  // would miss --input=art.md / --no-web=1 and break hermetic reason defaults.
+  return hasFlagOrEquals(args, name);
 }
 // Post-staging dispatch. Staged stdin cleanup is owned by main()'s finally.
 async function dispatch({
@@ -483,7 +485,11 @@ async function dispatch({
   // Integration consent gate (code/implement only). Refuses before wrapper spawn.
   // Re-bind rest so implement/code see the explicit --integration <effective>.
   // Capture effective for auto (apply-on-verified-ready) post-step.
+  // continue-run: still resolves effective (auto keeps apply-on-ready; review
+  // retains; direct continues on wrapper worktree lineage without auto apply)
+  // and derives apply target from prior-run metadata (--target is forbidden).
   let integrationEffective = null;
+  let continueRunTargetWorkspace = null;
   {
     const gated = gateIntegrationForCodeish(mode, rest, integrationFlag, cwd);
     if (!gated.ok) {
@@ -493,6 +499,9 @@ async function dispatch({
     if (gated.effective != null) {
       integrationEffective = gated.effective;
       rest = gated.rest;
+    }
+    if (gated.continueRun && gated.targetWorkspace) {
+      continueRunTargetWorkspace = gated.targetWorkspace;
     }
   }
   if (mode === "debate") {
@@ -560,7 +569,8 @@ async function dispatch({
       return runAutoIntegrate(wrapper, comboRest, runMode, track, {
         runWithLiveRelay,
         stderrLine,
-        targetCwd: cwd,
+        // continue-run forbids --target; apply to the prior run's repository.
+        targetCwd: continueRunTargetWorkspace || cwd,
         finalizeCombo,
       });
     }

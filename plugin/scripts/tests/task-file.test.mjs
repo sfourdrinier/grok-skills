@@ -146,6 +146,22 @@ test("injectTaskFile strips equals-form --task=/--task-file= tokens", () => {
   cleanup();
 });
 
+test("injectTaskFile does not consume a following flag as --task/--task-file value", () => {
+  // Regression: bare `--task` before `--target` used to swallow `--target`.
+  const { args, cleanup } = injectTaskFile(
+    ["code", "--task", "--target", ".", "--web"],
+    "new text"
+  );
+  assert.ok(args.includes("--target"), args.join(" "));
+  assert.ok(args.includes("."), args.join(" "));
+  assert.ok(args.includes("--web"), args.join(" "));
+  assert.ok(!args.includes("old"));
+  const tf = args.indexOf("--task-file");
+  assert.ok(tf > 0);
+  assert.equal(fs.readFileSync(args[tf + 1], "utf8"), "new text");
+  cleanup();
+});
+
 test("stageStdinTaskFile returns null when argv has no --task-file - sentinel", () => {
   assert.equal(stageStdinTaskFile(["code", "--target", "."]), null);
   assert.equal(stageStdinTaskFile(["code", "--task-file", "/tmp/x"]), null);
@@ -298,6 +314,35 @@ sys.exit(0)
     assert.equal(res.stdout.trim(), payload);
     const leftovers = fs.readdirSync(tmp).filter((d) => d.startsWith("grok-task-"));
     assert.deepEqual(leftovers, []);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(tmp, { recursive: true, force: true });
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("reason --input= equals form injects hermetic --no-web", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "grok-reason-input-eq-"));
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-reason-input-eqcwd-"));
+  // Fake wrapper dumps argv so we can assert companion appended --no-web.
+  const echoBody = `import sys
+print(" ".join(sys.argv[1:]))
+sys.exit(0)
+`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-fake-echo-input-"));
+  const wrapperPath = path.join(dir, "grok_agent.py");
+  fs.writeFileSync(wrapperPath, echoBody, { mode: 0o600 });
+  try {
+    const res = runCompanion(["reason", "--input=art.md", "--task", "summarize"], {
+      env: {
+        GROK_AGENT_WRAPPER: wrapperPath,
+        GROK_ALLOW_WRAPPER_OVERRIDE: "1",
+        TMPDIR: tmp,
+      },
+      cwd,
+    });
+    assert.equal(res.code, 0, res.stderr);
+    assert.match(res.stdout, /--no-web/, `expected hermetic --no-web for --input=; got: ${res.stdout}`);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
     fs.rmSync(tmp, { recursive: true, force: true });

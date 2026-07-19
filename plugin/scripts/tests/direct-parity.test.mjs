@@ -13,6 +13,8 @@ import { test } from "node:test";
 import {
   DIRECT_NO_HANDOFF_MSG,
   DIRECT_RUN_ID_RE,
+  isDirectHandoffRequest,
+  rawRunIdFlag,
   resolveDirectTimeoutSeconds,
   runDirectGrok,
 } from "../lib/direct-grok.mjs";
@@ -750,4 +752,31 @@ test("DIRECT_NO_HANDOFF_MSG is the single shared refusal string", () => {
   assert.equal(typeof DIRECT_NO_HANDOFF_MSG, "string");
   assert.match(DIRECT_NO_HANDOFF_MSG, /direct-mode runs have no hardened run state/);
   assert.match(DIRECT_NO_HANDOFF_MSG, /setup --run-mode hardened/);
+});
+
+test("rawRunIdFlag first valid wins (direct refusal must not be hidden)", () => {
+  assert.equal(
+    rawRunIdFlag(["status", "--run-id", DIRECT_ID, "--run-id", "20260717T120000Z-abcdef"]),
+    DIRECT_ID
+  );
+  assert.equal(
+    rawRunIdFlag(["status", "--run-id=direct-1", "--run-id=direct-2"]),
+    "direct-1"
+  );
+  // Invalid bare first occurrence is skipped; next valid wins as first valid.
+  assert.equal(
+    rawRunIdFlag(["status", "--run-id", "--pretty", "--run-id", DIRECT_ID]),
+    DIRECT_ID
+  );
+  assert.equal(isDirectHandoffRequest("status", ["--run-id", DIRECT_ID]), true);
+  assert.equal(
+    isDirectHandoffRequest("status", [
+      "--run-id",
+      DIRECT_ID,
+      "--run-id",
+      "20260717T120000Z-abcdef",
+    ]),
+    true,
+    "later hardened id must not hide earlier direct-* for refusal"
+  );
 });
