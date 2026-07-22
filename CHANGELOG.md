@@ -10,14 +10,13 @@ for marketplace / package tags.
 
 ### Fixed (monorepo hardened-direct)
 
-- **Nested git discovery no longer treats every workspace directory as a
-  gitdir visit.** The former hard bound of **2000** counted every `os.walk`
-  directory, so monorepos larger than that failed hardened `integration=direct`
-  before Grok started (`protected-path-write` / nested git discovery). The bound
-  now counts **discovered gitdirs** only (default **50_000**). Directory walk
-  has a separate monorepo-scale cap (default **2_000_000**).
-- Overrides: `GROK_WRAPPER_MAX_NESTED_GIT_DISCOVERY`,
-  `GROK_WRAPPER_MAX_GIT_DISCOVERY_WALK_DIRS`.
+- **Removed the bogus 2000-directory fail-closed.** Nested git discovery used to
+  count **every** `os.walk` directory against a hard cap of 2000, so monorepos
+  failed hardened `integration=direct` before Grok started
+  (`protected-path-write`). Production default is now **unlimited** for both
+  workspace walks and gitdir inventory (symlink-safe, no follow). Optional
+  operator caps only: `GROK_WRAPPER_MAX_NESTED_GIT_DISCOVERY` (gitdirs) and
+  `GROK_WRAPPER_MAX_GIT_DISCOVERY_WALK_DIRS` (walk visits) - unset = no cap.
 
 ## [2.0.1] - 2026-07-22
 
