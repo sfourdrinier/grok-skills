@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
+## [2.0.2] - 2026-07-22
+
+### Fixed (monorepo hardened-direct)
+
+- **Nested git discovery no longer treats every workspace directory as a
+  gitdir visit.** The former hard bound of **2000** counted every `os.walk`
+  directory, so monorepos larger than that failed hardened `integration=direct`
+  before Grok started (`protected-path-write` / nested git discovery). The bound
+  now counts **discovered gitdirs** only (default **50_000**). Directory walk
+  has a separate monorepo-scale cap (default **2_000_000**).
+- Overrides: `GROK_WRAPPER_MAX_NESTED_GIT_DISCOVERY`,
+  `GROK_WRAPPER_MAX_GIT_DISCOVERY_WALK_DIRS`.
+
 ## [2.0.1] - 2026-07-22
 
 ### Added (Linux live sandbox support)
