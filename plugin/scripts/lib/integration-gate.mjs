@@ -8,6 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { dropValueFlags, flagValue, hasFlagOrEquals } from "./companion-args.mjs";
+import { isDirectRunId } from "./direct-grok.mjs";
 import {
   parseTargetFlag,
   resolveTargetWorkspaceRoot,
@@ -106,6 +107,22 @@ export function gateIntegrationForCodeish(mode, rest, integrationFlag, cwd, env 
   const continueRunId = flagValue(rest, "--continue-run");
   const isContinueRun =
     continueRunId != null || hasFlagOrEquals(rest, "--continue-run");
+  // Synthetic runMode=direct job ids (direct-<ms>) have no durable run record
+  // under runs/; continue-run can only resume hardened lineages.
+  if (isContinueRun && isDirectRunId(continueRunId || "")) {
+    return {
+      ok: false,
+      code: 1,
+      message:
+        "[grok-companion] --continue-run requires a hardened run id " +
+        "(from a prior hardened code envelope under ~/.local/state/grok-skills/runs/), " +
+        "not a synthetic runMode=direct id (direct-*). " +
+        "runMode=direct does not store continuable lineage. " +
+        "Recovery: checkpoint or clean overlapping dirty paths, then start a " +
+        "fresh hardened code run (setup --run-mode hardened; integration may " +
+        "still be direct for live-tree landing).\n",
+    };
+  }
   // implement is verify-only (code + handoff, never applies to the live tree),
   // so it ALWAYS takes the worktree path: never direct (which would record the
   // code leg as mode=direct and make the immediate handoff refuse it after

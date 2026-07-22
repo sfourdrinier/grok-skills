@@ -55,8 +55,8 @@ Gating probes (their collective pass/fail is the suite's exit code and the only
 thing `--revalidate` keys off):
 
 1. `preflight` -- success, runnable Grok CLI (any working build),
-   `secretReadDenial:false` advisory present, current platform macOS (probed),
-   `start..done` progress.
+   `secretReadDenial:false` advisory present, current platform macOS or Linux
+   (probed; Seatbelt / Landlock), `start..done` progress.
 2. `reason` isolated (`--task "Reply with exactly: PONG"`) -- success,
    `effectiveModel` starts with `grok-4.5`, no `changedFiles`, `start..done`
    progress, private home destroyed clean.

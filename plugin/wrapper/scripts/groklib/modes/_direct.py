@@ -549,6 +549,7 @@ def _run_direct_mode_body(
         and effective_model is not None
     ):
         grok_field, usage_field, response_field, stderr_warnings = grok_usage_response_fields(result)
+        incomplete = list(result.incomplete_warnings or ())
         fields = _common_fields(
             requested_model=requested_model,
             effective_model=effective_model,
@@ -561,11 +562,15 @@ def _run_direct_mode_body(
             sandbox_obj=sandbox_obj,
             run_paths=run_paths,
             cleanup_field=cleanup_field,
-            warnings=stderr_warnings + warnings,
+            warnings=incomplete + stderr_warnings + warnings,
         )
         fields["grok"] = grok_field
         fields["usage"] = usage_field
         fields["response"] = response_field
+        if incomplete:
+            # Cancelled/turn-cap with findings: keep response, mark untrustworthy
+            # completion (exit_code_for -> 1). SSOT with _success_envelope.
+            fields["incompleteStop"] = True
         envelope = build_envelope(run_id=run_paths.run_id, mode=mode, status="success", **fields)
         try:
             record = runstate.load_run_record(run_paths.run_id)

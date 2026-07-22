@@ -424,6 +424,14 @@ FIELD_SPECS: Dict[str, dict] = {
         "default_factory": None,
         "omit_when_absent": True,
     },
+    # True when Grok stopped incomplete (Cancelled / turn-cap) but usable text was
+    # kept as findings. status may still be "success" so response is not wiped;
+    # exit_code_for treats this as non-zero so orchestrators do not mark work done.
+    "incompleteStop": {
+        "type_spec": ("bool",),
+        "default_factory": None,
+        "omit_when_absent": True,
+    },
 }
 
 # The four fields build_envelope binds directly from its named parameters;
@@ -592,11 +600,17 @@ def failure_envelope(
 
 
 def exit_code_for(envelope: dict) -> int:
-    """Return 0 for a non-failure envelope, else 1.
+    """Return 0 for a trustworthy non-failure envelope, else 1.
 
     ``success`` and ``running`` (status-mode: target still in progress) both
     exit 0 so a successful poll of a live run is not treated as a command error.
+
+    ``incompleteStop: true`` exits 1 even when ``status`` is ``success``: findings
+    were kept after Cancelled/turn-cap, but the run is not a trustworthy
+    completion (orchestrators must not treat exit 0 as "done").
     """
+    if envelope.get("incompleteStop") is True:
+        return 1
     return 0 if envelope.get("status") in ("success", "running") else 1
 
 

@@ -22,8 +22,11 @@ Prerequisites:
 
 - Python 3
 - Node.js (for plugin unit tests)
+- **ripgrep** (`rg`) for `tools/checks.sh` / `tools/verify.sh`
 - Optional: Claude Code CLI (`claude`) and Codex CLI (`codex`) for install validation
 - Optional: authenticated Grok CLI (`grok --version` works; any build)
+- For **live** hardened modes on Linux: Landlock-capable kernel + `bwrap`
+  (bubblewrap) on `PATH` (see `plugin/wrapper/scripts/tests/fixtures/probe-report-linux.md`)
 
 No `pip install` or `npm install` is required for unit tests.
 

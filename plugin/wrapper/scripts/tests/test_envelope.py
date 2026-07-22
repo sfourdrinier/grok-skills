@@ -216,6 +216,20 @@ class ExitCodeForTests(unittest.TestCase):
         self.assertEqual(exit_code_for(running), 0)
         self.assertEqual(exit_code_for(failure), 1)
 
+    def test_incomplete_stop_exits_nonzero_even_when_status_success(self) -> None:
+        # Cancelled-with-findings keeps status success so response is not wiped,
+        # but incompleteStop must not look like a trustworthy completion (exit 1).
+        incomplete = build_envelope(
+            run_id=_RUN_ID,
+            mode="code",
+            status="success",
+            incompleteStop=True,
+            warnings=["findings kept (run may be incomplete)"],
+        )
+        self.assertTrue(incomplete.get("incompleteStop"))
+        self.assertEqual(validate_envelope(incomplete), [])
+        self.assertEqual(exit_code_for(incomplete), 1)
+
 class ValidateEnvelopeTests(unittest.TestCase):
     """Covers validate_envelope's hand-rolled structural checking against FIELD_SPECS."""
 

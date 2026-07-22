@@ -125,20 +125,105 @@ def list_working_tree_changed_paths(
     return sorted({entry for entry in (tracked + untracked) if entry})
 
 
+def _filter_actually_ignored(
+    repo: pathlib.Path,
+    candidates: List[str],
+    *,
+    error_class: str,
+) -> List[str]:
+    """Keep only paths that ``git check-ignore`` classifies as ignored.
+
+    ``ls-files --others --ignored --directory`` may also emit untracked parent
+    directories that merely *contain* ignored children (e.g. ``other/`` when only
+    ``other/__pycache__/`` is ignored). Those parents are NOT ignored and must
+    not enter the ignored inventory (write-scope / dirty-overlap byproduct filter
+    would otherwise see a false source path). Fully ignored trees such as
+    ``node_modules/`` still pass check-ignore.
+    """
+    if not candidates:
+        return []
+    # Batch check-ignore -z stdin; exit 1 means none ignored.
+    try:
+        payload = b"\0".join(
+            entry.encode("utf-8", errors="surrogateescape") for entry in candidates
+        ) + b"\0"
+    except (UnicodeEncodeError, UnicodeError) as exc:
+        _log("_filter_actually_ignored", "path encode failed: {}".format(exc))
+        raise GrokWrapperError(
+            error_class,
+            "could not encode ignored-path candidates for git check-ignore: {}".format(exc),
+            {"error": str(exc)},
+        ) from exc
+    args = ("check-ignore", "--stdin", "-z")
+    completed = worktree._run_git_bytes(
+        repo,
+        args,
+        env=worktree._git_env(),
+        input_bytes=payload,
+    )
+    if completed.returncode == 1:
+        return []
+    if completed.returncode != 0:
+        _log(
+            "_filter_actually_ignored",
+            "git check-ignore exited {}: {}".format(
+                completed.returncode, _stderr_text(completed)
+            ),
+        )
+        raise GrokWrapperError(
+            error_class,
+            "git check-ignore failed while filtering ignored-path inventory",
+            {
+                "exitStatus": completed.returncode,
+                "stderr": _stderr_text(completed),
+            },
+        )
+    kept_raw = decode_nul_paths(completed.stdout or b"")
+    kept: set = set()
+    for entry in kept_raw:
+        kept.add(entry)
+        kept.add(entry.rstrip("/"))
+        if not entry.endswith("/"):
+            kept.add(entry + "/")
+    # Preserve candidate order for stable fingerprints / diffs.
+    return [
+        entry
+        for entry in candidates
+        if entry in kept or entry.rstrip("/") in kept or (entry + "/") in kept
+    ]
+
+
 def list_ignored_untracked_paths(
     repo: pathlib.Path,
     *,
     error_class: str = "worktree-failure",
 ) -> List[str]:
-    """Every IGNORED untracked repo-relative path (one ``ls-files`` call)."""
-    return [
+    """Ignored untracked repo-relative paths (collapsed + check-ignore filtered).
+
+    Uses ``--directory`` so fully ignored directories collapse to a single entry
+    (e.g. ``node_modules/`` instead of every file under it). Without that flag,
+    large monorepos can spend tens of seconds enumerating ignored trees and
+    trip the shared 30s git timeout (GitHub issue #7), blocking worktree-based
+    ``code --integration review|auto`` before Grok starts.
+
+    Results are filtered with ``git check-ignore`` so untracked parents that only
+    contain ignored children are dropped (not themselves ignored).
+
+    File-level ignore patterns still list individual files. Escape fingerprinting
+    already treats bulk ignored caches as stat-only; directory collapse matches
+    that bulk semantic while remaining sensitive to newly planted top-level
+    ignored paths and new ignored trees.
+    """
+    candidates = [
         entry
         for entry in list_ls_files(
             repo,
             "--others",
             "--ignored",
             "--exclude-standard",
+            "--directory",
             error_class=error_class,
         )
         if entry
     ]
+    return _filter_actually_ignored(repo, candidates, error_class=error_class)

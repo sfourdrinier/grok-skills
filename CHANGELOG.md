@@ -6,6 +6,73 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
+## [2.0.1] - 2026-07-22
+
+### Added (Linux live sandbox support)
+
+- **Linux is a probed platform** for live hardened modes (`review`, `reason`,
+  `code`, `verify`, peer, preflight). `PROBED_PLATFORMS` is now
+  `("macos", "linux")`; expected sandbox telemetry label is
+  `linux/landlock` (macOS remains `macos/seatbelt`).
+- **Committed Linux probe evidence:**
+  `plugin/wrapper/scripts/tests/fixtures/probe-report-linux.md` (write
+  confinement, custom `grok-skills-*` profiles, secret-read residual under
+  D-SECRETREAD, ProfileApplied shape).
+- **Linux operator prerequisites:** Landlock-capable kernel (5.13+ with Landlock
+  LSM) and **bubblewrap** (`bwrap` on `PATH`). Missing `bwrap` fails closed with
+  `probe-required` (same class as unprobed platform). Preflight reports
+  `linuxSandboxPrereqs` when green.
+- Docs: README, SECURITY, COMPATIBILITY, PROVENANCE, authority-policies,
+  cli-reference, roadmap, live probe README.
+
+### Changed
+
+- Unprobed-platform unit tests now use **Windows** as the unprobed fixture
+  (Linux is probed). Live probe suite accepts macOS or Linux for preflight
+  platform checks.
+- Packaging version **2.0.1** (manifests regenerated from
+  `plugin/manifest.source.json`).
+
+### Fixed (worktree prep on large monorepos - issue #7)
+
+- **Ignored-path inventory uses ``git ls-files --directory`` + check-ignore
+  filter (issue #7):** worktree baseline/escape scans no longer expand every
+  file under ignored trees such as `node_modules/` (was multi-minute /
+  multi-hundred-MB listings that hit the 30s git timeout and failed
+  `code --integration review|auto` with `worktree-failure` before Grok
+  started). Results are filtered with ``git check-ignore`` so untracked parents
+  that only contain ignored children (e.g. ``other/`` when only ``__pycache__/``
+  is ignored) are not treated as source paths.
+
+### Fixed (orchestrator trust - Cancelled / continue-run / runMode direct)
+
+- **`incompleteStop` envelope field + exit 1:** when Grok stops with Cancelled
+  (or turn-cap) but usable findings are kept, the envelope may still use
+  `status: success` so `response` is not wiped, but now sets
+  `incompleteStop: true` and **`exit_code_for` returns 1**. Orchestrators must
+  not treat that as completed implementation.
+- **runMode=direct stopReason honesty:** direct envelopes no longer force
+  `grok.stopReason: end_turn` on every process exit 0; they surface the CLI
+  stopReason when present and set `incompleteStop` + exit 1 on Cancelled-with-text.
+- **`--continue-run direct-*` fails closed:** synthetic runMode=direct job ids
+  are not durable run records. Companion refuses with an actionable message
+  (use a hardened run id, or fresh hardened code after checkpoint/clean).
+- Skills/agents: completion-trust checklist and continue-run eligibility docs.
+
+### Notes
+
+- Secret-read denial remains **unproven** on Linux (built-in profiles and
+  `deny_read_globs` still allowed sentinel reads in the probe). Write
+  confinement is the fail-closed boundary, same as macOS.
+- Windows live modes remain blocked until a Windows sandbox probe is committed.
+- aarch64 Linux and unusual LSM/distro configs are not covered by the initial
+  x86_64 Ubuntu-class evidence host.
+- Non-Linux POSIX maps to `other-posix` (unprobed); only `sys.platform` starting
+  with `linux` inherits the Linux Landlock pin.
+- Single SSOT live gate: `require_probed_platform_for_live()` (probed OS + Linux
+  bwrap). Preflight proves bwrap only; Landlock is verified post-run via
+  ProfileApplied.
+
 ## [2.0.0] - 2026-07-19
 
 Peer-agent integration release (plan: docs/superpowers/plans/2026-07-16-peer-agent-integration.md).

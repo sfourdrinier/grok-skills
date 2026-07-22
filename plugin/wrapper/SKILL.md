@@ -256,11 +256,13 @@ in every case; do not attempt to add web access to a verify run.
   host-readable file by absolute path. Only run live modes against trusted
   inputs. Full evidence: `references/authority-policies.md` and
   `references/cli-reference.md`.
-- **macOS-only in version 1 (decision D-PORT).** Live modes (`review`,
-  `reason`, `code`, `verify`) fail closed with error class `probe-required`
-  on any platform without its own captured Grok sandbox probe report. Only
-  macOS has one so far; Linux and Windows stay blocked until their own probe
-  suites run.
+- **Platform probe gate (decision D-PORT).** Live modes (`review`, `reason`,
+  `code`, `verify`) fail closed with error class `probe-required` on any
+  platform without a captured Grok sandbox probe report. macOS (Seatbelt) and
+  Linux (Landlock) are probed; Linux also requires `bwrap` (bubblewrap) on
+  `PATH`. Windows stays blocked until its own probe suite is committed.
+  Evidence: `scripts/tests/fixtures/probe-report.md` and
+  `scripts/tests/fixtures/probe-report-linux.md`.
 
 ## Reference material
 

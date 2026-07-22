@@ -49,6 +49,46 @@ class PathInventoryQuotePathTests(unittest.TestCase):
         self.assertIn("ignored-café.tmp", paths)
         self.assertFalse(any("\\303" in p or p.startswith('"') for p in paths))
 
+    def test_list_ignored_untracked_paths_collapses_ignored_directories(self) -> None:
+        # Issue #7: without --directory, node_modules-scale trees blow the 30s
+        # git timeout. Collapsed inventory must list the tree once, not leaves.
+        (self.repo / ".gitignore").write_text("node_modules/\n*.local\n", encoding="utf-8")
+        _git(self.repo, "add", ".gitignore")
+        _git(self.repo, "commit", "-q", "-m", "ignore bulk trees")
+        nested = self.repo / "node_modules" / "pkg"
+        nested.mkdir(parents=True)
+        (nested / "index.js").write_text("module.exports = 1\n", encoding="utf-8")
+        (self.repo / "creds.local").write_text("SECRET=x\n", encoding="utf-8")
+        paths = path_inventory.list_ignored_untracked_paths(self.repo)
+        self.assertTrue(
+            any(p.rstrip("/") == "node_modules" for p in paths),
+            paths,
+        )
+        self.assertFalse(
+            any("index.js" in p for p in paths),
+            "ignored directory inventory must not expand leaves: {}".format(paths),
+        )
+        self.assertIn("creds.local", paths)
+
+    def test_list_ignored_drops_untracked_parent_of_nested_ignore(self) -> None:
+        # --directory may emit other/ when only other/__pycache__/ is ignored;
+        # check-ignore filter must drop the non-ignored parent (scope byproducts).
+        (self.repo / ".gitignore").write_text("__pycache__/\n", encoding="utf-8")
+        _git(self.repo, "add", ".gitignore")
+        _git(self.repo, "commit", "-q", "-m", "ignore pycache only")
+        pycache = self.repo / "other" / "__pycache__"
+        pycache.mkdir(parents=True)
+        (pycache / "x.pyc").write_bytes(b"\0")
+        paths = path_inventory.list_ignored_untracked_paths(self.repo)
+        self.assertFalse(
+            any(p.rstrip("/") == "other" for p in paths),
+            "non-ignored parent must not appear: {}".format(paths),
+        )
+        self.assertTrue(
+            any("__pycache__" in p for p in paths),
+            paths,
+        )
+
     def test_decode_nul_paths_does_not_cunquote(self) -> None:
         # Raw -z already carries real UTF-8 bytes; do not treat backslash as escape.
         raw = "café.txt".encode("utf-8") + b"\0" + b'"caf\\303\\251.txt"\0'
@@ -102,6 +142,35 @@ class PathInventoryBytesRunnerTests(unittest.TestCase):
         self.assertIn("-z", list(args))
         # Must not have gone through the text-decoding _run_git path.
         self.assertIsInstance(completed.stdout, (bytes, bytearray))
+
+    def test_list_ignored_untracked_paths_passes_directory_flag(self) -> None:
+        ls_done = mock.Mock()
+        ls_done.returncode = 0
+        ls_done.stdout = b"node_modules/\0"
+        ls_done.stderr = b""
+        ci_done = mock.Mock()
+        ci_done.returncode = 0
+        ci_done.stdout = b"node_modules/\0"
+        ci_done.stderr = b""
+        fake = mock.Mock(side_effect=[ls_done, ci_done])
+        with mock.patch("groklib.worktree._run_git_bytes", fake):
+            paths = path_inventory.list_ignored_untracked_paths(self.repo)
+        self.assertEqual(paths, ["node_modules/"])
+        self.assertEqual(fake.call_count, 2)
+        ls_args = list(fake.call_args_list[0][0][1])
+        self.assertEqual(
+            ls_args,
+            [
+                "ls-files",
+                "-z",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--directory",
+            ],
+        )
+        ci_args = list(fake.call_args_list[1][0][1])
+        self.assertEqual(ci_args, ["check-ignore", "--stdin", "-z"])
 
     def test_list_diff_name_only_fail_closed_on_fatal(self) -> None:
         completed = mock.Mock()

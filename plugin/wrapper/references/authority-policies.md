@@ -45,10 +45,11 @@ Notes:
   built-in tools are allowlisted; child-process network access identified
   above is governed solely by D-NET and is the same with or without `--web`.
 - Live execution of `review`, `reason`, `code`, and `verify` additionally
-  requires the current platform to be in `PROBED_PLATFORMS` (macOS only in
-  version 1, decision D-PORT); on any other platform every one of these
-  modes fails closed with error class `probe-required` before Grok is ever
-  spawned.
+  requires the single SSOT gate `require_probed_platform_for_live()`: platform
+  in `PROBED_PLATFORMS` (macOS Seatbelt and Linux Landlock as of 2.0.1) and, on
+  Linux, `bwrap` on `PATH`. Windows and `other-posix` (non-Linux POSIX) are
+  unprobed. Landlock is verified after each run via ProfileApplied, not at
+  preflight. Decision D-PORT.
 
 ## C4 error classes and what they mean for you
 
@@ -74,7 +75,7 @@ each class implies and what to do next.
 | `schema-mismatch` | Structured output failed the caller's `--schema` (review/reason) or `verify`'s fixed verdict schema; `error.detail.pointer` names the failing location. | Adjust the schema or the task so Grok's structured answer can satisfy it. |
 | `timeout` | The run exceeded its wall-clock `--timeout`; the whole process tree was killed. | Raise `--timeout` if the task is legitimately long, or narrow the task. |
 | `turn-exhaustion` | Operator set `--max-turns` and Grok hit that budget with no usable text/structured output. (Default runs omit `--max-turns` entirely.) | Only applies when you set an explicit budget; omit the flag for unlimited. If you set a budget, raise it or narrow the task. |
-| `cancelled` | Grok's `stopReason` was `Cancelled` with **no** salvageable findings. If Cancelled arrives **with** text/structured output, the wrapper keeps findings as success + warning (does not discard them). | Empty cancel: often a hard-denied tool under `permission-mode auto`. Cancelled-with-content is treated as incomplete success, not a wipe. |
+| `cancelled` | Grok's `stopReason` was `Cancelled` with **no** salvageable findings. If Cancelled arrives **with** text/structured output, the wrapper keeps findings as `status: success` + warnings and sets **`incompleteStop: true`** (exit code **1**). | Empty cancel: often a hard-denied tool under `permission-mode auto`. Cancelled-with-content is **not** a trustworthy completion - continue or re-run; do not treat exit 0. |
 | `cli-failure` | Grok exited nonzero for a reason not covered by a more specific class, or an unexpected wrapper exception occurred. | `error.detail` carries captured stderr; report it if it recurs across preflight-clean runs. |
 | `unexpected-edits` | A `code`/`verify` run wrote outside the allowed worktree or modified the original checkout (escape). **Not** used for read-only `review` when the tree moves or Grok lists change-shaped JSON keys - those are informational warnings only. | Investigate worktree escapes before re-running `code`/`verify`. Review warnings about changed paths: keep the findings. |
 | `isolation-unavailable` | Opt-in `review --isolated` could not create or prepare the owned worktree (path/branch collision, dirty submodule, patch apply failure, etc.). No silent fallback to the live checkout. | Fix the setup cause, or re-run without `--isolated` for a live-tree review. |
@@ -83,7 +84,7 @@ each class implies and what to do next.
 | `state-ownership-violation` | An `owner.json` marker did not match the expected run id/owner string (for example, `status`/`cleanup` pointed at state the wrapper does not own). | Do not force past this; it exists to stop one run from touching another run's or another tool's state. |
 | `leader-socket-failure` | The generated `--leader-socket` path exceeded the OS `AF_UNIX` path length limit (~104 bytes on macOS). | This should not occur with the current short prefix scheme; report it if it does. |
 | `usage-error` | Bad argv - missing/mutually-exclusive/malformed CLI flags - caught before any run was created. | Fix the command line; compare against the exact C8 surface in `cli-reference.md`, never guess a flag. |
-| `probe-required` | The current platform (or a specific enforcement claim) has no captured live-probe evidence backing it. | On version 1 this means: you are not on macOS. Live modes stay blocked until that platform's own probe suite runs and is committed. |
+| `probe-required` | Unprobed platform, or Linux missing `bwrap`. | Use macOS or Linux with `bwrap` installed. Windows / other-posix stay blocked until probed. |
 | `finalization-timeout` | The finalize worker exceeded its wall-clock budget; parent recovered after kill and durably wrote a terminal failure (or fail-closed if persist itself failed). | Inspect `error.detail.budgetSeconds` and `finalize-worker.stderr` under the run dir; retry only after checking disk/CAS pressure. |
 | `finalization-worker-missing-result` | The finalize worker exited 0 (or parent recovery finished) without a valid terminal `envelope.json`. | Treat as durable hang recovery failure; inspect the run dir and re-run if the task outcome was not persisted. |
 | `finalization-worker-unkillable` | Parent could not terminate the finalize worker after timeout; **no durable terminal write** was performed (`doNotStore`). Lifecycle may remain `finalizing`. | Investigate the stuck worker process; do not trust stdout-only ephemeral failure as stored state - poll `status` until lifecycle moves or intervene manually. |

@@ -66,6 +66,19 @@ Constants live in `plugin/wrapper/scripts/groklib/implementation_contract.py`
 | **blank `--contract-file`** | Present-but-blank `--contract-file` / `--contract-file=` is usage failure on code, direct, and peer-start (`implementation-contract-invalid`); never treated as "no contract". |
 | **Older contracts** | schemaVersion must be 1; missing optional display fields normalize to empty; oversized objective/criteria fail at load (no silent truncation). |
 
+## Platforms (2.0.1+)
+
+| Platform | Live hardened modes | Notes |
+|----------|---------------------|-------|
+| **macOS** | Yes (Seatbelt) | Probe: `plugin/wrapper/scripts/tests/fixtures/probe-report.md` |
+| **Linux** | Yes (Landlock) | Pre-spawn: `bwrap` on PATH. Post-run: `ProfileApplied` must report `linux/landlock` + `enforced:true`. Probe: `probe-report-linux.md`. Secret-read denial still unproven (D-SECRETREAD). Evidence host is x86_64 Ubuntu-class; aarch64 / unusual LSM need their own probes if they fail. |
+| **other-posix** | No (`probe-required`) | FreeBSD etc. do not inherit the Linux pin |
+| **Windows** | No (`probe-required`) | Until a Windows sandbox probe is committed |
+
+Preflight green on Linux means probed family + `bwrap` present; it does **not** prove
+Landlock. Unit tests may still pin fakes to `macos/seatbelt` for stable CI telemetry;
+production Linux hosts use `linux/landlock` via `expected_sandbox_platform()`.
+
 ## Completion notifications (1.5.0+)
 
 Companion-only push after a terminal **live** run (review/reason/code/verify/

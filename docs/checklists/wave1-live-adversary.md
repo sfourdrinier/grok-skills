@@ -8,7 +8,7 @@ Run once against a disposable throwaway repo with a real Grok login. Not for CI.
 
 - [ ] Grok CLI installed, authenticated (`grok --version` works; any build)
 - [ ] Plugin installed from **git marketplace** (`sfourdrinier/grok-skills`) or local path
-- [ ] macOS (Seatbelt) for live modes
+- [ ] macOS (Seatbelt) or Linux (Landlock + `bwrap` on PATH) for live modes
 
 ## Install path
 

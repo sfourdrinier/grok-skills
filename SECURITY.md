@@ -240,9 +240,16 @@ Full design notes: [docs/OPEN-SECURITY-DECISIONS.md](docs/OPEN-SECURITY-DECISION
 ## Supported platforms
 
 - **macOS** with Seatbelt: live modes supported when a working Grok CLI is installed
-  and logged in (any build; platform probe gate still applies).
-- **Linux / Windows**: live modes fail closed with `probe-required` until a sandbox profile
-  is verified for that platform.
+  and logged in (any build; platform probe gate still applies). Evidence:
+  `plugin/wrapper/scripts/tests/fixtures/probe-report.md`.
+- **Linux** with Landlock: live modes supported when a working Grok CLI is installed
+  and **bubblewrap** (`bwrap`) is on `PATH`. Pre-spawn gate checks bwrap only;
+  Landlock write confinement is verified after each run via `ProfileApplied`
+  (`linux/landlock`, `enforced: true`). Evidence:
+  `plugin/wrapper/scripts/tests/fixtures/probe-report-linux.md` (x86_64 Ubuntu-class).
+  Secret-read denial remains unproven (same D-SECRETREAD residual as macOS).
+- **other-posix** (FreeBSD, etc.) and **Windows**: live modes fail closed with
+  `probe-required` until a sandbox profile is verified for that platform.
 
 ## Reporting a vulnerability
 

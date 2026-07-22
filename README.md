@@ -18,7 +18,7 @@ How edits land is mode-aware:
 ## First 5 minutes
 
 1. Install **Grok CLI**, log in, confirm `grok --version` works
-   (macOS for live modes; Python 3 + Node on `PATH`). Any working Grok CLI
+   (macOS or Linux for live modes; Python 3 + Node on `PATH`). Any working Grok CLI
    build is accepted - there is no exact version lock.
 2. Add the marketplace and install the plugin (no manual clone needed):
 
@@ -100,7 +100,10 @@ Same engine either way: Node companion → hardened Python wrapper → one JSON 
 
 You need all of these:
 
-1. **macOS** for live modes (Seatbelt). Linux/Windows stop with `probe-required` until a sandbox profile is validated for them.
+1. **macOS** (Seatbelt) or **Linux** (Landlock) for live hardened modes. Linux
+   also needs **bubblewrap** (`bwrap` on `PATH`) and a Landlock-capable kernel
+   (5.13+ with Landlock LSM). Windows still stops with `probe-required` until
+   its sandbox is live-probed.
 2. **Python 3** and **Node.js** on your `PATH` (stdlib only; no pip/npm packages for this tool).
 3. **Grok CLI installed and logged in** (`grok --version` works). Any working
    Grok CLI is accepted. `plugin/wrapper/accepted-version.json` is **last
@@ -494,14 +497,16 @@ Compatibility notes and versions tested: [docs/COMPATIBILITY.md](docs/COMPATIBIL
 | “Could not locate the Grok wrapper” | Reinstall the plugin from this repo. Confirm the cache (or `--plugin-dir`) contains `wrapper/scripts/grok_agent.py`. Advanced only: `GROK_AGENT_WRAPPER` + `GROK_ALLOW_WRAPPER_OVERRIDE=1`. |
 | `version-mismatch` | `grok --version` failed, exited nonzero, or did not print a usable Grok version line. Fix/install the Grok CLI; the plugin does **not** require a specific CLI build. |
 | Auth / login checks fail in preflight | Log in with the Grok CLI itself, then re-run `/grok:preflight`. |
-| `probe-required` on Linux/Windows | Expected until that platform’s sandbox is live-probed. |
+| `probe-required` on Windows | Expected until Windows sandbox is live-probed. |
+| `probe-required` on Linux without `bwrap` | Install bubblewrap (`bwrap` on PATH). Required pre-spawn prereq; secret-read denial remains unproven even with bwrap (D-SECRETREAD). Landlock write confinement is verified after each live run via ProfileApplied. |
 | Skills missing after install | Claude: `/reload-plugins`. Codex: check `codex plugin list`. Desktop: restart after install. |
 | Codex install: which name? | Use `grok@grok-skills` (plugin@marketplace). |
 | Codex agents missing from picker | Open a **new session** after install (SessionStart installs them). Confirm `~/.codex/agents/grok-*.toml` exist and `GROK_AGENT_RUN` / `# agent-run:` point at the current `agents/run.mjs`. Re-run optional `/grok:setup` or `setup --force-codex-agents` if you customized those files. |
 | Codex agent: `plugin root not set` | Stale agent from pre-1.2.5. New session or `setup --force-codex-agents` rewrites absolute `agents/run.mjs` path. |
 | Mixed / stale plugin after upgrade | `run.mjs`, companion, and SessionStart force the install tree they live in. Prefer Skill base + `run.mjs`; open a new session after upgrade. |
 | Model invents wrong cache paths | Ignore invented paths. See [plugin-root.md](plugin/references/plugin-root.md). |
-| Review ends Cancelled / empty | Default is unlimited turns. If you set `--max-turns`, incomplete runs with real findings still return success + warning; empty shells fail. |
+| Review/code ends Cancelled mid-work | With findings: `status` may be success + `incompleteStop: true` and **exit 1** (not done). Empty cancel fails as `cancelled`. Resume with hardened `--continue-run <runId>` (not `direct-*`). |
+| `--continue-run direct-…` refused | Expected: runMode=direct has no continuable state. Use hardened run ids under `~/.local/state/grok-skills/runs/`. |
 | Want managed Codex agents gone | Disable/uninstall plugin first (SessionStart reinstalls while enabled), then `setup --remove-codex-agents`. |
 | Review notes files changed during the run | Informational only (dev servers, logs, other editors, or Grok listing paths). Review still **succeeds**; findings apply. Not a failure. See [over-conservatism audit](docs/reviews/2026-07-15-over-conservatism-audit.md). |
 | Warning: "AGENTS.md and CLAUDE.md differ at ..." | Informational (2.0.0+). Both files exist at that level with different bodies (comparison ignores the first/header line, matching `ruleFileParity`) and only AGENTS.md was sent to Grok. Pointer-style CLAUDE.md (`@AGENTS.md`, optionally with surrounding whitespace) never warns. Align the pair, or set `"ruleFileParity": true` in `.grok-skills.json` to enforce matching pairs fail-closed. |

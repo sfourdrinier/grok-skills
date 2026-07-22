@@ -185,9 +185,13 @@ the chosen integration mode's gate.
 4. **Code:** **Required before integrate:** `GROK_RUN handoff --run-id '<runId>'`.
 5. Integrate only when ready (handoff or peer-stop response) and the mode allows.
 6. Completion **notify** is not ready - always verify the ready signal.
-7. On not-ready: summarize `integration.blockers`. For code, prefer
-   `code --continue-run '<runId>'` with the blockers as the follow-up task.
-   For peer, start a new session or use code continuation on a code lineage.
+7. On not-ready **or incomplete stop** (`incompleteStop: true`, non-zero exit
+   with kept findings, or `stopReason` Cancelled mid-work): summarize what
+   landed and what remains. For code, prefer
+   `code --continue-run '<hardened-runId>'` with the blockers as the follow-up
+   task. **Never** pass a synthetic `direct-*` id to `--continue-run` (not
+   stored). Prefer hardened runMode for lineages that need continue. For peer,
+   start a new session or use code continuation on a code lineage.
 8. Integrate only per the chosen mode and channel
    (`plugin/references/integration-modes.md`): one-shot code direct lands live;
    code auto may apply a verified ready patch; review never auto-applies. ACP

@@ -96,12 +96,25 @@ class PreflightModeTests(PreflightHarness):
     def test_preflight_unprobed_platform_is_not_ready(self) -> None:
         # SEC1: preflight is a live-run readiness diagnostic, so an unprobed
         # platform must surface not-ready (probe-required), never a false green.
-        with mock.patch.object(platformsupport, "current_platform", lambda: "linux"):
+        # Windows remains unprobed (macOS + Linux are probed as of 2.0.1).
+        with mock.patch.object(platformsupport, "current_platform", lambda: "windows"):
             exit_code, out = self.run_preflight()
         envelope = json.loads(out)
         self.assertEqual(exit_code, 1)
         self.assertEqual(envelope["status"], "failure")
         self.assertEqual(envelope["error"]["class"], "probe-required")
+
+    def test_preflight_linux_without_bwrap_is_not_ready(self) -> None:
+        # Linux is probed but still needs bwrap; missing bwrap is probe-required
+        # (same class as unprobed), never a false green readiness report.
+        with mock.patch.object(platformsupport, "current_platform", lambda: "linux"):
+            with mock.patch("shutil.which", return_value=None):
+                exit_code, out = self.run_preflight()
+        envelope = json.loads(out)
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(envelope["status"], "failure")
+        self.assertEqual(envelope["error"]["class"], "probe-required")
+        self.assertIn("bwrap", envelope["error"]["message"].lower())
 
     def test_preflight_inspect_unclean_teardown_fails_closed(self) -> None:
         # S2: an unclean inspect-home teardown is a classified cleanup-failure,

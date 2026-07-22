@@ -19,7 +19,7 @@ remove managed agents.
 ## Activating in Claude Code
 
 Prerequisites: `grok` CLI installed and authenticated, `node` and `python3` on
-PATH, macOS for live modes.
+PATH, macOS or Linux for live modes (Linux: Landlock kernel + `bwrap` on PATH).
 
 Preferred - install the marketplace from GitHub (no manual clone):
 

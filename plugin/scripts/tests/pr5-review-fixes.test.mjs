@@ -45,6 +45,20 @@ test("gateIntegrationForCodeish: continue-run is exempt from direct consent", ()
   assert.ok(i >= 0 && res.rest[i + 1] === "worktree", res.rest.join(" "));
 });
 
+test("gateIntegrationForCodeish: continue-run rejects synthetic direct-* run ids", () => {
+  // runMode=direct job ids are not durable run records; continuing them would
+  // fall through to a meaningless hardened lookup or silent mis-route.
+  const res = gateIntegrationForCodeish(
+    "code",
+    ["--continue-run", "direct-1784745579354", "--task-file", "-"],
+    null,
+    os.tmpdir(),
+    {}
+  );
+  assert.equal(res.ok, false);
+  assert.match(String(res.message || ""), /direct-\*|hardened run id|runMode=direct/i);
+});
+
 test("[3] gateIntegrationForCodeish routes implement to worktree (never direct)", () => {
   const res = gateIntegrationForCodeish(
     "implement",

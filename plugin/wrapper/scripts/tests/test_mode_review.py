@@ -495,7 +495,7 @@ class ReviewModeTests(ModeHarness):
         # completion with an unverified sandbox and trip the gate only post-run.
         repo = self._repo()
         before = self.temp_home_prefix_dirs()
-        with mock.patch.object(platformsupport, "current_platform", lambda: "linux"):
+        with mock.patch.object(platformsupport, "current_platform", lambda: "windows"):
             exit_code, out = self.drive(
                 ["review", "--target", "pkg", "--task", "Review"], repo_root=repo
             )
@@ -505,6 +505,22 @@ class ReviewModeTests(ModeHarness):
         # No private home was created and Grok never spawned (no argv log).
         self.assertEqual(self.temp_home_prefix_dirs() - before, set())
         self.assertFalse(self.argv_log_path.exists(), "grok must not spawn on an unprobed platform")
+
+    def test_linux_without_bwrap_blocks_before_any_spawn(self) -> None:
+        # Linux is probed but bwrap is a hard pre-spawn prereq; no home, no spawn.
+        repo = self._repo()
+        before = self.temp_home_prefix_dirs()
+        with mock.patch.object(platformsupport, "current_platform", lambda: "linux"):
+            with mock.patch("shutil.which", return_value=None):
+                exit_code, out = self.drive(
+                    ["review", "--target", "pkg", "--task", "Review"], repo_root=repo
+                )
+        envelope = json.loads(out)
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(envelope["error"]["class"], "probe-required")
+        self.assertIn("bwrap", envelope["error"]["message"].lower())
+        self.assertEqual(self.temp_home_prefix_dirs() - before, set())
+        self.assertFalse(self.argv_log_path.exists(), "grok must not spawn without bwrap on Linux")
 
     def test_failed_auth_teardown_is_fail_closed_not_silent(self) -> None:
         # S4 / Grok dogfood-2 #2: a FAILED private-home teardown is FAIL-CLOSED --

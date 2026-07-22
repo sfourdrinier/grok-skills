@@ -410,7 +410,7 @@ class CodeModeTests(WorktreeModeHarness):
         repo = self.make_code_repo()
         worktrees_before = self._worktree_dirs()
         homes_before = self.temp_home_prefix_dirs()
-        with mock.patch.object(platformsupport, "current_platform", lambda: "linux"):
+        with mock.patch.object(platformsupport, "current_platform", lambda: "windows"):
             exit_code, out = self._run(repo, plant=_plant_sentinel_in_worktree)
         env = json.loads(out)
         self.assertEqual(exit_code, 1, out)

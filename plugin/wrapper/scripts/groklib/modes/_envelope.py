@@ -226,6 +226,11 @@ def _success_envelope(
         "warnings": incomplete + stderr_warnings + warnings + citation_warnings,
         "cleanup": cleanup_field,
     }
+    if incomplete:
+        # Machine-readable incomplete stop (Cancelled/turn-cap with findings).
+        # status stays success so response is not wiped; incompleteStop + exit 1
+        # tell orchestrators the work is not a trustworthy completion.
+        fields["incompleteStop"] = True
     if citation_list:
         fields["citations"] = citation_list
     return build_envelope(

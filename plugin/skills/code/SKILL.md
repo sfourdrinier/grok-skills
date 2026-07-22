@@ -161,6 +161,22 @@ already live. See `skills/handoff/SKILL.md`,
 `plugin/references/integration-modes.md` - direct (default, live tree + consent),
 auto (worktree + apply-on-ready), review (worktree + manual parent apply).
 
+## Completion trust (2.0.1+)
+
+Do **not** treat a terminal envelope as "implementation done" unless all of:
+
+1. Process exit code is **0** (incomplete Cancelled/turn-cap exits **1** even when
+   `status` is `success` so findings are not wiped).
+2. `incompleteStop` is **absent or false**.
+3. `grok.stopReason` is a clean end (e.g. `EndTurn` / `end_turn`), not
+   `Cancelled` / `Canceled`.
+4. For gated work: build/test gates actually ran and passed (see `commands[]`
+   / response text). Mid-remediation narrative without gates is incomplete.
+
+If `incompleteStop: true` or exit is non-zero with kept findings: resume with
+`--continue-run` on a **hardened** run id, or a fresh hardened run after making
+the tree safe (dirty-overlap policy). Never invent completion.
+
 ## Iterating on a run (2.0.0+)
 
 When handoff is not ready (or the operator wants a follow-up in the same
@@ -172,6 +188,12 @@ node "$SKILL_BASE/run.mjs" code --continue-run '<runId>' --task-file - <<'GROK_T
 GROK_TASK
 ```
 
+- **`<runId>` must be a hardened id** from a prior hardened code envelope
+  (`~/.local/state/grok-skills/runs/<runId>/`). Synthetic **`direct-*`** ids from
+  `runMode=direct` are **not** continuable (companion fails closed). Prefer
+  `setup --run-mode hardened` for implementer lineages that need continue-run.
+  Note: **runMode=direct** (no wrapper isolation) is not the same as
+  **integration=direct** (hardened live-tree landing).
 - Do **not** pass `--target`, `--base`, or `--contract-file` with
   `--continue-run` (usage-error). Target, base, and the prior contract are
   derived from the prior run (apply/consent keyed on prior `run.json`
