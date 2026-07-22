@@ -393,11 +393,11 @@ For `code`, look for `worktreePath` / `changedFiles` in the envelope. For `verif
 ### Direct wrapper (no plugin)
 
 Same engine the plugin shells to. **Defaults differ from the product companion:**
-the companion/skills default to **integration=direct** after per-repo setup
-prefs; a bare wrapper `code` call without `--integration` intentionally
-defaults to **worktree** (fail-closed isolation) so an accidental bare call
-cannot silently edit the live tree. Pass `--integration direct` only when you
-mean the live-tree posture.
+the companion/skills default to **integration=direct** (no consent gate); a bare
+wrapper `code` call without `--integration` intentionally defaults to
+**worktree** (fail-closed isolation) so an accidental bare call cannot silently
+edit the live tree. Pass `--integration direct` only when you mean the live-tree
+posture.
 
 ```bash
 python3 plugin/wrapper/scripts/grok_agent.py preflight
