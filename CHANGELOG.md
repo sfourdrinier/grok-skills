@@ -17,6 +17,7 @@ for marketplace / package tags.
   workspace walks and gitdir inventory (symlink-safe, no follow). Optional
   operator caps only: `GROK_WRAPPER_MAX_NESTED_GIT_DISCOVERY` (gitdirs) and
   `GROK_WRAPPER_MAX_GIT_DISCOVERY_WALK_DIRS` (walk visits) - unset = no cap.
+  Documented in README troubleshooting and SECURITY (was constant-only prose).
 
 ### Fixed (bugs identified during 2.0.2 / Codex PR #9 review — full close-out)
 

@@ -507,7 +507,7 @@ Compatibility notes and versions tested: [docs/COMPATIBILITY.md](docs/COMPATIBIL
 | `probe-required` on Windows | Expected until Windows sandbox is live-probed. |
 | `probe-required` on Linux without `bwrap` | Install bubblewrap (`bwrap` on PATH). Required pre-spawn prereq; secret-read denial remains unproven even with bwrap (D-SECRETREAD). Landlock write confinement is verified after each live run via ProfileApplied. |
 | Git / worktree prep times out on monorepos | Default git timeout is **600s**; raise further with `GROK_WRAPPER_GIT_TIMEOUT_SECONDS`. Issue #7 also collapses ignored trees. |
-| Hardened direct fails monorepo "nested git discovery" / 2000 dirs | Fixed in **2.0.2**: that cap was a bug (counted every directory). Discovery is **unlimited by default**. Optional only: `GROK_WRAPPER_MAX_NESTED_GIT_DISCOVERY` / `GROK_WRAPPER_MAX_GIT_DISCOVERY_WALK_DIRS`. |
+| Hardened direct fails monorepo "nested git discovery" / 2000 dirs | Fixed in **2.0.2**: the old hard cap counted **every** `os.walk` directory (bug). Production discovery is **unlimited by default** (symlink-safe). Optional anti-hang only: `GROK_WRAPPER_MAX_NESTED_GIT_DISCOVERY` (gitdirs) and `GROK_WRAPPER_MAX_GIT_DISCOVERY_WALK_DIRS` (walk visits); unset both for monorepos. See [SECURITY.md](SECURITY.md). |
 | Contract errors one-at-a-time | 2.0.1 returns **all** `error.detail.violations` in one envelope; see code skill schema example. |
 | Setup status for orchestrators | `setup --json` returns runMode, integrationMode, notifications, checks. |
 | Skills missing after install | Claude: `/reload-plugins`. Codex: check `codex plugin list`. Desktop: restart after install. |
