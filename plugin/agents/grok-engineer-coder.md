@@ -181,7 +181,7 @@ the chosen integration mode's gate.
 2. Optionally `/grok:status --run-id <runId>` for progress.
 3. **Peer:** always external worktree; `peer stop` finalizes and may integrate
    via the active mode (auto/direct apply verified ready patch; review leaves
-   patch — not live-edit). Use the peer-stop response itself as the ready
+   patch - not live-edit). Use the peer-stop response itself as the ready
    signal - `/grok:handoff` is code-mode only and refuses peer runIds; do NOT
    call it for peer runs.
 4. **Code:** **Required before integrate:** `GROK_RUN handoff --run-id '<runId>'`.

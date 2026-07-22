@@ -2,7 +2,7 @@
 
 # ACP peer channel (2.0.0) - design
 
-> **2.0.1 note:** Integration **consent gates were removed**. Product default `integration=direct` lands without a setup ceremony. Isolation is opt-in via `auto`/`review`. Historical sections below may still say "consent" — treat those as pre-2.0.1 design history.
+> **2.0.1 note:** Integration **consent gates were removed**. Product default `integration=direct` lands without a setup ceremony. Isolation is opt-in via `auto`/`review`. Historical sections below may still say "consent" - treat those as pre-2.0.1 design history.
 
 
 Authority for Task 5.3 (plan: docs/superpowers/plans/2026-07-16-peer-agent-integration.md)

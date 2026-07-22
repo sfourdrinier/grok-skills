@@ -2,6 +2,7 @@
 //
 // Issue #8 / adversarial review: setup --json must reach cmdSetup after
 // stripFlags peels companion-only flags, and must not dump raw webhook URLs.
+// CI has no real `grok` on PATH - provide GROK_AGENT_BINARY fake.
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -18,9 +19,32 @@ function tempCwd() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "grok-setup-json-"));
 }
 
+/** Minimal `grok --version` binary for setup readiness (CI has no real grok). */
+function installFakeGrok() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-bin-"));
+  const binary = path.join(dir, "grok");
+  fs.writeFileSync(binary, "#!/bin/sh\necho 'grok 0.0.0-test'\n", { mode: 0o755 });
+  return {
+    binary,
+    cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
+  };
+}
+
+function setupEnv(fakeEnv, cwd) {
+  const { binary, cleanup: binCleanup } = installFakeGrok();
+  return {
+    env: {
+      ...fakeEnv,
+      GROK_AGENT_BINARY: binary,
+      CLAUDE_PLUGIN_DATA: path.join(cwd, ".grok-plugin-data"),
+    },
+    cleanupBin: binCleanup,
+  };
+}
+
 test("setup --json emits machine-readable status on stdout", () => {
   const cwd = tempCwd();
-  const { env, cleanup } = makeFakeWrapper({
+  const { env: fakeEnv, cleanup } = makeFakeWrapper({
     preflight: {
       stdout:
         JSON.stringify({
@@ -33,6 +57,7 @@ test("setup --json emits machine-readable status on stdout", () => {
       exitCode: 0,
     },
   });
+  const { env, cleanupBin } = setupEnv(fakeEnv, cwd);
   try {
     const res = runCompanion(["setup", "--json", "--run-mode", "hardened"], { cwd, env });
     assert.equal(res.code, 0, res.stderr || res.stdout);
@@ -49,6 +74,7 @@ test("setup --json emits machine-readable status on stdout", () => {
     assert.ok(Array.isArray(body.checks));
     assert.ok(body.notifications);
   } finally {
+    cleanupBin();
     cleanup();
     fs.rmSync(cwd, { recursive: true, force: true });
   }
@@ -57,7 +83,6 @@ test("setup --json emits machine-readable status on stdout", () => {
 test("setup --json redacts webhook URL path secrets", () => {
   const cwd = tempCwd();
   const secretPath = "https://hooks.example.com/services/T00/B00/SECRETTOKEN";
-  // Match runCompanion isolation: prefs key on CLAUDE_PLUGIN_DATA under cwd.
   const { env: fakeEnv, cleanup } = makeFakeWrapper({
     preflight: {
       stdout:
@@ -71,10 +96,7 @@ test("setup --json redacts webhook URL path secrets", () => {
       exitCode: 0,
     },
   });
-  const env = {
-    ...fakeEnv,
-    CLAUDE_PLUGIN_DATA: path.join(cwd, ".grok-plugin-data"),
-  };
+  const { env, cleanupBin } = setupEnv(fakeEnv, cwd);
   try {
     setNotificationConfig(
       cwd,
@@ -95,6 +117,7 @@ test("setup --json redacts webhook URL path secrets", () => {
     assert.ok(!String(body.notifications.webhookUrl).includes("SECRETTOKEN"));
     assert.ok(!String(res.stdout).includes("SECRETTOKEN"));
   } finally {
+    cleanupBin();
     cleanup();
     fs.rmSync(cwd, { recursive: true, force: true });
   }

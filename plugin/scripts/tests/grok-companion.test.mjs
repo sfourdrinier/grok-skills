@@ -331,7 +331,7 @@ test("handoff/status/cleanup force wrapper; contract-file routes hardened under 
   const src = fs.readFileSync(COMPANION, "utf8");
   assert.match(src, /WRAPPER_ONLY_MODES/);
   assert.match(src, /handoff/);
-  // Issue #8: no refuse — contract-file uses hardened wrapper for enforcement.
+  // Issue #8: no refuse - contract-file uses hardened wrapper for enforcement.
   assert.match(src, /using hardened wrapper for writeScopes/);
   assert.doesNotMatch(src, /--contract-file requires hardened mode \(fail closed\)/);
   assert.match(src, /function runHandoff/);

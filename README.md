@@ -272,7 +272,7 @@ edits land - both axes use the word "direct"; disambiguate in
 ### Integration modes (how edits land)
 
 Orthogonal to run mode (security). Default product name is **direct**. For
-**one-shot code** that means edit this working tree under hardened-direct —
+**one-shot code** that means edit this working tree under hardened-direct -
 **no consent gate** (2.0.1+). **`/grok:implement` always forces an isolated
 worktree + verify-only handoff** and never lands live (even when the workspace
 default is direct/auto) - see [integration-modes.md](plugin/references/integration-modes.md).

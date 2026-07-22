@@ -99,7 +99,7 @@ node "$SKILL_BASE/run.mjs" setup --json
 - Grok CLI presence / version
 - Bundled wrapper path
 - Run mode (hardened vs direct security posture)
-- Integration mode (how code edits land; target-scoped; see `--target`) — no consent flag
+- Integration mode (how code edits land; target-scoped; see `--target`) - no consent flag
 - Notifications mode (default `auto` for new installs)
 - Stop-review gate on/off
 - **Codex agents scope** (`user` or `project`)

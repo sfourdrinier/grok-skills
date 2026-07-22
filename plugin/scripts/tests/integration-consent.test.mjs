@@ -2,7 +2,7 @@
 //
 // 2.0.1+: integration consent gates are removed. Direct lands without setup.
 // This file keeps coverage that default direct works and cross-repo prefs still
-// key on target workspace (mode prefs only — no consent refuse).
+// key on target workspace (mode prefs only - no consent refuse).
 
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -40,7 +40,7 @@ function tempCwd() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "grok-int-direct-"));
 }
 
-test("default code (no setup) lands direct — wrapper is spawned", () => {
+test("default code (no setup) lands direct - wrapper is spawned", () => {
   const cwd = tempCwd();
   const callsPath = path.join(cwd, "calls.log");
   const { env, cleanup } = makeFakeWrapper({
@@ -134,7 +134,11 @@ test("getIntegrationConsent always true (legacy no-op)", () => {
 
 test("setup --integration direct sets mode without a consent gate", () => {
   const cwd = tempCwd();
-  const { env, cleanup } = makeFakeWrapper({
+  // CI has no real grok; setup exit 0 requires a version-capable binary.
+  const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-bin-"));
+  const fakeGrok = path.join(binDir, "grok");
+  fs.writeFileSync(fakeGrok, "#!/bin/sh\necho 'grok 0.0.0-test'\n", { mode: 0o755 });
+  const { env: fakeEnv, cleanup } = makeFakeWrapper({
     preflight: {
       stdout: JSON.stringify({
         schemaVersion: 1,
@@ -146,6 +150,11 @@ test("setup --integration direct sets mode without a consent gate", () => {
       exitCode: 0,
     },
   });
+  const env = {
+    ...fakeEnv,
+    GROK_AGENT_BINARY: fakeGrok,
+    CLAUDE_PLUGIN_DATA: path.join(cwd, ".grok-plugin-data"),
+  };
   try {
     setRunMode(cwd, "direct", env);
     const res = runCompanion(["setup", "--integration", "direct"], { cwd, env });
@@ -154,6 +163,7 @@ test("setup --integration direct sets mode without a consent gate", () => {
     assert.equal(getRunMode(cwd, env), "direct");
   } finally {
     cleanup();
+    fs.rmSync(binDir, { recursive: true, force: true });
     fs.rmSync(cwd, { recursive: true, force: true });
   }
 });
