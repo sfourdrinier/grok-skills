@@ -82,17 +82,29 @@ def scan_patch_bytes_for_secrets(patch_bytes: bytes) -> None:
 
 
 def _run_git_env(repo: pathlib.Path, args: Sequence[str], env: Optional[dict] = None) -> subprocess.CompletedProcess:
+    from groklib.git_timeout import git_timeout_seconds
+
     child = dict(os.environ if env is None else env)
     argv = ["git", "-c", "core.hooksPath={}".format(_EMPTY_HOOKS), "-C", str(repo)] + [
         str(a) for a in args
     ]
-    return subprocess.run(
-        argv,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=child,
-        check=False,
-    )
+    try:
+        return subprocess.run(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=child,
+            timeout=git_timeout_seconds(),
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise GrokWrapperError(
+            "artifact-generation-failure",
+            "git {} timed out after {}s".format(
+                " ".join(str(a) for a in args), git_timeout_seconds()
+            ),
+            {"timeoutSeconds": git_timeout_seconds(), "argv": list(argv)},
+        ) from exc
 
 
 def _git_ok(repo: pathlib.Path, args: Sequence[str], env: Optional[dict] = None) -> str:

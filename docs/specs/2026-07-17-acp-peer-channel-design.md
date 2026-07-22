@@ -2,6 +2,9 @@
 
 # ACP peer channel (2.0.0) - design
 
+> **2.0.1 note:** Integration **consent gates were removed**. Product default `integration=direct` lands without a setup ceremony. Isolation is opt-in via `auto`/`review`. Historical sections below may still say "consent" — treat those as pre-2.0.1 design history.
+
+
 Authority for Task 5.3 (plan: docs/superpowers/plans/2026-07-16-peer-agent-integration.md)
 and Task 7.4 (evidence-backed ready + ACP default). Probe evidence:
 docs/research/2026-07-17-acp-probe.md. **ACP is the default peer channel** for

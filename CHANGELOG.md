@@ -68,6 +68,9 @@ for marketplace / package tags.
   stripped); setup JSON redacts webhook URLs; `onlyIfChanged: ["."]` is root
   wildcard; job `runMode` records hardened when contract/continue forces it;
   `--execution-context` does not override an already-set env.
+- **Round-2 adversarial cleanup:** handoff patch git uses timeout SSOT; stamp
+  self-heal refreshes `validatedAtUtc`; argparse/`--help` and agent recipes no
+  longer claim consent; regression tests for `setup --json` redaction.
 
 ### Fixed (worktree prep on large monorepos - issue #7)
 

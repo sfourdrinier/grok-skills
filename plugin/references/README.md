@@ -123,9 +123,10 @@ Notify is not ready. Integrate is mode-aware - do not assume never-auto-apply.
 
 Canonical skill/agent prefix: [execution-context.md](execution-context.md).
 
-Completion push (OS toast / webhook) is companion-only, default **off**, at-most-once
-attempt after terminal live runs (hardened durable `runs/<id>`). Prefer
-`setup --notification-mode auto` for background jobs. Never status/jobs alone.
+Completion push (OS toast / webhook) is companion-only; **new installs default to
+`auto`** (background context only), at-most-once attempt after terminal live runs
+(hardened durable `runs/<id>`). Silence with `setup --notification-mode off`.
+See [execution-context.md](execution-context.md). Never status/jobs alone.
 
 **Not in 1.5.0 (PR5 → 1.7.0):** operator re-attempt; direct-mode push notify;
 headless/native honesty polish (setup/docs). Native toasts need a **macOS/Linux
@@ -182,7 +183,7 @@ Effective prefs precedence (per field):
 
 1. Explicit workspace prefs from `/grok:setup` (stored in `jobs-index.json`)
 2. `CLAUDE_PLUGIN_OPTION_*` env (invalid values ignored with a stderr note)
-3. Built-in defaults (`hardened` / `off` / no webhook)
+3. Built-in defaults (`hardened` / notification `auto` / no webhook)
 
 `GROK_SKILLS_MODE` remains a process-level override above setup for scripts and
 the stop-review gate. There is no enum support in the host schema - the

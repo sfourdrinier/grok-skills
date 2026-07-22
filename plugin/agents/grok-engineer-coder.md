@@ -72,8 +72,9 @@ contract, honest handoff, integrate only per the chosen mode's gate
 ## Derive a contract (default; skip only for exploratory tasks)
 
 Before calling peer start (or code), derive an implementation contract from the
-user's ask and write it to a temp file (hardened mode only; direct mode rejects
-it):
+user's ask and write it to a temp file. Prefer hardened runMode. One-shot code
+with `--contract-file` under runMode=direct routes through the hardened wrapper
+for writeScopes/requiredValidation (does not refuse):
 
 ```bash
 CONTRACT_FILE="$(mktemp -t grok-contract.XXXXXX)"

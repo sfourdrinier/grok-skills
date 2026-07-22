@@ -86,8 +86,8 @@ adversarial-review). Not status/jobs/result/setup alone.
 
 | Pref | Behavior |
 |------|----------|
-| `notificationMode: off` (default) | No push |
-| `auto` | Native OS notify only when `GROK_COMPANION_EXECUTION_CONTEXT=background` |
+| `notificationMode: auto` (default for new installs, 2.0.1+) | Native OS notify only when execution context is **background** (env, `--execution-context`, or non-TTY auto-detect) |
+| `off` | No push |
 | `native` | OS notify (macOS/Linux) for FG and BG |
 | `webhook` | POST JSON if `notificationWebhookUrl` set |
 

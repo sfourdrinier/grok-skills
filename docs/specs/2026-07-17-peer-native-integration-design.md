@@ -2,6 +2,9 @@
 
 # Phase 7: peer-native integration re-architecture (remediation)
 
+> **2.0.1 note:** Integration **consent gates were removed**. Product default `integration=direct` lands without a setup ceremony. Isolation is opt-in via `auto`/`review`. Historical sections below may still say "consent" — treat those as pre-2.0.1 design history.
+
+
 The 2.0 build made patch-apply the ONLY integration path and flagged ACP off.
 Both betray the goal (Grok as a peer, peer to Opus/Sonnet). This inverts the
 defaults: one-shot code defaults to consented live-tree edit landing, and ACP is

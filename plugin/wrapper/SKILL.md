@@ -127,8 +127,9 @@ Use when Grok should actually write or modify code. Landing is **mode-aware**
   silently edit the operator checkout.
 - **`--integration direct`**: hardened-direct live-tree edits under private
   auth home + sandbox write-confined to the **repo root** (+ private tmp) +
-  post-run protected-path guards. Product companion/skills pass this only after
-  no setup consent. No external worktree; no pre-apply dual-condition gate.
+  post-run protected-path guards. Product companion/skills default to this with
+  **no setup consent** (2.0.1+). No external worktree; no pre-apply dual-condition
+  gate.
 - Product alias modes `auto` / `review` map through the companion onto the
   worktree path (auto may apply a verified ready patch; review retains).
 

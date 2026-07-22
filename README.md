@@ -52,13 +52,14 @@ How edits land is mode-aware:
    /grok:setup --notification-mode auto
    ```
 
-   Defaults stay **off** (no toast). Use `--notification-mode webhook` plus
-   `--notification-webhook-url <https-url>` for SSH/CI/Windows (native toast is
-   macOS/Linux desktop only). Full smoke:
+   New installs default to **`auto`** (toast only when execution context is
+   **background**). Silence with `--notification-mode off`. Use
+   `--notification-mode webhook` plus `--notification-webhook-url <https-url>`
+   for SSH/CI/Windows (native toast is macOS/Linux desktop only). Full smoke:
    [manual-smoke.md](plugin/references/manual-smoke.md).
 
-4. Before promising implementer success on the **live tree**, record integration
-   opt into isolation (canonical matrix:
+4. Product default is live-tree **integration=direct** (no consent gate). Optional
+   prefs / isolation (canonical matrix:
    [integration-modes.md](plugin/references/integration-modes.md)):
 
    ```text
@@ -67,6 +68,8 @@ How edits land is mode-aware:
    /grok:setup --integration auto
    # or:
    /grok:setup --integration review
+   # machine-readable status:
+   /grok:setup --json
    ```
 
    Direct landing needs no consent. `/grok:implement`

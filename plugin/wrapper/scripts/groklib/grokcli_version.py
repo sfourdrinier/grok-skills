@@ -157,17 +157,28 @@ def maybe_refresh_accepted_version_stamp(version: str) -> bool:
             payload = dict(loaded)
     except (OSError, json.JSONDecodeError):
         payload = {}
+    now_utc = __import__("datetime").datetime.now(
+        __import__("datetime").timezone.utc
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    prior_version = payload.get("version") if isinstance(payload.get("version"), str) else None
+    prior_probe = payload.get("probeEvidence")
     payload["version"] = version
     payload.setdefault("schemaVersion", 2)
     payload.setdefault("enforcement", "none")
+    # Keep stamp fields honest when the CLI version changes (issue #8 review).
+    payload["validatedAtUtc"] = now_utc
+    payload["selfHealedAtUtc"] = now_utc
+    if prior_probe and prior_version and prior_version != version:
+        # Old probeEvidence refers to a different build; demote to note only.
+        payload["probeEvidenceNote"] = (
+            "prior probeEvidence retained for history only: {}".format(prior_probe)
+        )
     payload.setdefault(
         "note",
         "Last maintainer-validated Grok CLI build (advisory only). Runtime does "
-        "NOT require this exact version - any working `grok --version` is accepted.",
+        "NOT require this exact version - any working `grok --version` is accepted. "
+        "Self-heal after green preflight updates version + validatedAtUtc only.",
     )
-    payload["selfHealedAtUtc"] = __import__("datetime").datetime.now(
-        __import__("datetime").timezone.utc
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         ACCEPTED_VERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
         ACCEPTED_VERSION_FILE.write_text(
