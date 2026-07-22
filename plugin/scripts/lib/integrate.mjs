@@ -15,8 +15,6 @@ import { sanitizeRunId } from "./companion-terminal-notify.mjs";
 import {
   parseIntegrationMode,
   getIntegrationMode,
-  getIntegrationConsent,
-  formatDirectIntegrationConsentMsg,
 } from "./jobs.mjs";
 import { resolveTargetWorkspaceRoot, parseTargetFlag } from "./git-context.mjs";
 import {
@@ -792,16 +790,7 @@ export function maybeIntegratePeerStop(stdout, cwd, integrationFlag, rest, stder
     stderrLine(`[grok-peer] integration=${mode}: patch retained; not applied`);
     return { attempted: false, ok: true, outcome: "retained" };
   }
-  if (mode === "direct" && !getIntegrationConsent(tWs)) {
-    stderrLine(formatDirectIntegrationConsentMsg({ targetWorkspace: tWs, companionCwd: cwd }));
-    // Fail closed: direct was the REQUESTED integration but consent blocked the
-    // apply. Unlike worktree/review (retained by design), returning ok:true here
-    // would let peerStopExitCode preserve the wrapper's 0 exit, so the command
-    // would look successful while the verified patch was never applied. Mark it
-    // an attempted-but-failed integration so callers see a nonzero exit, parity
-    // with the code/direct consent gate.
-    return { attempted: true, ok: false, outcome: "consent-required" };
-  }
+  // No consent gate (2.0.1+): direct applies when selected, same as other providers.
   const runId = sanitizeRunId(env?.runId);
   if (!runId || typeof repo !== "string" || !repo) {
     stderrLine("[grok-peer] missing runId or repository on peer-stop envelope");

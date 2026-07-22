@@ -77,7 +77,6 @@ _CHANGE_KEYS: Tuple[str, ...] = (
     "edits",
 )
 
-_GIT_TIMEOUT_SECONDS = 30
 _REASON_CWD_PREFIX = "grok-reason-cwd-"
 
 
@@ -112,11 +111,14 @@ def repo_root_for_path(anchor: pathlib.Path) -> pathlib.Path:
     anchor_dir = resolved if resolved.is_dir() else resolved.parent
     argv = ["git", "-C", str(anchor_dir), "rev-parse", "--show-toplevel"]
     try:
+        # SSOT with git_timeout.git_timeout_seconds (monorepo-safe default; env override).
+        from groklib.git_timeout import git_timeout_seconds
+
         completed = subprocess.run(
             argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=_GIT_TIMEOUT_SECONDS,
+            timeout=git_timeout_seconds(),
             text=True,
             encoding="utf-8",
             check=False,

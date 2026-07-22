@@ -165,7 +165,7 @@ test("both marketplace roots source description/keywords from the single manifes
     assert.ok(!blob.includes(stale), `retired marketplace wording must be gone: "${stale}"`);
   }
 
-  // Phase 7 honesty: product default is consented live-tree edit landing; auto/review
+  // Phase 7 honesty: product default is live-tree edit landing; auto/review
   // are opt-in worktrees; ACP is the default peer channel; runMode direct is separate.
   for (const desc of [
     claudePlugin.description,
@@ -191,7 +191,7 @@ test("both marketplace roots source description/keywords from the single manifes
   assert.match(
     codexLong,
     /integration=direct|live-tree|this tree|working tree/i,
-    "Codex longDescription must state consented live-tree default"
+    "Codex longDescription must state live-tree default"
   );
   assert.match(codexLong, /\bACP\b/, "Codex longDescription must name ACP");
   assert.match(

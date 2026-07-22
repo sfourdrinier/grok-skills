@@ -120,19 +120,48 @@ message instead of an envelope, tell the user to run `/grok:setup`.
 **Derive a contract by default** before a non-exploratory `code` run (host
 agents: `agents/grok-engineer-coder.md`, Codex
 `codex-agents/grok-engineer-coder.toml`). Stage operator-trusted JSON and pass
-`--contract-file <path>` (writeScopes + `requiredValidation` argv arrays). Skip
-only for exploratory tasks, or when outcomes are not crisp (ask once, or
-proceed without a contract and say so). Bad contracts fail closed **before**
-Grok with `implementation-contract-invalid`. Trust model:
-`operator-contract-trusted-no-os-sandbox` (no OS filesystem sandbox claim for
-validation commands).
+`--contract-file <path>`. Skip only for exploratory tasks, or when outcomes are
+not crisp (ask once, or proceed without a contract and say so). Bad contracts
+fail closed **before** Grok with `implementation-contract-invalid` and (2.0.1+)
+**`error.detail.violations`** (all problems in one envelope). Trust model:
+`operator-contract-trusted-no-os-sandbox`.
+
+### Contract schemaVersion 1 (complete example)
+
+```json
+{
+  "schemaVersion": 1,
+  "taskId": "b7-task-3-ppg-quality",
+  "target": "packages/biometricsMesh",
+  "objective": "Implement PPG quality fusion helpers under the target package.",
+  "acceptanceCriteria": [
+    "Unit tests for quality fusion pass",
+    "No edits outside writeScopes"
+  ],
+  "writeScopes": [
+    { "kind": "subtree", "path": "packages/biometricsMesh/src/algorithms/ppg" },
+    { "kind": "file", "path": "packages/biometricsMesh/src/algorithms/ppg/index.ts" }
+  ],
+  "requiredValidation": [
+    {
+      "argv": ["bun", "test", "packages/biometricsMesh/src/algorithms/ppg"],
+      "cwd": ".",
+      "purpose": "targeted package tests",
+      "onlyIfChanged": ["packages/biometricsMesh/src/algorithms/ppg"]
+    }
+  ]
+}
+```
+
+Required: `schemaVersion` (**1**), `taskId` (alphanumeric / `._-`), `target`
+(non-empty repo-relative string), `writeScopes` (non-empty array of
+`{kind: "file"|"subtree", path}` objects - **not** bare path strings).
+Optional: `objective`, `acceptanceCriteria`, `requiredValidation`
+(`{argv: string[], cwd?, purpose?}`).
 
 `requiredValidation` argv is **shell-free** (canonical:
 `plugin/references/argv-safety.md`): no globs, no directory shorthands, no
-`$VARS`. Prefer **targeted** test modules over a heavy or environment-sensitive
-full suite; the workspace build gate still runs. Model examples:
-`["node", "--test"]` with `cwd`, and
-`["python3", "-m", "unittest", "discover", "-s", "tests", "-q"]`.
+`$VARS`. Prefer **targeted** test modules. The workspace build gate still runs.
 
 While a hardened code run is in flight, do **not** commit or edit the target
 checkout (original-checkout guard cannot attribute mid-run divergence);
@@ -141,9 +170,25 @@ move secret-shaped test fixtures cannot produce a handoff patch artifact
 (fail-closed scan); expect retained-worktree manual integration
 (`references/implementation-handoff.md`).
 
-**Direct run-mode refuses `--contract-file`** (companion fail-closed). Verified
-handoff artifacts (`implementation.patch` + `implementation-handoff.json`) are
-written only on the **hardened** path under the C2 run dir.
+**runMode vs integration (do not confuse them):**
+
+| Axis | Values | Meaning |
+|------|--------|---------|
+| **runMode** | `hardened` (default) / `direct` | Security posture: private home + sandbox vs installed Grok CLI + `~/.grok` |
+| **integration** | `direct` (default) / `auto` / `review` | How edits land: live tree vs worktree apply-on-ready vs retain |
+
+- **`integration=direct`** (product default): live-tree landing. Supports
+  `--contract-file` (writeScopes + requiredValidation post-run). No consent gate.
+- **`runMode=direct`**: installed-CLI path. With `--contract-file`, the companion
+  routes through the **hardened wrapper** so writeScopes/requiredValidation still
+  enforce (issue #8). Prefer `setup --run-mode hardened` for handoff artifacts and
+  continue-run.
+- Optional **`onlyIfChanged: ["path-prefix", ...]`** on each `requiredValidation`
+  entry skips that command when no changed path matches (monorepo-friendly).
+
+Verified handoff artifacts (`implementation.patch` +
+`implementation-handoff.json`) are written only on the **hardened** path under
+the C2 run dir.
 
 On success or classified failure after hardened Grok, the wrapper writes:
 

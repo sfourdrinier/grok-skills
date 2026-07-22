@@ -189,6 +189,7 @@ class BuildEnvelopeTests(unittest.TestCase):
                 "leader-socket-failure",
                 "usage-error",
                 "probe-required",
+                "consent-required",
                 "finalization-timeout",
                 "finalization-worker-missing-result",
                 "finalization-worker-unkillable",

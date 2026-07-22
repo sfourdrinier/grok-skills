@@ -30,12 +30,14 @@ const FILE_MODE = 0o600;
 /** Single source of jobs-index config defaults (design §11). */
 export const DEFAULT_JOBS_CONFIG = Object.freeze({
   runMode: "hardened",
-  notificationMode: "off",
+  // Issue #8: recommended default for new installs (background completion signals).
+  notificationMode: "auto",
   notificationWebhookUrl: null,
   lastRescueJobId: null,
   // Integration (how edits land) is orthogonal to runMode (security posture).
   integrationMode: "direct",
-  integrationConsent: false,
+  // Legacy field kept in index for forward-compat reads; never gated (2.0.1+).
+  integrationConsent: true,
 });
 
 /** Integration modes for code/implement (how edits land). Not runMode. */
@@ -477,17 +479,16 @@ export function getIntegrationMode(cwd, env = process.env) {
 }
 
 /**
- * True only when setup --integration direct recorded operator consent.
- * Env / userConfig alone never satisfies this gate.
+ * Legacy no-op: consent gates were removed in 2.0.1 (always allowed).
+ * Kept so older importers/tests do not crash; do not reintroduce gating.
+ * @returns {true}
  */
-export function getIntegrationConsent(cwd, env = process.env) {
-  const config = loadIndex(cwd, env).config;
-  return config.integrationConsent === true && isSetupAuthored(config, "integrationConsent");
+export function getIntegrationConsent(_cwd, _env = process.env) {
+  return true;
 }
 
 /**
- * Persist integrationMode via setup. For direct, also records integrationConsent.
- * Does not touch runMode.
+ * Persist integrationMode via setup. Does not touch runMode.
  * @param {string} cwd
  * @param {string} mode
  * @returns {"direct"|"worktree"|"auto"|"review"|null} null when mode invalid
@@ -503,61 +504,29 @@ export function setIntegrationMode(cwd, mode, env = process.env) {
   }
   index.config.integrationMode = parsed;
   index.config.prefsSources.integrationMode = "setup";
-  if (parsed === "direct") {
-    index.config.integrationConsent = true;
-    index.config.prefsSources.integrationConsent = "setup";
-  }
+  // Legacy index field: always true when mode is set (no consent gate in 2.0.1+).
+  index.config.integrationConsent = true;
+  index.config.prefsSources.integrationConsent = "setup";
   saveIndex(cwd, index, env);
   return parsed;
 }
 
 /**
- * One-screen refuse when effective integration is direct without setup consent.
- * When the resolved target workspace differs from companion cwd, the accept
- * command includes `--target <workspace>` so consent is recorded for the repo
- * that will be edited (not the companion cwd).
- *
- * @param {{ targetWorkspace?: string, companionCwd?: string }} [opts]
+ * @deprecated Consent gates removed in 2.0.1. Kept for import compatibility.
  * @returns {string}
  */
-export function formatDirectIntegrationConsentMsg(opts = {}) {
-  const targetWorkspace =
-    opts.targetWorkspace != null && String(opts.targetWorkspace).trim() !== ""
-      ? path.resolve(String(opts.targetWorkspace))
-      : null;
-  const companionCwd =
-    opts.companionCwd != null && String(opts.companionCwd).trim() !== ""
-      ? path.resolve(String(opts.companionCwd))
-      : null;
-  let targetFlag = "";
-  if (targetWorkspace && companionCwd) {
-    const cwdWorkspace = resolveTargetWorkspaceRoot(companionCwd, ".");
-    if (path.resolve(targetWorkspace) !== path.resolve(cwdWorkspace)) {
-      targetFlag = ` --target ${targetWorkspace}`;
-    }
-  } else if (targetWorkspace && !companionCwd) {
-    targetFlag = ` --target ${targetWorkspace}`;
-  }
-  const targetLine = targetWorkspace
-    ? ` Target workspace: ${targetWorkspace}.`
-    : "";
+export function formatDirectIntegrationConsentMsg(_opts = {}) {
   return (
-    "Direct integration is the consented landing default: one-shot code edits " +
-    "THIS working tree live (no worktree isolation, no pre-apply review); ACP " +
-    "peer always uses an external worktree and applies a verified ready patch " +
-    "only at peer-stop. Protected paths (.git config/HEAD/hooks/refs, .env, and " +
-    "key files) are detected and rolled back if touched on code-direct live " +
-    "edits." +
-    targetLine +
-    " To accept and make direct the default here: /grok:setup --integration direct" +
-    targetFlag +
-    " (or: companion setup --integration direct" +
-    targetFlag +
-    "). Or run this once with --integration worktree (isolated) or --integration review."
+    "Direct integration is the product default: one-shot code edits THIS working " +
+    "tree live (no worktree isolation, no pre-apply review); ACP peer always uses " +
+    "an external worktree and applies a verified ready patch only at peer-stop. " +
+    "Protected paths (.git config/HEAD/hooks/refs, .env, and key files) are " +
+    "detected and rolled back if touched on code-direct live edits. " +
+    "Set default with: /grok:setup --integration direct|worktree|auto|review."
   );
 }
 
-/** Default (cwd-scoped) refuse copy; prefer formatDirectIntegrationConsentMsg for gates. */
+/** @deprecated Consent gates removed in 2.0.1. */
 export const DIRECT_INTEGRATION_CONSENT_MSG = formatDirectIntegrationConsentMsg();
 
 // Integration gate + continue-run target live in integration-gate.mjs (900-line

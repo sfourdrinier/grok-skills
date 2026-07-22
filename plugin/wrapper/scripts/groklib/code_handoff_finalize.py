@@ -316,7 +316,18 @@ def code_handoff_finalize(
     # 7. requiredValidation (operator-trusted)
     steps.append("required-validation")
     if contract and contract.get("requiredValidation"):
+        from groklib.implementation_contract import validation_matches_changed
+
+        # onlyIfChanged uses post-Grok source paths (issue #8 monorepo scoping).
+        changed_for_skip = list(stage.acc.changed_files or [])
         for entry in contract["requiredValidation"]:
+            if not validation_matches_changed(entry, changed_for_skip):
+                stage.acc.warnings.append(
+                    "requiredValidation skipped (onlyIfChanged: no matching changes): {}".format(
+                        entry.get("purpose") or entry.get("argv")
+                    )
+                )
+                continue
             argv = list(entry["argv"])
             rel_cwd = entry.get("cwd") or "."
             if rel_cwd in (".", "./", ""):

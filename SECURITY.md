@@ -55,7 +55,7 @@ over. It is **not** a complete sandbox against an adversarial model.
   `requiredValidation` argv runs with `shell=False` and cwd confined to the
   worktree (or target tree); there is **no** OS filesystem sandbox claim for
   those commands (they can write outside the worktree if the operator points
-  them at a capable binary). **runMode direct** rejects `--contract-file` (fail
+  them at a capable binary). **runMode direct** with `--contract-file` routes to hardened enforcement (no longer fail
   closed). Handoff mode re-hashes the patch under the owned run directory only
   (absolute/`..` paths rejected). Notify is not integration-ready - for
   isolated modes always call `handoff --run-id` before apply. Integrate is
@@ -63,7 +63,7 @@ over. It is **not** a complete sandbox against an adversarial model.
   review never auto-applies; auto may apply a dual-condition-ready patch after
   revalidation; one-shot code `integration=direct` lands source edits live; ACP
   peer `integration=direct` applies a verified ready patch only at peer-stop
-  (after always-isolated worktree work) and still requires consent. The plugin
+  (after always-isolated worktree work) and applies when selected. The plugin
   never auto-commits, merges, cherry-picks, or pushes. **runMode direct**
   produces no handoff artifacts by design - the artifacts' value is the
   isolation evidence that runMode direct cannot attest; use runMode hardened for
@@ -84,7 +84,7 @@ over. It is **not** a complete sandbox against an adversarial model.
   `git apply --check`, apply, reverse-on-failure - see
   [integration-modes.md](plugin/references/integration-modes.md) Shared apply
   spine): `direct` and `auto` both apply the verified ready patch (`direct`
-  additionally requires per-repo direct consent); `review` / `worktree` retain
+  applies when selected); `review` / `worktree` retain
   for manual parent apply. **Not** via `/grok:handoff`, which stays code-mode
   only and still refuses peer runIds. Peer direct is therefore **stop-time
   apply**, not one-shot code live-edit direct. Peer-stop final envelope rewrite

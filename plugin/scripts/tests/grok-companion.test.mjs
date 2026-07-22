@@ -327,11 +327,13 @@ test("code/reason/verify dual-lens fenced runs export execution context", () => 
   assert.match(dual, /--no-notify/, "dual-lens first pass suppresses intermediate notify");
 });
 
-test("handoff/status/cleanup force wrapper; contract-file fails closed in direct", () => {
+test("handoff/status/cleanup force wrapper; contract-file routes hardened under runMode=direct", () => {
   const src = fs.readFileSync(COMPANION, "utf8");
   assert.match(src, /WRAPPER_ONLY_MODES/);
   assert.match(src, /handoff/);
-  assert.match(src, /--contract-file requires hardened mode/);
+  // Issue #8: no refuse — contract-file uses hardened wrapper for enforcement.
+  assert.match(src, /using hardened wrapper for writeScopes/);
+  assert.doesNotMatch(src, /--contract-file requires hardened mode \(fail closed\)/);
   assert.match(src, /function runHandoff/);
   // equals-form and space-form both detected
   assert.match(src, /--contract-file=/);

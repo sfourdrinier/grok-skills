@@ -482,7 +482,7 @@ async function dispatch({
     }
     if (fresh) stderrLine("[grok-companion] --fresh: starting a new rescue thread");
   }
-  // Integration consent gate (code/implement only). Refuses before wrapper spawn.
+  // Integration mode gate (code/implement only). No consent refuse (2.0.1+).
   // Re-bind rest so implement/code see the explicit --integration <effective>.
   // Capture effective for auto (apply-on-verified-ready) post-step.
   // continue-run: still resolves effective (auto keeps apply-on-ready; review
@@ -493,7 +493,7 @@ async function dispatch({
   {
     const gated = gateIntegrationForCodeish(mode, rest, integrationFlag, cwd);
     if (!gated.ok) {
-      process.stderr.write(gated.message);
+      process.stderr.write(gated.message || "");
       return gated.code;
     }
     if (gated.effective != null) {
@@ -653,14 +653,18 @@ async function dispatch({
   const isIsolatedIntegration =
     integrationEffective === "worktree" || integrationEffective === "review";
   if (runMode === "direct") {
+    // Issue #8: --contract-file needs writeScopes/requiredValidation enforcement
+    // from the hardened wrapper. Route contract code runs through hardened even
+    // when workspace prefs are runMode=direct (no silent refuse; live-tree
+    // integration=direct still works under hardened isolation machinery).
     if (wrapperMode === "code" && hasContractFile) {
       process.stderr.write(
-        "[grok-companion] --contract-file requires hardened mode (fail closed). " +
-          "Run setup --run-mode hardened, or omit --contract-file for direct code.\n"
+        "[grok-companion] --contract-file: using hardened wrapper for writeScopes " +
+          "and requiredValidation (workspace runMode=direct; contract needs " +
+          "enforcement the installed-CLI path cannot provide).\n"
       );
-      return finishCleanups(1);
-    }
-    if (!WRAPPER_ONLY_MODES.has(wrapperMode) && !hasContinueRun && !isIsolatedIntegration) {
+      // fall through to hardened wrapper
+    } else if (!WRAPPER_ONLY_MODES.has(wrapperMode) && !hasContinueRun && !isIsolatedIntegration) {
       return Promise.resolve(
         captureAndTrack(null, wrapperArgs, {
           cwd,
@@ -672,8 +676,8 @@ async function dispatch({
         })
       ).then(finishCleanups);
     }
-    // continue-run + worktree/review + handoff/status/cleanup: fall through to
-    // the hardened wrapper path below.
+    // continue-run + worktree/review + contract code + handoff/status/cleanup:
+    // fall through to the hardened wrapper path below.
   }
   const wrapper = resolveWrapperPath(process.env);
   if (!wrapper) {
@@ -798,7 +802,12 @@ async function main() {
     resume,
     fresh,
     noNotify,
+    executionContext: executionContextFlag,
   } = stripFlags(rawArgs);
+  // Issue #8: --execution-context sets env for this process (notify path).
+  if (executionContextFlag === "foreground" || executionContextFlag === "background") {
+    process.env.GROK_COMPANION_EXECUTION_CONTEXT = executionContextFlag;
+  }
   let staged;
   try {
     staged = stageStdinTaskFile(stripped);

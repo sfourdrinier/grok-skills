@@ -141,30 +141,33 @@ test("peer-stop auto: dirty patch-path blocks apply, tree unchanged, outcome !ok
   }
 });
 
-test("peer-stop auto: consent gate keys on the peer's repository, not cwd", () => {
-  // Started for repoB; stopped from repoA (cwd) with no --target. Direct mode
-  // must read repoB's consent, not repoA's (which we grant to prove it's ignored).
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-peer-int-consent-"));
+test("peer-stop direct: apply keys on the peer's repository, not companion cwd", () => {
+  // Started for repoB; stopped from repoA (cwd) with no --target. Direct must
+  // apply into repoB (envelope repository), never repoA (2.0.1+: no consent gate).
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "grok-peer-int-target-"));
   const repoA = initRepo(path.join(root, "repoA"));
   const repoB = initRepo(path.join(root, "repoB"));
   const xdg = path.join(root, "xdg");
-  stagePatch(xdg, RUN_ID, capturePatch(repoB));
+  const patch = capturePatch(repoB);
+  stagePatch(xdg, RUN_ID, patch);
   const lines = [];
   try {
-    // No consent recorded for repoB -> direct apply must be refused (not applied).
     const res = withXdg(xdg, () =>
       maybeIntegratePeerStop(peerStopEnvelope(repoB), repoA, "direct", [], (l) => lines.push(l))
     );
-    assert.equal(res.outcome, "consent-required");
-    // Fail closed: a requested-but-blocked direct apply is attempted+not-ok, so
-    // peerStopExitCode surfaces a nonzero exit rather than the wrapper's 0.
+    assert.equal(res.ok, true, JSON.stringify(res));
     assert.equal(res.attempted, true);
-    assert.equal(res.ok, false);
-    assert.equal(peerStopExitCode(0, res), 1);
-    assert.equal(
+    assert.notEqual(res.outcome, "consent-required");
+    // repoB received the patch; repoA (cwd) stays base.
+    assert.notEqual(
       fs.readFileSync(path.join(repoB, "foo.txt"), "utf8"),
       "hello\n",
-      "repoB must be untouched without repoB consent"
+      "repoB must receive the apply"
+    );
+    assert.equal(
+      fs.readFileSync(path.join(repoA, "foo.txt"), "utf8"),
+      "hello\n",
+      "repoA (cwd) must not be the apply target"
     );
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

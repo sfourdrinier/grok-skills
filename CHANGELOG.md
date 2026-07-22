@@ -33,6 +33,36 @@ for marketplace / package tags.
 - Packaging version **2.0.1** (manifests regenerated from
   `plugin/manifest.source.json`).
 
+### Fixed (timeouts and monorepo ops - issues #7 / #8)
+
+- **Git timeout default 30s -> 600s (10 min):** SSOT
+  `git_timeout.git_timeout_seconds()` (re-exported from `worktree`) used by
+  worktree prep and repo-root resolution. Override with
+  `GROK_WRAPPER_GIT_TIMEOUT_SECONDS` (clamped 30..7200). Anti-hang, not
+  anti-monorepo.
+
+### Fixed / Changed (orchestrator ergonomics - issue #8)
+
+- **Contract validation reports all violations** in one
+  `implementation-contract-invalid` envelope (`error.detail.violations[]`), not
+  one field per launch.
+- **Complete contract example** in `plugin/skills/code/SKILL.md` (schemaVersion,
+  taskId, target, writeScopes `{kind,path}`, requiredValidation, onlyIfChanged).
+- **`requiredValidation.onlyIfChanged`:** optional path-prefix list; skips that
+  validation when no changed path matches (monorepo scoping).
+- **Removed integration consent gates** (product default is direct landing, same
+  class of tool as other providers). `setup --integration` still sets mode
+  prefs; first direct run no longer refuses.
+- **`--contract-file` under runMode=direct:** companion routes through the
+  hardened wrapper for writeScopes/requiredValidation enforcement (no refuse).
+- **Stale-home audit log noise:** per-home "lease unreadable / age below" spam
+  replaced with one summary line per audit.
+- **`setup --json`:** machine-readable setup status for orchestrators.
+- **Notification default `auto`** for new installs; **`--execution-context`**
+  flag + non-TTY auto-detect for notify context.
+- **Advisory version stamp self-heal** after fully green preflight (best-effort
+  write of `accepted-version.json`).
+
 ### Fixed (worktree prep on large monorepos - issue #7)
 
 - **Ignored-path inventory uses ``git ls-files --directory`` + check-ignore

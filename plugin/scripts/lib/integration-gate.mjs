@@ -2,7 +2,8 @@
 //
 // Code/implement integration gate + continue-run target resolution. Extracted
 // from jobs.mjs to keep the jobs registry under the 900-line cap. Uses the
-// companion argv SSOT for flag strip/value and jobs prefs for mode/consent.
+// companion argv SSOT for flag strip/value and jobs prefs for integration mode.
+// No per-repo "consent" gate: direct lands when selected (like other providers).
 
 import fs from "node:fs";
 import path from "node:path";
@@ -14,8 +15,6 @@ import {
   resolveTargetWorkspaceRoot,
 } from "./git-context.mjs";
 import {
-  formatDirectIntegrationConsentMsg,
-  getIntegrationConsent,
   getIntegrationMode,
   parseIntegrationMode,
 } from "./jobs.mjs";
@@ -82,15 +81,14 @@ export function resolveContinueRunTargetWorkspace(continueRunId, cwd, env = proc
 }
 
 /**
- * Resolve effective integration for code/implement and enforce the one-time
- * direct consent gate. Consent and integrationMode are keyed on the resolved
- * TARGET repo root (git toplevel of --target, defaulting to '.'), not companion
- * cwd - so consent for repo A never authorizes a direct run against repo B.
- * worktree|auto|review need no consent; direct needs setup for that target.
+ * Resolve effective integration for code/implement. IntegrationMode is keyed on
+ * the resolved TARGET repo root (git toplevel of --target, defaulting to '.'),
+ * not companion cwd - so prefs for repo A do not silently switch mode for repo B.
+ * No consent gate: direct lands when selected (2.0.1+).
  *
- * continue-run: direct-consent exempt but still resolves configured/explicit
- * integration (auto keeps apply-on-ready; review retains; direct maps wrapper
- * worktree lineage without auto apply). Apply target from prior-run metadata.
+ * continue-run still resolves configured/explicit integration (auto keeps
+ * apply-on-ready; review retains; direct maps wrapper worktree lineage without
+ * auto apply). Apply target from prior-run metadata.
  *
  * @returns {{
  *   ok: true,
@@ -126,12 +124,12 @@ export function gateIntegrationForCodeish(mode, rest, integrationFlag, cwd, env 
   // implement is verify-only (code + handoff, never applies to the live tree),
   // so it ALWAYS takes the worktree path: never direct (which would record the
   // code leg as mode=direct and make the immediate handoff refuse it after
-  // mutating the tree) and never the direct-consent gate.
+  // mutating the tree).
   if (mode === "implement") {
     return { ok: true, effective: "worktree", rest: withExplicitIntegration(rest, "worktree") };
   }
-  // SECURITY: key consent on the repo being edited, not process.cwd().
-  // continue-run forbids --target, so key consent/mode on the prior run's repo.
+  // Key integration prefs on the repo being edited, not process.cwd().
+  // continue-run forbids --target, so key mode on the prior run's repo.
   const targetWorkspace = isContinueRun
     ? resolveContinueRunTargetWorkspace(continueRunId || "", cwd, env)
     : resolveTargetWorkspaceRoot(cwd, parseTargetFlag(rest));
@@ -150,24 +148,6 @@ export function gateIntegrationForCodeish(mode, rest, integrationFlag, cwd, env 
     effective = parsed;
   } else {
     effective = getIntegrationMode(targetWorkspace, env);
-  }
-  // auto/review: treat like worktree for gating (no live unverified tree writes).
-  // continue-run: never refuse on direct consent - wrapper continues in the
-  // retained worktree. Companion still surfaces effective for auto/review.
-  if (
-    !isContinueRun &&
-    effective === "direct" &&
-    !getIntegrationConsent(targetWorkspace, env)
-  ) {
-    return {
-      ok: false,
-      code: 1,
-      message:
-        formatDirectIntegrationConsentMsg({
-          targetWorkspace,
-          companionCwd: cwd,
-        }) + "\n",
-    };
   }
   // Wrapper continue-run always reuses worktree lineage. Companion auto/review
   // stay companion-side (apply-on-ready / retain); direct continues without

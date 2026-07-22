@@ -58,7 +58,7 @@ How edits land is mode-aware:
    [manual-smoke.md](plugin/references/manual-smoke.md).
 
 4. Before promising implementer success on the **live tree**, record integration
-   consent or opt into isolation (canonical matrix:
+   opt into isolation (canonical matrix:
    [integration-modes.md](plugin/references/integration-modes.md)):
 
    ```text
@@ -69,7 +69,7 @@ How edits land is mode-aware:
    /grok:setup --integration review
    ```
 
-   First direct landing without setup consent fails closed. `/grok:implement`
+   Direct landing needs no consent. `/grok:implement`
    always forces an isolated worktree + verify-only handoff (never live lands).
 
 5. Try a review or ask the host to use **grok-engineer-coder** for implementation.
@@ -210,8 +210,8 @@ codex plugin marketplace add git@github.com:sfourdrinier/grok-skills.git
 | `/grok:adversarial-review` | Hostile review that challenges design; web on by default. |
 | `/grok:dual-lens` | Adversarial pass, then ordinary review on the same target. |
 | `/grok:reason` | Cold second opinion on files you name. No automatic repo crawl. Web off by default. |
-| `/grok:code` | Implements per **integration mode** (default **direct** = live tree; `auto`/`review` = external worktree off a committed `--base`). Does not commit or push. Optional `--contract-file` (writeScopes + requiredValidation; runMode hardened only). Handoff artifacts under the run dir for isolated modes. See [integration-modes.md](plugin/references/integration-modes.md). |
-| `/grok:peer` | Multi-turn **ACP peer channel** (`start` / `prompt` / `stop`). Default path for `grok-engineer-coder`; one-shot `code` is the fallback (`GROK_DISABLE_ACP=1`). Hardened runMode only. **Always** external retained worktree during the session (not live-edit). At ready `peer stop`, `direct`/`auto` apply the verified patch (direct needs consent); `review` retains. Shared auto/peer apply spine; **not** via `/grok:handoff`. Final apply envelope rewrite-before-write/store/finalize; **not** completion-notification eligible. Does **not** claim host-level tool-approval enforcement beyond local CLI parse+initialize probe - trusted-input peer channel. See [peer skill](plugin/skills/peer/SKILL.md) + [integration-modes.md](plugin/references/integration-modes.md). |
+| `/grok:code` | Implements per **integration mode** (default **direct** = live tree; `auto`/`review` = external worktree off a committed `--base`). Does not commit or push. Optional `--contract-file` (writeScopes + requiredValidation; under runMode=direct the companion routes through the hardened wrapper for enforcement). Handoff artifacts under the run dir for isolated modes. See [integration-modes.md](plugin/references/integration-modes.md). |
+| `/grok:peer` | Multi-turn **ACP peer channel** (`start` / `prompt` / `stop`). Default path for `grok-engineer-coder`; one-shot `code` is the fallback (`GROK_DISABLE_ACP=1`). Hardened runMode only. **Always** external retained worktree during the session (not live-edit). At ready `peer stop`, `direct`/`auto` apply the verified patch (direct applies); `review` retains. Shared auto/peer apply spine; **not** via `/grok:handoff`. Final apply envelope rewrite-before-write/store/finalize; **not** completion-notification eligible. Does **not** claim host-level tool-approval enforcement beyond local CLI parse+initialize probe - trusted-input peer channel. See [peer skill](plugin/skills/peer/SKILL.md) + [integration-modes.md](plugin/references/integration-modes.md). |
 | `/grok:implement` | **One-call delegate:** `code` then auto-`handoff` on the resulting runId. Relays both envelopes. Exit 0 only when code ok AND handoff dual-condition ready. Hardened runMode only (runMode direct refused). **Always** isolated worktree + verify-only (never live lands even when workspace is direct/auto); for apply-on-ready use `code --integration auto`. |
 | `/grok:handoff` | **Read-only** verified implementation handoff by **`runId` only** (1.6.0+). Dual-condition ready: ready manifest + success envelope + patch rehash. Never applies (read-only). Code-mode only (peer runIds refuse). Notify is not ready. |
 | `/grok:verify` | Pass/fail/inconclusive check on an existing worktree. No `--web`. |
@@ -269,23 +269,24 @@ edits land - both axes use the word "direct"; disambiguate in
 ### Integration modes (how edits land)
 
 Orthogonal to run mode (security). Default product name is **direct**. For
-**one-shot code** that means edit this working tree under hardened-direct;
-the first direct run without recorded consent fails closed with a trust
-summary. **`/grok:implement` always forces an isolated worktree + verify-only
-handoff** and never lands live (even when the workspace default is
-direct/auto) - see [integration-modes.md](plugin/references/integration-modes.md).
+**one-shot code** that means edit this working tree under hardened-direct —
+**no consent gate** (2.0.1+). **`/grok:implement` always forces an isolated
+worktree + verify-only handoff** and never lands live (even when the workspace
+default is direct/auto) - see [integration-modes.md](plugin/references/integration-modes.md).
 **ACP peer** always uses an external worktree and only applies at ready
-peer-stop (`direct` still needs that same consent; `auto` applies without it;
-`review` retains). Accept once:
+peer-stop (`direct` and `auto` both apply; `review` retains).
 
 ```bash
+# optional: persist integration prefs
 node "$SKILL_BASE/run.mjs" setup --integration direct
+# machine-readable status:
+node "$SKILL_BASE/run.mjs" setup --json
 ```
 
 Or opt into isolation: `--integration auto` (worktree + apply-on-ready) or
 `--integration review` / `worktree` (worktree + manual parent apply). Settings
 `userConfig.integrationMode` / env `CLAUDE_PLUGIN_OPTION_INTEGRATIONMODE` are a
-default hint only - they do **not** satisfy consent; only setup does.
+default hint; setup persists mode prefs when you want them.
 
 **Canonical matrix (modes, honesty, two "direct" axes, ACP):**
 [plugin/references/integration-modes.md](plugin/references/integration-modes.md).
@@ -330,7 +331,7 @@ Integrate is **mode-aware** and **channel-aware** (canonical:
 - **code review:** never auto-applies; parent apply is manual (`git apply
   --check --binary` then explicit apply)
 - **ACP peer:** always external worktree during the session; at ready
-  `peer stop`, `direct`/`auto` apply the verified patch (direct needs consent),
+  `peer stop`, `direct`/`auto` apply the verified patch (direct applies),
   `review` retains; handoff refuses peer runIds
 
 This plugin **never** auto-commits, merges, cherry-picks, or pushes in any mode.
@@ -387,8 +388,8 @@ For `code`, look for `worktreePath` / `changedFiles` in the envelope. For `verif
 
 Same engine the plugin shells to. **Defaults differ from the product companion:**
 the companion/skills default to **integration=direct** after per-repo setup
-consent; a bare wrapper `code` call without `--integration` intentionally
-defaults to **worktree** (fail-closed isolation) so an un-consented bare call
+prefs; a bare wrapper `code` call without `--integration` intentionally
+defaults to **worktree** (fail-closed isolation) so an accidental bare call
 cannot silently edit the live tree. Pass `--integration direct` only when you
 mean the live-tree posture.
 
@@ -400,7 +401,7 @@ python3 plugin/wrapper/scripts/grok_agent.py review \
 # bare code: worktree isolation by default
 python3 plugin/wrapper/scripts/grok_agent.py code \
   --target src/my-lib --base HEAD --task-file task.md
-# explicit live-tree (same as product after consent):
+# explicit live-tree (product default):
 python3 plugin/wrapper/scripts/grok_agent.py code \
   --integration direct --target src/my-lib --task-file task.md
 ```
@@ -439,17 +440,17 @@ What it actually enforces:
 - Private throwaway Grok home per run (your real credentials are not the run’s `HOME`)
 - OS sandbox write confinement on the supported platform (verified after the run)
 - **Mode-aware write landing** (see [integration-modes.md](plugin/references/integration-modes.md)):
-  - **One-shot `code` `integration=direct`** (product default after per-repo consent):
+  - **One-shot `code` `integration=direct`** (product default):
     live-tree edits under hardened-direct (private home + sandbox write-confined to
     the **repo root** + private tmp + post-run protected-path guards). Not worktree
     isolation.
   - **One-shot `code` `auto` / `review` / `worktree`**: external worktree + escape
     checks; auto may apply a verified ready patch; review retains for parent apply.
   - **Bare wrapper** `python3 …/grok_agent.py code` without `--integration`: still
-    defaults to **worktree** so an un-consented bare call cannot silently edit the
+    defaults to **worktree** so an accidental bare call cannot silently edit the
     live tree.
   - **ACP peer:** always external retained worktree during the session; at ready
-    peer-stop, `direct`/`auto` apply (direct needs consent), `review` retains.
+    peer-stop, `direct`/`auto` apply (direct applies), `review` retains.
     Peer direct is stop-time apply, not one-shot code live-edit.
 - One redacted JSON envelope on stdout (pattern scan + exact values from the injected `auth.json`)
 - Build scripts that Grok rewrote are not executed (gate refused)
@@ -499,6 +500,9 @@ Compatibility notes and versions tested: [docs/COMPATIBILITY.md](docs/COMPATIBIL
 | Auth / login checks fail in preflight | Log in with the Grok CLI itself, then re-run `/grok:preflight`. |
 | `probe-required` on Windows | Expected until Windows sandbox is live-probed. |
 | `probe-required` on Linux without `bwrap` | Install bubblewrap (`bwrap` on PATH). Required pre-spawn prereq; secret-read denial remains unproven even with bwrap (D-SECRETREAD). Landlock write confinement is verified after each live run via ProfileApplied. |
+| Git / worktree prep times out on monorepos | Default git timeout is **600s**; raise further with `GROK_WRAPPER_GIT_TIMEOUT_SECONDS`. Issue #7 also collapses ignored trees. |
+| Contract errors one-at-a-time | 2.0.1 returns **all** `error.detail.violations` in one envelope; see code skill schema example. |
+| Setup status for orchestrators | `setup --json` returns runMode, integrationMode, notifications, checks. |
 | Skills missing after install | Claude: `/reload-plugins`. Codex: check `codex plugin list`. Desktop: restart after install. |
 | Codex install: which name? | Use `grok@grok-skills` (plugin@marketplace). |
 | Codex agents missing from picker | Open a **new session** after install (SessionStart installs them). Confirm `~/.codex/agents/grok-*.toml` exist and `GROK_AGENT_RUN` / `# agent-run:` point at the current `agents/run.mjs`. Re-run optional `/grok:setup` or `setup --force-codex-agents` if you customized those files. |
@@ -511,9 +515,9 @@ Compatibility notes and versions tested: [docs/COMPATIBILITY.md](docs/COMPATIBIL
 | Review notes files changed during the run | Informational only (dev servers, logs, other editors, or Grok listing paths). Review still **succeeds**; findings apply. Not a failure. See [over-conservatism audit](docs/reviews/2026-07-15-over-conservatism-audit.md). |
 | Warning: "AGENTS.md and CLAUDE.md differ at ..." | Informational (2.0.0+). Both files exist at that level with different bodies (comparison ignores the first/header line, matching `ruleFileParity`) and only AGENTS.md was sent to Grok. Pointer-style CLAUDE.md (`@AGENTS.md`, optionally with surrounding whitespace) never warns. Align the pair, or set `"ruleFileParity": true` in `.grok-skills.json` to enforce matching pairs fail-closed. |
 | `code` fails `unexpected-edits` naming files you changed yourself | Do not commit or edit the target checkout while a hardened `code` run is in flight; the original-checkout guard cannot attribute mid-run divergence. Rerun the task, then integrate in a quiet window. |
-| No completion toast after a long job | Notifications default **off**. Run `/grok:setup --notification-mode auto` and use a **background** skill run (execution context). Headless/Windows: use `webhook`. Direct mode has no push notify in 1.5.0. Peer-stop is not notify-eligible. |
+| No completion toast after a long job | Notifications default **off**. Run `/grok:setup --notification-mode auto` and use a **background** skill run (execution context). Headless/Windows: use `webhook`. runMode=direct has limited notify in older builds. Peer-stop is not notify-eligible. |
 | Toast arrived but cannot integrate | Notify is only a signal. Call `/grok:handoff --run-id` and require dual-condition ready before any apply. |
-| `--contract-file` in direct mode | Fail closed. Use hardened mode (`setup --run-mode hardened`) for contracts and handoff artifacts. |
+| `--contract-file` with runMode=direct | Companion routes through hardened wrapper for enforcement. Prefer `setup --run-mode hardened` for handoff artifacts. |
 
 ---
 

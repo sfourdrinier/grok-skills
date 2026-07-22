@@ -51,11 +51,13 @@ test("run mode persists hardened vs direct", () => {
   assert.equal(setRunMode(cwd, "hardened", env), "hardened");
 });
 
-test("notification prefs default off and persist", () => {
+test("notification prefs default auto and persist", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-notify-cfg-"));
   const env = { CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata") };
+  assert.equal(getNotificationConfig(cwd, env).notificationMode, "auto");
+  assert.equal(DEFAULT_JOBS_CONFIG.notificationMode, "auto");
+  setNotificationConfig(cwd, { notificationMode: "off" }, env);
   assert.equal(getNotificationConfig(cwd, env).notificationMode, "off");
-  assert.equal(DEFAULT_JOBS_CONFIG.notificationMode, "off");
   setNotificationConfig(cwd, { notificationMode: "auto" }, env);
   assert.equal(getNotificationConfig(cwd, env).notificationMode, "auto");
 });
@@ -286,7 +288,7 @@ test("getNotificationConfig precedence: setup > CLAUDE_PLUGIN_OPTION_* > default
 
   assert.equal(
     getNotificationConfig(cwd, { CLAUDE_PLUGIN_DATA: pluginData }).notificationMode,
-    "off"
+    "auto"
   );
 
   const fromEnv = getNotificationConfig(cwd, {
@@ -328,7 +330,7 @@ test("getNotificationConfig ignores invalid CLAUDE_PLUGIN_OPTION values with not
   };
   try {
     const cfg = getNotificationConfig(cwd, env);
-    assert.equal(cfg.notificationMode, "off");
+    assert.equal(cfg.notificationMode, "auto");
     assert.equal(cfg.notificationWebhookUrl, null);
     assert.match(err, /ignoring invalid/i);
   } finally {

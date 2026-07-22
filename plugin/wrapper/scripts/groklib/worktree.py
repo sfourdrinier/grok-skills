@@ -23,13 +23,13 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from groklib import GrokWrapperError, log_stderr
 from groklib import path_inventory, platformsupport, runstate
+from groklib.git_timeout import git_timeout_seconds  # re-export SSOT (issue #7/#8)
 
 _BRANCH_PREFIX = "grok/code/"
 # Run-bound branches that cleanup may delete (code + opt-in review isolation).
 _RUN_BOUND_BRANCH_PREFIXES = (_BRANCH_PREFIX, "grok/review/")
 _MARKER_SUFFIX = ".owner.json"
 _SLUG_UNSAFE = re.compile(r"[^A-Za-z0-9._-]")
-_GIT_TIMEOUT_SECONDS = 30
 _REFS_HEADS_PREFIX = "refs/heads/"
 
 
@@ -127,7 +127,7 @@ def _run_git_bytes(
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=_git_env(env),
-            timeout=_GIT_TIMEOUT_SECONDS,
+            timeout=git_timeout_seconds(),
             check=False,
         )
     except UnicodeEncodeError as exc:

@@ -126,3 +126,56 @@ def check_version(binary: pathlib.Path) -> str:
             "(allowed; stamp is advisory only)".format(first_line, reference),
         )
     return first_line
+
+
+def maybe_refresh_accepted_version_stamp(version: str) -> bool:
+    """Best-effort write of advisory accepted-version.json after green preflight.
+
+    Issue #8: after a fully green preflight on a new CLI version, refresh the
+    advisory stamp so the diagnostic disappears until the next bump. Never fails
+    the run if the install tree is read-only. Not called from check_version so
+    ordinary runs and unit tests never mutate the package stamp.
+    """
+    if not isinstance(version, str) or not version.strip():
+        return False
+    version = version.strip()
+    current = last_validated_version()
+    if current == version:
+        return True
+    # Preserve existing maintainer fields (schemaVersion, probeEvidence, …).
+    payload: dict = {}
+    try:
+        raw = ACCEPTED_VERSION_FILE.read_text(encoding="utf-8")
+        loaded = json.loads(raw)
+        if isinstance(loaded, dict):
+            payload = dict(loaded)
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    payload["version"] = version
+    payload.setdefault("schemaVersion", 2)
+    payload.setdefault("enforcement", "none")
+    payload.setdefault(
+        "note",
+        "Last maintainer-validated Grok CLI build (advisory only). Runtime does "
+        "NOT require this exact version - any working `grok --version` is accepted.",
+    )
+    payload["selfHealedAtUtc"] = __import__("datetime").datetime.now(
+        __import__("datetime").timezone.utc
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        ACCEPTED_VERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ACCEPTED_VERSION_FILE.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        _log(
+            "maybe_refresh_accepted_version_stamp",
+            "refreshed advisory stamp to {!r}".format(version),
+        )
+        return True
+    except OSError as exc:
+        _log(
+            "maybe_refresh_accepted_version_stamp",
+            "could not refresh stamp (ignored): {}".format(exc),
+        )
+        return False
