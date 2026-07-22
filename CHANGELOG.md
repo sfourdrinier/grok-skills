@@ -19,7 +19,7 @@ for marketplace / package tags.
   `GROK_WRAPPER_MAX_GIT_DISCOVERY_WALK_DIRS` (walk visits) - unset = no cap.
   Documented in README troubleshooting and SECURITY (was constant-only prose).
 
-### Fixed (bugs identified during 2.0.2 / Codex PR #9 review — full close-out)
+### Fixed (bugs identified during 2.0.2 / Codex PR #9 review - full close-out)
 
 Three defects were identified in review thinking / Codex comments on top of the
 nested-git monorepo work. All three are fixed end-to-end (code + tests), not

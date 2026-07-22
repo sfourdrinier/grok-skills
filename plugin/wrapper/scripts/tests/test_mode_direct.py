@@ -345,7 +345,8 @@ class DirectModeSecurityTests(DirectModeHarness):
         def _plant(repo_root: pathlib.Path, _run_id: str) -> None:
             secrets = repo_root / "secrets"
             secrets.mkdir(parents=True, exist_ok=True)
-            (secrets / "id_rsa").write_text("-----BEGIN PRIVATE KEY-----\n", encoding="utf-8")
+            # Filename is deny-scoped; avoid contiguous secret-shaped body literals.
+            (secrets / "id_rsa").write_text("planted-key-body\n", encoding="utf-8")
             # Legitimate in-scope edit so the run is not a no-op plant only.
             (repo_root / "pkg" / "mod.txt").write_text("module fixed\n", encoding="utf-8")
 
