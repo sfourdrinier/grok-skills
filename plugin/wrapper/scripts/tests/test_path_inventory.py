@@ -66,9 +66,41 @@ class PathInventoryQuotePathTests(unittest.TestCase):
         )
         self.assertFalse(
             any("index.js" in p for p in paths),
-            "ignored directory inventory must not expand leaves: {}".format(paths),
+            "ignored directory inventory must not expand non-deny leaves: {}".format(paths),
         )
         self.assertIn("creds.local", paths)
+
+    def test_list_ignored_expands_protected_leaves_under_collapsed_dirs(self) -> None:
+        # Codex PR #9: secrets/ collapse must still surface secrets/id_rsa so
+        # deny globs match after --directory (otherwise protected-path-write misses).
+        (self.repo / ".gitignore").write_text("secrets/\nnode_modules/\n", encoding="utf-8")
+        _git(self.repo, "add", ".gitignore")
+        _git(self.repo, "commit", "-q", "-m", "ignore secrets tree")
+        secrets = self.repo / "secrets"
+        secrets.mkdir()
+        (secrets / "id_rsa").write_text("PRIVATE KEY\n", encoding="utf-8")
+        (secrets / "readme.txt").write_text("not a secret leaf name\n", encoding="utf-8")
+        nm = self.repo / "node_modules" / "pkg"
+        nm.mkdir(parents=True)
+        (nm / "index.js").write_text("ok\n", encoding="utf-8")
+        paths = path_inventory.list_ignored_untracked_paths(self.repo)
+        self.assertTrue(
+            any(p.rstrip("/") == "secrets" for p in paths),
+            "collapsed secrets/ dir should remain: {}".format(paths),
+        )
+        self.assertIn(
+            "secrets/id_rsa",
+            paths,
+            "deny-scoped leaf under ignored dir must be expanded: {}".format(paths),
+        )
+        self.assertFalse(
+            any(p.endswith("readme.txt") for p in paths),
+            "non-deny leaves under collapsed dirs must stay collapsed: {}".format(paths),
+        )
+        self.assertFalse(
+            any("index.js" in p for p in paths),
+            "bulk cache non-deny leaves must stay collapsed: {}".format(paths),
+        )
 
     def test_list_ignored_drops_untracked_parent_of_nested_ignore(self) -> None:
         # --directory may emit other/ when only other/__pycache__/ is ignored;

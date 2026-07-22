@@ -331,6 +331,37 @@ class DirectModeSecurityTests(DirectModeHarness):
         self.assertEqual(env["error"]["class"], "protected-path-write")
         self.assertIn(".env", json.dumps(env["error"]))
 
+    def test_protected_leaf_under_collapsed_ignored_dir_fails(self) -> None:
+        """Codex PR #9: secrets/id_rsa under ignored secrets/ must not slip past deny.
+
+        ``ls-files --directory`` collapses the tree to ``secrets/``; without leaf
+        expansion the deny glob ``id_rsa`` never matches and the plant survives.
+        """
+        repo = self.make_code_repo()
+        (repo / ".gitignore").write_text("secrets/\n", encoding="utf-8")
+        self._git(repo, "add", ".gitignore")
+        self._git(repo, "commit", "-q", "-m", "ignore secrets tree")
+
+        def _plant(repo_root: pathlib.Path, _run_id: str) -> None:
+            secrets = repo_root / "secrets"
+            secrets.mkdir(parents=True, exist_ok=True)
+            # Filename is deny-scoped; avoid contiguous secret-shaped body literals.
+            (secrets / "id_rsa").write_text("planted-key-body\n", encoding="utf-8")
+            # Legitimate in-scope edit so the run is not a no-op plant only.
+            (repo_root / "pkg" / "mod.txt").write_text("module fixed\n", encoding="utf-8")
+
+        exit_code, out = self.drive_direct(self._direct_argv(), repo_root=repo, plant=_plant)
+        env = json.loads(out)
+        self.assertEqual(exit_code, 1, out)
+        self.assertEqual(env["error"]["class"], "protected-path-write")
+        detail = json.dumps(env["error"])
+        self.assertIn("id_rsa", detail, detail)
+        # Rollback must remove the planted protected leaf.
+        self.assertFalse(
+            (repo / "secrets" / "id_rsa").exists(),
+            "planted secrets/id_rsa must be removed on protected-path-write",
+        )
+
     def test_dirty_overlap_fails_without_force(self) -> None:
         repo = self.make_code_repo()
         # make_repo leaves dirty.txt untracked; also dirtied here for clarity.

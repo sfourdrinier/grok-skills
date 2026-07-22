@@ -124,8 +124,11 @@ over. It is **not** a complete sandbox against an adversarial model.
   discovered/snapshotted `git_roots` longest-prefix + shared suffix classifier
   (module path components may be named hooks/refs/objects/logs; token peels
   are not used). Ordinary module metadata (index/objects/logs) is not
-  auto-restored. Nested gitdir discovery is still bounded
-  (`MAX_NESTED_GIT_DISCOVERY`) and fail-closed on overflow; hooks/refs inventory
+  auto-restored. Nested gitdir discovery is **unlimited by default** (2.0.2+);
+  optional operator caps only via `GROK_WRAPPER_MAX_NESTED_GIT_DISCOVERY`
+  (gitdirs counted, not every workspace directory) and
+  `GROK_WRAPPER_MAX_GIT_DISCOVERY_WALK_DIRS` (os.walk visits) - unset = no cap;
+  when set, overflow fails closed as `protected-path-write`. Hooks/refs inventory
   streams without an artificial file-count cap (real walk/read errors fail
   closed as `protected-path-write`). Watched regular git files are
   stream-hashed (SHA-256, chunked) regardless of size - never a
@@ -184,9 +187,11 @@ gaps to paper over):
    restore to the **actual** absolute gitdir, never under a gitfile path.
    Sensitive set: `config` / `HEAD` / `packed-refs`, `hooks/**`, `refs/**`
    after any multi-component `.git/modules/**` path (moved branch or planted
-   hook/ref is reverted or removed). Nested gitdir discovery is bounded and
-   fail-closed on overflow; hooks/refs walks stream fully (no artificial file
-   count). Watched regular files stream-hash in bounded memory (including
+   hook/ref is reverted or removed). Nested gitdir discovery is unlimited by
+   default; optional env caps (`GROK_WRAPPER_MAX_NESTED_GIT_DISCOVERY`,
+   `GROK_WRAPPER_MAX_GIT_DISCOVERY_WALK_DIRS`) fail closed only when set.
+   Hooks/refs walks stream fully (no artificial file count). Watched regular
+   files stream-hash in bounded memory (including
    multi-MiB hooks); unreadable watched paths fail closed rather than using a
    forgeable stat signature. Snapshot persists a `git_roots`
    prefix->actual-gitdir map used by restore even if a gitfile pointer is

@@ -9,6 +9,7 @@ import {
   DEFAULT_JOBS_CONFIG,
   findJobByRunId,
   formatJobsTable,
+  getIntegrationMode,
   getJob,
   getNotificationConfig,
   getRunMode,
@@ -613,6 +614,77 @@ test("legacy jobs-index notificationMode off is not setup-authored after default
       CLAUDE_PLUGIN_OPTION_NOTIFICATIONMODE: "native",
     }).notificationMode,
     "native"
+  );
+});
+
+test("legacy jobs-index non-default integrationMode is pinned as setup", () => {
+  // Codex PR #9: pre-prefsSources index with setup --integration worktree/auto/
+  // review must not fall through to built-in direct after consent became a no-op.
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-legacy-integ-"));
+  const pluginData = path.join(cwd, "pdata");
+  const env = { CLAUDE_PLUGIN_DATA: pluginData };
+  createJob(cwd, { kind: "code", mode: "code", runMode: "hardened" }, env);
+  function findIndex(dir) {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, ent.name);
+      if (ent.isFile() && ent.name === "jobs-index.json") return full;
+      if (ent.isDirectory()) {
+        const hit = findIndex(full);
+        if (hit) return hit;
+      }
+    }
+    return null;
+  }
+  const indexPath = findIndex(pluginData);
+  assert.ok(indexPath, "expected jobs-index.json under plugin data");
+
+  for (const mode of ["worktree", "auto", "review"]) {
+    fs.writeFileSync(
+      indexPath,
+      JSON.stringify({
+        version: 1,
+        config: {
+          runMode: "hardened",
+          notificationMode: "off",
+          integrationMode: mode,
+          // no prefsSources => legacySetup path
+        },
+        jobs: [],
+      }),
+      "utf8"
+    );
+    assert.equal(getIntegrationMode(cwd, env), mode, `legacy ${mode} must stick`);
+    // userConfig must not override setup-authored legacy non-default mode.
+    assert.equal(
+      getIntegrationMode(cwd, {
+        ...env,
+        CLAUDE_PLUGIN_OPTION_INTEGRATIONMODE: "direct",
+      }),
+      mode,
+      `userConfig must not demote legacy ${mode} to direct`
+    );
+  }
+
+  // Legacy default "direct" stays unpinned so userConfig / built-in apply.
+  fs.writeFileSync(
+    indexPath,
+    JSON.stringify({
+      version: 1,
+      config: {
+        runMode: "hardened",
+        integrationMode: "direct",
+      },
+      jobs: [],
+    }),
+    "utf8"
+  );
+  assert.equal(getIntegrationMode(cwd, env), "direct");
+  assert.equal(
+    getIntegrationMode(cwd, {
+      ...env,
+      CLAUDE_PLUGIN_OPTION_INTEGRATIONMODE: "review",
+    }),
+    "review"
   );
 });
 

@@ -39,6 +39,8 @@ from groklib.modes import direct_protect_git as _git
 # Re-export discovery API (single public surface via direct_protect).
 MAX_GIT_TREE_WALK_FILES = _git.MAX_GIT_TREE_WALK_FILES
 MAX_NESTED_GIT_DISCOVERY = _git.MAX_NESTED_GIT_DISCOVERY
+nested_git_discovery_limit = _git.nested_git_discovery_limit
+git_discovery_max_walk_dirs = _git.git_discovery_max_walk_dirs
 is_sensitive_git_suffix = _git.is_sensitive_git_suffix
 is_sensitive_git_relative = _git.is_sensitive_git_relative
 is_snapshot_scope = _git.is_snapshot_scope

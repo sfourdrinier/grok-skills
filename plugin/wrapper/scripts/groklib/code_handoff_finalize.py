@@ -319,10 +319,17 @@ def code_handoff_finalize(
     # the list alone is NOT authoritative evidence (Codex PR review P1).
     contract_validation_executed = False
     if contract and contract.get("requiredValidation"):
-        from groklib.implementation_contract import validation_matches_changed
+        from groklib.implementation_contract import (
+            changed_paths_for_only_if_changed,
+            validation_matches_changed,
+        )
 
         # onlyIfChanged uses post-Grok source paths (issue #8 monorepo scoping).
-        changed_for_skip = list(stage.acc.changed_files or [])
+        # Include rename/copy sources (oldPath): destination-only lists would skip
+        # a validation scoped to the rename source (Codex PR #9).
+        changed_for_skip = changed_paths_for_only_if_changed(
+            changed, fallback=list(stage.acc.changed_files or [])
+        )
         for entry in contract["requiredValidation"]:
             if not validation_matches_changed(entry, changed_for_skip):
                 stage.acc.warnings.append(

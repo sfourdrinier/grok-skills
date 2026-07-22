@@ -24,10 +24,47 @@ _GIT_SNAPSHOT_TREES: Tuple[str, ...] = ("hooks", "refs")
 # named constant so tests can assert inventory past this bound still completes).
 # Tree walks no longer truncate or fail-closed on file count; they stream.
 MAX_GIT_TREE_WALK_FILES = 20000
-# Bound nested .git / gitfile discovery so ignored vendor caches cannot stall
-# discovery of real gitdirs (pathological ignored trees). Distinct from the
-# retired per-tree file-count cap on hooks/refs inventory.
-MAX_NESTED_GIT_DISCOVERY = 2000
+# Back-compat export. Production discovery is **unlimited by default** (None).
+# The old 2000 value was a bug: it counted every os.walk directory, so monorepos
+# failed hardened direct before Grok started. Optional env caps exist only for
+# operators who want a deliberate anti-hang ceiling.
+MAX_NESTED_GIT_DISCOVERY = None  # type: ignore[assignment]
+
+
+def nested_git_discovery_limit() -> Optional[int]:
+    """Optional max **gitdirs** to inventory; ``None`` = unlimited (default).
+
+    Env: ``GROK_WRAPPER_MAX_NESTED_GIT_DISCOVERY`` - set a positive int to cap.
+    Empty/unset = no cap. Counts gitdirs only, never workspace directories.
+    """
+    raw = os.environ.get("GROK_WRAPPER_MAX_NESTED_GIT_DISCOVERY", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw, 10)
+    except ValueError:
+        return None
+    if value < 1:
+        return None
+    return value
+
+
+def git_discovery_max_walk_dirs() -> Optional[int]:
+    """Optional max os.walk directory visits; ``None`` = unlimited (default).
+
+    Env: ``GROK_WRAPPER_MAX_GIT_DISCOVERY_WALK_DIRS`` - set a positive int to
+    cap. Empty/unset = walk the full workspace (symlink-safe, no follow).
+    """
+    raw = os.environ.get("GROK_WRAPPER_MAX_GIT_DISCOVERY_WALK_DIRS", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw, 10)
+    except ValueError:
+        return None
+    if value < 1:
+        return None
+    return value
 
 
 def _log(function: str, message: str) -> None:
@@ -250,10 +287,10 @@ def _inventory_modules_under(
     rel_prefix: str,
     *,
     add_fn,
-    max_discovery: int,
-    visits_holder: List[int],
+    walk_count: List[int],
+    max_walk_dirs: Optional[int],
 ) -> None:
-    """Discover ``modules/**`` gitdirs under one abs gitdir (bounded, no symlink).
+    """Discover ``modules/**`` gitdirs under one abs gitdir (no symlink follow).
 
     Logical keys are ``{rel_prefix}/modules/<name>/...``. Called for every
     discovered free-standing or gitfile-target gitdir so root-gitfile common
@@ -267,6 +304,18 @@ def _inventory_modules_under(
         for dirpath, dirnames, _filenames in os.walk(
             str(modules), topdown=True, followlinks=False
         ):
+            walk_count[0] += 1
+            if max_walk_dirs is not None and walk_count[0] > max_walk_dirs:
+                raise GrokWrapperError(
+                    "protected-path-write",
+                    "nested git modules walk exceeded optional directory visit cap under {}/modules".format(
+                        pfx
+                    ),
+                    {
+                        "maxWalkDirs": max_walk_dirs,
+                        "hint": "unset GROK_WRAPPER_MAX_GIT_DISCOVERY_WALK_DIRS for unlimited",
+                    },
+                )
             dirnames.sort()
             # Do not follow symlink children inside modules.
             dirnames[:] = [
@@ -284,15 +333,6 @@ def _inventory_modules_under(
                     # Nested modules/ of this gitdir are inventoried by add_fn;
                     # do not walk objects/hooks/refs here (duplicate + unbounded).
                     dirnames[:] = []
-            visits_holder[0] += 1
-            if visits_holder[0] > max_discovery:
-                raise GrokWrapperError(
-                    "protected-path-write",
-                    "nested git discovery exceeded bound under {}/modules; fail closed".format(
-                        pfx
-                    ),
-                    {"maxDiscovery": max_discovery},
-                )
     except OSError as exc:
         _log(
             "_inventory_modules_under",
@@ -303,9 +343,10 @@ def _inventory_modules_under(
 def discover_workspace_git_roots(
     repo_root: pathlib.Path,
     *,
-    max_discovery: int = MAX_NESTED_GIT_DISCOVERY,
+    max_discovery: Optional[int] = None,
+    max_walk_dirs: Optional[int] = None,
 ) -> List[Tuple[str, pathlib.Path]]:
-    """Bounded no-symlink discovery of workspace gitdirs (root + nested + modules).
+    """Discover workspace gitdirs (root + nested + modules); no symlink follow.
 
     Yields ``(repo_relative_git_prefix, abs_git_dir)`` for:
     - root ``.git`` directory or in-workspace gitfile target
@@ -315,29 +356,41 @@ def discover_workspace_git_roots(
     - ``modules/**`` under **every** discovered abs gitdir (root free-standing,
       root gitfile target, nested free-standing, nested gitfile target)
 
-    Fail closed with ``protected-path-write`` when discovery hits ``max_discovery``
-    (unbounded ignored caches must not silently leave nested git unguarded).
+    **Default is unlimited** for both gitdir count and walk visits (monorepo-
+    friendly). Optional caps via kwargs or env
+    (``GROK_WRAPPER_MAX_NESTED_GIT_DISCOVERY``,
+    ``GROK_WRAPPER_MAX_GIT_DISCOVERY_WALK_DIRS``) fail closed only when set.
     ``seen_abs`` prevents recursive duplicate loops when the same gitdir is
     reachable via multiple logical prefixes.
     """
+    # Explicit kwargs win; else env (None = unlimited).
+    if max_discovery is None:
+        max_discovery = nested_git_discovery_limit()
+    if max_walk_dirs is None:
+        max_walk_dirs = git_discovery_max_walk_dirs()
     root = pathlib.Path(repo_root)
     found: List[Tuple[str, pathlib.Path]] = []
     seen_abs: Set[str] = set()
-    visits_holder = [0]
+    gitdir_count = [0]
+    walk_count = [0]
 
     def _add(rel_prefix: str, abs_dir: pathlib.Path, *, inventory_modules: bool = True) -> None:
-        visits_holder[0] += 1
-        if visits_holder[0] > max_discovery:
-            raise GrokWrapperError(
-                "protected-path-write",
-                "nested git discovery exceeded bound; fail closed rather than leave unguarded gitdirs",
-                {
-                    "maxDiscovery": max_discovery,
-                    "hint": "reduce nested .git / vendor caches in the workspace or raise the bound only after review",
-                },
-            )
         if not abs_dir.is_dir():
             return
+        # Count real gitdirs only (not ordinary workspace dirs, not missing paths).
+        gitdir_count[0] += 1
+        if max_discovery is not None and gitdir_count[0] > max_discovery:
+            raise GrokWrapperError(
+                "protected-path-write",
+                "nested git discovery exceeded optional gitdir cap; fail closed rather than leave unguarded gitdirs",
+                {
+                    "maxDiscovery": max_discovery,
+                    "hint": (
+                        "unset GROK_WRAPPER_MAX_NESTED_GIT_DISCOVERY for unlimited "
+                        "(counts nested .git / modules only, not every monorepo directory)"
+                    ),
+                },
+            )
         try:
             key = str(abs_dir.resolve())
         except OSError:
@@ -366,8 +419,8 @@ def discover_workspace_git_roots(
                 abs_dir,
                 pfx,
                 add_fn=lambda r, a: _add(r, a, inventory_modules=True),
-                max_discovery=max_discovery,
-                visits_holder=visits_holder,
+                walk_count=walk_count,
+                max_walk_dirs=max_walk_dirs,
             )
 
     root_git = root / ".git"
@@ -384,12 +437,15 @@ def discover_workspace_git_roots(
     # we enter a .git directory so we do not invent paths under objects/.
     try:
         for dirpath, dirnames, filenames in os.walk(str(root), topdown=True, followlinks=False):
-            visits_holder[0] += 1
-            if visits_holder[0] > max_discovery:
+            walk_count[0] += 1
+            if max_walk_dirs is not None and walk_count[0] > max_walk_dirs:
                 raise GrokWrapperError(
                     "protected-path-write",
-                    "nested git discovery exceeded bound while scanning workspace; fail closed",
-                    {"maxDiscovery": max_discovery},
+                    "nested git discovery walk exceeded optional directory visit cap; fail closed",
+                    {
+                        "maxWalkDirs": max_walk_dirs,
+                        "hint": "unset GROK_WRAPPER_MAX_GIT_DISCOVERY_WALK_DIRS for unlimited",
+                    },
                 )
             rel_dir = _posix_rel(os.path.relpath(dirpath, str(root)))
             if rel_dir == ".":

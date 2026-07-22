@@ -515,6 +515,28 @@ class DirectProtectSnapshotRestoreTests(unittest.TestCase):
             direct_protect.discover_workspace_git_roots(self.repo, max_discovery=0)
         self.assertEqual(cm.exception.error_class, "protected-path-write")
 
+    def test_many_workspace_dirs_do_not_count_as_gitdir_bound(self) -> None:
+        """Monorepo fix: former 2000 bound counted every os.walk visit."""
+        # Create far more than the old 2000-directory cap; only root .git exists.
+        for i in range(2500):
+            (self.repo / "pkg{:04d}".format(i)).mkdir()
+        roots = direct_protect.discover_workspace_git_roots(self.repo)
+        self.assertTrue(any(rel == ".git" for rel, _ in roots))
+        # Nested package without .git must not force failure.
+        self.assertEqual(len([r for r, _ in roots if r == ".git"]), 1)
+
+    def test_walk_dir_bound_fail_closed(self) -> None:
+        from groklib import GrokWrapperError
+
+        for i in range(20):
+            (self.repo / "d{:02d}".format(i)).mkdir()
+        with self.assertRaises(GrokWrapperError) as cm:
+            direct_protect.discover_workspace_git_roots(
+                self.repo, max_discovery=100, max_walk_dirs=5
+            )
+        self.assertEqual(cm.exception.error_class, "protected-path-write")
+        self.assertIn("walk", str(cm.exception).lower())
+
     def test_gitfile_outside_workspace_not_inventoried(self) -> None:
         # Honest linked-worktree limit: gitfile pointing outside workspace is not
         # walked as nested protected content (common dir often lives outside).

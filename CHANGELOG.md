@@ -6,6 +6,52 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
+## [2.0.2] - 2026-07-22
+
+### Fixed (monorepo hardened-direct)
+
+- **Removed the bogus 2000-directory fail-closed.** Nested git discovery used to
+  count **every** `os.walk` directory against a hard cap of 2000, so monorepos
+  failed hardened `integration=direct` before Grok started
+  (`protected-path-write`). Production default is now **unlimited** for both
+  workspace walks and gitdir inventory (symlink-safe, no follow). Optional
+  operator caps only: `GROK_WRAPPER_MAX_NESTED_GIT_DISCOVERY` (gitdirs) and
+  `GROK_WRAPPER_MAX_GIT_DISCOVERY_WALK_DIRS` (walk visits) - unset = no cap.
+  Documented in README troubleshooting and SECURITY (was constant-only prose).
+
+### Fixed (bugs identified during 2.0.2 / Codex PR #9 review - full close-out)
+
+Three defects were identified in review thinking / Codex comments on top of the
+nested-git monorepo work. All three are fixed end-to-end (code + tests), not
+left as partial inventory-only or helper-only patches.
+
+1. **`onlyIfChanged` ignored rename/copy sources (`oldPath`)**
+   - **Bug:** skip matching used destination-only `changed_files`, so a
+     validation scoped to a rename source subtree was skipped even though that
+     subtree changed.
+   - **Fix:** `changed_paths_for_only_if_changed()` collects both `path` and
+     `oldPath`; `code_handoff_finalize` uses it for skip decisions.
+   - **Tests:** `test_changed_paths_for_only_if_changed_includes_rename_source`.
+
+2. **Protected leaves under collapsed ignored directories**
+   - **Bug:** `ls-files --directory` reports ignored trees as one entry
+     (e.g. `secrets/`). Deny globs match basenames like `id_rsa` / `*.pem`, so a
+     planted `secrets/id_rsa` never hit protected-path-write and was not rolled
+     back.
+   - **Fix:** after check-ignore filter, expand deny-scoped leaves under
+     collapsed ignored dirs; bulk non-deny caches stay collapsed (issue #7).
+   - **Tests:** inventory unit test; fingerprint inclusion; **direct-mode E2E**
+     `test_protected_leaf_under_collapsed_ignored_dir_fails` (fail + rollback).
+
+3. **Legacy non-default `integrationMode` fell through to `direct`**
+   - **Bug:** pre-`prefsSources` indexes with `worktree`/`auto`/`review` were
+     not setup-authored, so after consent removal those workspaces silently
+     switched to live-tree `direct`.
+   - **Fix:** legacy normalization pins any non-default stored
+     `integrationMode` as setup-authored (default `direct` stays unpinned).
+   - **Tests:** `legacy jobs-index non-default integrationMode is pinned`
+     covers worktree, auto, and review.
+
 ## [2.0.1] - 2026-07-22
 
 ### Added (Linux live sandbox support)
