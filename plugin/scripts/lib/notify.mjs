@@ -23,12 +23,31 @@ const WEBHOOK_TIMEOUT_MS = 3000;
 const TITLE = "Grok Skills";
 
 /**
+ * Resolve execution context for notifications (issue #8).
+ * Precedence: env GROK_COMPANION_EXECUTION_CONTEXT > auto when stdout is not a
+ * TTY (piped orchestrators default to background) > foreground.
  * @param {NodeJS.ProcessEnv} [env]
+ * @param {{ stdoutIsTTY?: boolean|null }} [opts]
  * @returns {"foreground"|"background"}
  */
-export function getExecutionContext(env = process.env) {
+export function getExecutionContext(env = process.env, opts = {}) {
   const raw = (env.GROK_COMPANION_EXECUTION_CONTEXT ?? "").trim().toLowerCase();
   if (raw === "background") {
+    return "background";
+  }
+  if (raw === "foreground") {
+    return "foreground";
+  }
+  // Auto-detect when unset/invalid: non-TTY stdout implies host-piped background.
+  let stdoutIsTTY = opts.stdoutIsTTY;
+  if (stdoutIsTTY === undefined || stdoutIsTTY === null) {
+    try {
+      stdoutIsTTY = Boolean(process.stdout && process.stdout.isTTY);
+    } catch {
+      stdoutIsTTY = true;
+    }
+  }
+  if (stdoutIsTTY === false) {
     return "background";
   }
   return "foreground";

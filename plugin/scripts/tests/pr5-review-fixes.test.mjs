@@ -26,9 +26,9 @@ test("parseTargetFlag: last --target wins (matches wrapper argparse)", () => {
   assert.equal(parseTargetFlag(["--target", "only"]), "only");
 });
 
-test("gateIntegrationForCodeish: continue-run is exempt from direct consent", () => {
-  // Fresh workspace (no consent recorded) + default direct would normally refuse;
-  // continue-run stays consent-exempt but still resolves effective integration.
+test("gateIntegrationForCodeish: continue-run maps direct lineage to worktree", () => {
+  // continue-run reuses wrapper worktree lineage; effective stays direct for mode
+  // awareness while wrapper gets --integration worktree.
   const res = gateIntegrationForCodeish(
     "code",
     ["--continue-run", "20260101T000000Z-abc123", "--task-file", "-"],
@@ -38,11 +38,38 @@ test("gateIntegrationForCodeish: continue-run is exempt from direct consent", ()
   );
   assert.equal(res.ok, true);
   assert.equal(res.continueRun, true);
-  // Default integration is direct: companion maps wrapper lineage to worktree
-  // without auto apply, while preserving effective=direct for mode awareness.
   assert.equal(res.effective, "direct");
   const i = res.rest.indexOf("--integration");
   assert.ok(i >= 0 && res.rest[i + 1] === "worktree", res.rest.join(" "));
+});
+
+test("gateIntegrationForCodeish: direct needs no consent (2.0.1+)", () => {
+  const res = gateIntegrationForCodeish(
+    "code",
+    ["--target", ".", "--base", "HEAD", "--task-file", "-", "--integration", "direct"],
+    "direct",
+    os.tmpdir(),
+    {}
+  );
+  assert.equal(res.ok, true);
+  assert.equal(res.effective, "direct");
+  assert.equal(res.envelope, undefined);
+  const i = res.rest.indexOf("--integration");
+  assert.ok(i >= 0 && res.rest[i + 1] === "direct", res.rest.join(" "));
+});
+
+test("gateIntegrationForCodeish: continue-run rejects synthetic direct-* run ids", () => {
+  // runMode=direct job ids are not durable run records; continuing them would
+  // fall through to a meaningless hardened lookup or silent mis-route.
+  const res = gateIntegrationForCodeish(
+    "code",
+    ["--continue-run", "direct-1784745579354", "--task-file", "-"],
+    null,
+    os.tmpdir(),
+    {}
+  );
+  assert.equal(res.ok, false);
+  assert.match(String(res.message || ""), /direct-\*|hardened run id|runMode=direct/i);
 });
 
 test("[3] gateIntegrationForCodeish routes implement to worktree (never direct)", () => {

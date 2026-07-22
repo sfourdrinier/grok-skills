@@ -7,15 +7,14 @@ instead of restating the matrix. Orthogonal to **run mode** (security posture);
 see [Naming: two "direct" axes](#naming-two-direct-axes) below.
 
 Workspace default for **code** and **peer-stop landing** is **`direct`**.
-First direct landing in a target repo without recorded consent fails closed
-with a trust summary (one-shot code run, or ready peer-stop apply); accept
-once via `setup --integration direct` (optionally `--target <repo>`), or opt
-into isolation with `setup --integration auto|review` before promising
-live-tree success. **`implement` is different:** it always forces an isolated
-worktree + verify-only handoff and never lands on the live tree, even when
-the workspace default is direct/auto. For ACP peer, `direct` still means
-stop-time apply after an always-external worktree - not live-edit during
-prompts.
+**No consent gate** (2.0.1+): one-shot code and ready peer-stop apply land when
+selected, like other implementer tools. Optional `setup --integration
+direct|auto|review` (optionally `--target <repo>`) only **persists prefs**.
+Opt into isolation with `auto`/`review` when you want a worktree before land.
+**`implement` is different:** it always forces an isolated worktree + verify-only
+handoff and never lands on the live tree, even when the workspace default is
+direct/auto. For ACP peer, `direct` still means stop-time apply after an
+always-external worktree - not live-edit during prompts.
 
 ```bash
 node "$SKILL_BASE/run.mjs" setup --integration direct
@@ -26,7 +25,7 @@ node "$SKILL_BASE/run.mjs" code --integration review --target '...' --base 'HEAD
 ```
 
 `userConfig.integrationMode` / `CLAUDE_PLUGIN_OPTION_INTEGRATIONMODE` is a
-**default hint only** - it does not satisfy consent. Only setup does.
+**default hint only** - setup persists mode prefs when you want them.
 
 ## The three product modes (one-shot `code`)
 
@@ -65,7 +64,7 @@ Under **runMode hardened** (the security default), `integration=direct` is
   until a guarded ref points at them)
 - **Source edits land live** - no worktree isolation, no pre-apply dual-condition
   gate, no forensic patch required for the edit to exist
-- **One-time setup consent** per target repo before the first direct run
+- **Optional setup** to persist integration mode prefs per target repo
 
 Dirty-tree policy: refuse when a changed path **overlaps** operator-dirty paths
 captured at run start, unless `--force`. Clean-elsewhere is fine.
@@ -91,7 +90,7 @@ captured at run start, unless `--force`. Clean-elsewhere is fine.
 Canonical ladder for landing a verified patch on the operator tree
 (`plugin/scripts/lib/integrate.mjs` +
 `plugin/scripts/lib/integrate-apply-state.mjs`). Auto and ready peer-stop share
-it; consent / readiness / target identity stay outside the helper. This is
+it; readiness / target identity stay outside the helper. This is
 **not** an atomic TOCTOU seal against a hostile concurrent writer of the patch
 or tree.
 
@@ -165,7 +164,7 @@ Published outcomes include: `already-applied`, `applied`,
 `blocked-dirty-status`, `blocked-numstat`, `blocked-patch-headers`,
 `blocked-protected-path`, `blocked-dirty-overlap`, `blocked-apply-check`,
 `rolled-back`, `marker-persist-failure`, `manual-needed`, plus caller-owned
-readiness / consent / integrity failures.
+readiness / integrity failures.
 
 ### `implement` always forces worktree + verify-only
 
@@ -174,20 +173,20 @@ rewrites implement to `--integration worktree` (never live direct; never
 apply-on-ready). It runs code + handoff only; exit 0 only when dual-condition
 ready. Product `direct` default still applies to **code** and **peer-stop**
 landing. For apply-on-ready use `code --integration auto` (or peer-stop with
-`auto` / consented `direct`).
+`auto` / `direct`).
 
 ### `continue-run` (one-shot code)
 
 - **Forbidden on continue:** `--target`, `--base`, `--contract-file` (usage-error).
   Target identity, base, and prior contract are derived from the prior run.
-- **Target workspace** for consent / apply is the prior run's durable
+- **Target workspace** for apply is the prior run's durable
   `run.json` `targetWorkspace` / `repository` (not companion cwd). Relative
   `targetWorkspace` values (e.g. package `pkg`) resolve against the recorded
   `repository`, so continuation from outside the original checkout still keys
-  consent/apply on the original repo. Missing prior metadata falls back to
+  apply on the original repo. Missing prior metadata falls back to
   cwd-scoped default.
-- **Direct consent exempt** on continue (wrapper reuses retained worktree
-  lineage). Effective mode still resolves: `auto` keeps apply-on-ready on the
+- **Continue-run** reuses retained worktree lineage (never live-edit mid-lineage).
+  Effective mode still resolves: `auto` keeps apply-on-ready on the
   **new** run; `review` retains (manual parent apply); product `direct` maps
   the wrapper to worktree lineage without live apply.
 - Direct continue uses the **hardened wrapper** for retained lineage (never
@@ -211,7 +210,7 @@ not isolation theater.
 | Private home protects your checkout | **No.** Private home isolates **Grok auth/config**, not your working tree. |
 | Grok cannot read secrets | **No.** Documented **D-SECRETREAD** gap: write confinement is not a read firewall. Absolute-path reads remain possible. |
 | Edits can be rolled back | **Only protected paths** (best-effort). Ordinary source edits land live; your git history / stash is the recovery story. |
-| Silent default flip | **No.** First direct run without setup consent fails closed with the accept command. |
+| Silent default flip | **No consent theater** (2.0.1+): direct is an explicit product default, documented and opt-out via `auto`/`review`. |
 
 Choose **`auto`** or **`review`** when you want isolation and a verified patch
 before anything lands on the operator tree.
@@ -226,20 +225,22 @@ Both axes use the word **direct**. They are **orthogonal**.
 | Axis | Values | Meaning |
 |------|--------|---------|
 | **runMode** (security) | `hardened` (default) \| `direct` | **hardened:** private home + sandbox verification + redaction. **direct:** installed Grok CLI + normal `~/.grok` auth; less isolation; no verified handoff artifacts. Set via `setup --run-mode` or `GROK_SKILLS_MODE`. |
-| **integration** (how edits land) | `direct` (default) \| `auto` \| `review` (`worktree` alias) | **One-shot code:** direct = live tree (hardened-direct when runMode is hardened); auto = worktree then apply-on-ready; review = worktree + manual parent apply. **ACP peer:** always external worktree during the session; at peer-stop, direct/auto apply the verified ready patch (direct needs consent), review retains. Set via `setup --integration` or `--integration` on the run / peer-stop. |
+| **integration** (how edits land) | `direct` (default) \| `auto` \| `review` (`worktree` alias) | **One-shot code:** direct = live tree (hardened-direct when runMode is hardened); auto = worktree then apply-on-ready; review = worktree + manual parent apply. **ACP peer:** always external worktree during the session; at peer-stop, direct/auto apply the verified ready patch (direct applies), review retains. Set via `setup --integration` or `--integration` on the run / peer-stop. |
 
 Examples:
 
 - `runMode=hardened` + `integration=direct` + one-shot **code** → **hardened-direct**:
-  private home + sandbox-to-repo + live source edits + consent.
+  private home + sandbox-to-repo + live source edits (no consent gate).
 - `runMode=hardened` + `integration=direct` + **ACP peer** → external worktree for
-  the whole session; at ready peer-stop, consented apply of the verified patch
+  the whole session; at ready peer-stop, apply of the verified patch
   (not live-edit during prompts).
 - `runMode=hardened` + `integration=review` → isolated worktree, manual apply
   (code handoff or peer-stop retain).
-- `runMode=direct` + any integration that needs handoff artifacts → handoff /
-  implement / contract / peer path **refuse** fail-closed (no isolation evidence to
-  attest; peer is hardened-only). Prefer hardened runMode for auto/review handoff.
+- `runMode=direct` + handoff / implement / peer → **refuse** fail-closed (no
+  isolation evidence to attest; peer is hardened-only). **`--contract-file` on
+  code** routes through the hardened wrapper for writeScopes/requiredValidation
+  (does not stay on pure installed-CLI path). Prefer `setup --run-mode hardened`
+  for auto/review handoff and continue-run.
 
 When docs say "direct mode" without a qualifier, prefer **integration=direct**
 for edit-landing, and **runMode=direct** only when discussing installed-CLI
@@ -262,11 +263,11 @@ untouched until a ready **peer-stop** apply (if the mode applies). Peer
 
 ### Peer-stop landing matrix
 
-| Mode at peer-stop | Session isolation | On evidence-backed ready | Consent |
-|-------------------|-------------------|--------------------------|---------|
-| **`direct`** | Always external worktree | Companion **applies** the verified ready patch to the target checkout (shared apply spine) | **Required** (`setup --integration direct` for that repo) |
-| **`auto`** | Always external worktree | Companion **applies** the verified ready patch (same spine; no separate code-style live path) | Not required for apply |
-| **`review`** / **`worktree`** | Always external worktree | Patch + handoff manifest **retained**; parent applies manually | N/A |
+| Mode at peer-stop | Session isolation | On evidence-backed ready | Notes |
+|-------------------|-------------------|--------------------------|-------|
+| **`direct`** | Always external worktree | Companion **applies** the verified ready patch to the target checkout (shared apply spine) | No consent gate (2.0.1+) |
+| **`auto`** | Always external worktree | Companion **applies** the verified ready patch (same spine; no separate code-style live path) | Same apply spine as direct |
+| **`review`** / **`worktree`** | Always external worktree | Patch + handoff manifest **retained**; parent applies manually | Manual parent apply |
 
 `peer stop` runs contract `requiredValidation` and the build gate **for real**;
 `integration.ready=true` only from non-forgeable evidence. Peer-stop then applies
@@ -281,7 +282,7 @@ helper under rewrite-before-write/store/finalize: onStdout computes final
 emitStdout/effectiveCode **before** first write; then stdout write; then
 storeJobStdout (same envelope for `/grok:result`); then updateJob/finalize from
 final envelope + effective exit code; then notify. Emits **exactly one** final
-stdout envelope. A blocked apply (consent, dirty-overlap, integrity, etc.) is
+stdout envelope. A blocked apply (dirty-overlap, integrity, etc.) is
 `status: failure`, nonzero exit, job failed, target untouched - never a raw
 wrapper `success` for an unapplied ready peer-stop. **Peer-stop is not
 completion-notification eligible** (`NOTIFY_ELIGIBLE_MODES` is
@@ -299,7 +300,7 @@ One-shot **code** (live vs worktree during the run):
 | `review` / `worktree` | **No** | **Yes** - manual after ready handoff (`git apply --check --binary`, then explicit apply) |
 
 **ACP peer** always isolates in an external worktree; at stop, `direct` and
-`auto` both apply the verified ready patch (direct needs consent), while
+`auto` both apply the verified ready patch (direct applies), while
 `review`/`worktree` retain for manual parent apply - see the peer-stop matrix
 above. Do not summarize peer as "direct = edits already live".
 
@@ -308,7 +309,7 @@ above. Do not summarize peer as "direct = edits already live".
 Handoff skill remains **read-only** (never applies). `implement` is **verify-only**
 and always isolated (code + handoff; never applies, never live lands) - for
 apply-on-ready use `code --integration auto` or peer-stop with
-`integration=auto` / consented `direct`. Peer-stop remains **outside**
+`integration=auto` / `direct`. Peer-stop remains **outside**
 completion-notification eligibility.
 
 ## Related

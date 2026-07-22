@@ -1,6 +1,6 @@
 ---
 name: grok-cli
-description: Use when the user says to use Grok, wants a Grok review, wants a second opinion from Grok, or asks to delegate a task to Grok. Also use for getting an independent code review from Grok, having Grok reason about an architecture or debugging question, having Grok implement code (live tree after consent, or opt-in isolated worktree), or having Grok independently verify someone else's implementation. Trigger phrases include "use grok", "grok review", "second opinion from grok", and "delegate to grok".
+description: Use when the user says to use Grok, wants a Grok review, wants a second opinion from Grok, or asks to delegate a task to Grok. Also use for getting an independent code review from Grok, having Grok reason about an architecture or debugging question, having Grok implement code (live tree by default, or opt-in isolated worktree), or having Grok independently verify someone else's implementation. Trigger phrases include "use grok", "grok review", "second opinion from grok", and "delegate to grok".
 ---
 
 <!-- plugin/wrapper/SKILL.md -->
@@ -123,12 +123,13 @@ Use when Grok should actually write or modify code. Landing is **mode-aware**
   verifies an **external** git worktree (never the current checkout), requires
   the workspace's full build gate (build or typecheck+lint, plus test when
   present) to pass with exit 0, and keeps the worktree for inspection. Fail-closed
-  isolation so an un-consented bare `python3 …/grok_agent.py code` call cannot
+  isolation so an accidental bare `python3 …/grok_agent.py code` call cannot
   silently edit the operator checkout.
 - **`--integration direct`**: hardened-direct live-tree edits under private
   auth home + sandbox write-confined to the **repo root** (+ private tmp) +
-  post-run protected-path guards. Product companion/skills pass this only after
-  per-repo setup consent. No external worktree; no pre-apply dual-condition gate.
+  post-run protected-path guards. Product companion/skills default to this with
+  **no setup consent** (2.0.1+). No external worktree; no pre-apply dual-condition
+  gate.
 - Product alias modes `auto` / `review` map through the companion onto the
   worktree path (auto may apply a verified ready patch; review retains).
 
@@ -142,7 +143,7 @@ python3 plugin/wrapper/scripts/grok_agent.py code \
   --base <committed-revision> \
   --task-file <path-to-spec-file>
 
-# consented live-tree path (product default after setup --integration direct)
+# live-tree path (product default; setup --integration direct only persists prefs)
 python3 plugin/wrapper/scripts/grok_agent.py code \
   --integration direct \
   --target <workspace-relative-path> \
@@ -256,11 +257,13 @@ in every case; do not attempt to add web access to a verify run.
   host-readable file by absolute path. Only run live modes against trusted
   inputs. Full evidence: `references/authority-policies.md` and
   `references/cli-reference.md`.
-- **macOS-only in version 1 (decision D-PORT).** Live modes (`review`,
-  `reason`, `code`, `verify`) fail closed with error class `probe-required`
-  on any platform without its own captured Grok sandbox probe report. Only
-  macOS has one so far; Linux and Windows stay blocked until their own probe
-  suites run.
+- **Platform probe gate (decision D-PORT).** Live modes (`review`, `reason`,
+  `code`, `verify`) fail closed with error class `probe-required` on any
+  platform without a captured Grok sandbox probe report. macOS (Seatbelt) and
+  Linux (Landlock) are probed; Linux also requires `bwrap` (bubblewrap) on
+  `PATH`. Windows stays blocked until its own probe suite is committed.
+  Evidence: `scripts/tests/fixtures/probe-report.md` and
+  `scripts/tests/fixtures/probe-report-linux.md`.
 
 ## Reference material
 

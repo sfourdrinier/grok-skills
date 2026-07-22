@@ -18,6 +18,64 @@ from groklib.implementation_contract import (
 )
 
 
+class MultiViolationContractTests(unittest.TestCase):
+    def test_reports_all_violations_in_one_error(self) -> None:
+        # Issue #8: one round-trip, not one error per launch.
+        with self.assertRaises(GrokWrapperError) as cm:
+            validate_contract(
+                {
+                    "schemaVersion": 2,
+                    "taskId": "!!!bad!!!",
+                    "target": "",
+                    "writeScopes": ["pkg/a.ts"],
+                }
+            )
+        self.assertEqual(cm.exception.error_class, "implementation-contract-invalid")
+        violations = (cm.exception.detail or {}).get("violations") or []
+        self.assertGreaterEqual(len(violations), 3, violations)
+        joined = " ".join(violations).lower()
+        self.assertIn("schemaversion", joined)
+        self.assertIn("taskid", joined)
+        self.assertIn("target", joined)
+        self.assertIn("writescopes", joined)
+
+
+
+class OnlyIfChangedTests(unittest.TestCase):
+    def test_validation_matches_changed(self) -> None:
+        from groklib.implementation_contract import validation_matches_changed
+
+        always = {"argv": ["true"], "cwd": "."}
+        self.assertTrue(validation_matches_changed(always, []))
+        scoped = {
+            "argv": ["true"],
+            "cwd": ".",
+            "onlyIfChanged": ["packages/foo"],
+        }
+        self.assertFalse(validation_matches_changed(scoped, ["packages/bar/a.ts"]))
+        self.assertTrue(validation_matches_changed(scoped, ["packages/foo/x.ts"]))
+        self.assertTrue(validation_matches_changed(scoped, ["packages/foo"]))
+        root = {"argv": ["true"], "cwd": ".", "onlyIfChanged": ["."]}
+        self.assertTrue(validation_matches_changed(root, ["any/path.ts"]))
+
+    def test_only_if_changed_parsed_on_valid_contract(self) -> None:
+        c = validate_contract(
+            {
+                "schemaVersion": 1,
+                "taskId": "task-1",
+                "target": ".",
+                "writeScopes": [{"kind": "subtree", "path": "packages/foo"}],
+                "requiredValidation": [
+                    {
+                        "argv": ["true"],
+                        "cwd": ".",
+                        "onlyIfChanged": ["packages/foo"],
+                    }
+                ],
+            }
+        )
+        self.assertEqual(c["requiredValidation"][0]["onlyIfChanged"], ["packages/foo"])
+
 class NormalizePathTests(unittest.TestCase):
     def test_rejects_absolute_and_traversal(self) -> None:
         with self.assertRaises(GrokWrapperError) as cm:

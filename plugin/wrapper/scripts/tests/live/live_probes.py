@@ -82,7 +82,7 @@ _RAW_CHECK_TIMEOUT_SECONDS = 240
 
 
 def probe_preflight() -> ProbeResult:
-    """Probe 1: preflight succeeds; Grok CLI runnable; secretReadDenial advisory present; macOS probed."""
+    """Probe 1: preflight succeeds; Grok CLI runnable; secretReadDenial advisory; probed platform."""
     command = "grok_agent.py preflight"
     exit_code, envelope, _stderr, duration = _run_wrapper(["preflight"], _PROBE_TIMEOUT_SECONDS)
     highlights = _envelope_highlights(envelope, duration)
@@ -104,8 +104,22 @@ def probe_preflight() -> ProbeResult:
         _require(isinstance(secret, dict), "secretReadDenial check absent")
         _require(secret.get("value") is False, "secretReadDenial advisory value is not false")
         platform = response.get("platform")
-        _require(platform == "macos", "probed platform is not macos: {}".format(platform))
+        _require(
+            platform in ("macos", "linux"),
+            "probed platform is not macos or linux: {}".format(platform),
+        )
         _require(response.get("platformProbed") is True, "current platform is not marked probed")
+        if platform == "linux":
+            prereq = by_name.get("linuxSandboxPrereqs")
+            _require(
+                isinstance(prereq, dict) and prereq.get("ok") is True,
+                "linuxSandboxPrereqs check not ok on Linux host",
+            )
+            detail = prereq.get("detail") or ""
+            _require(
+                "bwrap" in str(detail).lower(),
+                "linuxSandboxPrereqs detail should mention bwrap: {}".format(detail),
+            )
         phases = _read_progress_phases(envelope)
         _require("start" in phases and "done" in phases, "progress stream missing start/done phases")
         highlights["checkNames"] = sorted(by_name.keys())

@@ -34,7 +34,7 @@ use `--task-file -` with a single-quoted heredoc.
 Run a Grok `code` implementation through the hardened wrapper and relay its
 result envelope. How edits land is **mode-aware** (canonical:
 `plugin/references/integration-modes.md`): default **direct** edits the real
-tree (hardened-direct; one-time consent); **auto** / **review** use an
+tree (hardened-direct; no consent gate); **auto** / **review** use an
 external git worktree. The wrapper runs the workspace build gate. Nothing is
 ever committed, merged, pushed, or deleted automatically.
 
@@ -50,10 +50,10 @@ Required wrapper flags (copy exactly, substitute only placeholder values):
   frame direct edits; they land on the live tree and protected paths roll back
   after (dirty-overlap policy applies; see integration-modes.md).
 - Optional `--integration direct|auto|review|worktree` (default direct when
-  consented; see `plugin/references/integration-modes.md`).
+  product default; see `plugin/references/integration-modes.md`).
 - Continuation: `--continue-run <runId>` instead of `--target`/`--base` (reuses
   the prior retained worktree; mutually exclusive with `--target`, `--base`, and
-  `--contract-file`). Prior target identity, consent keying, auto apply-on-ready
+  `--contract-file`). Prior target identity, auto apply-on-ready
   on the **new** run, and direct-continue hardened-wrapper lineage: see
   [integration-modes.md](../../references/integration-modes.md) continue-run.
 - Exactly one of `--task <text>` or `--task-file <path>` is required. Prefer
@@ -120,19 +120,48 @@ message instead of an envelope, tell the user to run `/grok:setup`.
 **Derive a contract by default** before a non-exploratory `code` run (host
 agents: `agents/grok-engineer-coder.md`, Codex
 `codex-agents/grok-engineer-coder.toml`). Stage operator-trusted JSON and pass
-`--contract-file <path>` (writeScopes + `requiredValidation` argv arrays). Skip
-only for exploratory tasks, or when outcomes are not crisp (ask once, or
-proceed without a contract and say so). Bad contracts fail closed **before**
-Grok with `implementation-contract-invalid`. Trust model:
-`operator-contract-trusted-no-os-sandbox` (no OS filesystem sandbox claim for
-validation commands).
+`--contract-file <path>`. Skip only for exploratory tasks, or when outcomes are
+not crisp (ask once, or proceed without a contract and say so). Bad contracts
+fail closed **before** Grok with `implementation-contract-invalid` and (2.0.1+)
+**`error.detail.violations`** (all problems in one envelope). Trust model:
+`operator-contract-trusted-no-os-sandbox`.
+
+### Contract schemaVersion 1 (complete example)
+
+```json
+{
+  "schemaVersion": 1,
+  "taskId": "b7-task-3-ppg-quality",
+  "target": "packages/biometricsMesh",
+  "objective": "Implement PPG quality fusion helpers under the target package.",
+  "acceptanceCriteria": [
+    "Unit tests for quality fusion pass",
+    "No edits outside writeScopes"
+  ],
+  "writeScopes": [
+    { "kind": "subtree", "path": "packages/biometricsMesh/src/algorithms/ppg" },
+    { "kind": "file", "path": "packages/biometricsMesh/src/algorithms/ppg/index.ts" }
+  ],
+  "requiredValidation": [
+    {
+      "argv": ["bun", "test", "packages/biometricsMesh/src/algorithms/ppg"],
+      "cwd": ".",
+      "purpose": "targeted package tests",
+      "onlyIfChanged": ["packages/biometricsMesh/src/algorithms/ppg"]
+    }
+  ]
+}
+```
+
+Required: `schemaVersion` (**1**), `taskId` (alphanumeric / `._-`), `target`
+(non-empty repo-relative string), `writeScopes` (non-empty array of
+`{kind: "file"|"subtree", path}` objects - **not** bare path strings).
+Optional: `objective`, `acceptanceCriteria`, `requiredValidation`
+(`{argv: string[], cwd?, purpose?}`).
 
 `requiredValidation` argv is **shell-free** (canonical:
 `plugin/references/argv-safety.md`): no globs, no directory shorthands, no
-`$VARS`. Prefer **targeted** test modules over a heavy or environment-sensitive
-full suite; the workspace build gate still runs. Model examples:
-`["node", "--test"]` with `cwd`, and
-`["python3", "-m", "unittest", "discover", "-s", "tests", "-q"]`.
+`$VARS`. Prefer **targeted** test modules. The workspace build gate still runs.
 
 While a hardened code run is in flight, do **not** commit or edit the target
 checkout (original-checkout guard cannot attribute mid-run divergence);
@@ -141,9 +170,25 @@ move secret-shaped test fixtures cannot produce a handoff patch artifact
 (fail-closed scan); expect retained-worktree manual integration
 (`references/implementation-handoff.md`).
 
-**Direct run-mode refuses `--contract-file`** (companion fail-closed). Verified
-handoff artifacts (`implementation.patch` + `implementation-handoff.json`) are
-written only on the **hardened** path under the C2 run dir.
+**runMode vs integration (do not confuse them):**
+
+| Axis | Values | Meaning |
+|------|--------|---------|
+| **runMode** | `hardened` (default) / `direct` | Security posture: private home + sandbox vs installed Grok CLI + `~/.grok` |
+| **integration** | `direct` (default) / `auto` / `review` | How edits land: live tree vs worktree apply-on-ready vs retain |
+
+- **`integration=direct`** (product default): live-tree landing. Supports
+  `--contract-file` (writeScopes + requiredValidation post-run). No consent gate.
+- **`runMode=direct`**: installed-CLI path. With `--contract-file`, the companion
+  routes through the **hardened wrapper** so writeScopes/requiredValidation still
+  enforce (issue #8). Prefer `setup --run-mode hardened` for handoff artifacts and
+  continue-run.
+- Optional **`onlyIfChanged: ["path-prefix", ...]`** on each `requiredValidation`
+  entry skips that command when no changed path matches (monorepo-friendly).
+
+Verified handoff artifacts (`implementation.patch` +
+`implementation-handoff.json`) are written only on the **hardened** path under
+the C2 run dir.
 
 On success or classified failure after hardened Grok, the wrapper writes:
 
@@ -158,8 +203,24 @@ already live. See `skills/handoff/SKILL.md`,
 `references/integration-modes.md`.
 
 **Integration modes (link only - do not restate):**
-`plugin/references/integration-modes.md` - direct (default, live tree + consent),
+`plugin/references/integration-modes.md` - direct (default, live tree, no consent),
 auto (worktree + apply-on-ready), review (worktree + manual parent apply).
+
+## Completion trust (2.0.1+)
+
+Do **not** treat a terminal envelope as "implementation done" unless all of:
+
+1. Process exit code is **0** (incomplete Cancelled/turn-cap exits **1** even when
+   `status` is `success` so findings are not wiped).
+2. `incompleteStop` is **absent or false**.
+3. `grok.stopReason` is a clean end (e.g. `EndTurn` / `end_turn`), not
+   `Cancelled` / `Canceled`.
+4. For gated work: build/test gates actually ran and passed (see `commands[]`
+   / response text). Mid-remediation narrative without gates is incomplete.
+
+If `incompleteStop: true` or exit is non-zero with kept findings: resume with
+`--continue-run` on a **hardened** run id, or a fresh hardened run after making
+the tree safe (dirty-overlap policy). Never invent completion.
 
 ## Iterating on a run (2.0.0+)
 
@@ -172,10 +233,16 @@ node "$SKILL_BASE/run.mjs" code --continue-run '<runId>' --task-file - <<'GROK_T
 GROK_TASK
 ```
 
+- **`<runId>` must be a hardened id** from a prior hardened code envelope
+  (`~/.local/state/grok-skills/runs/<runId>/`). Synthetic **`direct-*`** ids from
+  `runMode=direct` are **not** continuable (companion fails closed). Prefer
+  `setup --run-mode hardened` for implementer lineages that need continue-run.
+  Note: **runMode=direct** (no wrapper isolation) is not the same as
+  **integration=direct** (hardened live-tree landing).
 - Do **not** pass `--target`, `--base`, or `--contract-file` with
   `--continue-run` (usage-error). Target, base, and the prior contract are
-  derived from the prior run (apply/consent keyed on prior `run.json`
-  target/repository). Continue-run is direct-consent exempt; product direct
+  derived from the prior run (apply keyed on prior `run.json`
+  target/repository). Continue-run reuses worktree lineage; product direct
   continues on hardened wrapper worktree lineage (never live direct edit).
 - `--model` / `--timeout` / `--max-turns` / `--web` remain allowed (last-valid
   companion argv SSOT: [argv-safety.md](../../references/argv-safety.md)).

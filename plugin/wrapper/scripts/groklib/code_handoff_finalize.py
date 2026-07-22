@@ -315,8 +315,23 @@ def code_handoff_finalize(
 
     # 7. requiredValidation (operator-trusted)
     steps.append("required-validation")
+    # Track executions that actually ran (not onlyIfChanged-skipped). Presence of
+    # the list alone is NOT authoritative evidence (Codex PR review P1).
+    contract_validation_executed = False
     if contract and contract.get("requiredValidation"):
+        from groklib.implementation_contract import validation_matches_changed
+
+        # onlyIfChanged uses post-Grok source paths (issue #8 monorepo scoping).
+        changed_for_skip = list(stage.acc.changed_files or [])
         for entry in contract["requiredValidation"]:
+            if not validation_matches_changed(entry, changed_for_skip):
+                stage.acc.warnings.append(
+                    "requiredValidation skipped (onlyIfChanged: no matching changes): {}".format(
+                        entry.get("purpose") or entry.get("argv")
+                    )
+                )
+                continue
+            contract_validation_executed = True
             argv = list(entry["argv"])
             rel_cwd = entry.get("cwd") or "."
             if rel_cwd in (".", "./", ""):
@@ -579,11 +594,9 @@ def code_handoff_finalize(
 
     # 11. compute ready
     steps.append("compute-ready")
-    # Authoritative only for gates that ACTUALLY ran (wrapper-executed evidence).
-    contract_validation_ran = bool(
-        contract and isinstance(contract.get("requiredValidation"), list)
-        and len(contract.get("requiredValidation") or []) > 0
-    )
+    # Authoritative only for gates that ACTUALLY executed (wrapper-executed
+    # evidence). onlyIfChanged skips do not count as a run (Codex PR review P1).
+    contract_validation_ran = bool(contract_validation_executed)
     build_gate_ran = any(
         isinstance(c, dict)
         and str(c.get("purpose") or "").startswith("build-gate:")

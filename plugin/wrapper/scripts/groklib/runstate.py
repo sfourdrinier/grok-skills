@@ -662,15 +662,13 @@ def _home_owner_liveness(candidate: pathlib.Path) -> str:
     try:
         with open(marker_path, "r", encoding="utf-8") as handle:
             payload = json.load(handle)
-    except (OSError, json.JSONDecodeError) as exc:
-        _log_stderr("_home_owner_liveness", "lease unreadable for {} (possibly-active): {}".format(candidate, exc))
+    except (OSError, json.JSONDecodeError):
+        # Common on residue without owner.pid; audit summarizes skip counts (issue #8).
         return _LIVENESS_UNKNOWN
     if not isinstance(payload, dict):
-        _log_stderr("_home_owner_liveness", "lease for {} is not an object (possibly-active)".format(candidate))
         return _LIVENESS_UNKNOWN
     pid = payload.get("pid")
     if not isinstance(pid, int) or isinstance(pid, bool):
-        _log_stderr("_home_owner_liveness", "lease for {} has no usable pid (possibly-active)".format(candidate))
         return _LIVENESS_UNKNOWN
     if not platformsupport.process_is_alive(pid):
         return _LIVENESS_DEAD
@@ -745,22 +743,13 @@ def _is_removable_stale_home(candidate: pathlib.Path, now: float, max_age_second
     if not platformsupport.path_is_owned_by_current_user(dir_stat):
         return False
     if (now - dir_stat.st_mtime) < reap_age_threshold:
-        _log_stderr(
-            "_is_removable_stale_home",
-            "skipping {} (age below {} threshold for {} lease)".format(
-                candidate, reap_age_threshold, liveness
-            ),
-        )
+        # High-volume on large temp dirs; audit_stale_temp_homes summarizes (issue #8).
         return False
 
     marker_path = candidate / "owner.json"
     try:
         verify_owner_marker(marker_path)
-    except StateOwnershipError as exc:
-        _log_stderr(
-            "_is_removable_stale_home",
-            "skipping {} (owner marker did not verify: {})".format(candidate, exc),
-        )
+    except StateOwnershipError:
         return False
 
     return True
@@ -812,11 +801,21 @@ def audit_stale_temp_homes(max_age_seconds: int) -> List[str]:
             {"tempRoot": str(temp_root)},
         ) from exc
 
+    skipped = 0
     for candidate in candidates:
         if not _is_removable_stale_home(candidate, now, max_age_seconds):
+            skipped += 1
             continue
         _remove_stale_home(candidate)
         removed.append(str(candidate))
+
+    if candidates:
+        _log_stderr(
+            "audit_stale_temp_homes",
+            "scanned {} gs-* home(s): removed {}, skipped {} (young/unknown lease/alive/unowned)".format(
+                len(candidates), len(removed), skipped
+            ),
+        )
 
     return removed
 

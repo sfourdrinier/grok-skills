@@ -160,11 +160,33 @@ def _check_platform_probed(progress: ProgressWriter, checks: List[dict]) -> None
     SEC1: preflight is a live-run readiness diagnostic, so an unprobed platform
     is NOT ready -- live modes are blocked there. Reuse the same gate the runners
     apply pre-spawn so preflight surfaces not-ready instead of a false green.
+    On Linux this also requires bubblewrap (bwrap) on PATH.
     """
     platformsupport.require_probed_platform_for_live()
     platform = platformsupport.current_platform()
-    progress.safe_emit("sandbox", "platform has a captured Grok sandbox probe report", data={"platform": platform})
-    checks.append({"name": "platformProbed", "ok": True, "detail": "probed platform {}".format(platform)})
+    expected = platformsupport.expected_sandbox_platform()
+    progress.safe_emit(
+        "sandbox",
+        "platform has a captured Grok sandbox probe report",
+        data={"platform": platform, "expectedSandboxPlatform": expected},
+    )
+    checks.append(
+        {
+            "name": "platformProbed",
+            "ok": True,
+            "detail": "probed platform {} ({})".format(platform, expected),
+        }
+    )
+    if platform == "linux":
+        # Preflight only proves bwrap presence (via require_probed_platform_for_live).
+        # Landlock write confinement is verified after live runs via ProfileApplied.
+        checks.append(
+            {
+                "name": "linuxSandboxPrereqs",
+                "ok": True,
+                "detail": "bwrap on PATH (Landlock not verified at preflight; post-run ProfileApplied)",
+            }
+        )
 
 
 def _check_sandbox_policies(progress: ProgressWriter, checks: List[dict]) -> None:
@@ -428,6 +450,9 @@ def _run_preflight_body(
         from groklib import preflight_cache
 
         preflight_cache.write_ok(version_detail)
+        # Do NOT rewrite accepted-version.json here (Codex PR review): that stamp
+        # is maintainer evidence after a full live probe suite, not a routine
+        # preflight side-effect that dirties marketplace installs / checkouts.
     envelope = build_envelope(
         run_id=run_paths.run_id,
         mode="preflight",

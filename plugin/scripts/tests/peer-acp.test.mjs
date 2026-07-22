@@ -358,8 +358,7 @@ test("peer-stop ready + integration=auto applies patch to target repo", () => {
 });
 
 test("peer-stop job is marked FAILED when the apply is blocked (job-status honesty)", () => {
-  // A ready peer-stop whose apply is refused (direct integration, no consent)
-  // must NOT leave /grok:jobs showing the job as successful.
+  // Dirty-overlap refuse must NOT leave /grok:jobs showing the job as successful.
   const rid = "20260717T120000Z-abc199";
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "grok-peer-jobfail-"));
   const target = path.join(tmp, "target");
@@ -375,8 +374,15 @@ test("peer-stop job is marked FAILED when the apply is blocked (job-status hones
   fs.writeFileSync(path.join(target, "hello.txt"), "old\n", "utf8");
   git(["add", "hello.txt"]);
   git(["commit", "-q", "-m", "base"]);
+  // Operator dirty on the patch path so apply blocks (dirty-overlap).
+  fs.writeFileSync(path.join(target, "hello.txt"), "operator-dirty\n", "utf8");
   const work = path.join(tmp, "work");
   spawnSync("git", ["clone", "-q", target, work], { encoding: "utf8" });
+  // Clean worktree clone for a clean patch against original "old"
+  spawnSync("git", ["-C", work, "checkout", "-q", "--", "hello.txt"], { encoding: "utf8" });
+  fs.writeFileSync(path.join(work, "hello.txt"), "new\n", "utf8");
+  // Reset work to committed old then write new for a real patch vs HEAD
+  spawnSync("git", ["-C", work, "reset", "--hard", "HEAD"], { encoding: "utf8" });
   fs.writeFileSync(path.join(work, "hello.txt"), "new\n", "utf8");
   const diff = spawnSync("git", ["-C", work, "diff", "--binary", "HEAD", "--", "hello.txt"], {
     encoding: "utf8",
@@ -405,7 +411,6 @@ test("peer-stop job is marked FAILED when the apply is blocked (job-status hones
       CLAUDE_PLUGIN_DATA: pluginData,
       GROK_DISABLE_ACP: "",
     };
-    // direct integration with NO recorded consent -> apply blocked (consent-required).
     const res = runCompanion(["peer-stop", "--run-id", rid, "--integration", "direct"], {
       env: runEnv,
       cwd: target,
@@ -413,8 +418,8 @@ test("peer-stop job is marked FAILED when the apply is blocked (job-status hones
     assert.equal(res.code, 1, `blocked apply must exit nonzero; stderr: ${res.stderr}`);
     assert.equal(
       fs.readFileSync(path.join(target, "hello.txt"), "utf8"),
-      "old\n",
-      "target must be untouched (no apply)"
+      "operator-dirty\n",
+      "target dirty content must remain (no forced apply)"
     );
     const jobs = listJobs(target, { CLAUDE_PLUGIN_DATA: pluginData, XDG_STATE_HOME: state });
     assert.ok(jobs.length >= 1, "a peer-stop job was recorded");
@@ -632,11 +637,8 @@ function assertPeerStopBlockedCompletion(res, fx, expectedOutcome) {
   }
 }
 
-test("peer-stop consent-blocked: final stdout/stored envelope is failure with applied=false", () => {
-  // Wrapper returns ready+success, but direct integration has no consent. The
-  // companion completion path must rewrite the FINAL envelope (and stored
-  // /grok:result payload) before first stdout write so consumers never see a
-  // success envelope for an unapplied peer-stop.
+test("peer-stop direct applies without consent (2.0.1+): final envelope applied=true", () => {
+  // Consent gates removed: ready + direct must apply and report success.
   const rid = "20260717T120000Z-abc301";
   const fx = stagePeerStopCompletionFixture({
     rid,
@@ -647,7 +649,11 @@ test("peer-stop consent-blocked: final stdout/stored envelope is failure with ap
       env: fx.runEnv,
       cwd: fx.target,
     });
-    assertPeerStopBlockedCompletion(res, fx, "consent-required");
+    assert.equal(res.code, 0, res.stderr || res.stdout);
+    const env = JSON.parse(String(res.stdout).trim().split("\n").filter(Boolean).pop());
+    assert.ok(env, "expected envelope");
+    assert.equal(env.status, "success");
+    assert.equal(env.response?.integration?.applied, true);
   } finally {
     fx.cleanup();
   }

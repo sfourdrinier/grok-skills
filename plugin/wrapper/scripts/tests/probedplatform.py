@@ -1,10 +1,10 @@
 # wrapper/scripts/tests/probedplatform.py
 #
 # Unit tests exercise sandbox verification and live-mode lifecycles that require
-# a probed platform (macOS only in production). CI runs on Linux; patch
-# current_platform to "macos" so tests validate sandbox logic rather than the
-# platform gate. Production code is unchanged: real Linux hosts still get
-# probe-required.
+# a probed platform. Fake Grok fixtures emit macos/seatbelt telemetry, so tests
+# pin current_platform to "macos" for a stable expected_sandbox_platform match
+# on both macOS and Linux CI runners. Production Linux hosts are probed
+# (linux/landlock) as of 2.0.1; this mixin does not change production gates.
 
 from unittest import mock
 
@@ -12,7 +12,7 @@ from groklib import platformsupport
 
 
 class ProbedPlatformMixin:
-    """Treat the host as probed macOS for the duration of each test."""
+    """Treat the host as probed macOS for the duration of each test (stable fakes)."""
 
     def setUp(self) -> None:
         super().setUp()

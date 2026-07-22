@@ -6,8 +6,9 @@ import pathlib
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 
-from groklib import GrokWrapperError, sandbox
+from groklib import GrokWrapperError, platformsupport, sandbox
 from groklib.authhome import PrivateHome
 from groklib.sandbox import SandboxPolicy
 
@@ -294,6 +295,16 @@ class VerifyEnforcementTests(ProbedPlatformMixin, unittest.TestCase):
             sandbox.verify_enforcement(self.home, self._policy("grok-skills-review"))
         self.assertEqual(caught.exception.error_class, "sandbox-failure")
 
+    def test_verify_enforcement_platform_label_mismatch_raises(self) -> None:
+        # Host is macos (ProbedPlatformMixin); telemetry claims linux/landlock.
+        applied = self._profile_applied("grok-skills-review")
+        applied["platform"] = "linux/landlock"
+        self._write_events([applied])
+        with self.assertRaises(GrokWrapperError) as caught:
+            sandbox.verify_enforcement(self.home, self._policy("grok-skills-review"))
+        self.assertEqual(caught.exception.error_class, "sandbox-failure")
+        self.assertIn("platform mismatch", str(caught.exception).lower())
+
     def test_verify_enforcement_records_fs_violations_as_evidence(self) -> None:
         # An FsViolation whose target is OUTSIDE the writable roots is the
         # sandbox correctly denying an escape: healthy evidence, not a
@@ -487,6 +498,93 @@ class VerifyEnforcementTests(ProbedPlatformMixin, unittest.TestCase):
             handle.write('{"event_type": "FsViol')  # torn, no newline
         result = sandbox.verify_enforcement(self.home, self._policy("grok-skills-review"))
         self.assertEqual(result["reportedProfile"], "grok-skills-review")
+
+
+class VerifyEnforcementLinuxLabelTests(unittest.TestCase):
+    """Dual-platform verify path: host linux + linux/landlock telemetry (and mismatches).
+
+    Intentionally does NOT use ProbedPlatformMixin (which pins macos for fakes).
+    """
+
+    def setUp(self) -> None:
+        self.scratch_dir = tempfile.mkdtemp(prefix="grok-cli-sandbox-verify-linux-")
+        self.addCleanup(shutil.rmtree, self.scratch_dir, True)
+        self.home_dir = pathlib.Path(self.scratch_dir) / "grok-skills-home-fixture"
+        self.grok_dir = self.home_dir / ".grok"
+        self.grok_dir.mkdir(parents=True)
+        self.home = PrivateHome(
+            home_dir=self.home_dir,
+            grok_dir=self.grok_dir,
+            config_path=self.grok_dir / "config.toml",
+        )
+        self.worktree = pathlib.Path(self.scratch_dir) / "worktree"
+        self.worktree.mkdir()
+        self._platform = mock.patch.object(platformsupport, "current_platform", return_value="linux")
+        self._platform.start()
+        self.addCleanup(self._platform.stop)
+        self._bwrap = mock.patch("shutil.which", return_value="/usr/bin/bwrap")
+        self._bwrap.start()
+        self.addCleanup(self._bwrap.stop)
+
+    def _write_events(self, events: "list") -> None:
+        events_path = self.grok_dir / "sandbox-events.jsonl"
+        with open(str(events_path), "w", encoding="utf-8") as handle:
+            for event in events:
+                handle.write(json.dumps(event) + "\n")
+
+    def _profile_applied_linux(self, profile: str) -> "dict":
+        return {
+            "timestamp": "2026-07-22T17:55:00.000000Z",
+            "event_type": "ProfileApplied",
+            "profile": profile,
+            "workspace": str(self.worktree),
+            "platform": "linux/landlock",
+            "enforced": True,
+            "restrict_network": True,
+            "read_write_paths": [str(self.grok_dir), "/tmp", "/var/tmp", str(self.worktree)],
+            "read_only_paths": ["/usr"],
+        }
+
+    def test_linux_landlock_happy_path(self) -> None:
+        self._write_events([self._profile_applied_linux("grok-skills-review")])
+        policy = SandboxPolicy(
+            mode="review",
+            profile="grok-skills-review",
+            writable_roots=(),
+            secret_read_denial_proven=False,
+        )
+        result = sandbox.verify_enforcement(self.home, policy)
+        self.assertTrue(result["enforced"])
+        self.assertEqual(result["reportedProfile"], "grok-skills-review")
+        self.assertIn("linux/landlock", result["evidence"])
+
+    def test_linux_host_rejects_macos_seatbelt_label(self) -> None:
+        applied = self._profile_applied_linux("grok-skills-review")
+        applied["platform"] = "macos/seatbelt"
+        self._write_events([applied])
+        policy = SandboxPolicy(
+            mode="review",
+            profile="grok-skills-review",
+            writable_roots=(),
+            secret_read_denial_proven=False,
+        )
+        with self.assertRaises(GrokWrapperError) as caught:
+            sandbox.verify_enforcement(self.home, policy)
+        self.assertEqual(caught.exception.error_class, "sandbox-failure")
+
+    def test_linux_without_bwrap_fails_before_events(self) -> None:
+        self._write_events([self._profile_applied_linux("grok-skills-review")])
+        policy = SandboxPolicy(
+            mode="review",
+            profile="grok-skills-review",
+            writable_roots=(),
+            secret_read_denial_proven=False,
+        )
+        with mock.patch("shutil.which", return_value=None):
+            with self.assertRaises(GrokWrapperError) as caught:
+                sandbox.verify_enforcement(self.home, policy)
+        self.assertEqual(caught.exception.error_class, "probe-required")
+        self.assertIn("bwrap", str(caught.exception).lower())
 
 
 if __name__ == "__main__":

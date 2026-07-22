@@ -165,7 +165,7 @@ test("both marketplace roots source description/keywords from the single manifes
     assert.ok(!blob.includes(stale), `retired marketplace wording must be gone: "${stale}"`);
   }
 
-  // Phase 7 honesty: product default is consented live-tree edit landing; auto/review
+  // Phase 7 honesty: product default is live-tree edit landing; auto/review
   // are opt-in worktrees; ACP is the default peer channel; runMode direct is separate.
   for (const desc of [
     claudePlugin.description,
@@ -191,7 +191,7 @@ test("both marketplace roots source description/keywords from the single manifes
   assert.match(
     codexLong,
     /integration=direct|live-tree|this tree|working tree/i,
-    "Codex longDescription must state consented live-tree default"
+    "Codex longDescription must state live-tree default"
   );
   assert.match(codexLong, /\bACP\b/, "Codex longDescription must name ACP");
   assert.match(
@@ -287,11 +287,17 @@ test("gen-manifests --check exits 1 when a generated file drifts", () => {
       fs.copyFileSync(path.join(REPO_ROOT, rel), dst);
     }
     // Mutate the COPY of a generated file so --check must fail closed.
+    // Use whatever version is currently in the source (do not hardcode X.Y.Z).
     const claudeCopy = path.join(tmpRoot, CLAUDE_PLUGIN);
     const original = fs.readFileSync(claudeCopy, "utf8");
+    const versionMatch = original.match(/"version":\s*"([^"]+)"/);
+    assert.ok(versionMatch, "generated plugin.json must contain a version field");
     fs.writeFileSync(
       claudeCopy,
-      original.replace('"version": "2.0.0"', '"version": "0.0.0-drift"'),
+      original.replace(
+        `"version": "${versionMatch[1]}"`,
+        '"version": "0.0.0-drift"'
+      ),
       "utf8"
     );
     const result = spawnSync(process.execPath, [GEN_MANIFESTS, "--check"], {

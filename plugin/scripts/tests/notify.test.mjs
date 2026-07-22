@@ -29,10 +29,21 @@ function tempCwd() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "grok-notify-"));
 }
 
-test("getExecutionContext defaults to foreground", () => {
-  assert.equal(getExecutionContext({}), "foreground");
-  assert.equal(getExecutionContext({ GROK_COMPANION_EXECUTION_CONTEXT: "nope" }), "foreground");
-  assert.equal(getExecutionContext({ GROK_COMPANION_EXECUTION_CONTEXT: "background" }), "background");
+test("getExecutionContext: env wins; unset + TTY => foreground; unset + non-TTY => background", () => {
+  assert.equal(getExecutionContext({}, { stdoutIsTTY: true }), "foreground");
+  assert.equal(getExecutionContext({}, { stdoutIsTTY: false }), "background");
+  assert.equal(
+    getExecutionContext({ GROK_COMPANION_EXECUTION_CONTEXT: "nope" }, { stdoutIsTTY: true }),
+    "foreground"
+  );
+  assert.equal(
+    getExecutionContext({ GROK_COMPANION_EXECUTION_CONTEXT: "background" }, { stdoutIsTTY: true }),
+    "background"
+  );
+  assert.equal(
+    getExecutionContext({ GROK_COMPANION_EXECUTION_CONTEXT: "foreground" }, { stdoutIsTTY: false }),
+    "foreground"
+  );
 });
 
 test("shouldNotify matrix for modes", () => {
@@ -63,13 +74,13 @@ test("wrapperChildEnv strips execution context", () => {
   assert.equal(env.PATH, "/usr/bin");
 });
 
-test("jobs notification defaults are off / null", () => {
+test("jobs notification defaults are auto / null webhook", () => {
   const cwd = tempCwd();
   const env = { CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata") };
   const cfg = getNotificationConfig(cwd, env);
   assert.equal(cfg.notificationMode, DEFAULT_JOBS_CONFIG.notificationMode);
   assert.equal(cfg.notificationWebhookUrl, null);
-  assert.equal(DEFAULT_JOBS_CONFIG.notificationMode, "off");
+  assert.equal(DEFAULT_JOBS_CONFIG.notificationMode, "auto");
 });
 
 test("setNotificationConfig persists mode and webhook", () => {
@@ -331,9 +342,9 @@ test("setNotificationConfig rejects invalid mode without clobbering prior prefs"
   const cwd = tempCwd();
   const env = { CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata") };
   setRunMode(cwd, "hardened", env);
-  // Invalid while still at default: leave default off
+  // Invalid while still at default: leave default auto
   setNotificationConfig(cwd, { notificationMode: "telepathy" }, env);
-  assert.equal(getNotificationConfig(cwd, env).notificationMode, "off");
+  assert.equal(getNotificationConfig(cwd, env).notificationMode, "auto");
   setNotificationConfig(cwd, { notificationMode: "auto" }, env);
   assert.equal(getNotificationConfig(cwd, env).notificationMode, "auto");
   setNotificationConfig(cwd, { notificationMode: "BOGUS" }, env);

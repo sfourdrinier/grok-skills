@@ -56,7 +56,7 @@ direct default still applies to **code** and **peer-stop** landing only. The
 edits stay in the retained worktree + handoff artifacts until you apply them
 manually. For **apply-on-verified-ready**, use `/grok:code --integration auto`
 (shared apply spine: lock + durable marker + dirty-guard); for a live edit use
-`/grok:code` under the direct integration mode (after setup consent). In
+`/grok:code` under the direct integration mode (product default; no consent gate). In
 **review**, parent apply stays manual after ready handoff
 (`references/implementation-handoff.md`). Requires hardened **runMode**;
 runMode direct is refused fail-closed.

@@ -6,6 +6,116 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
+## [2.0.1] - 2026-07-22
+
+### Added (Linux live sandbox support)
+
+- **Linux is a probed platform** for live hardened modes (`review`, `reason`,
+  `code`, `verify`, peer, preflight). `PROBED_PLATFORMS` is now
+  `("macos", "linux")`; expected sandbox telemetry label is
+  `linux/landlock` (macOS remains `macos/seatbelt`).
+- **Committed Linux probe evidence:**
+  `plugin/wrapper/scripts/tests/fixtures/probe-report-linux.md` (write
+  confinement, custom `grok-skills-*` profiles, secret-read residual under
+  D-SECRETREAD, ProfileApplied shape).
+- **Linux operator prerequisites:** Landlock-capable kernel (5.13+ with Landlock
+  LSM) and **bubblewrap** (`bwrap` on `PATH`). Missing `bwrap` fails closed with
+  `probe-required` (same class as unprobed platform). Preflight reports
+  `linuxSandboxPrereqs` when green.
+- Docs: README, SECURITY, COMPATIBILITY, PROVENANCE, authority-policies,
+  cli-reference, roadmap, live probe README.
+
+### Changed
+
+- Unprobed-platform unit tests now use **Windows** as the unprobed fixture
+  (Linux is probed). Live probe suite accepts macOS or Linux for preflight
+  platform checks.
+- Packaging version **2.0.1** (manifests regenerated from
+  `plugin/manifest.source.json`).
+
+### Fixed (timeouts and monorepo ops - issues #7 / #8)
+
+- **Git timeout default 30s -> 600s (10 min):** SSOT
+  `git_timeout.git_timeout_seconds()` (re-exported from `worktree`) used by
+  worktree prep and repo-root resolution. Override with
+  `GROK_WRAPPER_GIT_TIMEOUT_SECONDS` (clamped 30..7200). Anti-hang, not
+  anti-monorepo.
+
+### Fixed / Changed (orchestrator ergonomics - issue #8)
+
+- **Contract validation reports all violations** in one
+  `implementation-contract-invalid` envelope (`error.detail.violations[]`), not
+  one field per launch.
+- **Complete contract example** in `plugin/skills/code/SKILL.md` (schemaVersion,
+  taskId, target, writeScopes `{kind,path}`, requiredValidation, onlyIfChanged).
+- **`requiredValidation.onlyIfChanged`:** optional path-prefix list; skips that
+  validation when no changed path matches (monorepo scoping).
+- **Removed integration consent gates** (product default is direct landing, same
+  class of tool as other providers). `setup --integration` still sets mode
+  prefs; first direct run no longer refuses.
+- **`--contract-file` under runMode=direct:** companion routes through the
+  hardened wrapper for writeScopes/requiredValidation enforcement (no refuse).
+- **Stale-home audit log noise:** per-home "lease unreadable / age below" spam
+  replaced with one summary line per audit.
+- **`setup --json`:** machine-readable setup status for orchestrators.
+- **Notification default `auto`** for new installs; **`--execution-context`**
+  flag + non-TTY auto-detect for notify context.
+- **Docs/agents follow-through:** removed consent ceremony from skills, agents,
+  codex TOMLs, integration-modes, manual-smoke, SECURITY, COMPATIBILITY, manifests.
+- **Adversarial-review fixes:** `setup --json` actually reaches `cmdSetup` (was
+  stripped); setup JSON redacts webhook URLs; `onlyIfChanged: ["."]` is root
+  wildcard; job `runMode` records hardened when contract/continue forces it;
+  `--execution-context` does not override an already-set env.
+- **Round-2 adversarial cleanup:** handoff patch git uses timeout SSOT;
+  argparse/`--help` and agent recipes no longer claim consent; regression tests
+  for `setup --json` redaction.
+- **Codex PR review (PR #9):** `onlyIfChanged` skips no longer count as
+  authoritative validation; preflight does **not** rewrite `accepted-version.json`
+  (maintainer stamp only); Linux `XDG_RUNTIME_DIR` must be under `/run/user/<uid>`;
+  legacy jobs-index `notificationMode: off` is not pinned as setup-authored after
+  the default flip to `auto`; runMode=direct incompleteStop includes max-turn
+  exhaustion tokens.
+
+### Fixed (worktree prep on large monorepos - issue #7)
+
+- **Ignored-path inventory uses ``git ls-files --directory`` + check-ignore
+  filter (issue #7):** worktree baseline/escape scans no longer expand every
+  file under ignored trees such as `node_modules/` (was multi-minute /
+  multi-hundred-MB listings that hit the 30s git timeout and failed
+  `code --integration review|auto` with `worktree-failure` before Grok
+  started). Results are filtered with ``git check-ignore`` so untracked parents
+  that only contain ignored children (e.g. ``other/`` when only ``__pycache__/``
+  is ignored) are not treated as source paths.
+
+### Fixed (orchestrator trust - Cancelled / continue-run / runMode direct)
+
+- **`incompleteStop` envelope field + exit 1:** when Grok stops with Cancelled
+  (or turn-cap) but usable findings are kept, the envelope may still use
+  `status: success` so `response` is not wiped, but now sets
+  `incompleteStop: true` and **`exit_code_for` returns 1**. Orchestrators must
+  not treat that as completed implementation.
+- **runMode=direct stopReason honesty:** direct envelopes no longer force
+  `grok.stopReason: end_turn` on every process exit 0; they surface the CLI
+  stopReason when present and set `incompleteStop` + exit 1 on Cancelled-with-text.
+- **`--continue-run direct-*` fails closed:** synthetic runMode=direct job ids
+  are not durable run records. Companion refuses with an actionable message
+  (use a hardened run id, or fresh hardened code after checkpoint/clean).
+- Skills/agents: completion-trust checklist and continue-run eligibility docs.
+
+### Notes
+
+- Secret-read denial remains **unproven** on Linux (built-in profiles and
+  `deny_read_globs` still allowed sentinel reads in the probe). Write
+  confinement is the fail-closed boundary, same as macOS.
+- Windows live modes remain blocked until a Windows sandbox probe is committed.
+- aarch64 Linux and unusual LSM/distro configs are not covered by the initial
+  x86_64 Ubuntu-class evidence host.
+- Non-Linux POSIX maps to `other-posix` (unprobed); only `sys.platform` starting
+  with `linux` inherits the Linux Landlock pin.
+- Single SSOT live gate: `require_probed_platform_for_live()` (probed OS + Linux
+  bwrap). Preflight proves bwrap only; Landlock is verified post-run via
+  ProfileApplied.
+
 ## [2.0.0] - 2026-07-19
 
 Peer-agent integration release (plan: docs/superpowers/plans/2026-07-16-peer-agent-integration.md).

@@ -22,7 +22,6 @@ import {
   resolveTargetWorkspaceRoot,
 } from "./git-context.mjs";
 import {
-  getIntegrationConsent,
   getIntegrationMode,
   getNotificationConfig,
   getRunMode,
@@ -106,9 +105,10 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
     }
   }
   // Integration mode (how edits land) - orthogonal to runMode security posture.
-  // SECURITY: consent + integrationMode are target-scoped (resolved --target git
-  // toplevel, default '.'), so the operator consents for the repo they will edit.
-  // Other setup prefs (runMode, notifications, gate) stay companion-cwd scoped.
+  // integrationMode is target-scoped (resolved --target git toplevel, default
+  // '.'). Other setup prefs (runMode, notifications, gate) stay companion-cwd
+  // scoped. No consent gate (2.0.1+).
+  const wantJson = args.includes("--json");
   const integrationTargetWorkspace = resolveTargetWorkspaceRoot(
     cwd,
     parseTargetFlag(args)
@@ -181,7 +181,6 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
   const gate = readGateConfig(cwd);
   const runMode = getRunMode(cwd);
   const integrationMode = getIntegrationMode(integrationTargetWorkspace);
-  const integrationConsent = getIntegrationConsent(integrationTargetWorkspace);
   const notifyPrefs = getNotificationConfig(cwd);
   const codexAgentsScope = invalidCodexAgentsScope
     ? priorCodexAgentsScope
@@ -203,13 +202,7 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
   if (invalidIntegrationMode) {
     integrationDetail = `invalid ${JSON.stringify(invalidIntegrationMode)} (integration prefs unchanged)`;
   } else {
-    integrationDetail = `${integrationMode}${
-      integrationMode === "direct"
-        ? integrationConsent
-          ? "; consent=yes"
-          : "; consent=no (first direct run will refuse)"
-        : ""
-    }`;
+    integrationDetail = integrationMode;
   }
   const rows = [
     {
@@ -271,14 +264,10 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
     hints.push(
       `Valid --integration values: ${INTEGRATION_MODES.join(" | ")}. Integration prefs were not changed.`
     );
-  } else if (integrationMode === "direct" && !integrationConsent) {
-    const targetHint =
-      path.resolve(integrationTargetWorkspace) ===
-      path.resolve(resolveTargetWorkspaceRoot(cwd, "."))
-        ? "setup --integration direct"
-        : `setup --integration direct --target ${integrationTargetWorkspace}`;
+  } else if (integrationMode === "direct") {
     hints.push(
-      `Direct integration is the default but needs one-time consent: ${targetHint} (or use --integration worktree for isolation).`
+      "Direct integration is the product default (live-tree one-shot code). " +
+        "For isolation: setup --integration worktree|auto|review."
     );
   }
   if (invalidNotificationMode) {
@@ -291,7 +280,7 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
     );
   } else if (notifyPrefs.notificationMode === "off") {
     hints.push(
-      "Notifications are off. For background completion signals: setup --notification-mode auto (recommended)."
+      "Notifications are off. For background completion signals: setup --notification-mode auto."
     );
   }
   if (invalidCodexAgentsScope) {
@@ -399,14 +388,48 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
     }
   }
 
-  process.stdout.write(renderSetupReport({ rows, runMode, hints }));
-  return binary.ok &&
-    wrapper &&
+  const ok =
+    binary.ok &&
+    Boolean(wrapper) &&
     agentsOk &&
     !notifyPrefsInvalid &&
     !invalidCodexAgentsScope &&
     !invalidIntegrationMode &&
-    preflightOk
+    preflightOk;
+  // Issue #8: machine-readable setup for orchestrators (consent-free status).
+  if (wantJson) {
+    process.stdout.write(
+      `${JSON.stringify({
+        schemaVersion: 1,
+        mode: "setup",
+        status: ok ? "success" : "failure",
+        runMode,
+        integrationMode,
+        targetWorkspace: integrationTargetWorkspace,
+        notifications: {
+          mode: notifyPrefs.notificationMode,
+          // Never dump raw webhook URL (secrets often live in path); parity with human report.
+          webhookUrl: notifyPrefs.notificationWebhookUrl
+            ? formatWebhookDisplay(notifyPrefs.notificationWebhookUrl)
+            : null,
+          webhookConfigured: Boolean(notifyPrefs.notificationWebhookUrl),
+        },
+        stopReviewGate: Boolean(gate.stopReviewGate),
+        codexAgentsScope,
+        checks: rows.map((r) => ({
+          name: r.name,
+          ok: Boolean(r.ok),
+          detail: r.detail || "",
+        })),
+        hints,
+        grokCli: binary.ok ? binary.version : null,
+        wrapper: wrapper || null,
+      })}\n`
+    );
+  } else {
+    process.stdout.write(renderSetupReport({ rows, runMode, hints }));
+  }
+  return ok
     ? 0
     : 1;
 }

@@ -36,7 +36,8 @@ Two layers:
   surfaced as a preflight advisory (`secretReadDenial=false`), not hidden.
 - **D-PORT (portability):** all platform-specific behavior goes through one abstraction
   layer so the tool is cross-platform and fails closed on any platform whose sandbox
-  cannot be enforced. macOS is the live-probed platform; others fail closed until probed.
+  cannot be enforced. macOS (Seatbelt) and Linux (Landlock + bwrap) are live-probed;
+  Windows and others fail closed until probed.
 - **D-STREAM (streaming without direct-ACP):** `--output-format streaming-json` on the
   single-shot, OS-sandboxed path streams live thoughts and tool calls for ALL modes. This
   removed the need for a direct Agent-Client-Protocol transport, which would have run

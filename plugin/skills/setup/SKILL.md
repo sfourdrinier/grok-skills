@@ -1,7 +1,7 @@
 ---
 name: "setup"
 description: "Check Grok readiness and optionally toggle stop gate / run mode / Codex agents scope (Codex agents auto-install on SessionStart)"
-argument-hint: "[--enable-review-gate | --disable-review-gate] [--run-mode hardened|direct] [--integration direct|worktree|auto|review] [--target <path>] [--notification-mode off|auto|native|webhook] [--notification-webhook-url <url>] [--codex-agents-scope user|project] [--force-codex-agents] [--skip-codex-agents] [--remove-codex-agents]"
+argument-hint: "[--enable-review-gate | --disable-review-gate] [--run-mode hardened|direct] [--integration direct|worktree|auto|review] [--target <path>] [--notification-mode off|auto|native|webhook] [--notification-webhook-url <url>] [--json] [--codex-agents-scope user|project] [--force-codex-agents] [--skip-codex-agents] [--remove-codex-agents]"
 allowed-tools: "Bash(node:*)"
 ---
 
@@ -43,11 +43,11 @@ prefs). You should not need a manual setup step after installing the plugin.
 `/hooks`. That is the honest default posture - install alone does not enable those
 hooks. Skills and SessionStart agent materialization still work without hook trust.
 
-**Before promising implementer success on the live tree**, record integration
-consent with `setup --integration direct` **or** choose isolation with
-`setup --integration auto|review`. First direct landing without setup consent
-fails closed. `/grok:implement` always forces worktree + verify-only (never live
-lands). Canonical: `plugin/references/integration-modes.md`.
+**Product default is live-tree `integration=direct` with no consent gate**
+(2.0.1+). Optional: `setup --integration direct|auto|review` to persist prefs,
+or choose isolation when you want a worktree. `/grok:implement` always forces
+worktree + verify-only (never live lands). Canonical:
+`plugin/references/integration-modes.md`.
 
 Raw arguments:
 `$ARGUMENTS`
@@ -66,11 +66,12 @@ Supported flags:
 |------|--------|
 | `--run-mode hardened` | Persist hardened mode (default) |
 | `--run-mode direct` | Persist direct (installed Grok CLI home) |
-| `--integration direct` | Persist integration mode **and** record one-time consent for direct landing on the **target** repo (orthogonal to run mode): one-shot **code** live-tree edits, and ACP **peer-stop** apply of a verified ready patch after an always-external worktree. Does **not** make `/grok:implement` live-land (implement always forces worktree + verify-only). Consent is keyed on the resolved target workspace, not companion cwd. Canonical matrix: `plugin/references/integration-modes.md`. |
-| `--integration worktree\|auto\|review` | Persist integration mode for the target repo (no consent required; auto = apply-on-ready for code/peer-stop; review/worktree = isolated, manual parent apply). Prefer explicit setup before promising implementer success without live-tree consent. |
-| `--target <path>` | Repo (or dir) that integration prefs/consent apply to (default `.`). Git toplevel when inside a repo; absolute path when not. Use when consenting for a repo other than companion cwd. |
-| `--notification-mode off\|auto\|native\|webhook` | Completion signal prefs (default `off`; **auto** recommended for background jobs) |
+| `--integration direct` | Persist integration mode for direct landing on the **target** repo (orthogonal to run mode; **no consent gate** as of 2.0.1): one-shot **code** live-tree edits, and ACP **peer-stop** apply of a verified ready patch after an always-external worktree. Does **not** make `/grok:implement` live-land (implement always forces worktree + verify-only). Prefs are keyed on the resolved target workspace, not companion cwd. Canonical matrix: `plugin/references/integration-modes.md`. |
+| `--integration worktree\|auto\|review` | Persist integration mode for the target repo (auto = apply-on-ready for code/peer-stop; review/worktree = isolated, manual parent apply). |
+| `--target <path>` | Repo (or dir) that integration prefs apply to (default `.`). Git toplevel when inside a repo; absolute path when not. Use when setting mode for a repo other than companion cwd. |
+| `--notification-mode off\|auto\|native\|webhook` | Completion signal prefs (product default **`auto`** for new installs; use `off` to silence) |
 | `--notification-webhook-url <url>` | Webhook URL when mode is `webhook` |
+| `--json` | Machine-readable setup status on stdout (runMode, integrationMode, checks, hints) |
 | `--enable-review-gate` | Opt-in stop-time review gate |
 | `--disable-review-gate` | Turn gate off |
 | `--codex-agents-scope user\|project` | Persist install scope (default `user` = `~/.codex/agents/`; `project` = `<cwd>/.codex/agents/`). SessionStart honors the same prefs. |
@@ -90,6 +91,7 @@ node "$SKILL_BASE/run.mjs" setup --codex-agents-scope project
 node "$SKILL_BASE/run.mjs" setup --force-codex-agents
 node "$SKILL_BASE/run.mjs" setup --remove-codex-agents
 node "$SKILL_BASE/run.mjs" setup --enable-review-gate
+node "$SKILL_BASE/run.mjs" setup --json
 ```
 
 ## What the report includes
@@ -97,7 +99,8 @@ node "$SKILL_BASE/run.mjs" setup --enable-review-gate
 - Grok CLI presence / version
 - Bundled wrapper path
 - Run mode (hardened vs direct security posture)
-- Integration mode (how code edits land) + direct consent status (target-scoped; see `--target`)
+- Integration mode (how code edits land; target-scoped; see `--target`) - no consent flag
+- Notifications mode (default `auto` for new installs)
 - Stop-review gate on/off
 - **Codex agents scope** (`user` or `project`)
 - **Codex agents** ensure result (dest from scope, absolute `agents/run.mjs`)

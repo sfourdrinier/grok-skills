@@ -145,10 +145,10 @@ for every required command; `changedFiles` / `diffSummary` for what actually
 changed; `cleanup.status == "retained"` (the worktree is never removed on a
 successful run).
 
-### 7b. Consented live-tree direct
+### 7b. Live-tree direct (product default)
 
-Product companion/skills pass `--integration direct` only after per-repo
-setup consent. No external worktree; sandbox write root is the repo root.
+Product companion/skills default to `--integration direct` with **no setup
+consent** (2.0.1+). No external worktree; sandbox write root is the repo root.
 
 ```bash
 python3 plugin/wrapper/scripts/grok_agent.py code \
@@ -160,7 +160,7 @@ python3 plugin/wrapper/scripts/grok_agent.py code \
 
 **Check:** edits are on the operator checkout; `worktreePath` is absent/null
 for this path; protected-path post-run guards apply. Do not expect a retained
-external worktree from product-default direct after consent.
+external worktree from product-default direct.
 
 ## 8. Test generation and required validation
 

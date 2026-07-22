@@ -513,6 +513,8 @@ export function runDirectGrok({
 
   const raw = (result.stdout || "").trim();
   let responseText = raw;
+  let parsedStopReason = null;
+  let parsedNumTurns = null;
   try {
     const parsed = JSON.parse(raw);
     responseText =
@@ -520,28 +522,89 @@ export function runDirectGrok({
       parsed.response ??
       parsed.message ??
       parsed.output ??
+      parsed.text ??
       raw;
     if (typeof responseText !== "string") {
       responseText = JSON.stringify(responseText, null, 2);
+    }
+    if (typeof parsed.stopReason === "string") {
+      parsedStopReason = parsed.stopReason;
+    }
+    if (typeof parsed.num_turns === "number") {
+      parsedNumTurns = parsed.num_turns;
+    } else if (typeof parsed.numTurns === "number") {
+      parsedNumTurns = parsed.numTurns;
     }
   } catch {
     // keep raw
   }
 
-  const ok = result.status === 0;
+  const processOk = result.status === 0;
+  // Incomplete stop: keep findings but do not claim EndTurn success (parity with
+  // hardened incompleteStop honesty). Include max-turn exhaustion tokens and
+  // num_turns >= --max-turns (Codex PR review P2). Mirrors
+  // groklib.grokcli_output is_cancelled / is_turn_exhaustion (alphanumeric-normalized).
+  const stopNorm = String(parsedStopReason || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+  const CANCELLED_TOKENS = new Set([
+    "cancelled",
+    "canceled",
+    "aborted",
+    "interrupted",
+    "userabort",
+  ]);
+  const MAX_TURN_TOKENS = new Set([
+    "maxturns",
+    "maxturnsreached",
+    "maxturnsexceeded",
+    "turnlimit",
+    "maxturnlimit",
+    "maxstepsreached",
+  ]);
+  const cancelIncomplete = CANCELLED_TOKENS.has(stopNorm);
+  const maxTurnToken = MAX_TURN_TOKENS.has(stopNorm) || stopNorm.includes("maxturn");
+  let maxTurnsBudget = null;
+  if (maxTurnsRaw != null) {
+    const n = Number.parseInt(String(maxTurnsRaw), 10);
+    if (Number.isFinite(n) && n > 0) maxTurnsBudget = n;
+  }
+  const errorStop = /(error|fail|refus|denied|invalid)/.test(stopNorm);
+  const turnsAtBudget =
+    maxTurnsBudget != null &&
+    typeof parsedNumTurns === "number" &&
+    parsedNumTurns >= maxTurnsBudget &&
+    !errorStop &&
+    stopNorm !== "endturn";
+  const incompleteStop =
+    processOk &&
+    Boolean(responseText && String(responseText).trim()) &&
+    (cancelIncomplete ||
+      (maxTurnsBudget != null && (maxTurnToken || turnsAtBudget)));
+  const warnings = [
+    "runMode=direct: used installed Grok CLI without grok-skills private-home sandbox isolation or wrapper sandbox verification",
+    ...(webForcedOff
+      ? ["verify stays hermetic: --web ignored (no live web access on the direct verify path)"]
+      : []),
+  ];
+  if (incompleteStop) {
+    warnings.push(
+      `runMode=direct: Grok stopReason=${JSON.stringify(parsedStopReason)} ` +
+        `(numTurns=${parsedNumTurns ?? "unknown"}) with usable output; findings kept ` +
+        "(run may be incomplete - incompleteStop=true; do not treat as done)"
+    );
+  }
   const envelope = {
     schemaVersion: 1,
     mode,
-    status: ok ? "success" : "failure",
+    // Keep status success when findings exist so response is not wiped; exit
+    // code and incompleteStop carry the "not done" signal.
+    status: processOk ? "success" : "failure",
     runId: `direct-${Date.now()}`,
     response: { text: responseText },
-    warnings: [
-      "runMode=direct: used installed Grok CLI without grok-skills private-home isolation or wrapper sandbox verification",
-      ...(webForcedOff
-        ? ["verify stays hermetic: --web ignored (no live web access on the direct verify path)"]
-        : []),
-    ],
-    error: ok
+    warnings,
+    ...(incompleteStop ? { incompleteStop: true } : {}),
+    error: processOk
       ? null
       : {
           // A wall-clock timeout is a distinct remediation from a missing/broken
@@ -554,7 +617,11 @@ export function runDirectGrok({
           detail: { exitCode: result.status, timedOut },
         },
     policy: { direct: true, webAccess: web, model },
-    grok: { stopReason: ok ? "end_turn" : timedOut ? "timeout" : "error" },
+    grok: {
+      stopReason: timedOut
+        ? "timeout"
+        : parsedStopReason || (processOk ? "end_turn" : "error"),
+    },
   };
   if (result.stderr) {
     // Redact stderr through the SAME single source before relaying to the
@@ -573,9 +640,12 @@ export function runDirectGrok({
   // Redact the response through the wrapper's redaction (installed CLI output can
   // quote a token it read from the repo/terminal). Fail closed: if redaction
   // cannot run, withhold response.text rather than emit a possible secret.
+  // Exit 1 on process failure OR incomplete Cancelled-with-findings (same
+  // orchestrator contract as hardened exit_code_for + incompleteStop).
+  const exitCode = processOk && !incompleteStop ? 0 : 1;
   const redacted = redactEnvelopeViaWrapper(envelope, { scriptsDir, python, env });
   if (redacted) {
-    return { code: ok ? 0 : 1, envelopeText: `${redacted}\n` };
+    return { code: exitCode, envelopeText: `${redacted}\n` };
   }
   // Fail closed on EVERY field derived from untrusted Grok output: response.text
   // AND error.message (built from grok stderr, which can echo a token). Emit a
@@ -583,7 +653,7 @@ export function runDirectGrok({
   const withheld = {
     ...envelope,
     response: { text: "[redaction-unavailable: response withheld under runMode=direct]" },
-    error: ok
+    error: processOk
       ? null
       : {
           class: (envelope.error && envelope.error.class) || "tool-unavailable",
@@ -595,7 +665,7 @@ export function runDirectGrok({
       "runMode=direct: secret redaction could not run; response/error text withheld",
     ],
   };
-  return { code: ok ? 0 : 1, envelopeText: `${JSON.stringify(withheld)}\n` };
+  return { code: exitCode, envelopeText: `${JSON.stringify(withheld)}\n` };
 }
 
 export function grokBinaryAvailable(env = process.env) {

@@ -178,6 +178,7 @@ export function dropValueFlags(args, names) {
  *   resume: boolean,
  *   fresh: boolean,
  *   noNotify: boolean,
+ *   executionContext: string|null,
  * }}
  */
 export function stripFlags(args) {
@@ -217,8 +218,17 @@ export function stripFlags(args) {
   const runModeStripped = stripValueFlag(boolOut, "--run-mode");
   const integrationStripped = stripValueFlag(runModeStripped.args, "--integration");
   const baseStripped = stripValueFlag(integrationStripped.args, "--base");
+  // Issue #8: optional --execution-context foreground|background (also sets env).
+  const execStripped = stripValueFlag(baseStripped.args, "--execution-context");
+  let executionContext = null;
+  if (execStripped.value != null) {
+    const v = String(execStripped.value).trim().toLowerCase();
+    if (v === "foreground" || v === "background") {
+      executionContext = v;
+    }
+  }
   return {
-    args: baseStripped.args,
+    args: execStripped.args,
     pretty,
     runMode: runModeStripped.value,
     integration: integrationStripped.value,
@@ -227,5 +237,6 @@ export function stripFlags(args) {
     resume,
     fresh,
     noNotify,
+    executionContext,
   };
 }

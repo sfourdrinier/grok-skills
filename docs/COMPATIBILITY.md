@@ -27,7 +27,7 @@ requires ready manifest **and** a success terminal envelope **and** patch
 rehash. Notifications are not ready. Integrate is **mode-aware** and
 **channel-aware** (one-shot code: direct lands live; auto may apply; review is
 parent apply. ACP peer: always external worktree; direct/auto apply at ready
-peer-stop with direct consent; review retains) - see
+peer-stop apply for direct/auto; review retains) - see
 `plugin/references/integration-modes.md`. Handoff skill itself never applies.
 Details: `plugin/references/implementation-handoff.md`.
 
@@ -54,17 +54,30 @@ Constants live in `plugin/wrapper/scripts/groklib/implementation_contract.py`
 
 | Surface | Behavior |
 |---------|----------|
-| **integration default** | Product (companion/skills) defaults to **direct** after per-repo setup consent; bare `python3 …/grok_agent.py code` without `--integration` still defaults to **worktree** (fail-closed isolation for un-consented bare calls). |
+| **integration default** | Product (companion/skills) defaults to **direct** with **no consent gate** (2.0.1+); bare `python3 …/grok_agent.py code` without `--integration` still defaults to **worktree** (fail-closed isolation for accidental bare calls). |
 | **ACP peer channel** | Default on for `grok-engineer-coder`. Always external retained worktree during the session. Opt out with `GROK_DISABLE_ACP=1` (one-shot `code` fallback). `GROK_EXPERIMENTAL_ACP` is no longer a hard enable gate (legacy opt-in ignored). |
 | **runMode vs integration** | Orthogonal axes that both use the word "direct". runMode=direct = installed CLI home; integration=direct = edit-landing default name. For one-shot code, integration=direct means live-tree edits; for ACP peer it means stop-time apply of a verified ready patch (still external worktree during prompts). See integration-modes.md. |
-| **handoff vs peer** | `/grok:handoff` remains **code-mode only** and refuses peer runIds (`handoff-unavailable`). Peer integrate runs at `peer stop` via the shared auto/peer apply spine (dirty-status fail-closed + patch integrity): direct and auto both apply when ready (direct needs consent); review retains. |
+| **handoff vs peer** | `/grok:handoff` remains **code-mode only** and refuses peer runIds (`handoff-unavailable`). Peer integrate runs at `peer stop` via the shared auto/peer apply spine (dirty-status fail-closed + patch integrity): direct and auto both apply when ready; review retains. |
 | **peer notifications** | Peer-stop is **not** completion-notification eligible (`NOTIFY_ELIGIBLE_MODES` excludes peer modes). |
 | **task / web argv** | Companion **last-valid** split-or-equals for value flags (`flagValue` SSOT): later bare without value does not wipe; never consume a following flag as value. `--web`/`--no-web` last occurrence via `resolveWebFlag`. See `plugin/references/argv-safety.md`. |
 | **apply lock + marker** | Exclusive per-`(runId, targetKey)` apply lock (`apply-locks/<targetKey>.lock` + durable owner); durable `integration-applied-<targetKey>.json`; automatic stale reclaim disabled (timeout + owner diagnostics; manual cleanup for abandoned locks); not a TOCTOU seal. See integration-modes Shared apply spine. |
 | **implement always-worktree** | `/grok:implement` always forces isolated worktree + verify-only handoff; never live lands even when workspace integration is direct/auto. Product direct default remains for **code** + **peer-stop** landing. |
-| **continue-run prior target** | `--target`/`--base`/`--contract-file` forbidden on continue; target/consent keyed on prior `run.json` identity (relative `targetWorkspace` resolves against recorded `repository`, not companion cwd); direct consent exempt; auto apply-on-ready on the **new** run; review retains; direct continue uses hardened wrapper lineage. |
+| **continue-run prior target** | `--target`/`--base`/`--contract-file` forbidden on continue; target keyed on prior `run.json` identity (relative `targetWorkspace` resolves against recorded `repository`, not companion cwd); auto apply-on-ready on the **new** run; review retains; direct continue uses hardened wrapper lineage. |
 | **blank `--contract-file`** | Present-but-blank `--contract-file` / `--contract-file=` is usage failure on code, direct, and peer-start (`implementation-contract-invalid`); never treated as "no contract". |
 | **Older contracts** | schemaVersion must be 1; missing optional display fields normalize to empty; oversized objective/criteria fail at load (no silent truncation). |
+
+## Platforms (2.0.1+)
+
+| Platform | Live hardened modes | Notes |
+|----------|---------------------|-------|
+| **macOS** | Yes (Seatbelt) | Probe: `plugin/wrapper/scripts/tests/fixtures/probe-report.md` |
+| **Linux** | Yes (Landlock) | Pre-spawn: `bwrap` on PATH. Post-run: `ProfileApplied` must report `linux/landlock` + `enforced:true`. Probe: `probe-report-linux.md`. Secret-read denial still unproven (D-SECRETREAD). Evidence host is x86_64 Ubuntu-class; aarch64 / unusual LSM need their own probes if they fail. |
+| **other-posix** | No (`probe-required`) | FreeBSD etc. do not inherit the Linux pin |
+| **Windows** | No (`probe-required`) | Until a Windows sandbox probe is committed |
+
+Preflight green on Linux means probed family + `bwrap` present; it does **not** prove
+Landlock. Unit tests may still pin fakes to `macos/seatbelt` for stable CI telemetry;
+production Linux hosts use `linux/landlock` via `expected_sandbox_platform()`.
 
 ## Completion notifications (1.5.0+)
 
@@ -73,8 +86,8 @@ adversarial-review). Not status/jobs/result/setup alone.
 
 | Pref | Behavior |
 |------|----------|
-| `notificationMode: off` (default) | No push |
-| `auto` | Native OS notify only when `GROK_COMPANION_EXECUTION_CONTEXT=background` |
+| `notificationMode: auto` (default for new installs, 2.0.1+) | Native OS notify only when execution context is **background** (env, `--execution-context`, or non-TTY auto-detect) |
+| `off` | No push |
 | `native` | OS notify (macOS/Linux) for FG and BG |
 | `webhook` | POST JSON if `notificationWebhookUrl` set |
 

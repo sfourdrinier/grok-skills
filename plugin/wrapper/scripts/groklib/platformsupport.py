@@ -47,19 +47,21 @@ _FILE_MODE = 0o600
 # AttributeError.
 _WINDOWS_CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
 
-# Only macOS has a captured Grok sandbox probe report in v1; live modes and
+# Platforms with a committed Grok sandbox probe report. Live modes and
 # sandbox.verify_enforcement fail closed on every other platform until its own
 # probe suite runs and captures a sandbox report (the version-revalidation
-# pattern, applied per platform).
-PROBED_PLATFORMS: Tuple[str, ...] = ("macos",)
+# pattern, applied per platform). macOS: Seatbelt (Task 0, 2026-07-14).
+# Linux: Landlock (Task Linux probe, 2026-07-22; fixtures/probe-report-linux.md).
+PROBED_PLATFORMS: Tuple[str, ...] = ("macos", "linux")
 
 # The ProfileApplied.platform label a captured probe report pins for each
 # probed platform. verify_enforcement compares the telemetry's platform field
-# against this instead of hardcoding "macos/seatbelt". Only probed platforms
+# against this instead of hardcoding a single OS label. Only probed platforms
 # have an entry; expected_sandbox_platform is reached only after
 # require_probed_platform_for_live has already gated the platform.
 _EXPECTED_SANDBOX_PLATFORM_BY_PLATFORM: Dict[str, str] = {
     "macos": "macos/seatbelt",
+    "linux": "linux/landlock",
 }
 
 # Mandatory per-run session-temp roots the sandbox is always allowed to write
@@ -70,6 +72,8 @@ _EXPECTED_SANDBOX_PLATFORM_BY_PLATFORM: Dict[str, str] = {
 _SESSION_TEMP_ROOTS_BY_PLATFORM: Dict[str, Tuple[str, ...]] = {
     "macos": ("/private/var/folders", "/tmp", "/var/tmp", "/private/tmp"),
     "linux": ("/tmp", "/var/tmp"),
+    # Unprobed POSIX: same session-temp shape as Linux for non-live helpers only.
+    "other-posix": ("/tmp", "/var/tmp"),
     "windows": (),
 }
 
@@ -82,6 +86,7 @@ _SESSION_TEMP_ROOTS_BY_PLATFORM: Dict[str, Tuple[str, ...]] = {
 _CREDENTIAL_HOME_RELATIVE_DIRS_BY_PLATFORM: Dict[str, Tuple[str, ...]] = {
     "macos": (".ssh", ".aws", ".grok", ".config"),
     "linux": (".ssh", ".aws", ".grok", ".config", ".gnupg"),
+    "other-posix": (".ssh", ".aws", ".grok", ".config", ".gnupg"),
     "windows": (".ssh", ".aws", ".grok"),
 }
 _MACOS_USER_KEYCHAIN_RELATIVE_DIR = "Library/Keychains"
@@ -94,27 +99,33 @@ def _log(function: str, message: str) -> None:
 
 
 def _platform_from(os_name: str, sys_platform: str) -> str:
-    """Pure mapping from (os.name, sys.platform) to one of macos|linux|windows.
+    """Pure mapping from (os.name, sys.platform) to a platform key.
 
-    Windows is detected first (os.name "nt"); macOS is "darwin"; everything
-    else on a POSIX system is treated as linux. Kept pure so both non-host
-    branches are unit-testable by injecting the pair directly.
+    Returns one of: macos | linux | windows | other-posix.
+
+    Windows is detected first (os.name "nt"); macOS is "darwin"; Linux is only
+    sys.platform starting with "linux". Other POSIX (FreeBSD, etc.) is
+    ``other-posix`` and stays **unprobed** so it does not inherit the Linux
+    Landlock pin. Kept pure so non-host branches are unit-testable by injecting
+    the pair directly.
     """
     if os_name == "nt" or sys_platform.startswith("win"):
         return "windows"
     if sys_platform == "darwin":
         return "macos"
-    return "linux"
+    if sys_platform.startswith("linux"):
+        return "linux"
+    return "other-posix"
 
 
 def current_platform() -> str:
-    """Return this host's platform: "macos" | "linux" | "windows"."""
+    """Return this host's platform: macos | linux | windows | other-posix."""
     return _platform_from(os.name, sys.platform)
 
 
 def _is_posix_platform(platform: str) -> bool:
-    """True for the POSIX platforms (macos, linux); False for windows."""
-    return platform in ("macos", "linux")
+    """True for POSIX platforms (macos, linux, other-posix); False for windows."""
+    return platform in ("macos", "linux", "other-posix")
 
 
 def is_posix() -> bool:
@@ -477,11 +488,20 @@ def kill_process_tree_by_pid(pid: int) -> None:
 
 
 def require_probed_platform_for_live() -> None:
-    """Fail closed (probe-required) when this host has no captured Grok sandbox probe report.
+    """Single SSOT live-platform gate: probed OS + Linux bwrap when applicable.
 
-    macOS is the only probed platform in v1; live modes and
-    sandbox.verify_enforcement call this first so Linux/Windows stay blocked
-    until their own probe suite runs. The raised message names the platform.
+    Fail closed with ``probe-required`` when:
+      - the host platform has no committed Grok sandbox probe report, or
+      - the host is Linux and ``bwrap`` (bubblewrap) is not on PATH.
+
+    Probed today: macOS (Seatbelt) and Linux (Landlock). Windows and
+    ``other-posix`` stay blocked until their own probe suite runs.
+
+    This is the **only** public pre-live gate. Live modes, preflight, and
+    ``sandbox.verify_enforcement`` must call this (and nothing else) for
+    platform/prereq checks. Landlock itself is **not** probed here; post-run
+    ``ProfileApplied`` telemetry (``linux/landlock`` / ``macos/seatbelt``) is
+    verified by ``sandbox.verify_enforcement``.
     """
     platform = current_platform()
     if platform not in PROBED_PLATFORMS:
@@ -495,6 +515,37 @@ def require_probed_platform_for_live() -> None:
                 platform
             ),
             {"platform": platform, "probedPlatforms": list(PROBED_PLATFORMS)},
+        )
+    _require_linux_bwrap_for(platform)
+
+
+def _require_linux_bwrap_for(platform: str) -> None:
+    """Fail closed when Linux lacks ``bwrap`` on PATH. No-op on non-Linux.
+
+    Coarse pre-spawn prereq only (PATH presence). Does not prove Landlock or
+    that Grok will invoke bwrap. Called only from require_probed_platform_for_live
+    (single SSOT; do not re-export a second public gate).
+    """
+    if platform != "linux":
+        return
+    # shutil.which is stdlib; import locally to keep this module's import surface stable.
+    import shutil
+
+    if shutil.which("bwrap") is None:
+        _log(
+            "_require_linux_bwrap_for",
+            "bubblewrap (bwrap) not found on PATH",
+        )
+        raise GrokWrapperError(
+            "probe-required",
+            "Linux live sandbox requires bubblewrap (bwrap) on PATH "
+            "(install bubblewrap; Landlock write confinement is verified after "
+            "each run via ProfileApplied, not at this pre-spawn gate)",
+            {
+                "platform": "linux",
+                "missing": ["bwrap"],
+                "hint": "apt install bubblewrap / dnf install bubblewrap",
+            },
         )
 
 
@@ -518,13 +569,45 @@ def expected_sandbox_platform() -> str:
     return _expected_sandbox_platform_for(current_platform())
 
 
+def _is_safe_xdg_runtime_dir(raw: str) -> bool:
+    """True when ``raw`` is an absolute XDG runtime dir under ``/run/user/<uid>``.
+
+    Codex PR review P1: an unvalidated ``XDG_RUNTIME_DIR=/home`` would accept
+    broad ProfileApplied write grants as "session temp". Only trust the standard
+    Linux per-uid runtime path (or ``/var/run/user/<uid>``).
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return False
+    try:
+        resolved = pathlib.Path(raw).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return False
+    if not resolved.is_absolute():
+        return False
+    text = str(resolved)
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    if uid is None:
+        return False
+    allowed_prefixes = (
+        "/run/user/{}".format(uid),
+        "/var/run/user/{}".format(uid),
+    )
+    for prefix in allowed_prefixes:
+        if text == prefix or text.startswith(prefix + "/"):
+            return True
+    return False
+
+
 def _mandatory_session_temp_roots_for(platform: str) -> Tuple[str, ...]:
     """Per-platform session-temp roots the sandbox may always write under."""
     roots: List[str] = list(_SESSION_TEMP_ROOTS_BY_PLATFORM.get(platform, ()))
-    if platform == "linux":
+    if platform in ("linux", "other-posix"):
         xdg_runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "")
-        if xdg_runtime_dir:
-            roots.append(xdg_runtime_dir)
+        if xdg_runtime_dir and _is_safe_xdg_runtime_dir(xdg_runtime_dir):
+            try:
+                roots.append(str(pathlib.Path(xdg_runtime_dir).expanduser().resolve()))
+            except (OSError, RuntimeError):
+                pass
     elif platform == "windows":
         windows_temp = os.environ.get("TEMP", "") or os.environ.get("TMP", "")
         if windows_temp:

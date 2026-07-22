@@ -448,12 +448,23 @@ def _run_required_validation(
     stage: DirectFinalizeStage,
     contract: Optional[dict],
     run_recorded_command,
+    *,
+    changed_paths: Optional[Set[str]] = None,
 ) -> None:
     """Run contract requiredValidation commands under the real repo root."""
     if not contract or not contract.get("requiredValidation"):
         return
+    from groklib.implementation_contract import validation_matches_changed
+
     repo_root = stage.repo_root
     for entry in contract["requiredValidation"]:
+        if not validation_matches_changed(entry, changed_paths):
+            stage.acc.warnings.append(
+                "requiredValidation skipped (onlyIfChanged: no matching changes): {}".format(
+                    entry.get("purpose") or entry.get("argv")
+                )
+            )
+            continue
         argv = list(entry["argv"])
         rel_cwd = entry.get("cwd") or "."
         if rel_cwd in (".", "./", ""):
@@ -560,7 +571,12 @@ def finalize_direct(
     )
 
     stage.progress.safe_emit("validate", "direct: running requiredValidation")
-    _run_required_validation(stage, contract, code_mode._run_recorded_command)
+    _run_required_validation(
+        stage,
+        contract,
+        code_mode._run_recorded_command,
+        changed_paths=source_changed,
+    )
 
     # Re-diff: build/validation may have written further paths.
     after_fp = worktree_escape.repo_change_fingerprint(repo_root)

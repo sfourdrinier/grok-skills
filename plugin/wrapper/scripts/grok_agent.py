@@ -224,10 +224,9 @@ def _build_parser() -> _Parser:
         default="worktree",
         help="worktree (safe default for a bare wrapper call): isolated external "
         "worktree; direct: edit the real repo under sandbox + post-run guards. The "
-        "plugin's skills/companion default to direct AFTER a per-repo consent gate "
-        "and always pass this flag explicitly, so the product default stays direct; "
-        "the wrapper defaults to worktree so an un-consented bare call cannot "
-        "silently edit the live tree.",
+        "plugin's skills/companion product-default to direct (no consent gate as of "
+        "2.0.1) and always pass this flag explicitly; the wrapper defaults to "
+        "worktree so an accidental bare call cannot silently edit the live tree.",
     )
     code.add_argument(
         "--force",

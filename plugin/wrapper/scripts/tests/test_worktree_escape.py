@@ -280,7 +280,10 @@ class AssertChangesWithinTests(WorktreeTestBase):
         (self.repo_root / ".gitignore").write_text("secret/\n*.local\n", encoding="utf-8")
         baseline = capture_original_checkout_baseline(self.repo_root)
 
-        # Plant a gitignored file deep inside an ignored directory AND at the root.
+        # Plant a gitignored tree (deep file) AND a root ignored file. Inventory
+        # collapses ignored directories to one entry (issue #7 --directory); the
+        # planted tree still appears as a NEW path vs baseline (secret/), and
+        # the root file still lists individually.
         (self.repo_root / "secret").mkdir()
         (self.repo_root / "secret" / "evil.bin").write_text("exfil\n", encoding="utf-8")
         (self.repo_root / "creds.local").write_text("SECRET=planted\n", encoding="utf-8")
@@ -288,7 +291,13 @@ class AssertChangesWithinTests(WorktreeTestBase):
             assert_changes_within(wt, (wt.path,), original_baseline=baseline)
         self.assertEqual(ctx.exception.error_class, "unexpected-edits")
         violations = ctx.exception.detail["violations"]
-        self.assertTrue(any("secret/evil.bin" in v for v in violations), violations)
+        self.assertTrue(
+            any(
+                "secret/evil.bin" in v or v.rstrip("/").endswith("secret") or "/secret" in v
+                for v in violations
+            ),
+            violations,
+        )
         self.assertTrue(any("creds.local" in v for v in violations), violations)
         # Pre-existing operator dirt (dirty.txt) stays exempt.
         self.assertFalse(any("dirty.txt" in v for v in violations))

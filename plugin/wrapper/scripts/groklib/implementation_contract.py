@@ -318,47 +318,68 @@ def load_contract_file(path: pathlib.Path) -> dict:
 
 
 def validate_contract(data: dict) -> dict:
-    """Validate contract schemaVersion 1 document; return normalized dict."""
+    """Validate contract schemaVersion 1 document; return normalized dict.
+
+    Collects **all** field violations then raises once with
+    ``error.detail.violations`` so orchestrators fix a contract in one round-trip
+    (GitHub issue #8) instead of one error per launch.
+    """
     if not isinstance(data, dict):
         raise _contract_error("contract must be an object")
+
+    violations: List[str] = []
+
     if data.get("schemaVersion") != 1:
-        raise _contract_error(
-            "contract schemaVersion must be 1",
-            {"schemaVersion": data.get("schemaVersion")},
+        violations.append(
+            "contract schemaVersion must be 1 (got {!r})".format(data.get("schemaVersion"))
         )
+
     task_id = data.get("taskId")
     if not isinstance(task_id, str) or not _TASK_ID_RE.match(task_id):
-        raise _contract_error("invalid taskId", {"taskId": task_id})
+        violations.append("invalid taskId (must match {!r})".format(_TASK_ID_RE.pattern))
+
     target = data.get("target")
+    target_norm = "."
     if not isinstance(target, str) or not target.strip():
-        raise _contract_error("target must be a non-empty string")
-    try:
-        target_norm = normalize_repo_relative(target) if target.strip() not in (".", "./") else "."
-    except GrokWrapperError:
-        if target.strip() in (".", "./"):
-            target_norm = "."
-        else:
-            raise
-    if target.strip() in (".", "./"):
-        target_norm = "."
+        violations.append("target must be a non-empty string")
+    else:
+        try:
+            if target.strip() in (".", "./"):
+                target_norm = "."
+            else:
+                target_norm = normalize_repo_relative(target)
+        except GrokWrapperError as exc:
+            violations.append("target path invalid: {}".format(exc))
 
     write_scopes = data.get("writeScopes")
-    if not isinstance(write_scopes, list) or not write_scopes:
-        raise _contract_error("writeScopes must be a non-empty array when contract is present")
     scopes_out: List[dict] = []
-    for i, scope in enumerate(write_scopes):
-        if not isinstance(scope, dict):
-            raise _contract_error("writeScopes[{}] must be an object".format(i))
-        kind = scope.get("kind")
-        if kind not in ("file", "subtree"):
-            raise _contract_error(
-                "writeScopes[{}].kind must be file or subtree".format(i),
-                {"kind": kind},
-            )
-        sp = scope.get("path")
-        if not isinstance(sp, str):
-            raise _contract_error("writeScopes[{}].path must be a string".format(i))
-        scopes_out.append({"kind": kind, "path": normalize_repo_relative(sp)})
+    if not isinstance(write_scopes, list) or not write_scopes:
+        violations.append(
+            "writeScopes must be a non-empty array of {kind: file|subtree, path} objects"
+        )
+    else:
+        for i, scope in enumerate(write_scopes):
+            if not isinstance(scope, dict):
+                violations.append(
+                    "writeScopes[{}] must be an object {{kind, path}} (not a string)".format(i)
+                )
+                continue
+            kind = scope.get("kind")
+            if kind not in ("file", "subtree"):
+                violations.append(
+                    "writeScopes[{}].kind must be file or subtree (got {!r})".format(i, kind)
+                )
+            sp = scope.get("path")
+            if not isinstance(sp, str):
+                violations.append("writeScopes[{}].path must be a string".format(i))
+                continue
+            try:
+                path_norm = normalize_repo_relative(sp)
+            except GrokWrapperError as exc:
+                violations.append("writeScopes[{}].path invalid: {}".format(i, exc))
+                continue
+            if kind in ("file", "subtree"):
+                scopes_out.append({"kind": kind, "path": path_norm})
 
     # Absent/null => no validations. Present non-array (incl. "" / false) => fail closed.
     if "requiredValidation" not in data or data.get("requiredValidation") is None:
@@ -366,66 +387,118 @@ def validate_contract(data: dict) -> dict:
     else:
         required = data.get("requiredValidation")
         if not isinstance(required, list):
-            raise _contract_error(
-                "requiredValidation must be an array when present",
-                {"type": type(required).__name__},
+            violations.append(
+                "requiredValidation must be an array when present (got {})".format(
+                    type(required).__name__
+                )
             )
+            required = []
     req_out: List[dict] = []
     for i, entry in enumerate(required):
         if not isinstance(entry, dict):
-            raise _contract_error("requiredValidation[{}] must be an object".format(i))
+            violations.append("requiredValidation[{}] must be an object".format(i))
+            continue
         argv = entry.get("argv")
         if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
-            raise _contract_error(
+            violations.append(
                 "requiredValidation[{}].argv must be a non-empty string array".format(i)
             )
-        # subprocess.run rejects embedded NUL with ValueError; fail closed at contract load.
+            continue
+        bad_nul = False
         for j, token in enumerate(argv):
             if "\x00" in token:
-                raise _contract_error(
-                    "requiredValidation[{}].argv[{}] must not contain NUL bytes".format(i, j),
-                    {"index": j},
+                violations.append(
+                    "requiredValidation[{}].argv[{}] must not contain NUL bytes".format(i, j)
                 )
+                bad_nul = True
+        if bad_nul:
+            continue
         cwd = entry.get("cwd", ".")
         if not isinstance(cwd, str):
-            raise _contract_error("requiredValidation[{}].cwd must be a string".format(i))
+            violations.append("requiredValidation[{}].cwd must be a string".format(i))
+            continue
         if "\x00" in cwd:
-            raise _contract_error("requiredValidation[{}].cwd must not contain NUL bytes".format(i))
+            violations.append("requiredValidation[{}].cwd must not contain NUL bytes".format(i))
+            continue
         if cwd.strip() in (".", "./", ""):
             cwd_norm = "."
         else:
-            cwd_norm = normalize_repo_relative(cwd)
+            try:
+                cwd_norm = normalize_repo_relative(cwd)
+            except GrokWrapperError as exc:
+                violations.append("requiredValidation[{}].cwd invalid: {}".format(i, exc))
+                continue
         purpose = entry.get("purpose") or ""
         if purpose is not None and not isinstance(purpose, str):
-            raise _contract_error("requiredValidation[{}].purpose must be a string".format(i))
+            violations.append("requiredValidation[{}].purpose must be a string".format(i))
+            continue
         if isinstance(purpose, str) and "\x00" in purpose:
-            raise _contract_error(
+            violations.append(
                 "requiredValidation[{}].purpose must not contain NUL bytes".format(i)
             )
-        req_out.append({"argv": list(argv), "cwd": cwd_norm, "purpose": purpose or ""})
+            continue
+        # Optional monorepo skip: run only when any changed path matches a prefix
+        # (issue #8 onlyIfChanged). Absent/null => always run.
+        only_if: List[str] = []
+        if "onlyIfChanged" in entry and entry.get("onlyIfChanged") is not None:
+            raw_only = entry.get("onlyIfChanged")
+            if not isinstance(raw_only, list) or not raw_only:
+                violations.append(
+                    "requiredValidation[{}].onlyIfChanged must be a non-empty "
+                    "array of path-prefix strings when present".format(i)
+                )
+            else:
+                for k, pref in enumerate(raw_only):
+                    if not isinstance(pref, str) or not pref.strip() or "\x00" in pref:
+                        violations.append(
+                            "requiredValidation[{}].onlyIfChanged[{}] must be a "
+                            "non-empty string without NUL".format(i, k)
+                        )
+                        continue
+                    try:
+                        only_if.append(normalize_repo_relative(pref.strip()))
+                    except GrokWrapperError as exc:
+                        violations.append(
+                            "requiredValidation[{}].onlyIfChanged[{}] invalid: {}".format(
+                                i, k, exc
+                            )
+                        )
+        entry_out = {"argv": list(argv), "cwd": cwd_norm, "purpose": purpose or ""}
+        if only_if:
+            entry_out["onlyIfChanged"] = only_if
+        req_out.append(entry_out)
 
     if "acceptanceCriteria" not in data or data.get("acceptanceCriteria") is None:
         acceptance: list = []
     else:
         acceptance = data.get("acceptanceCriteria")
         if not isinstance(acceptance, list):
-            raise _contract_error(
-                "acceptanceCriteria must be an array when present",
-                {"type": type(acceptance).__name__},
+            violations.append(
+                "acceptanceCriteria must be an array when present (got {})".format(
+                    type(acceptance).__name__
+                )
             )
+            acceptance = []
 
     objective = data.get("objective")
     if objective is not None and not isinstance(objective, str):
-        raise _contract_error("objective must be a string when present")
+        violations.append("objective must be a string when present")
 
     # Size caps: fail closed BEFORE Grok spawns (Phase 1 finding 4).
     ac_value = list(acceptance) if isinstance(acceptance, list) else []
-    bound_errs = objective_criteria_bound_errors(
-        objective if isinstance(objective, str) else None,
-        ac_value,
-    )
-    if bound_errs:
-        raise _contract_error(bound_errs[0], {"errors": bound_errs})
+    obj_value = objective if isinstance(objective, str) else None
+    bound_errs = objective_criteria_bound_errors(obj_value, ac_value)
+    violations.extend(bound_errs)
+
+    if violations:
+        raise _contract_error(
+            "; ".join(violations[:5])
+            + ("; ... ({} more)".format(len(violations) - 5) if len(violations) > 5 else ""),
+            {"violations": violations, "violationCount": len(violations)},
+        )
+
+    # Re-validate task_id for type checkers after violation gate (always valid here).
+    assert isinstance(task_id, str)
 
     return {
         "schemaVersion": 1,
@@ -437,6 +510,7 @@ def validate_contract(data: dict) -> dict:
         "requiredValidation": req_out,
         "trustModel": _TRUST_MODEL,
     }
+
 
 
 def assert_target_matches(contract: dict, cli_target_relative: str) -> None:
@@ -451,3 +525,31 @@ def assert_target_matches(contract: dict, cli_target_relative: str) -> None:
             "contract target does not match CLI --target",
             {"contractTarget": contract.get("target"), "cliTarget": cli_n},
         )
+
+
+def validation_matches_changed(entry: dict, changed_paths) -> bool:
+    """True when a requiredValidation entry should run for the given changed paths.
+
+    Absent/empty ``onlyIfChanged`` => always run. When set, run if any changed
+    path equals a prefix or is under ``prefix/`` (issue #8 monorepo scoping).
+    Prefix ``.`` / ``./`` means "any change" (repo root wildcard).
+    """
+    prefixes = entry.get("onlyIfChanged") if isinstance(entry, dict) else None
+    if not prefixes:
+        return True
+    changed = list(changed_paths or [])
+    if not changed:
+        return False
+    for pref in prefixes:
+        if not isinstance(pref, str) or not pref:
+            continue
+        pref_n = pref.strip().rstrip("/")
+        # Repo-root wildcard: any non-empty change set matches.
+        if pref_n in (".", "", "./"):
+            return True
+        for path in changed:
+            if not isinstance(path, str):
+                continue
+            if path == pref_n or path.startswith(pref_n + "/"):
+                return True
+    return False

@@ -72,8 +72,9 @@ contract, honest handoff, integrate only per the chosen mode's gate
 ## Derive a contract (default; skip only for exploratory tasks)
 
 Before calling peer start (or code), derive an implementation contract from the
-user's ask and write it to a temp file (hardened mode only; direct mode rejects
-it):
+user's ask and write it to a temp file. Prefer hardened runMode. One-shot code
+with `--contract-file` under runMode=direct routes through the hardened wrapper
+for writeScopes/requiredValidation (does not refuse):
 
 ```bash
 CONTRACT_FILE="$(mktemp -t grok-contract.XXXXXX)"
@@ -126,9 +127,10 @@ Then add `--contract-file "$CONTRACT_FILE"` to peer start (or code). Rules:
 
 Never `--task "..."`. Always:
 
-Peer modes and `--contract-file` require **hardened** runMode, so the commands
-below pin `--run-mode hardened`: in a workspace whose default is `direct`, peer
-start is refused and `--contract-file` is rejected without it.
+Peer modes require **hardened** runMode (pin `--run-mode hardened` below).
+`--contract-file` on one-shot **code** is enforced under hardened isolation:
+if workspace prefs are runMode=direct, the companion routes that run through
+the hardened wrapper (issue #8). Peer start is still refused under runMode=direct.
 
 ```bash
 # 1. Start the peer session
@@ -178,21 +180,25 @@ the chosen integration mode's gate.
 1. Read `runId` from the start/code envelope (success or failure with retained worktree).
 2. Optionally `/grok:status --run-id <runId>` for progress.
 3. **Peer:** always external worktree; `peer stop` finalizes and may integrate
-   via the active mode (auto/direct apply verified ready patch; direct needs
-   consent; review leaves patch - not live-edit). Use the peer-stop response
-   itself as the ready signal - `/grok:handoff` is code-mode only and refuses
-   peer runIds; do NOT call it for peer runs.
+   via the active mode (auto/direct apply verified ready patch; review leaves
+   patch - not live-edit). Use the peer-stop response itself as the ready
+   signal - `/grok:handoff` is code-mode only and refuses peer runIds; do NOT
+   call it for peer runs.
 4. **Code:** **Required before integrate:** `GROK_RUN handoff --run-id '<runId>'`.
 5. Integrate only when ready (handoff or peer-stop response) and the mode allows.
 6. Completion **notify** is not ready - always verify the ready signal.
-7. On not-ready: summarize `integration.blockers`. For code, prefer
-   `code --continue-run '<runId>'` with the blockers as the follow-up task.
-   For peer, start a new session or use code continuation on a code lineage.
+7. On not-ready **or incomplete stop** (`incompleteStop: true`, non-zero exit
+   with kept findings, or `stopReason` Cancelled mid-work): summarize what
+   landed and what remains. For code, prefer
+   `code --continue-run '<hardened-runId>'` with the blockers as the follow-up
+   task. **Never** pass a synthetic `direct-*` id to `--continue-run` (not
+   stored). Prefer hardened runMode for lineages that need continue. For peer,
+   start a new session or use code continuation on a code lineage.
 8. Integrate only per the chosen mode and channel
    (`plugin/references/integration-modes.md`): one-shot code direct lands live;
    code auto may apply a verified ready patch; review never auto-applies. ACP
    peer always uses an external worktree; at ready peer-stop, direct/auto apply
-   (direct needs consent) and review retains - peer direct is not live-edit.
+   and review retains - peer direct is not live-edit.
    Never commit or push from this agent.
 9. Prefer deriving a contract by default; pass `--contract-file` on every
    non-exploratory **fresh** peer start or code run.

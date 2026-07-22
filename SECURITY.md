@@ -39,23 +39,25 @@ over. It is **not** a complete sandbox against an adversarial model.
   `code` / `verify` at repositories whose exposure you accept.
 - Same-UID local malware can still read state under the operator account; 0700/0600 is
   not a multi-tenant security boundary.
-- **Notifications (1.5.0+):** optional OS toasts and webhooks after terminal live
-  runs. Default is **off**. Webhook URL is stored in the workspace jobs index
-  (plugin state), not in the wrapper envelope. Payload is small
-  (`runId`, `mode`, `lifecycle`, `durationSeconds`) - do not put secrets in the
-  webhook URL. At-most-once **attempt** only (no delivery guarantee; no auto-retry).
-  Native OS notify expects a **macOS/Linux desktop** session; it is **not**
-  implemented on Windows (use **webhook**). Prefer webhook for SSH/CI/headless
-  until PR5 setup/docs polish. Direct mode has no push notify in 1.5.0 (job
-  still tracked; PR5 job-scoped marker). Isolation dirty patches may briefly
-  exist as `*.diff` under the state root and are cleaned on success/cleanup
-  paths; treat state root as sensitive.
+- **Notifications (1.5.0+ / 2.0.1 defaults):** optional OS toasts and webhooks
+  after terminal live runs. **New installs default to `auto`** (native toast only
+  when execution context is **background**). Use `setup --notification-mode off`
+  to silence. Webhook URL is stored in the workspace jobs index (plugin state),
+  not in the wrapper envelope; `setup --json` redacts path secrets (scheme+host
+  only). Payload is small (`runId`, `mode`, `lifecycle`, `durationSeconds`) -
+  do not put secrets in the webhook URL. At-most-once **attempt** only (no
+  delivery guarantee; no auto-retry). Native OS notify expects a **macOS/Linux
+  desktop** session; it is **not** implemented on Windows (use **webhook**).
+  Prefer webhook for SSH/CI/headless. runMode=direct has limited push notify
+  historically (job still tracked). Isolation dirty patches may briefly exist as
+  `*.diff` under the state root and are cleaned on success/cleanup paths; treat
+  state root as sensitive.
 - **Implementation handoff (1.6.0+):** optional `--contract-file` is
   **operator-trusted** content (not untrusted model output).
   `requiredValidation` argv runs with `shell=False` and cwd confined to the
   worktree (or target tree); there is **no** OS filesystem sandbox claim for
   those commands (they can write outside the worktree if the operator points
-  them at a capable binary). **runMode direct** rejects `--contract-file` (fail
+  them at a capable binary). **runMode direct** with `--contract-file` routes to hardened enforcement (no longer fail
   closed). Handoff mode re-hashes the patch under the owned run directory only
   (absolute/`..` paths rejected). Notify is not integration-ready - for
   isolated modes always call `handoff --run-id` before apply. Integrate is
@@ -63,7 +65,7 @@ over. It is **not** a complete sandbox against an adversarial model.
   review never auto-applies; auto may apply a dual-condition-ready patch after
   revalidation; one-shot code `integration=direct` lands source edits live; ACP
   peer `integration=direct` applies a verified ready patch only at peer-stop
-  (after always-isolated worktree work) and still requires consent. The plugin
+  (after always-isolated worktree work) and applies when selected. The plugin
   never auto-commits, merges, cherry-picks, or pushes. **runMode direct**
   produces no handoff artifacts by design - the artifacts' value is the
   isolation evidence that runMode direct cannot attest; use runMode hardened for
@@ -84,7 +86,7 @@ over. It is **not** a complete sandbox against an adversarial model.
   `git apply --check`, apply, reverse-on-failure - see
   [integration-modes.md](plugin/references/integration-modes.md) Shared apply
   spine): `direct` and `auto` both apply the verified ready patch (`direct`
-  additionally requires per-repo direct consent); `review` / `worktree` retain
+  applies when selected); `review` / `worktree` retain
   for manual parent apply. **Not** via `/grok:handoff`, which stays code-mode
   only and still refuses peer runIds. Peer direct is therefore **stop-time
   apply**, not one-shot code live-edit direct. Peer-stop final envelope rewrite
@@ -161,7 +163,7 @@ direct/auto. Under runMode hardened, one-shot **code** direct is
 **hardened-direct**: private auth home + OS sandbox write-confined to the
 **repo root** (+ private tmp) + secret redaction on the stdout envelope. ACP
 **peer** keeps isolation on an external worktree for the whole session and only
-lands via stop-time apply when ready + (for direct) consented.
+lands via stop-time apply when ready (direct and auto apply; review retains).
 
 Honest limits for **one-shot code** direct (these are deliberate, not temporary
 gaps to paper over):
@@ -208,10 +210,10 @@ gaps to paper over):
    best-effort detection + rollback, not seatbelt subpath prevention.
 4. **Grok can still READ your files** (documented D-SECRETREAD). Write
    confinement is not a read firewall.
-5. **Consent gate:** first direct landing without `setup --integration direct`
-   (per target repo) fails closed with a trust summary - for code direct runs
-   and for peer-stop direct apply. Env / userConfig alone never counts as
-   consent.
+5. **No consent gate (2.0.1+):** product default `integration=direct` lands on
+   the live tree without a setup ceremony (same class of tool as other host
+   implementers). Isolation is opt-in: choose **`auto`** or **`review`** when
+   you want a worktree and verified patch before land, or peer-stop retain.
 
 Choose **integration=auto** or **review** when you want isolation and a verified
 patch before anything lands on the operator tree (one-shot code), or when you
@@ -240,9 +242,16 @@ Full design notes: [docs/OPEN-SECURITY-DECISIONS.md](docs/OPEN-SECURITY-DECISION
 ## Supported platforms
 
 - **macOS** with Seatbelt: live modes supported when a working Grok CLI is installed
-  and logged in (any build; platform probe gate still applies).
-- **Linux / Windows**: live modes fail closed with `probe-required` until a sandbox profile
-  is verified for that platform.
+  and logged in (any build; platform probe gate still applies). Evidence:
+  `plugin/wrapper/scripts/tests/fixtures/probe-report.md`.
+- **Linux** with Landlock: live modes supported when a working Grok CLI is installed
+  and **bubblewrap** (`bwrap`) is on `PATH`. Pre-spawn gate checks bwrap only;
+  Landlock write confinement is verified after each run via `ProfileApplied`
+  (`linux/landlock`, `enforced: true`). Evidence:
+  `plugin/wrapper/scripts/tests/fixtures/probe-report-linux.md` (x86_64 Ubuntu-class).
+  Secret-read denial remains unproven (same D-SECRETREAD residual as macOS).
+- **other-posix** (FreeBSD, etc.) and **Windows**: live modes fail closed with
+  `probe-required` until a sandbox profile is verified for that platform.
 
 ## Reporting a vulnerability
 

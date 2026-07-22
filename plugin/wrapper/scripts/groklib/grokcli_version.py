@@ -9,6 +9,7 @@
 # accepted_version / check_version so callers keep using grokcli.check_version(...).
 
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -126,3 +127,72 @@ def check_version(binary: pathlib.Path) -> str:
             "(allowed; stamp is advisory only)".format(first_line, reference),
         )
     return first_line
+
+
+def maybe_refresh_accepted_version_stamp(version: str) -> bool:
+    """Best-effort write of advisory accepted-version.json after green preflight.
+
+    Issue #8: after a fully green preflight on a new CLI version, refresh the
+    advisory stamp so the diagnostic disappears until the next bump. Never fails
+    the run if the install tree is read-only. Not called from check_version so
+    ordinary runs and unit tests never mutate the package stamp.
+    """
+    if not isinstance(version, str) or not version.strip():
+        return False
+    # Unit tests / fake_grok harnesses must never mutate the install stamp.
+    if os.environ.get("GROK_WRAPPER_DISABLE_VERSION_STAMP_SELF_HEAL") == "1":
+        return False
+    if os.environ.get("GROK_WRAPPER_FAKE_GROK") or os.environ.get("GROK_UNITTEST") == "1":
+        return False
+    version = version.strip()
+    current = last_validated_version()
+    if current == version:
+        return True
+    # Preserve existing maintainer fields (schemaVersion, probeEvidence, …).
+    payload: dict = {}
+    try:
+        raw = ACCEPTED_VERSION_FILE.read_text(encoding="utf-8")
+        loaded = json.loads(raw)
+        if isinstance(loaded, dict):
+            payload = dict(loaded)
+    except (OSError, json.JSONDecodeError):
+        payload = {}
+    now_utc = __import__("datetime").datetime.now(
+        __import__("datetime").timezone.utc
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    prior_version = payload.get("version") if isinstance(payload.get("version"), str) else None
+    prior_probe = payload.get("probeEvidence")
+    payload["version"] = version
+    payload.setdefault("schemaVersion", 2)
+    payload.setdefault("enforcement", "none")
+    # Keep stamp fields honest when the CLI version changes (issue #8 review).
+    payload["validatedAtUtc"] = now_utc
+    payload["selfHealedAtUtc"] = now_utc
+    if prior_probe and prior_version and prior_version != version:
+        # Old probeEvidence refers to a different build; demote to note only.
+        payload["probeEvidenceNote"] = (
+            "prior probeEvidence retained for history only: {}".format(prior_probe)
+        )
+    payload.setdefault(
+        "note",
+        "Last maintainer-validated Grok CLI build (advisory only). Runtime does "
+        "NOT require this exact version - any working `grok --version` is accepted. "
+        "Self-heal after green preflight updates version + validatedAtUtc only.",
+    )
+    try:
+        ACCEPTED_VERSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ACCEPTED_VERSION_FILE.write_text(
+            json.dumps(payload, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        _log(
+            "maybe_refresh_accepted_version_stamp",
+            "refreshed advisory stamp to {!r}".format(version),
+        )
+        return True
+    except OSError as exc:
+        _log(
+            "maybe_refresh_accepted_version_stamp",
+            "could not refresh stamp (ignored): {}".format(exc),
+        )
+        return False

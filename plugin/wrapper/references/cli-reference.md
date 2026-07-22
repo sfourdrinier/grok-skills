@@ -201,17 +201,18 @@ fake-green the stamp. The stamp is evidence, not a user allowlist.
 
 ## Per-platform live-probe gate
 
-`PROBED_PLATFORMS = ("macos",)` (`groklib/platformsupport.py`). Every live
+`PROBED_PLATFORMS = ("macos", "linux")` (`groklib/platformsupport.py`). Every live
 mode (`review`, `reason`, `code`, `verify`) and `sandbox.verify_enforcement`
-call `platformsupport.require_probed_platform_for_live()` first, which
-raises error class `probe-required` naming the current platform on anything
-not in `PROBED_PLATFORMS`. This is a per-platform version of the same
-revalidation discipline above: unlocking Linux or Windows live execution
-means running this skill's own probe suite on that platform and capturing
-its sandbox report, not editing a constant. Non-live functionality (argument
-parsing, prompt assembly, most of `groklib`) is fully cross-platform by
-construction (decision D-PORT); only the live-execution SECURITY guarantee
-is gated per platform.
+call the single SSOT gate `platformsupport.require_probed_platform_for_live()`
+first, which raises `probe-required` when the host is not in `PROBED_PLATFORMS`
+or (on Linux) when `bwrap` is missing from `PATH`. Expected post-run telemetry
+labels: `macos/seatbelt`, `linux/landlock` (`expected_sandbox_platform()`).
+Landlock is **not** proven at the pre-spawn gate; it is verified after each run
+via `ProfileApplied`. Non-Linux POSIX (FreeBSD, etc.) maps to `other-posix` and
+stays unprobed (does not inherit the Linux pin). Unlocking Windows or
+other-posix means running this skill's probe suite on that platform and
+extending `PROBED_PLATFORMS`. Non-live functionality is fully cross-platform
+(decision D-PORT). Linux evidence: `scripts/tests/fixtures/probe-report-linux.md`.
 
 ## Why `agents/openai.yaml` exists
 

@@ -34,7 +34,7 @@ worktree** (never live-edit of the operator tree during prompts). Ready results
 integrate only at **`peer stop`**, via the active mode (canonical:
 `plugin/references/integration-modes.md` ACP peer section): **direct** and
 **auto** both apply the verified ready patch to the target checkout (direct
-additionally requires per-repo direct consent); **review** / **worktree** retain
+applies when ready); **review** / **worktree** retain
 patch + manifest for manual parent apply. Peer direct is therefore **stop-time
 apply**, not one-shot code live-edit direct. `/grok:handoff` is code-mode only
 and refuses peer runIds (`handoff-unavailable`); peer integration never routes
@@ -155,6 +155,6 @@ node "$SKILL_BASE/run.mjs" cleanup --run-id '<id>' --confirm
 - Integrate only per the chosen mode's gate (see
   `plugin/references/integration-modes.md` ACP peer section: shared dirty-guard
   apply spine with exclusive apply lock + durable marker + already-applied
-  restop; review/worktree retain; auto and consented direct apply the verified
+  restop; review/worktree retain; auto and direct apply the verified
   ready patch at stop - not live-edit). Prefer deriving a contract with
   shell-free `requiredValidation` so ready can be evidence-backed.

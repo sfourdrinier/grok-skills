@@ -24,9 +24,12 @@ class CurrentPlatformTests(unittest.TestCase):
         self.assertEqual(platformsupport._platform_from("nt", "win32"), "windows")
         self.assertEqual(platformsupport._platform_from("posix", "linux"), "linux")
         self.assertEqual(platformsupport._platform_from("posix", "linux2"), "linux")
+        # FreeBSD etc. must NOT inherit the Linux Landlock pin.
+        self.assertEqual(platformsupport._platform_from("posix", "freebsd13"), "other-posix")
+        self.assertEqual(platformsupport._platform_from("posix", "openbsd7"), "other-posix")
 
         current = platformsupport.current_platform()
-        self.assertIn(current, ("macos", "linux", "windows"))
+        self.assertIn(current, ("macos", "linux", "windows", "other-posix"))
         # Host mapping must match the runner OS (macOS locally, Linux in CI).
         expected = platformsupport._platform_from(os.name, __import__("sys").platform)
         self.assertEqual(current, expected)
@@ -35,10 +38,19 @@ class CurrentPlatformTests(unittest.TestCase):
         self.assertEqual(platformsupport.is_posix(), os.name == "posix")
         self.assertTrue(platformsupport._is_posix_platform("macos"))
         self.assertTrue(platformsupport._is_posix_platform("linux"))
+        self.assertTrue(platformsupport._is_posix_platform("other-posix"))
         self.assertFalse(platformsupport._is_posix_platform("windows"))
 
-    def test_probed_platforms_is_macos_only(self) -> None:
-        self.assertEqual(platformsupport.PROBED_PLATFORMS, ("macos",))
+    def test_probed_platforms_includes_macos_and_linux(self) -> None:
+        self.assertEqual(platformsupport.PROBED_PLATFORMS, ("macos", "linux"))
+        self.assertEqual(
+            platformsupport._EXPECTED_SANDBOX_PLATFORM_BY_PLATFORM["macos"],
+            "macos/seatbelt",
+        )
+        self.assertEqual(
+            platformsupport._EXPECTED_SANDBOX_PLATFORM_BY_PLATFORM["linux"],
+            "linux/landlock",
+        )
 
 
 class PermissionTests(unittest.TestCase):
@@ -143,14 +155,30 @@ class KillProcessTreeTests(unittest.TestCase):
 
 class RequireProbedPlatformTests(unittest.TestCase):
     def test_require_probed_platform_raises_on_unprobed(self) -> None:
-        with mock.patch("groklib.platformsupport.current_platform", return_value="linux"):
-            with self.assertRaises(GrokWrapperError) as caught:
-                platformsupport.require_probed_platform_for_live()
-        self.assertEqual(caught.exception.error_class, "probe-required")
-        self.assertIn("linux", str(caught.exception))
+        # Windows and other-posix remain unprobed; macOS and Linux are probed.
+        for unprobed in ("windows", "other-posix"):
+            with self.subTest(platform=unprobed):
+                with mock.patch("groklib.platformsupport.current_platform", return_value=unprobed):
+                    with self.assertRaises(GrokWrapperError) as caught:
+                        platformsupport.require_probed_platform_for_live()
+                self.assertEqual(caught.exception.error_class, "probe-required")
+                self.assertIn(unprobed, str(caught.exception))
 
         with mock.patch("groklib.platformsupport.current_platform", return_value="macos"):
             self.assertIsNone(platformsupport.require_probed_platform_for_live())
+
+        with mock.patch("groklib.platformsupport.current_platform", return_value="linux"):
+            with mock.patch("shutil.which", return_value="/usr/bin/bwrap"):
+                self.assertIsNone(platformsupport.require_probed_platform_for_live())
+
+    def test_linux_requires_bwrap(self) -> None:
+        with mock.patch("groklib.platformsupport.current_platform", return_value="linux"):
+            with mock.patch("shutil.which", return_value=None):
+                with self.assertRaises(GrokWrapperError) as caught:
+                    platformsupport.require_probed_platform_for_live()
+        self.assertEqual(caught.exception.error_class, "probe-required")
+        self.assertIn("bubblewrap", str(caught.exception).lower())
+        self.assertEqual(caught.exception.detail.get("missing"), ["bwrap"])
 
 
 class ProcessIsAliveTests(unittest.TestCase):
@@ -256,6 +284,33 @@ class ProcessStartTokenTests(unittest.TestCase):
         with mock.patch("groklib.platformsupport.subprocess.run", return_value=fake):
             token = platformsupport._process_start_token_for("macos", 4321)
         self.assertEqual(token, "Mon Jul 7 12:34:56 2026")
+
+
+class XdgRuntimeDirSafetyTests(unittest.TestCase):
+    def test_rejects_broad_home_and_relative(self) -> None:
+        self.assertFalse(platformsupport._is_safe_xdg_runtime_dir("/home"))
+        self.assertFalse(platformsupport._is_safe_xdg_runtime_dir("/home/alice"))
+        self.assertFalse(platformsupport._is_safe_xdg_runtime_dir("relative/run"))
+        self.assertFalse(platformsupport._is_safe_xdg_runtime_dir(""))
+
+    def test_accepts_run_user_uid(self) -> None:
+        if not hasattr(os, "getuid"):
+            self.skipTest("no getuid")
+        uid = os.getuid()
+        self.assertTrue(platformsupport._is_safe_xdg_runtime_dir("/run/user/{}".format(uid)))
+        self.assertTrue(
+            platformsupport._is_safe_xdg_runtime_dir("/run/user/{}/grok".format(uid))
+        )
+        self.assertTrue(
+            platformsupport._is_safe_xdg_runtime_dir("/var/run/user/{}".format(uid))
+        )
+        # resolve() collapses ../ so this becomes another uid path under /run/user
+        # - reject foreign uids.
+        self.assertFalse(
+            platformsupport._is_safe_xdg_runtime_dir(
+                "/run/user/{}/../{}".format(uid, uid + 1)
+            )
+        )
 
 
 if __name__ == "__main__":

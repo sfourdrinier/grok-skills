@@ -443,11 +443,11 @@ def verify_enforcement(home: PrivateHome, policy: SandboxPolicy) -> "dict":
 
     Fails closed with GrokWrapperError("probe-required") FIRST when this host
     has no captured Grok sandbox probe report (per-platform SECURITY GUARANTEE,
-    D-PORT): macOS is the only probed platform in v1, so Linux/Windows live
-    verification stays blocked until their own probe suite runs. The probed
-    platform's expected ProfileApplied.platform label
+    D-PORT): macOS (Seatbelt) and Linux (Landlock) are probed; Windows and other
+    hosts stay blocked until their own probe suite runs. The probed platform's
+    expected ProfileApplied.platform label
     (platformsupport.expected_sandbox_platform) is compared against the
-    telemetry instead of hardcoding ``macos/seatbelt``.
+    telemetry (``macos/seatbelt`` or ``linux/landlock``).
 
     Raises GrokWrapperError("sandbox-failure") when:
       - the events file is absent or unreadable,
@@ -478,8 +478,8 @@ def verify_enforcement(home: PrivateHome, policy: SandboxPolicy) -> "dict":
     here. This is a fail-closed strengthening; it never suppresses a real
     denial.
     """
-    # Per-platform SECURITY GUARANTEE (D-PORT): fail closed on any platform
-    # without a captured Grok sandbox probe report, before touching evidence.
+    # Per-platform SECURITY GUARANTEE (D-PORT): single SSOT live gate
+    # (probed OS + Linux bwrap) before touching evidence.
     platformsupport.require_probed_platform_for_live()
 
     if not isinstance(home, PrivateHome):
