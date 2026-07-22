@@ -568,3 +568,51 @@ test("status known job id without runId prints jobs table and exits 1", () => {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+
+test("legacy jobs-index notificationMode off is not setup-authored after default flip", () => {
+  // Pre-2.0.1 indexes persisted off without prefsSources. That must not pin
+  // off as setup so the new auto default / CLAUDE_PLUGIN_OPTION still apply.
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-legacy-notify-"));
+  const pluginData = path.join(cwd, "pdata");
+  const env = { CLAUDE_PLUGIN_DATA: pluginData };
+  // Force state root creation, then overwrite with a legacy-shaped index.
+  createJob(cwd, { kind: "review", mode: "review", runMode: "hardened" }, env);
+  const jobs = listJobs(cwd, env);
+  assert.ok(jobs.length >= 1);
+  // Locate jobs-index.json under plugin data state tree.
+  function findIndex(dir) {
+    for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, ent.name);
+      if (ent.isFile() && ent.name === "jobs-index.json") return full;
+      if (ent.isDirectory()) {
+        const hit = findIndex(full);
+        if (hit) return hit;
+      }
+    }
+    return null;
+  }
+  const indexPath = findIndex(pluginData);
+  assert.ok(indexPath, "expected jobs-index.json under plugin data");
+  const legacy = {
+    version: 1,
+    config: {
+      runMode: "hardened",
+      notificationMode: "off",
+      notificationWebhookUrl: null,
+      // no prefsSources => legacySetup path
+    },
+    jobs: [],
+  };
+  fs.writeFileSync(indexPath, JSON.stringify(legacy), "utf8");
+  assert.equal(getNotificationConfig(cwd, env).notificationMode, "auto");
+  // Explicit userConfig must still win over unpinned legacy off.
+  assert.equal(
+    getNotificationConfig(cwd, {
+      ...env,
+      CLAUDE_PLUGIN_OPTION_NOTIFICATIONMODE: "native",
+    }).notificationMode,
+    "native"
+  );
+});
+

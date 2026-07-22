@@ -40,6 +40,11 @@ export const DEFAULT_JOBS_CONFIG = Object.freeze({
   integrationConsent: true,
 });
 
+// Pre-2.0.1 product default. Used only when classifying legacy indexes that
+// lack prefsSources so a persisted "off" (old default, never setup) is not
+// pinned as setup-authored after the default flipped to auto (Codex PR review).
+const LEGACY_DEFAULT_NOTIFICATION_MODE = "off";
+
 /** Integration modes for code/implement (how edits land). Not runMode. */
 export const INTEGRATION_MODES = Object.freeze([
   "direct",
@@ -98,9 +103,12 @@ function normalizeConfig(raw, opts = {}) {
     // Only pin a field as setup-authored when its stored value is NON-default
     // (evidence of a deliberate setup); otherwise leave it unset so post-upgrade
     // CLAUDE_PLUGIN_OPTION_* userConfig still applies.
-    const defaultNotificationMode = normalizeNotificationMode(undefined);
+    // Compare notificationMode against the PRE-2.0.1 default ("off"), not the
+    // current DEFAULT_JOBS_CONFIG.auto - otherwise every legacy "off" row is
+    // wrongly pinned as setup-authored and ignores userConfig / new default.
     if (raw?.runMode === "direct") prefsSources.runMode = "setup";
-    if (normalizeNotificationMode(raw?.notificationMode) !== defaultNotificationMode) {
+    const storedNotify = parseNotificationMode(raw?.notificationMode);
+    if (storedNotify && storedNotify !== LEGACY_DEFAULT_NOTIFICATION_MODE) {
       prefsSources.notificationMode = "setup";
     }
     if (normalizeWebhookUrl(raw?.notificationWebhookUrl)) {

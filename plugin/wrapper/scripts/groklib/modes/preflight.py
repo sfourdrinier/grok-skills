@@ -448,11 +448,11 @@ def _run_preflight_body(
     )
     if isinstance(version_detail, str) and version_detail.strip():
         from groklib import preflight_cache
-        from groklib.grokcli_version import maybe_refresh_accepted_version_stamp
 
         preflight_cache.write_ok(version_detail)
-        # Issue #8: best-effort advisory stamp self-heal after fully green preflight.
-        maybe_refresh_accepted_version_stamp(version_detail.strip())
+        # Do NOT rewrite accepted-version.json here (Codex PR review): that stamp
+        # is maintainer evidence after a full live probe suite, not a routine
+        # preflight side-effect that dirties marketplace installs / checkouts.
     envelope = build_envelope(
         run_id=run_paths.run_id,
         mode="preflight",

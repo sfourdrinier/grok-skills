@@ -60,17 +60,21 @@ for marketplace / package tags.
 - **`setup --json`:** machine-readable setup status for orchestrators.
 - **Notification default `auto`** for new installs; **`--execution-context`**
   flag + non-TTY auto-detect for notify context.
-- **Advisory version stamp self-heal** after fully green preflight (best-effort
-  write of `accepted-version.json`; disabled under unit tests).
 - **Docs/agents follow-through:** removed consent ceremony from skills, agents,
   codex TOMLs, integration-modes, manual-smoke, SECURITY, COMPATIBILITY, manifests.
 - **Adversarial-review fixes:** `setup --json` actually reaches `cmdSetup` (was
   stripped); setup JSON redacts webhook URLs; `onlyIfChanged: ["."]` is root
   wildcard; job `runMode` records hardened when contract/continue forces it;
   `--execution-context` does not override an already-set env.
-- **Round-2 adversarial cleanup:** handoff patch git uses timeout SSOT; stamp
-  self-heal refreshes `validatedAtUtc`; argparse/`--help` and agent recipes no
-  longer claim consent; regression tests for `setup --json` redaction.
+- **Round-2 adversarial cleanup:** handoff patch git uses timeout SSOT;
+  argparse/`--help` and agent recipes no longer claim consent; regression tests
+  for `setup --json` redaction.
+- **Codex PR review (PR #9):** `onlyIfChanged` skips no longer count as
+  authoritative validation; preflight does **not** rewrite `accepted-version.json`
+  (maintainer stamp only); Linux `XDG_RUNTIME_DIR` must be under `/run/user/<uid>`;
+  legacy jobs-index `notificationMode: off` is not pinned as setup-authored after
+  the default flip to `auto`; runMode=direct incompleteStop includes max-turn
+  exhaustion tokens.
 
 ### Fixed (worktree prep on large monorepos - issue #7)
 

@@ -286,5 +286,32 @@ class ProcessStartTokenTests(unittest.TestCase):
         self.assertEqual(token, "Mon Jul 7 12:34:56 2026")
 
 
+class XdgRuntimeDirSafetyTests(unittest.TestCase):
+    def test_rejects_broad_home_and_relative(self) -> None:
+        self.assertFalse(platformsupport._is_safe_xdg_runtime_dir("/home"))
+        self.assertFalse(platformsupport._is_safe_xdg_runtime_dir("/home/alice"))
+        self.assertFalse(platformsupport._is_safe_xdg_runtime_dir("relative/run"))
+        self.assertFalse(platformsupport._is_safe_xdg_runtime_dir(""))
+
+    def test_accepts_run_user_uid(self) -> None:
+        if not hasattr(os, "getuid"):
+            self.skipTest("no getuid")
+        uid = os.getuid()
+        self.assertTrue(platformsupport._is_safe_xdg_runtime_dir("/run/user/{}".format(uid)))
+        self.assertTrue(
+            platformsupport._is_safe_xdg_runtime_dir("/run/user/{}/grok".format(uid))
+        )
+        self.assertTrue(
+            platformsupport._is_safe_xdg_runtime_dir("/var/run/user/{}".format(uid))
+        )
+        # resolve() collapses ../ so this becomes another uid path under /run/user
+        # - reject foreign uids.
+        self.assertFalse(
+            platformsupport._is_safe_xdg_runtime_dir(
+                "/run/user/{}/../{}".format(uid, uid + 1)
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

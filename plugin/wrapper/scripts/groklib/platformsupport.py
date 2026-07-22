@@ -569,13 +569,45 @@ def expected_sandbox_platform() -> str:
     return _expected_sandbox_platform_for(current_platform())
 
 
+def _is_safe_xdg_runtime_dir(raw: str) -> bool:
+    """True when ``raw`` is an absolute XDG runtime dir under ``/run/user/<uid>``.
+
+    Codex PR review P1: an unvalidated ``XDG_RUNTIME_DIR=/home`` would accept
+    broad ProfileApplied write grants as "session temp". Only trust the standard
+    Linux per-uid runtime path (or ``/var/run/user/<uid>``).
+    """
+    if not isinstance(raw, str) or not raw.strip():
+        return False
+    try:
+        resolved = pathlib.Path(raw).expanduser().resolve()
+    except (OSError, RuntimeError):
+        return False
+    if not resolved.is_absolute():
+        return False
+    text = str(resolved)
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    if uid is None:
+        return False
+    allowed_prefixes = (
+        "/run/user/{}".format(uid),
+        "/var/run/user/{}".format(uid),
+    )
+    for prefix in allowed_prefixes:
+        if text == prefix or text.startswith(prefix + "/"):
+            return True
+    return False
+
+
 def _mandatory_session_temp_roots_for(platform: str) -> Tuple[str, ...]:
     """Per-platform session-temp roots the sandbox may always write under."""
     roots: List[str] = list(_SESSION_TEMP_ROOTS_BY_PLATFORM.get(platform, ()))
     if platform in ("linux", "other-posix"):
         xdg_runtime_dir = os.environ.get("XDG_RUNTIME_DIR", "")
-        if xdg_runtime_dir:
-            roots.append(xdg_runtime_dir)
+        if xdg_runtime_dir and _is_safe_xdg_runtime_dir(xdg_runtime_dir):
+            try:
+                roots.append(str(pathlib.Path(xdg_runtime_dir).expanduser().resolve()))
+            except (OSError, RuntimeError):
+                pass
     elif platform == "windows":
         windows_temp = os.environ.get("TEMP", "") or os.environ.get("TMP", "")
         if windows_temp:

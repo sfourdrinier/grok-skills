@@ -540,13 +540,47 @@ export function runDirectGrok({
   }
 
   const processOk = result.status === 0;
-  // Cancelled / aborted with text is incomplete: keep findings but do not claim
-  // EndTurn success (parity with hardened incompleteStop honesty).
-  const stopLower = (parsedStopReason || "").toLowerCase();
+  // Incomplete stop: keep findings but do not claim EndTurn success (parity with
+  // hardened incompleteStop honesty). Include max-turn exhaustion tokens and
+  // num_turns >= --max-turns (Codex PR review P2). Mirrors
+  // groklib.grokcli_output is_cancelled / is_turn_exhaustion (alphanumeric-normalized).
+  const stopNorm = String(parsedStopReason || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+  const CANCELLED_TOKENS = new Set([
+    "cancelled",
+    "canceled",
+    "aborted",
+    "interrupted",
+    "userabort",
+  ]);
+  const MAX_TURN_TOKENS = new Set([
+    "maxturns",
+    "maxturnsreached",
+    "maxturnsexceeded",
+    "turnlimit",
+    "maxturnlimit",
+    "maxstepsreached",
+  ]);
+  const cancelIncomplete = CANCELLED_TOKENS.has(stopNorm);
+  const maxTurnToken = MAX_TURN_TOKENS.has(stopNorm) || stopNorm.includes("maxturn");
+  let maxTurnsBudget = null;
+  if (maxTurnsRaw != null) {
+    const n = Number.parseInt(String(maxTurnsRaw), 10);
+    if (Number.isFinite(n) && n > 0) maxTurnsBudget = n;
+  }
+  const errorStop = /(error|fail|refus|denied|invalid)/.test(stopNorm);
+  const turnsAtBudget =
+    maxTurnsBudget != null &&
+    typeof parsedNumTurns === "number" &&
+    parsedNumTurns >= maxTurnsBudget &&
+    !errorStop &&
+    stopNorm !== "endturn";
   const incompleteStop =
     processOk &&
     Boolean(responseText && String(responseText).trim()) &&
-    /^(cancelled|canceled|aborted|interrupted|userabort)$/.test(stopLower);
+    (cancelIncomplete ||
+      (maxTurnsBudget != null && (maxTurnToken || turnsAtBudget)));
   const warnings = [
     "runMode=direct: used installed Grok CLI without grok-skills private-home sandbox isolation or wrapper sandbox verification",
     ...(webForcedOff
