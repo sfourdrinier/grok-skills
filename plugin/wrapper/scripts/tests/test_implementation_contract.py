@@ -58,6 +58,71 @@ class OnlyIfChangedTests(unittest.TestCase):
         root = {"argv": ["true"], "cwd": ".", "onlyIfChanged": ["."]}
         self.assertTrue(validation_matches_changed(root, ["any/path.ts"]))
 
+    def test_changed_paths_for_only_if_changed_includes_rename_source(self) -> None:
+        # Codex PR #9: onlyIfChanged must see rename/copy oldPath, not destination only.
+        from groklib.implementation_contract import (
+            changed_paths_for_only_if_changed,
+            validation_matches_changed,
+        )
+
+        entries = [
+            {
+                "path": "packages/bar/a.ts",
+                "status": "renamed",
+                "oldPath": "packages/foo/a.ts",
+            },
+            {
+                "path": "packages/baz/b.ts",
+                "status": "copied",
+                "oldPath": "packages/foo/b.ts",
+            },
+            {
+                "path": "packages/other/c.ts",
+                "status": "modified",
+                "oldPath": None,
+            },
+        ]
+        tokens = changed_paths_for_only_if_changed(entries)
+        self.assertEqual(
+            tokens,
+            [
+                "packages/bar/a.ts",
+                "packages/foo/a.ts",
+                "packages/baz/b.ts",
+                "packages/foo/b.ts",
+                "packages/other/c.ts",
+            ],
+        )
+        scoped = {
+            "argv": ["true"],
+            "cwd": ".",
+            "onlyIfChanged": ["packages/foo"],
+        }
+        self.assertTrue(
+            validation_matches_changed(scoped, tokens),
+            "rename/copy source under onlyIfChanged prefix must run validation",
+        )
+        dest_only = ["packages/bar/a.ts", "packages/baz/b.ts", "packages/other/c.ts"]
+        self.assertFalse(
+            validation_matches_changed(scoped, dest_only),
+            "destination-only list would incorrectly skip (the bug)",
+        )
+        # Fallback when entries empty.
+        self.assertEqual(
+            changed_paths_for_only_if_changed([], fallback=["x.ts"]),
+            ["x.ts"],
+        )
+        # Dedupes when path == oldPath is impossible but repeated tokens appear.
+        self.assertEqual(
+            changed_paths_for_only_if_changed(
+                [
+                    {"path": "a.ts", "oldPath": "b.ts"},
+                    {"path": "b.ts", "oldPath": None},
+                ]
+            ),
+            ["a.ts", "b.ts"],
+        )
+
     def test_only_if_changed_parsed_on_valid_contract(self) -> None:
         c = validate_contract(
             {

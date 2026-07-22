@@ -61,6 +61,39 @@ class RepoChangeFingerprintTests(WorktreeTestBase):
             "rewrite of non-ASCII dirty path must be detected under default quotePath",
         )
 
+    def test_fingerprint_includes_protected_leaf_under_collapsed_ignored_dir(self) -> None:
+        # Codex PR #9: after --directory collapse, deny-scoped leaves under an
+        # ignored tree must still appear so before/after diffs catch plants.
+        (self.repo_root / ".gitignore").write_text("secrets/\nnode_modules/\n", encoding="utf-8")
+        _git(self.repo_root, "add", ".gitignore")
+        _git(self.repo_root, "commit", "-q", "-m", "ignore secrets and caches")
+        before = repo_change_fingerprint(self.repo_root)
+        secrets = self.repo_root / "secrets"
+        secrets.mkdir()
+        (secrets / "id_rsa").write_text("PRIVATE\n", encoding="utf-8")
+        (secrets / "notes.txt").write_text("not deny-scoped\n", encoding="utf-8")
+        after = repo_change_fingerprint(self.repo_root)
+        after_paths = {path for path, _fp in after}
+        changed = {path for path, _fp in (after - before)}
+        self.assertIn("secrets/id_rsa", after_paths)
+        self.assertIn("secrets/id_rsa", changed)
+        self.assertFalse(
+            any(path.endswith("notes.txt") for path in after_paths),
+            "non-deny leaves under collapsed dirs must not explode inventory: {}".format(
+                sorted(after_paths)
+            ),
+        )
+        # Bulk cache non-deny leaves stay collapsed.
+        nm = self.repo_root / "node_modules" / "pkg"
+        nm.mkdir(parents=True)
+        (nm / "index.js").write_text("ok\n", encoding="utf-8")
+        late = repo_change_fingerprint(self.repo_root)
+        late_paths = {path for path, _fp in late}
+        self.assertFalse(
+            any("index.js" in path for path in late_paths),
+            late_paths,
+        )
+
     def test_fingerprint_detects_same_size_mtime_rewrite_of_ignored_env(self) -> None:
         # Protected gitignored credentials cannot use size:mtime:mode alone: a
         # same-length rewrite that restores mtime is invisible to stat signatures

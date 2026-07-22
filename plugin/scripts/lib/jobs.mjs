@@ -45,6 +45,13 @@ export const DEFAULT_JOBS_CONFIG = Object.freeze({
 // pinned as setup-authored after the default flipped to auto (Codex PR review).
 const LEGACY_DEFAULT_NOTIFICATION_MODE = "off";
 
+// Pre-prefsSources product default for integration. Same as today's default
+// ("direct"), but used so a legacy index that stored worktree/auto/review
+// (evidence of deliberate setup --integration) is pinned as setup-authored
+// and is not silently downgraded to live-tree direct after consent removal
+// (Codex PR #9).
+const LEGACY_DEFAULT_INTEGRATION_MODE = "direct";
+
 /** Integration modes for code/implement (how edits land). Not runMode. */
 export const INTEGRATION_MODES = Object.freeze([
   "direct",
@@ -113,6 +120,14 @@ function normalizeConfig(raw, opts = {}) {
     }
     if (normalizeWebhookUrl(raw?.notificationWebhookUrl)) {
       prefsSources.notificationWebhookUrl = "setup";
+    }
+    // Pin non-default legacy integrationMode (worktree/auto/review). A stored
+    // "direct" matches the old default and is left unpinned so userConfig /
+    // built-in default still apply; deliberate setup --integration worktree
+    // must survive consent removal without falling through to live-tree edits.
+    const storedIntegration = parseIntegrationMode(raw?.integrationMode);
+    if (storedIntegration && storedIntegration !== LEGACY_DEFAULT_INTEGRATION_MODE) {
+      prefsSources.integrationMode = "setup";
     }
   }
   return {

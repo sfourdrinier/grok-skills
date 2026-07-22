@@ -527,6 +527,36 @@ def assert_target_matches(contract: dict, cli_target_relative: str) -> None:
         )
 
 
+def changed_paths_for_only_if_changed(
+    changed_entries,
+    *,
+    fallback: Optional[List[str]] = None,
+) -> List[str]:
+    """Collect destination + rename/copy source paths for onlyIfChanged matching.
+
+    ``list_changed_paths`` / handoff entries use ``path`` (destination) and
+    optional ``oldPath`` (rename/copy source). Destination-only lists would skip
+    a validation scoped to the rename source even though that subtree changed
+    (Codex PR #9). When no tokens are found, return ``fallback`` (legacy
+    ``changed_files`` path strings) or an empty list.
+    """
+    out: List[str] = []
+    seen: set = set()
+    for entry in changed_entries or []:
+        if not isinstance(entry, dict):
+            continue
+        for key in ("path", "oldPath"):
+            p = entry.get(key)
+            if isinstance(p, str) and p and p not in seen:
+                seen.add(p)
+                out.append(p)
+    if out:
+        return out
+    if fallback:
+        return list(fallback)
+    return []
+
+
 def validation_matches_changed(entry: dict, changed_paths) -> bool:
     """True when a requiredValidation entry should run for the given changed paths.
 

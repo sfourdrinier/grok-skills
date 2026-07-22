@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 from typing import List, Union
 
@@ -193,6 +194,77 @@ def _filter_actually_ignored(
     ]
 
 
+def _expand_protected_leaves_under_ignored_dirs(
+    repo: pathlib.Path,
+    candidates: List[str],
+) -> List[str]:
+    """Add deny-scoped leaves under collapsed ignored directories.
+
+    ``ls-files --directory`` reports fully ignored trees as a single entry
+    (e.g. ``secrets/``). Direct-mode deny scans match globs against those
+    inventory paths, so a planted ``secrets/id_rsa`` would not match ``id_rsa``
+    / ``*.pem`` if only the directory token is present (Codex PR #9). Walk each
+    collapsed directory and append paths that match the deny-write SSOT; bulk
+    caches without deny leaves stay collapsed (issue #7).
+    """
+    # Late import keeps path_inventory free of deny_write at module load for
+    # callers that only need NUL split / working-tree listings.
+    from groklib.deny_write import path_matches_deny
+
+    root = pathlib.Path(repo)
+    out: List[str] = list(candidates)
+    seen = set(candidates)
+    # Also index slash-stripped forms so we do not double-add.
+    for entry in candidates:
+        seen.add(entry.rstrip("/"))
+        if not entry.endswith("/"):
+            seen.add(entry + "/")
+
+    for entry in candidates:
+        rel_dir = entry.rstrip("/")
+        abs_dir = root / rel_dir
+        try:
+            if not abs_dir.is_dir() or abs_dir.is_symlink():
+                continue
+        except OSError:
+            continue
+        # Directory entries from --directory often end with "/"; plain files do not.
+        # Still walk any candidate that is a real directory on disk.
+        try:
+            for dirpath, dirnames, filenames in os.walk(
+                str(abs_dir), topdown=True, followlinks=False
+            ):
+                # Never descend into nested .git (deny covers .git/* via other guards).
+                dirnames[:] = [
+                    d
+                    for d in dirnames
+                    if d != ".git" and not (pathlib.Path(dirpath) / d).is_symlink()
+                ]
+                for name in filenames:
+                    abs_file = pathlib.Path(dirpath) / name
+                    # Include regular files and symlink leaves (planted key links).
+                    try:
+                        if not abs_file.is_file() and not abs_file.is_symlink():
+                            continue
+                    except OSError:
+                        continue
+                    try:
+                        rel = abs_file.relative_to(root).as_posix()
+                    except ValueError:
+                        continue
+                    if not path_matches_deny(rel):
+                        continue
+                    if rel not in seen:
+                        seen.add(rel)
+                        out.append(rel)
+        except OSError as exc:
+            _log(
+                "_expand_protected_leaves_under_ignored_dirs",
+                "walk failed under {}: {}".format(rel_dir, exc),
+            )
+    return out
+
+
 def list_ignored_untracked_paths(
     repo: pathlib.Path,
     *,
@@ -208,6 +280,11 @@ def list_ignored_untracked_paths(
 
     Results are filtered with ``git check-ignore`` so untracked parents that only
     contain ignored children are dropped (not themselves ignored).
+
+    Deny-scoped leaves under collapsed ignored directories (e.g. ``secrets/id_rsa``
+    when ``secrets/`` is ignored) are expanded back into the inventory so
+    direct-mode protected-path scans still match basename globs (Codex PR #9).
+    Non-deny leaves under bulk caches stay collapsed.
 
     File-level ignore patterns still list individual files. Escape fingerprinting
     already treats bulk ignored caches as stat-only; directory collapse matches
@@ -226,4 +303,5 @@ def list_ignored_untracked_paths(
         )
         if entry
     ]
-    return _filter_actually_ignored(repo, candidates, error_class=error_class)
+    filtered = _filter_actually_ignored(repo, candidates, error_class=error_class)
+    return _expand_protected_leaves_under_ignored_dirs(repo, filtered)
