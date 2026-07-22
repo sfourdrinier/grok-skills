@@ -68,5 +68,16 @@ class TempHomeIsolationMixin:
         for key in self._TEMP_ENV_KEYS:
             os.environ[key] = isolated_dir
         self.temp_home_isolated_dir = isolated_dir
+        # Issue #8 self-heal must never rewrite the install tree during unit tests.
+        prev_stamp = os.environ.get("GROK_WRAPPER_DISABLE_VERSION_STAMP_SELF_HEAL")
+        os.environ["GROK_WRAPPER_DISABLE_VERSION_STAMP_SELF_HEAL"] = "1"
+
+        def _restore_stamp_flag() -> None:
+            if prev_stamp is None:
+                os.environ.pop("GROK_WRAPPER_DISABLE_VERSION_STAMP_SELF_HEAL", None)
+            else:
+                os.environ["GROK_WRAPPER_DISABLE_VERSION_STAMP_SELF_HEAL"] = prev_stamp
+
+        self.addCleanup(_restore_stamp_flag)
 
         super().setUp()

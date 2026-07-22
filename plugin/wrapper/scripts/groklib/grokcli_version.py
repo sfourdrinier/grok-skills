@@ -9,6 +9,7 @@
 # accepted_version / check_version so callers keep using grokcli.check_version(...).
 
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -137,6 +138,11 @@ def maybe_refresh_accepted_version_stamp(version: str) -> bool:
     ordinary runs and unit tests never mutate the package stamp.
     """
     if not isinstance(version, str) or not version.strip():
+        return False
+    # Unit tests / fake_grok harnesses must never mutate the install stamp.
+    if os.environ.get("GROK_WRAPPER_DISABLE_VERSION_STAMP_SELF_HEAL") == "1":
+        return False
+    if os.environ.get("GROK_WRAPPER_FAKE_GROK") or os.environ.get("GROK_UNITTEST") == "1":
         return False
     version = version.strip()
     current = last_validated_version()

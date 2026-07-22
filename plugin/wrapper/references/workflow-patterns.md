@@ -148,7 +148,7 @@ successful run).
 ### 7b. Consented live-tree direct
 
 Product companion/skills pass `--integration direct` only after per-repo
-setup consent. No external worktree; sandbox write root is the repo root.
+no setup consent. No external worktree; sandbox write root is the repo root.
 
 ```bash
 python3 plugin/wrapper/scripts/grok_agent.py code \
@@ -160,7 +160,7 @@ python3 plugin/wrapper/scripts/grok_agent.py code \
 
 **Check:** edits are on the operator checkout; `worktreePath` is absent/null
 for this path; protected-path post-run guards apply. Do not expect a retained
-external worktree from product-default direct after consent.
+external worktree from product-default direct.
 
 ## 8. Test generation and required validation
 

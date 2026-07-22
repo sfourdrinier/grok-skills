@@ -61,7 +61,13 @@ for marketplace / package tags.
 - **Notification default `auto`** for new installs; **`--execution-context`**
   flag + non-TTY auto-detect for notify context.
 - **Advisory version stamp self-heal** after fully green preflight (best-effort
-  write of `accepted-version.json`).
+  write of `accepted-version.json`; disabled under unit tests).
+- **Docs/agents follow-through:** removed consent ceremony from skills, agents,
+  codex TOMLs, integration-modes, manual-smoke, SECURITY, COMPATIBILITY, manifests.
+- **Adversarial-review fixes:** `setup --json` actually reaches `cmdSetup` (was
+  stripped); setup JSON redacts webhook URLs; `onlyIfChanged: ["."]` is root
+  wildcard; job `runMode` records hardened when contract/continue forces it;
+  `--execution-context` does not override an already-set env.
 
 ### Fixed (worktree prep on large monorepos - issue #7)
 

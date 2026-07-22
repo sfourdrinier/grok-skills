@@ -13,8 +13,8 @@ already cover the companion, gate, and wrapper contracts.
 - Plugin installed via marketplace (cache path) **or** `--plugin-dir ./plugin`.
 - No `GROK_AGENT_WRAPPER` set (prove the bundled layout works).
 - Before any **direct** live-tree code smoke or **direct** peer-stop apply, record
-  consent with `setup --integration direct` (or opt into
-  `auto`/`review`). First direct landing without consent fails closed - see
+  optionally persist prefs with `setup --integration direct` (or opt into
+  `auto`/`review`). Direct lands without a consent gate - see
   [integration-modes.md](integration-modes.md).
 
 ## Install (Claude Code)
@@ -69,7 +69,7 @@ one-shot `code`) with `export GROK_DISABLE_ACP=1`. Spec:
 `docs/specs/2026-07-17-acp-peer-channel-design.md` (Amendments supersede draft).
 Peer always runs in an external retained worktree. Peer-stop applies its
 verified patch itself per the active `--integration` mode (review retains;
-auto/direct apply - direct needs consent; peer direct is stop-time apply, not
+auto/direct apply; peer direct is stop-time apply, not
 live-edit). It is not eligible for `/grok:handoff`.
 
 Live smoke (start -> two prompts -> stop), recorded 2026-07-17
@@ -93,7 +93,7 @@ Reply with exactly: PEER-PONG-2
 GROK_TASK
 # peer-stop finalizes: real validation, then apply/retain per --integration.
 # review|worktree retain the verified patch; auto/direct apply when ready
-# (direct needs consent - run setup --integration direct first if testing
+# (direct is default - no setup consent required for testing
 # apply). Landing is controlled here, not at peer-start. Peer-stop is not
 # completion-notification eligible.
 node "$CLAUDE_PLUGIN_ROOT/scripts/grok-companion.mjs" peer stop \
@@ -133,10 +133,8 @@ not the run dir.
 - [ ] `/grok:reason --task "Reply with exactly: PONG"` → success envelope
 - [ ] `/grok:review --target . --task "list top risks"` → one review envelope (live checkout)
 - [ ] `/grok:review --target . --isolated --task "list risks"` → isolation worktree cleaned after run
-- [ ] `/grok:code` without prior direct consent → refuses direct with trust
-      summary / consent pointer (no silent live-tree edit). Do **not** expect a
-      worktree from the bare **product** default once consent is recorded.
-- [ ] After `/grok:setup --integration direct` (or with recorded consent), bare
+- [ ] `/grok:code` with product default (no setup) → **lands direct** (live tree under hardened-direct). No consent refuse.
+- [ ] After optional `/grok:setup --integration direct` (prefs only), bare
       `/grok:code --target . --base HEAD --task "trivial helper"` → **live-tree**
       direct (edits already on the operator checkout; no external worktree
       retained as the landing path; no auto-commit / no auto-push)
@@ -161,7 +159,7 @@ not the run dir.
 - [ ] `grok-engineer-coder` prefers ACP peer (`peer start/prompt/stop`) with
       one-shot `code` fallback (`GROK_DISABLE_ACP=1`); one shell call path; no
       unrestricted Bash
-- [ ] Peer-stop blocked apply (dirty/consent/integrity) yields failure envelope
+- [ ] Peer-stop blocked apply (dirty/integrity) yields failure envelope
       on stdout + `/grok:result` (not raw wrapper success); no peer toast
 - [ ] `grok-rescue` routes diagnosis to `reason` (not pure implement); one Bash(node) call
 - [ ] Codex: after SessionStart, `~/.codex/agents/grok-*.toml` present with

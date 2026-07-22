@@ -128,7 +128,7 @@ Mode-aware integrate (canonical:
   only if apply did not run or failed.
 - **code review:** never auto-applies - use the checklist below.
 - **ACP peer:** always external worktree during the session; at ready
-  `peer stop`, `direct`/`auto` apply via the same spine (direct needs consent),
+  `peer stop`, `direct`/`auto` apply via the same spine,
   `review` retains. `/grok:handoff` refuses peer runIds (code-mode only).
 
 ### Manual apply (review / when auto did not apply)

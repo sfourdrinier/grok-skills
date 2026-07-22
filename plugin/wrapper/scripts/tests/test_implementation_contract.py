@@ -55,6 +55,8 @@ class OnlyIfChangedTests(unittest.TestCase):
         self.assertFalse(validation_matches_changed(scoped, ["packages/bar/a.ts"]))
         self.assertTrue(validation_matches_changed(scoped, ["packages/foo/x.ts"]))
         self.assertTrue(validation_matches_changed(scoped, ["packages/foo"]))
+        root = {"argv": ["true"], "cwd": ".", "onlyIfChanged": ["."]}
+        self.assertTrue(validation_matches_changed(root, ["any/path.ts"]))
 
     def test_only_if_changed_parsed_on_valid_contract(self) -> None:
         c = validate_contract(

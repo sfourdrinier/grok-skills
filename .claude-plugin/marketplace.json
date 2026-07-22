@@ -4,13 +4,13 @@
     "name": "Stephane Fourdrinier"
   },
   "metadata": {
-    "description": "Grok as a peer implementer for Claude Code: default integration=direct lands consented live-tree edits for one-shot code (ACP peer always external worktree; stop-time apply); auto/review are opt-in worktrees; ACP is the default peer channel (runMode direct is a separate installed-home security posture). Review, reason, verify, continue-run, and verified handoff included. See plugin/references/integration-modes.md. Not affiliated with xAI.",
+    "description": "Grok as a peer implementer for Claude Code: default integration=direct lands live-tree edits for one-shot code (no consent gate; ACP peer always external worktree; stop-time apply); auto/review are opt-in worktrees; ACP is the default peer channel (runMode direct is a separate installed-home security posture). Review, reason, verify, continue-run, and verified handoff included. See plugin/references/integration-modes.md. Not affiliated with xAI.",
     "version": "2.0.1"
   },
   "plugins": [
     {
       "name": "grok",
-      "description": "Grok as a peer implementer for Claude Code: default integration=direct lands consented live-tree edits for one-shot code (ACP peer always external worktree; stop-time apply); auto/review are opt-in worktrees; ACP is the default peer channel (runMode direct is a separate installed-home security posture). Review, reason, verify, continue-run, and verified handoff included. See plugin/references/integration-modes.md. Not affiliated with xAI.",
+      "description": "Grok as a peer implementer for Claude Code: default integration=direct lands live-tree edits for one-shot code (no consent gate; ACP peer always external worktree; stop-time apply); auto/review are opt-in worktrees; ACP is the default peer channel (runMode direct is a separate installed-home security posture). Review, reason, verify, continue-run, and verified handoff included. See plugin/references/integration-modes.md. Not affiliated with xAI.",
       "version": "2.0.1",
       "author": {
         "name": "Stephane Fourdrinier"

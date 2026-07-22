@@ -34,7 +34,7 @@ use `--task-file -` with a single-quoted heredoc.
 Run a Grok `code` implementation through the hardened wrapper and relay its
 result envelope. How edits land is **mode-aware** (canonical:
 `plugin/references/integration-modes.md`): default **direct** edits the real
-tree (hardened-direct; one-time consent); **auto** / **review** use an
+tree (hardened-direct; no consent gate); **auto** / **review** use an
 external git worktree. The wrapper runs the workspace build gate. Nothing is
 ever committed, merged, pushed, or deleted automatically.
 
@@ -50,10 +50,10 @@ Required wrapper flags (copy exactly, substitute only placeholder values):
   frame direct edits; they land on the live tree and protected paths roll back
   after (dirty-overlap policy applies; see integration-modes.md).
 - Optional `--integration direct|auto|review|worktree` (default direct when
-  consented; see `plugin/references/integration-modes.md`).
+  product default; see `plugin/references/integration-modes.md`).
 - Continuation: `--continue-run <runId>` instead of `--target`/`--base` (reuses
   the prior retained worktree; mutually exclusive with `--target`, `--base`, and
-  `--contract-file`). Prior target identity, consent keying, auto apply-on-ready
+  `--contract-file`). Prior target identity, auto apply-on-ready
   on the **new** run, and direct-continue hardened-wrapper lineage: see
   [integration-modes.md](../../references/integration-modes.md) continue-run.
 - Exactly one of `--task <text>` or `--task-file <path>` is required. Prefer
@@ -203,7 +203,7 @@ already live. See `skills/handoff/SKILL.md`,
 `references/integration-modes.md`.
 
 **Integration modes (link only - do not restate):**
-`plugin/references/integration-modes.md` - direct (default, live tree + consent),
+`plugin/references/integration-modes.md` - direct (default, live tree, no consent),
 auto (worktree + apply-on-ready), review (worktree + manual parent apply).
 
 ## Completion trust (2.0.1+)
@@ -241,8 +241,8 @@ GROK_TASK
   **integration=direct** (hardened live-tree landing).
 - Do **not** pass `--target`, `--base`, or `--contract-file` with
   `--continue-run` (usage-error). Target, base, and the prior contract are
-  derived from the prior run (apply/consent keyed on prior `run.json`
-  target/repository). Continue-run is direct-consent exempt; product direct
+  derived from the prior run (apply keyed on prior `run.json`
+  target/repository). Continue-run reuses worktree lineage; product direct
   continues on hardened wrapper worktree lineage (never live direct edit).
 - `--model` / `--timeout` / `--max-turns` / `--web` remain allowed (last-valid
   companion argv SSOT: [argv-safety.md](../../references/argv-safety.md)).

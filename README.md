@@ -339,20 +339,23 @@ Handoff checklist: [implementation-handoff.md](plugin/references/implementation-
 
 `--contract-file` is operator-trusted (`operator-contract-trusted-no-os-sandbox`):
 argv arrays only, cwd confined to the worktree, **no** OS filesystem sandbox claim.
-runMode direct (`setup --run-mode direct`) **rejects** `--contract-file` (fail closed);
+runMode direct (`setup --run-mode direct`) **routes** `--contract-file` through the hardened wrapper for writeScopes/requiredValidation;
 handoff/status/cleanup always use the hardened wrapper even if prefs say direct.
 
 ### Completion notifications (optional, 1.5.0+)
 
-Default is **off**. Turn on for background jobs:
+New installs default to **`auto`** (notify only when execution context is
+background). Silence with `/grok:setup --notification-mode off`. Piped hosts
+auto-detect non-TTY as background when env is unset.
 
 ```text
 /grok:setup --notification-mode auto
+export GROK_COMPANION_EXECUTION_CONTEXT=background
 ```
 
 | Mode | When you get a signal |
 |------|------------------------|
-| `off` (default) | Never |
+| `off` | Never |
 | `auto` | Native toast only if the skill ran with `GROK_COMPANION_EXECUTION_CONTEXT=background` |
 | `native` | OS toast on macOS/Linux desktop (FG or BG) |
 | `webhook` | POST JSON if you also set `--notification-webhook-url https://...` |
@@ -515,7 +518,7 @@ Compatibility notes and versions tested: [docs/COMPATIBILITY.md](docs/COMPATIBIL
 | Review notes files changed during the run | Informational only (dev servers, logs, other editors, or Grok listing paths). Review still **succeeds**; findings apply. Not a failure. See [over-conservatism audit](docs/reviews/2026-07-15-over-conservatism-audit.md). |
 | Warning: "AGENTS.md and CLAUDE.md differ at ..." | Informational (2.0.0+). Both files exist at that level with different bodies (comparison ignores the first/header line, matching `ruleFileParity`) and only AGENTS.md was sent to Grok. Pointer-style CLAUDE.md (`@AGENTS.md`, optionally with surrounding whitespace) never warns. Align the pair, or set `"ruleFileParity": true` in `.grok-skills.json` to enforce matching pairs fail-closed. |
 | `code` fails `unexpected-edits` naming files you changed yourself | Do not commit or edit the target checkout while a hardened `code` run is in flight; the original-checkout guard cannot attribute mid-run divergence. Rerun the task, then integrate in a quiet window. |
-| No completion toast after a long job | Notifications default **off**. Run `/grok:setup --notification-mode auto` and use a **background** skill run (execution context). Headless/Windows: use `webhook`. runMode=direct has limited notify in older builds. Peer-stop is not notify-eligible. |
+| No completion toast after a long job | New installs default notifications to **`auto`** (background only). Set `GROK_COMPANION_EXECUTION_CONTEXT=background` or `--execution-context background` (or pipe non-TTY). Headless/Windows: use `webhook`. Peer-stop is not notify-eligible. |
 | Toast arrived but cannot integrate | Notify is only a signal. Call `/grok:handoff --run-id` and require dual-condition ready before any apply. |
 | `--contract-file` with runMode=direct | Companion routes through hardened wrapper for enforcement. Prefer `setup --run-mode hardened` for handoff artifacts. |
 

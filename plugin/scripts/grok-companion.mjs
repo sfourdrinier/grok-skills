@@ -419,6 +419,7 @@ function hasFlag(args, name) {
 // Post-staging dispatch. Staged stdin cleanup is owned by main()'s finally.
 async function dispatch({
   cwd, stripped, pretty, runModeFlag, integrationFlag, baseRef, resume, fresh, noNotify, staged,
+  jsonOut = false,
 }) {
   const forwardedArgs = staged ? staged.args : stripped;
   let mode = forwardedArgs[0];
@@ -453,9 +454,8 @@ async function dispatch({
   if (mode === "result") return cmdResult(cwd, rest, pretty || rest.includes("--pretty"));
   if (mode === "cancel") return cmdCancel(cwd, rest);
   if (mode === "transfer") return cmdTransfer(cwd, rest);
-  // stripFlags peels --integration AND --run-mode for the code/implement gate;
-  // re-attach BOTH for setup or `/grok:setup --run-mode direct|hardened` would be
-  // silently dropped (cmdSetup never sees it) and the persisted posture stays put.
+  // stripFlags peels --integration, --run-mode, and --json for companion-only
+  // routing; re-attach them for setup so cmdSetup still sees the flags.
   if (mode === "setup") {
     const setupArgs = [
       ...(integrationFlag != null && String(integrationFlag).trim() !== ""
@@ -464,6 +464,9 @@ async function dispatch({
       ...(runModeFlag != null && String(runModeFlag).trim() !== ""
         ? ["--run-mode", String(runModeFlag)]
         : []),
+      // Issue #8 / adversarial review: --json was stripped into jsonOut and never
+      // forwarded, so setup --json was a silent no-op.
+      ...(jsonOut ? ["--json"] : []),
       ...rest,
     ];
     return cmdSetup(cwd, setupArgs);
@@ -619,19 +622,6 @@ async function dispatch({
       if (prev) prev();
     };
   }
-  const track = {
-    kind: mode === "adversarial-review" ? "adversarial-review" : mode === "code" ? "code" : "run",
-    // Keep skill name for notify payload (adversarial-review), wrapperMode for argv.
-    mode: wrapperMode,
-    notifyMode: mode === "adversarial-review" ? "adversarial-review" : wrapperMode,
-    runMode,
-    skipNotify: Boolean(noNotify),
-  };
-  // Staged stdin cleanup is owned by main()'s finally - only inject temps here.
-  const finishCleanups = (code) => {
-    if (extraCleanup) extraCleanup();
-    return code;
-  };
   // Read-only durable-run modes always use the hardened wrapper (state under
   // XDG runs/), even when workspace prefs are setup --run-mode direct.
   const WRAPPER_ONLY_MODES = new Set(["status", "cleanup", "handoff"]);
@@ -652,6 +642,27 @@ async function dispatch({
   // (auto/implement already returned above.) Send them to the wrapper instead.
   const isIsolatedIntegration =
     integrationEffective === "worktree" || integrationEffective === "review";
+  // When workspace is runMode=direct but we force hardened, track effective path.
+  const forcesHardened =
+    WRAPPER_ONLY_MODES.has(wrapperMode) ||
+    hasContinueRun ||
+    isIsolatedIntegration ||
+    (wrapperMode === "code" && hasContractFile);
+  const trackRunMode =
+    runMode === "direct" && forcesHardened ? "hardened" : runMode;
+  const track = {
+    kind: mode === "adversarial-review" ? "adversarial-review" : mode === "code" ? "code" : "run",
+    // Keep skill name for notify payload (adversarial-review), wrapperMode for argv.
+    mode: wrapperMode,
+    notifyMode: mode === "adversarial-review" ? "adversarial-review" : wrapperMode,
+    runMode: trackRunMode,
+    skipNotify: Boolean(noNotify),
+  };
+  // Staged stdin cleanup is owned by main()'s finally - only inject temps here.
+  const finishCleanups = (code) => {
+    if (extraCleanup) extraCleanup();
+    return code;
+  };
   if (runMode === "direct") {
     // Issue #8: --contract-file needs writeScopes/requiredValidation enforcement
     // from the hardened wrapper. Route contract code runs through hardened even
@@ -802,10 +813,16 @@ async function main() {
     resume,
     fresh,
     noNotify,
+    jsonOut,
     executionContext: executionContextFlag,
   } = stripFlags(rawArgs);
-  // Issue #8: --execution-context sets env for this process (notify path).
-  if (executionContextFlag === "foreground" || executionContextFlag === "background") {
+  // Issue #8: --execution-context sets env only when env is unset (env wins).
+  const existingExec = (process.env.GROK_COMPANION_EXECUTION_CONTEXT || "").trim().toLowerCase();
+  if (
+    (executionContextFlag === "foreground" || executionContextFlag === "background") &&
+    existingExec !== "foreground" &&
+    existingExec !== "background"
+  ) {
     process.env.GROK_COMPANION_EXECUTION_CONTEXT = executionContextFlag;
   }
   let staged;
@@ -830,6 +847,7 @@ async function main() {
       fresh,
       noNotify,
       staged,
+      jsonOut: Boolean(jsonOut),
     });
   } finally {
     if (staged) staged.cleanup();

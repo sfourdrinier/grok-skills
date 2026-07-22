@@ -161,7 +161,7 @@ direct/auto. Under runMode hardened, one-shot **code** direct is
 **hardened-direct**: private auth home + OS sandbox write-confined to the
 **repo root** (+ private tmp) + secret redaction on the stdout envelope. ACP
 **peer** keeps isolation on an external worktree for the whole session and only
-lands via stop-time apply when ready + (for direct) consented.
+lands via stop-time apply when ready (direct and auto apply; review retains).
 
 Honest limits for **one-shot code** direct (these are deliberate, not temporary
 gaps to paper over):
@@ -208,10 +208,10 @@ gaps to paper over):
    best-effort detection + rollback, not seatbelt subpath prevention.
 4. **Grok can still READ your files** (documented D-SECRETREAD). Write
    confinement is not a read firewall.
-5. **Consent gate:** first direct landing without `setup --integration direct`
-   (per target repo) fails closed with a trust summary - for code direct runs
-   and for peer-stop direct apply. Env / userConfig alone never counts as
-   consent.
+5. **No consent gate (2.0.1+):** product default `integration=direct` lands on
+   the live tree without a setup ceremony (same class of tool as other host
+   implementers). Isolation is opt-in: choose **`auto`** or **`review`** when
+   you want a worktree and verified patch before land, or peer-stop retain.
 
 Choose **integration=auto** or **review** when you want isolation and a verified
 patch before anything lands on the operator tree (one-shot code), or when you

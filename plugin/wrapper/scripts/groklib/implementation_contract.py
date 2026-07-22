@@ -532,6 +532,7 @@ def validation_matches_changed(entry: dict, changed_paths) -> bool:
 
     Absent/empty ``onlyIfChanged`` => always run. When set, run if any changed
     path equals a prefix or is under ``prefix/`` (issue #8 monorepo scoping).
+    Prefix ``.`` / ``./`` means "any change" (repo root wildcard).
     """
     prefixes = entry.get("onlyIfChanged") if isinstance(entry, dict) else None
     if not prefixes:
@@ -542,7 +543,10 @@ def validation_matches_changed(entry: dict, changed_paths) -> bool:
     for pref in prefixes:
         if not isinstance(pref, str) or not pref:
             continue
-        pref_n = pref.rstrip("/")
+        pref_n = pref.strip().rstrip("/")
+        # Repo-root wildcard: any non-empty change set matches.
+        if pref_n in (".", "", "./"):
+            return True
         for path in changed:
             if not isinstance(path, str):
                 continue

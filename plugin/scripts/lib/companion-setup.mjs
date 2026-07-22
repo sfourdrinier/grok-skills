@@ -408,7 +408,11 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
         targetWorkspace: integrationTargetWorkspace,
         notifications: {
           mode: notifyPrefs.notificationMode,
-          webhookUrl: notifyPrefs.notificationWebhookUrl,
+          // Never dump raw webhook URL (secrets often live in path); parity with human report.
+          webhookUrl: notifyPrefs.notificationWebhookUrl
+            ? formatWebhookDisplay(notifyPrefs.notificationWebhookUrl)
+            : null,
+          webhookConfigured: Boolean(notifyPrefs.notificationWebhookUrl),
         },
         stopReviewGate: Boolean(gate.stopReviewGate),
         codexAgentsScope,

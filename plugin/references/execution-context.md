@@ -22,10 +22,16 @@ node "$SKILL_BASE/run.mjs" review --target '.' --task-file - <<'GROK_TASK'
 GROK_TASK
 ```
 
-Rules (design §11 / PR3):
+Rules (design §11 / PR3; 2.0.1+):
 
-- Values: only `foreground` or `background`. Missing/invalid → treated as **foreground**.
-- Companion uses this for `notificationMode=auto` (notify only when **background**).
+- Values: only `foreground` or `background`.
+- Precedence: env `GROK_COMPANION_EXECUTION_CONTEXT` > companion flag
+  `--execution-context foreground|background` > **auto-detect** when unset
+  (non-TTY stdout → `background`, TTY → `foreground`).
+- Skills/agents should still **export explicitly** in fenced commands for
+  predictable notify behavior; auto-detect is a footgun fix for piped hosts.
+- Companion uses this for `notificationMode=auto` (notify only when
+  **background**). New installs default notification mode to **`auto`**.
 - Companion **never** forwards this env to the Python wrapper.
 - Do **not** change `skill-run.mjs`; set the env in the skill/agent shell only.
 - Completion notify is mode-gated: only

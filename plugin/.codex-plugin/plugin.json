@@ -1,7 +1,7 @@
 {
   "name": "grok",
   "version": "2.0.1",
-  "description": "Grok as a peer implementer for Codex / ChatGPT: default integration=direct lands consented live-tree edits for one-shot code (ACP peer always external worktree; stop-time apply); auto/review are opt-in worktrees; ACP is the default peer channel (runMode direct is a separate installed-home security posture). Review, reason, verify, continue-run, and verified handoff included. See plugin/references/integration-modes.md. Not affiliated with xAI.",
+  "description": "Grok as a peer implementer for Codex / ChatGPT: default integration=direct lands live-tree edits for one-shot code (no consent gate; ACP peer always external worktree; stop-time apply); auto/review are opt-in worktrees; ACP is the default peer channel (runMode direct is a separate installed-home security posture). Review, reason, verify, continue-run, and verified handoff included. See plugin/references/integration-modes.md. Not affiliated with xAI.",
   "author": {
     "name": "Stephane Fourdrinier"
   },
@@ -24,7 +24,7 @@
   "interface": {
     "displayName": "Grok Skills",
     "shortDescription": "Peer implementer for Codex: live-tree code default, ACP peer stop-time apply, verified handoff",
-    "longDescription": "Grok as a peer implementer for Codex CLI and the ChatGPT desktop app. Product default is integration=direct: consented live-tree edits for one-shot code; ACP peer always uses an external worktree and applies only at ready peer-stop (direct needs consent; auto applies; review retains). Auto and review are opt-in isolated worktrees for code. ACP is the default multi-turn peer channel (opt out with GROK_DISABLE_ACP=1); one-shot code is the fallback. runMode is a separate security axis: hardened (default private home + sandbox) vs runMode direct (installed Grok CLI / normal home). Iterate with continue-run; integrate through mode-aware verified handoff / peer-stop. Review, reason, and verify included. Canonical matrix: plugin/references/integration-modes.md. Every mode emits exactly one machine-readable JSON result envelope. The Python engine is bundled inside the plugin install tree so marketplace cache installs work without env hacks. Not affiliated with xAI.",
+    "longDescription": "Grok as a peer implementer for Codex CLI and the ChatGPT desktop app. Product default is integration=direct: live-tree edits for one-shot code (no consent gate); ACP peer always uses an external worktree and applies only at ready peer-stop (direct/auto apply; review retains). Auto and review are opt-in isolated worktrees for code. ACP is the default multi-turn peer channel (opt out with GROK_DISABLE_ACP=1); one-shot code is the fallback. runMode is a separate security axis: hardened (default private home + sandbox) vs runMode direct (installed Grok CLI / normal home). Iterate with continue-run; integrate through mode-aware verified handoff / peer-stop. Review, reason, and verify included. Canonical matrix: plugin/references/integration-modes.md. Every mode emits exactly one machine-readable JSON result envelope. The Python engine is bundled inside the plugin install tree so marketplace cache installs work without env hacks. Not affiliated with xAI.",
     "developerName": "Stephane Fourdrinier",
     "category": "Development & Workflow",
     "capabilities": [

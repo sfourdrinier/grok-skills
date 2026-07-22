@@ -58,9 +58,9 @@ add or move secret-shaped test fixtures cannot produce a handoff patch
 artifact (fail-closed scan); expect retained-worktree manual integration
 (references/implementation-handoff.md).
 
-DEFAULT - multi-turn peer (peer modes and --contract-file require hardened
-runMode; pin --run-mode hardened so a direct-default workspace does not refuse
-peer start / reject --contract-file):
+DEFAULT - multi-turn peer (peer modes require hardened runMode; pin
+--run-mode hardened so a direct-default workspace does not refuse peer start.
+One-shot code + --contract-file routes through the hardened wrapper when needed):
 
   node "$GROK_AGENT_RUN" peer start \\
     --run-mode hardened \\
@@ -85,7 +85,7 @@ envelope when the user wants a pass/fail check.
 
 Peer always uses an external worktree. Peer-stop finalizes with real
 validation and may integrate via the active mode (auto/direct apply the
-verified ready patch when ready - direct needs consent; review leaves patch).
+verified ready patch when ready; review leaves patch).
 Peer direct is stop-time apply, not one-shot code live-edit. Use the peer-stop
 response itself as the ready signal - `/grok:handoff` is code-mode only and
 refuses peer runIds (`handoff-unavailable`); do NOT call it for peer runs. For
