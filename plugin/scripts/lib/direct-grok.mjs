@@ -13,6 +13,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { firstFlagValue, flagValue, resolveWebFlag } from "./companion-args.mjs";
+import { resolveNoPlan, resolveReasoningEffort, resolveRequestedModel } from "./cli-defaults.mjs";
 import { extractTask, stageTaskFile } from "./task-file.mjs";
 
 /** Honest refusal when handoff artifacts are requested for a direct-mode run. */
@@ -431,7 +432,30 @@ export function runDirectGrok({
     return { code: ok ? 0 : 1, envelopeText: `${JSON.stringify(envelope)}\n` };
   }
 
-  const model = flagValue(args, "--model") || "grok-4.5";
+  let reasoningEffort = null;
+  let model;
+  let noPlan;
+  try {
+    reasoningEffort = resolveReasoningEffort(args);
+    model = resolveRequestedModel(args);
+    noPlan = resolveNoPlan(args);
+  } catch (err) {
+    const envelope = {
+      schemaVersion: 1,
+      mode,
+      status: "failure",
+      runId: `direct-${Date.now()}`,
+      error: {
+        class: "usage-error",
+        message: err && err.message ? String(err.message) : "invalid model/effort/plan flag",
+        detail: { flag: "model-or-effort-or-plan" },
+      },
+      response: null,
+      warnings: ["runMode=direct: invalid --model/--reasoning-effort/--plan rejected fail-closed"],
+      policy: { direct: true },
+    };
+    return { code: 1, envelopeText: `${JSON.stringify(envelope)}\n` };
+  }
   // --worktree is a VERIFY-only flag (the retained worktree to inspect). Honor it
   // as the cwd ONLY for verify; for other direct modes it is not a valid flag and
   // must be ignored, or `code --target <consented A> --worktree <B>` would pass
@@ -472,8 +496,13 @@ export function runDirectGrok({
     toolsAllowlist(mode, web),
     "--no-subagents",
     "--no-memory",
-    "--no-plan",
   ];
+  if (noPlan) {
+    argv.push("--no-plan");
+  }
+  if (reasoningEffort) {
+    argv.push("--reasoning-effort", reasoningEffort);
+  }
   if (!web) {
     argv.push("--disable-web-search");
   }

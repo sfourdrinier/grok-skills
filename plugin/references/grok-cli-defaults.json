@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "title": "Grok CLI product defaults (model, reasoning effort, plan pin)",
+  "description": "Single source for the product default model id, reasoning-effort vocabulary, and --no-plan default pin. Python groklib.cli_defaults and Node scripts/lib/cli-defaults.mjs load this file. Do not retype these values in production code. grok-4.5 remains operator-selectable when named and listed by `grok models`; it is not required for preflight.",
+  "defaultModel": "grok-4.6",
+  "deprecatedModels": ["grok-4.5"],
+  "reasoningEffortValues": ["low", "medium", "high", "xhigh"],
+  "noPlanDefault": true
+}

@@ -1,8 +1,9 @@
 {
   "schemaVersion": 2,
   "enforcement": "none",
-  "version": "grok 0.2.110 (b70e0acd09) [alpha]",
-  "validatedAtUtc": "2026-07-22T19:20:00Z",
+  "version": "grok 1.0.3 (1a29d5bc12d4)",
+  "validatedAtUtc": "2026-08-12T23:30:00Z",
   "probeEvidence": "scripts/tests/fixtures/probe-report.md",
-  "note": "Last maintainer-validated Grok CLI build (advisory only). Runtime does NOT require this exact version - any working `grok --version` is accepted. Refreshed after green preflight on 2.0.1 Linux branch (issue #8)."
+  "probeEvidenceNote": "prior probeEvidence retained for history only: scripts/tests/fixtures/probe-report.md (0.2.110 Task 0). 1.0.3 stamp is last-seen working `grok --version` on 2026-08-12; not a runtime allowlist.",
+  "note": "Last maintainer-validated Grok CLI build (advisory only). Runtime does NOT require this exact version - any working `grok --version` is accepted."
 }

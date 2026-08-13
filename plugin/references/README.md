@@ -6,6 +6,10 @@ This plugin is a thin surface over the hardened Grok CLI wrapper. It adds no
 safety logic of its own. Skills and agents shell to the companion, which runs
 the wrapper and relays the single JSON result envelope on stdout VERBATIM.
 
+Product default model, reasoning-effort vocabulary, and the `--no-plan` child
+pin live in [grok-cli-defaults.json](grok-cli-defaults.json) (2.0.3+). Default
+model is `grok-4.6`; `grok-4.5` remains named-ok when selectable.
+
 **Agents:** `grok-engineer-coder` (implement via ACP peer default or code;
 edits land per [integration-modes.md](integration-modes.md); host orchestrates)
 and `grok-rescue` (diagnosis / second opinion). Claude loads `plugin/agents/`

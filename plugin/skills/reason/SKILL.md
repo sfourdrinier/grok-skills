@@ -1,7 +1,7 @@
 ---
 name: "reason"
 description: "Get a cold, isolated Grok second opinion on named artifacts (architecture, debugging, plan critique)"
-argument-hint: "(--task <text> | --task-file <path>) [--input <path> ...] [--rules-file <path> ...] [--web] [--schema <path>] [--model <id>] [--timeout <s>] [--max-turns <n>]"
+argument-hint: "(--task <text> | --task-file <path>) [--input <path> ...] [--rules-file <path> ...] [--web] [--schema <path>] [--model <id>] [--reasoning-effort <low|medium|high|xhigh>] [--plan] [--timeout <s>] [--max-turns <n>]"
 allowed-tools: "Bash(node:*)"
 ---
 

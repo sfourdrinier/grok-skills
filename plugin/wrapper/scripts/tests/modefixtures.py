@@ -95,6 +95,7 @@ class ModeHarness(ProbedPlatformMixin, TempHomeIsolationMixin, unittest.TestCase
         scenario: str = "ok-json",
         repo_root: Optional[pathlib.Path] = None,
         sandbox_profile: Optional[str] = None,
+        control_extra: Optional[dict] = None,
     ):
         """Run main(argv), injecting the fake control + passing sandbox events into each home.
 
@@ -109,8 +110,11 @@ class ModeHarness(ProbedPlatformMixin, TempHomeIsolationMixin, unittest.TestCase
 
         def _patched_create(**kwargs):
             home = real_create(**kwargs)
+            control = {"scenario": scenario, "argvLog": str(self.argv_log_path)}
+            if control_extra:
+                control.update(control_extra)
             (home.home_dir / "fake-grok-control.json").write_text(
-                json.dumps({"scenario": scenario, "argvLog": str(self.argv_log_path)}),
+                json.dumps(control),
                 encoding="utf-8",
             )
             (home.grok_dir / "sandbox-events.jsonl").write_text(

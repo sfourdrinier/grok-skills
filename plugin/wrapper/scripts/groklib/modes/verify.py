@@ -26,6 +26,7 @@ from typing import Optional, Tuple
 from groklib import GrokWrapperError, log_stderr, runstate
 from groklib import worktree as worktree_mod
 from groklib import worktree_escape
+from groklib.cli_defaults import mode_run_cli_kwargs, requested_model_from_args
 from groklib.modes import _shared
 from groklib.modes._worktree import (
     FinalizeStage,
@@ -242,7 +243,7 @@ def run(args: argparse.Namespace) -> dict:
     return run_worktree_mode(
         mode="verify",
         binary=binary,
-        requested_model=args.model,
+        requested_model=requested_model_from_args(args),
         web_access=False,
         timeout_seconds=args.timeout,
         max_turns=args.max_turns,
@@ -252,4 +253,5 @@ def run(args: argparse.Namespace) -> dict:
         prepare=_prepare,
         finalize=_finalize,
         elicit_schema=_VERDICT_SCHEMA,
+        **mode_run_cli_kwargs(args),
     )

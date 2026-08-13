@@ -1,36 +1,13 @@
 # wrapper/scripts/groklib/grokcli.py
 #
-# C6 Grok CLI execution layer: the single module that actually spawns the
-# Grok binary, enforces the wall-clock timeout, and classifies every outcome
-# into a C4 error class. Its correctness IS the point of the module, so every
-# design choice here is pinned by Task 0 probe evidence (probe-report.md) and
-# the C6 invocation baseline, never guessed.
+# C6 Grok CLI execution layer: spawn the Grok binary, enforce wall-clock
+# timeout, classify every outcome into a C4 error class. Pinned by Task 0
+# probe evidence (probe-report.md) and the C6 invocation baseline.
 #
-# Responsibilities:
-#   - accepted_version / check_version: ensure the installed Grok CLI runs
-#     and reports a version line (any working build). accepted-version.json
-#     is last-validated maintainer evidence only - not a runtime allowlist.
-#   - build_argv: emit the EXACT C6 baseline argv (every flag once, no silent
-#     additions), delivering the prompt via --prompt-file (never the
-#     positional/-p/--single form) and honoring the D-WEB web-access toggle.
-#   - build_child_env: a MINIMAL constructed child env (HOME/PATH/TMPDIR
-#     only), never an os.environ passthrough, with GROK_SANDBOX unset so the
-#     --sandbox flag governs.
-#   - execute: spawn via subprocess.Popen in its own process group
-#     (platformsupport.spawn_kwargs_new_group), enforce the timeout via
-#     communicate(timeout=...), and on TimeoutExpired kill the whole process
-#     tree via platformsupport.kill_process_tree (D-PORT: NO raw os.killpg /
-#     start_new_session in this module). Classify timeout, cli-failure,
-#     output-missing, output-malformed, schema-mismatch, cancelled, and
-#     turn-exhaustion; return a GrokRunResult only on a clean success.
-#   - the read-only `grok inspect --json` / `grok models` probes (inspect_home /
-#     probe_login) now live in groklib.grokcli_probe, reusing this module's
-#     minimal-child-env + active-process-registry helpers (900-line cap split).
-#
-# stdout discipline: this module NEVER writes to stdout (the only stdout
-# writer in the package is envelope.emit_envelope). All diagnostics go to
-# stderr through the shared log helper. The child process writes to its own
-# captured stdout pipe, which this module reads but never re-emits.
+# check_version: any working `grok --version` (accepted-version.json is
+# advisory only). build_argv: exact C6 baseline, prompt via --prompt-file.
+# Child env is HOME/PATH/TMPDIR only (GROK_SANDBOX unset). inspect/models
+# probes live in grokcli_probe. Never writes stdout.
 
 import contextlib
 import dataclasses
@@ -50,6 +27,7 @@ from groklib import grokstream
 from groklib import platformsupport
 from groklib.authhome import PrivateHome
 from groklib.envelope import redact_secret_value_text
+from groklib.cli_defaults import append_child_pins
 from groklib.grokcli_version import ACCEPTED_VERSION_FILE, accepted_version, check_version
 from groklib.progress import ProgressWriter
 from groklib.sandbox import SandboxPolicy
@@ -128,6 +106,7 @@ C6_BASELINE_FLAGS = frozenset(
         "--no-memory",
         "--disable-web-search",
         "--no-plan",
+        "--reasoning-effort",
         "--sandbox",
         "--max-turns",
         "--session-id",
@@ -251,6 +230,8 @@ class GrokRunSpec:
     # When True, build_argv emits --resume <session_id> instead of --session-id
     # (continuation after session_store.seed_sessions; see session-resume probe).
     resume_session: bool = False
+    reasoning_effort: "str|None" = None
+    no_plan: bool = True
 
 
 @dataclasses.dataclass(frozen=True)
@@ -340,7 +321,9 @@ def build_argv(spec: GrokRunSpec) -> List[str]:
     if not spec.web_access:
         argv.append("--disable-web-search")
 
-    argv.append("--no-plan")
+    append_child_pins(
+        argv, reasoning_effort=spec.reasoning_effort, no_plan=spec.no_plan
+    )
 
     argv.extend(["--sandbox", spec.sandbox.profile])
     # Optional: only pass --max-turns when the operator set an explicit budget.

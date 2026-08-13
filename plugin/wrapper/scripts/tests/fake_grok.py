@@ -40,11 +40,11 @@ _CONTROL_FILENAME = "fake-grok-control.json"
 _MODELS_OK = (
     "You are logged in with grok.com.\n"
     "\n"
-    "Default model: grok-4.5\n"
+    "Default model: grok-4.6\n"
     "\n"
     "Available models:\n"
-    "  * grok-4.5 (default)\n"
-    "  - grok-composer-2.5-fast\n"
+    "  * grok-4.6 (default)\n"
+    "  - grok-4.5\n"
 )
 _MODELS_LOGGEDOUT = (
     "You are not logged in.\n"
@@ -182,8 +182,33 @@ def _emit_stream(payload: "dict") -> None:
     _emit_line(end)
 
 
+def _apply_effective_model(payload: "dict") -> None:
+    """Align fixture modelUsage with requested --model unless a control override is set.
+
+    Historical Task-0 fixtures key usage as grok-4.5. Product default is now
+    grok-4.6; remapping keeps family checks honest without rewriting every
+    fixture. Explicit effectiveModel / a non-fixture usage key is left alone.
+    """
+    control = _load_control()
+    override = _control_value(control, "effectiveModel", "FAKE_GROK_EFFECTIVE_MODEL")
+    usage = payload.get("modelUsage")
+    if not isinstance(usage, dict) or not usage:
+        return
+    first = next(iter(usage.values()))
+    if override:
+        payload["modelUsage"] = {override: first}
+        return
+    fixture_keys = {"grok-4.5", "grok-4.5-build"}
+    if set(usage.keys()) <= fixture_keys:
+        requested = _arg_value("--model")
+        if requested:
+            suffix = "-build" if any(str(k).endswith("-build") for k in usage) else ""
+            payload["modelUsage"] = {requested + suffix: first}
+
+
 def _emit_result(payload: "dict") -> None:
     """Emit a run payload as a streaming-json stream or a single json blob per the requested format."""
+    _apply_effective_model(payload)
     if _streaming_requested():
         _emit_stream(payload)
     else:

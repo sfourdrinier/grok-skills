@@ -565,6 +565,8 @@ def _execute_and_verify(
         web_access=run.web_access,
         home=home,
         resume_session=resume_session,
+        reasoning_effort=run.reasoning_effort,
+        no_plan=run.no_plan,
     )
     result = grokcli.execute(spec, progress)
     # Publish the produced result IMMEDIATELY so a post-run check raising below

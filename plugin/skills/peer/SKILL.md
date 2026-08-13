@@ -1,7 +1,7 @@
 ---
 name: "peer"
 description: "ACP multi-turn peer channel (start/prompt/stop). Default peer path; opt out with GROK_DISABLE_ACP=1"
-argument-hint: "start --target <path> --base <rev> [--contract-file <path>] [--model] | prompt --run-id <id> (--task|--task-file) | stop --run-id <id>"
+argument-hint: "start --target <path> --base <rev> [--contract-file <path>] [--model] [--reasoning-effort <low|medium|high|xhigh>] [--plan] | prompt --run-id <id> (--task|--task-file) | stop --run-id <id>"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
 
@@ -80,7 +80,7 @@ stays resident serving a wrapper-owned unix control socket (0600). Records
 the external worktree.
 
 ```bash
-node "$SKILL_BASE/run.mjs" peer start --target '<path>' --base '<rev>' [--contract-file '<path>'] [--model '<id>']
+node "$SKILL_BASE/run.mjs" peer start --target '<path>' --base '<rev>' [--contract-file '<path>'] [--model '<id>'] [--reasoning-effort '<low|medium|high|xhigh>'] [--plan]
 ```
 
 Optional `--contract-file` is the same operator-trusted writeScopes +

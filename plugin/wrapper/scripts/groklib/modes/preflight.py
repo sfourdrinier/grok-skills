@@ -26,6 +26,7 @@ from groklib.progress import ProgressWriter
 # name so the existing preflight test seam (which patches
 # ``preflight._source_grok_dir``) keeps working while the path logic lives once
 # in _shared.
+from groklib.cli_defaults import DEFAULT_MODEL
 from groklib.modes._shared import (
     AUTH_FILE_NAMES,
     resolve_binary as _resolve_binary,
@@ -38,7 +39,7 @@ from groklib.modes._shared import (
 # that a concurrent run legitimately owns; it only proves the sweep runs.
 _STALE_HOME_MAX_AGE_SECONDS = 86400
 
-_REQUESTED_MODEL = "grok-4.5"
+_REQUESTED_MODEL = DEFAULT_MODEL
 _SANDBOX_MODES = ("review", "reason", "code", "verify")
 
 
@@ -99,7 +100,9 @@ def _check_home_and_login(
                 {"models": list(models)},
             )
         progress.safe_emit(
-            "grok", "probe_login: logged in, grok-4.5 selectable", data={"defaultModel": login.get("defaultModel")}
+            "grok",
+            "probe_login: logged in, {} selectable".format(_REQUESTED_MODEL),
+            data={"defaultModel": login.get("defaultModel")},
         )
         checks.append({"name": "login", "ok": True, "detail": "logged in; default {}".format(login.get("defaultModel"))})
     finally:

@@ -127,6 +127,8 @@ class ModeRun:
     # When True with a seeded archive, build_argv emits --resume instead of
     # --session-id (docs/research/2026-07-17-session-resume-probe.md).
     resume_session: bool = False
+    reasoning_effort: Optional[str] = None
+    no_plan: bool = True
 
 
 def effective_tools(tools: Tuple[str, ...], web_access: bool) -> List[str]:
