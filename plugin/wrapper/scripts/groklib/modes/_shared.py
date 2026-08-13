@@ -32,6 +32,7 @@ from typing import Callable, List, Optional, Tuple
 from groklib import GrokWrapperError, log_stderr, runstate
 from groklib import grokcli
 from groklib import platformsupport
+from groklib.cli_defaults import is_same_model_family as _is_same_model_family
 from groklib import session_store
 from groklib.authhome import (
     PrivateHome,
@@ -462,18 +463,6 @@ def _grok_reported_changes(parsed: Optional[dict]) -> List[str]:
         elif isinstance(value, str) and value.strip():
             changes.append(value)
     return changes
-
-
-def _is_same_model_family(effective: str, requested_model: str) -> bool:
-    """True iff ``effective`` is the requested model exactly, or a hyphen-delimited sub-variant of it.
-
-    A raw ``startswith`` is wrong: requesting ``grok-4`` would then accept
-    ``grok-4.5`` (Grok dogfood #4), silently treating a different model family as
-    a success. The boundary is a literal ``-`` separator, so ``grok-4.5`` accepts
-    the exact ``grok-4.5`` and build variants like ``grok-4.5-build``, while
-    ``grok-4`` accepts ``grok-4`` / ``grok-4-...`` but NOT ``grok-4.5``.
-    """
-    return effective == requested_model or effective.startswith(requested_model + "-")
 
 
 def _assert_effective_model(result: grokcli.GrokRunResult, requested_model: str) -> str:

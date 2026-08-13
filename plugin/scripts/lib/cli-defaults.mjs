@@ -18,12 +18,10 @@ export const CLI_DEFAULTS_SSOT_PATH = path.resolve(
 
 let _doc = null;
 
-export function loadCliDefaults() {
-  if (_doc) return _doc;
-  if (!fs.existsSync(CLI_DEFAULTS_SSOT_PATH)) {
-    throw new Error(`cli-defaults SSOT missing at ${CLI_DEFAULTS_SSOT_PATH}`);
+export function parseCliDefaultsDoc(doc) {
+  if (!doc || typeof doc !== "object") {
+    throw new Error("cli-defaults SSOT must be an object");
   }
-  const doc = JSON.parse(fs.readFileSync(CLI_DEFAULTS_SSOT_PATH, "utf8"));
   if (typeof doc.defaultModel !== "string" || !doc.defaultModel.trim()) {
     throw new Error("cli-defaults SSOT missing defaultModel");
   }
@@ -34,10 +32,18 @@ export function loadCliDefaults() {
   ) {
     throw new Error("cli-defaults SSOT has empty/invalid reasoningEffortValues");
   }
-  if (doc.noPlanDefault !== true) {
-    throw new Error("cli-defaults SSOT noPlanDefault must be true");
+  if (typeof doc.noPlanDefault !== "boolean") {
+    throw new Error("cli-defaults SSOT noPlanDefault must be a boolean");
   }
-  _doc = doc;
+  return doc;
+}
+
+export function loadCliDefaults() {
+  if (_doc) return _doc;
+  if (!fs.existsSync(CLI_DEFAULTS_SSOT_PATH)) {
+    throw new Error(`cli-defaults SSOT missing at ${CLI_DEFAULTS_SSOT_PATH}`);
+  }
+  _doc = parseCliDefaultsDoc(JSON.parse(fs.readFileSync(CLI_DEFAULTS_SSOT_PATH, "utf8")));
   return _doc;
 }
 
@@ -47,6 +53,25 @@ export function defaultModel() {
 
 export function reasoningEffortValues() {
   return loadCliDefaults().reasoningEffortValues.slice();
+}
+
+export function noPlanDefault() {
+  return loadCliDefaults().noPlanDefault;
+}
+
+export function isSameModelFamily(effective, requested) {
+  if (typeof effective !== "string" || typeof requested !== "string") return false;
+  return effective === requested || effective.startsWith(`${requested}-`);
+}
+
+export function effectiveModelFromUsage(modelUsage) {
+  if (!modelUsage || typeof modelUsage !== "object" || Array.isArray(modelUsage)) {
+    return null;
+  }
+  for (const key of Object.keys(modelUsage)) {
+    if (typeof key === "string" && key) return key;
+  }
+  return null;
 }
 
 export function parseReasoningEffort(raw) {
@@ -65,6 +90,15 @@ export function parseReasoningEffort(raw) {
     throw err;
   }
   return value;
+}
+
+export function parseRequestedModel(raw) {
+  if (typeof raw !== "string" || !raw.trim()) {
+    const err = new Error("model id must be a non-empty string");
+    err.code = "usage-error";
+    throw err;
+  }
+  return raw.trim();
 }
 
 function takeEffortToken(token) {
@@ -99,8 +133,8 @@ export function resolveReasoningEffort(args) {
 }
 
 export function resolveNoPlan(args) {
-  if (!Array.isArray(args)) return true;
-  let last = true;
+  if (!Array.isArray(args)) return noPlanDefault();
+  let last = noPlanDefault();
   for (const a of args) {
     if (typeof a !== "string") continue;
     if (a === "--plan") {
@@ -131,19 +165,16 @@ export function resolveRequestedModel(args) {
     if (a === "--model") {
       const next = args[i + 1];
       seen = true;
-      last = next !== undefined && !isFlagToken(next) ? String(next) : "";
+      last = parseRequestedModel(
+        next !== undefined && !isFlagToken(next) ? String(next) : ""
+      );
       continue;
     }
     if (typeof a === "string" && a.startsWith("--model=")) {
       seen = true;
-      last = a.slice("--model=".length);
+      last = parseRequestedModel(a.slice("--model=".length));
     }
   }
   if (!seen) return defaultModel();
-  if (typeof last !== "string" || !last.trim()) {
-    const err = new Error("model id must be a non-empty string");
-    err.code = "usage-error";
-    throw err;
-  }
-  return last.trim();
+  return last;
 }

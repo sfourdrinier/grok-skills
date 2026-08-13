@@ -32,11 +32,18 @@ for marketplace / package tags.
   in `plugin/references/grok-cli-defaults.json` (Python `groklib.cli_defaults` +
   Node `scripts/lib/cli-defaults.mjs`). Docs no longer claim
   `grok-composer-2.5-fast` as a current selectable pair.
+- Codex review on PR #11: direct path family-checks `modelUsage` (no silent
+  4.5 success when 4.6 was requested); Node type-checks every `--model`
+  occurrence; SSOT load failures emit a classified envelope; `noPlanDefault`
+  is read from the JSON; wrapper `SKILL.md` lists `--reasoning-effort` /
+  `--plan` on reason/code/verify; `accepted-version.json` stays on the last
+  probed 0.2.110 stamp and records 1.0.3 as last-seen only.
 
 ### Notes
 
 - Runtime still accepts any working `grok --version` (no version allowlist). The
-  advisory `accepted-version.json` stamp stays `enforcement: none`.
+  advisory `accepted-version.json` stamp stays `enforcement: none` and is not
+  updated without a full probe suite.
 
 ## [2.0.2] - 2026-07-22
 

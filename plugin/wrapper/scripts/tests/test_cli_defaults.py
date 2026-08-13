@@ -227,10 +227,14 @@ class WrapperParseAndArgvTests(GrokCliTestBase):
 
 class FamilyAndPreflightTests(unittest.TestCase):
     def test_family_check_rejects_4_5_when_4_6_requested(self) -> None:
-        self.assertFalse(_shared._is_same_model_family("grok-4.5", "grok-4.6"))
-        self.assertFalse(_shared._is_same_model_family("grok-4.5-build", "grok-4.6"))
-        self.assertTrue(_shared._is_same_model_family("grok-4.6", "grok-4.6"))
-        self.assertTrue(_shared._is_same_model_family("grok-4.6-build", "grok-4.6"))
+        from groklib.cli_defaults import is_same_model_family
+
+        self.assertFalse(is_same_model_family("grok-4.5", "grok-4.6"))
+        self.assertFalse(is_same_model_family("grok-4.5-build", "grok-4.6"))
+        self.assertTrue(is_same_model_family("grok-4.6", "grok-4.6"))
+        self.assertTrue(is_same_model_family("grok-4.6-build", "grok-4.6"))
+        self.assertFalse(is_same_model_family("grok-4.5", "grok-4"))
+        self.assertIs(_shared._is_same_model_family, is_same_model_family)
 
         class _Result:
             effective_model = "grok-4.5"
@@ -242,9 +246,66 @@ class FamilyAndPreflightTests(unittest.TestCase):
     def test_preflight_requires_default_model_not_grok_4_5(self) -> None:
         from groklib.cli_defaults import DEFAULT_MODEL
 
-        self.assertEqual(preflight._REQUESTED_MODEL, DEFAULT_MODEL)
-        self.assertEqual(preflight._REQUESTED_MODEL, "grok-4.6")
-        self.assertNotEqual(preflight._REQUESTED_MODEL, "grok-4.5")
+        self.assertEqual(preflight._requested_model(), DEFAULT_MODEL)
+        self.assertEqual(preflight._requested_model(), "grok-4.6")
+        self.assertNotEqual(preflight._requested_model(), "grok-4.5")
+
+    def test_no_plan_default_is_read_from_ssot_not_hardcoded(self) -> None:
+        from groklib import cli_defaults
+
+        doc = cli_defaults.load_cli_defaults()
+        self.assertIsInstance(doc["noPlanDefault"], bool)
+        self.assertEqual(cli_defaults.NO_PLAN_DEFAULT, doc["noPlanDefault"])
+        src = pathlib.Path(cli_defaults.__file__).read_text(encoding="utf-8")
+        self.assertIn('NO_PLAN_DEFAULT = bool(doc["noPlanDefault"])', src)
+        self.assertNotIn("NO_PLAN_DEFAULT = True", src)
+        self.assertNotIn("noPlanDefault must be true", src)
+
+    def test_ssot_load_failure_emits_classified_envelope(self) -> None:
+        import json
+
+        from groklib import cli_defaults
+        from tests.test_entrypoint import _run_main
+
+        missing = pathlib.Path("/nonexistent/grok-cli-defaults.json")
+        cli_defaults.reset_cli_defaults_cache()
+        try:
+            with mock.patch.object(cli_defaults, "cli_defaults_ssot_path", return_value=missing):
+                code, stdout = _run_main(["preflight"])
+        finally:
+            cli_defaults.reset_cli_defaults_cache()
+        self.assertNotEqual(code, 0, stdout)
+        self.assertTrue(stdout.strip(), "stdout must carry one envelope, not a traceback-only failure")
+        env = json.loads(stdout.strip().splitlines()[-1])
+        self.assertEqual(env["status"], "failure")
+        self.assertEqual(env["error"]["class"], "cli-failure")
+        self.assertRegex(env["error"]["message"], r"SSOT|cli-defaults", env["error"]["message"])
+
+    def test_accepted_version_stamp_is_last_probed_not_last_seen(self) -> None:
+        import json
+
+        stamp_path = grokcli.ACCEPTED_VERSION_FILE
+        doc = json.loads(stamp_path.read_text(encoding="utf-8"))
+        version = str(doc.get("version") or "")
+        self.assertIn("0.2.110", version, doc)
+        self.assertNotIn(
+            "1.0.3",
+            version,
+            "do not stamp an unprobed CLI build as validated; record it as last-seen only",
+        )
+        last_seen = "{} {}".format(doc.get("lastSeenWorking") or "", doc.get("note") or "")
+        self.assertIn("1.0.3", last_seen, doc)
+
+    def test_wrapper_skill_documents_effort_and_plan_on_every_run_mode(self) -> None:
+        skill = pathlib.Path(__file__).resolve().parents[2] / "SKILL.md"
+        text = skill.read_text(encoding="utf-8")
+        for heading in ("### `reason`", "### `code`", "### `verify`"):
+            start = text.find(heading)
+            self.assertNotEqual(start, -1, "missing {} in {}".format(heading, skill))
+            nxt = text.find("\n### ", start + len(heading))
+            section = text[start : nxt if nxt != -1 else None]
+            self.assertIn("--reasoning-effort", section, heading)
+            self.assertIn("--plan", section, heading)
 
 
 class PeerArgvDefaultsTests(unittest.TestCase):

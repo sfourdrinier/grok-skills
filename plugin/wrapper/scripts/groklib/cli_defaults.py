@@ -20,30 +20,70 @@ _DATA_PATH = (
 
 _LOADED = False
 _DOC: dict = {}
+_BOOTSTRAP_NAMES = (
+    "DEFAULT_MODEL",
+    "REASONING_EFFORT_VALUES",
+    "NO_PLAN_DEFAULT",
+    "DEPRECATED_MODELS",
+)
 
 
 def cli_defaults_ssot_path() -> pathlib.Path:
     return _DATA_PATH
 
 
+def reset_cli_defaults_cache() -> None:
+    """Drop cached SSOT so the next attribute access reloads (tests)."""
+    global _LOADED, _DOC
+    _LOADED = False
+    _DOC = {}
+    g = globals()
+    for name in _BOOTSTRAP_NAMES:
+        g.pop(name, None)
+
+
 def load_cli_defaults() -> dict:
     global _LOADED, _DOC
     if _LOADED:
         return _DOC
-    if not _DATA_PATH.is_file():
-        raise RuntimeError("cli-defaults SSOT missing at {}".format(_DATA_PATH))
-    with _DATA_PATH.open("r", encoding="utf-8") as fh:
-        doc = json.load(fh)
+    path = cli_defaults_ssot_path()
+    if not path.is_file():
+        raise GrokWrapperError(
+            "cli-failure",
+            "cli-defaults SSOT missing at {}".format(path),
+            {"path": str(path)},
+        )
+    try:
+        with path.open("r", encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise GrokWrapperError(
+            "cli-failure",
+            "cli-defaults SSOT unreadable at {}: {}".format(path, exc),
+            {"path": str(path)},
+        ) from exc
     model = doc.get("defaultModel")
     efforts = doc.get("reasoningEffortValues")
     if not isinstance(model, str) or not model.strip():
-        raise RuntimeError("cli-defaults SSOT missing defaultModel")
+        raise GrokWrapperError(
+            "cli-failure",
+            "cli-defaults SSOT missing defaultModel",
+            {"path": str(path)},
+        )
     if not isinstance(efforts, list) or not efforts or not all(
         isinstance(v, str) and v for v in efforts
     ):
-        raise RuntimeError("cli-defaults SSOT has empty/invalid reasoningEffortValues")
-    if doc.get("noPlanDefault") is not True:
-        raise RuntimeError("cli-defaults SSOT noPlanDefault must be true")
+        raise GrokWrapperError(
+            "cli-failure",
+            "cli-defaults SSOT has empty/invalid reasoningEffortValues",
+            {"path": str(path)},
+        )
+    if not isinstance(doc.get("noPlanDefault"), bool):
+        raise GrokWrapperError(
+            "cli-failure",
+            "cli-defaults SSOT noPlanDefault must be a boolean",
+            {"path": str(path)},
+        )
     _DOC = doc
     _LOADED = True
     return _DOC
@@ -64,12 +104,25 @@ def _bootstrap() -> None:
     doc = load_cli_defaults()
     DEFAULT_MODEL = str(doc["defaultModel"])
     REASONING_EFFORT_VALUES = tuple(str(v) for v in doc["reasoningEffortValues"])
-    NO_PLAN_DEFAULT = True
+    NO_PLAN_DEFAULT = bool(doc["noPlanDefault"])
     deprecated = doc.get("deprecatedModels") or []
     DEPRECATED_MODELS = tuple(str(v) for v in deprecated if isinstance(v, str))
 
 
-_bootstrap()
+def __getattr__(name: str):
+    if name in _BOOTSTRAP_NAMES:
+        _bootstrap()
+        return globals()[name]
+    raise AttributeError("module {!r} has no attribute {!r}".format(__name__, name))
+
+
+def is_same_model_family(effective: str, requested_model: str) -> bool:
+    """True iff ``effective`` is the requested model or a hyphen-delimited sub-variant.
+
+    A raw ``startswith`` is wrong: requesting ``grok-4`` would then accept
+    ``grok-4.5``. The boundary is a literal ``-`` separator.
+    """
+    return effective == requested_model or effective.startswith(requested_model + "-")
 
 
 def parse_reasoning_effort(raw: object) -> str:
@@ -163,11 +216,12 @@ def append_child_pins(
     argv: List[str],
     *,
     reasoning_effort: Optional[str] = None,
-    no_plan: bool = True,
+    no_plan: Optional[bool] = None,
 ) -> None:
     """Append the shared --reasoning-effort / --no-plan pins (C6 globals)."""
     effort = require_reasoning_effort(reasoning_effort)
     if effort is not None:
         argv.extend(["--reasoning-effort", effort])
-    if no_plan:
+    pin = NO_PLAN_DEFAULT if no_plan is None else no_plan
+    if pin:
         argv.append("--no-plan")

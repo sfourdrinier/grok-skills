@@ -13,7 +13,13 @@ import os from "node:os";
 import path from "node:path";
 
 import { firstFlagValue, flagValue, resolveWebFlag } from "./companion-args.mjs";
-import { resolveNoPlan, resolveReasoningEffort, resolveRequestedModel } from "./cli-defaults.mjs";
+import {
+  effectiveModelFromUsage,
+  isSameModelFamily,
+  resolveNoPlan,
+  resolveReasoningEffort,
+  resolveRequestedModel,
+} from "./cli-defaults.mjs";
 import { extractTask, stageTaskFile } from "./task-file.mjs";
 
 /** Honest refusal when handoff artifacts are requested for a direct-mode run. */
@@ -544,8 +550,10 @@ export function runDirectGrok({
   let responseText = raw;
   let parsedStopReason = null;
   let parsedNumTurns = null;
+  let parsedDoc = null;
   try {
     const parsed = JSON.parse(raw);
+    parsedDoc = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
     responseText =
       parsed.result ??
       parsed.response ??
@@ -566,6 +574,40 @@ export function runDirectGrok({
     }
   } catch {
     // keep raw
+  }
+
+  const processOkEarly = result.status === 0;
+  const grokShaped =
+    parsedDoc != null &&
+    (parsedDoc.modelUsage != null ||
+      parsedDoc.stopReason != null ||
+      parsedDoc.sessionId != null);
+  if (processOkEarly && grokShaped) {
+    const effective = effectiveModelFromUsage(parsedDoc.modelUsage);
+    if (typeof effective !== "string" || !isSameModelFamily(effective, model)) {
+      const envelope = {
+        schemaVersion: 1,
+        mode,
+        status: "failure",
+        runId: `direct-${Date.now()}`,
+        error: {
+          class: "model-unavailable",
+          message:
+            "grok ran model " +
+            JSON.stringify(effective) +
+            " which is not in the requested " +
+            JSON.stringify(model) +
+            " family",
+          detail: { requestedModel: model, effectiveModel: effective },
+        },
+        response: null,
+        warnings: [
+          "runMode=direct: effective modelUsage is not in the requested family (no silent fallback)",
+        ],
+        policy: { direct: true, model },
+      };
+      return { code: 1, envelopeText: `${JSON.stringify(envelope)}\n` };
+    }
   }
 
   const processOk = result.status === 0;

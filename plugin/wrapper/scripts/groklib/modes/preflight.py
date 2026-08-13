@@ -26,7 +26,7 @@ from groklib.progress import ProgressWriter
 # name so the existing preflight test seam (which patches
 # ``preflight._source_grok_dir``) keeps working while the path logic lives once
 # in _shared.
-from groklib.cli_defaults import DEFAULT_MODEL
+from groklib import cli_defaults
 from groklib.modes._shared import (
     AUTH_FILE_NAMES,
     resolve_binary as _resolve_binary,
@@ -39,7 +39,10 @@ from groklib.modes._shared import (
 # that a concurrent run legitimately owns; it only proves the sweep runs.
 _STALE_HOME_MAX_AGE_SECONDS = 86400
 
-_REQUESTED_MODEL = DEFAULT_MODEL
+def _requested_model() -> str:
+    return cli_defaults.DEFAULT_MODEL
+
+
 _SANDBOX_MODES = ("review", "reason", "code", "verify")
 
 
@@ -93,15 +96,15 @@ def _check_home_and_login(
         leader_socket = runstate.allocate_leader_socket(home.home_dir, run_paths.run_id)
         login = grokcli_probe.probe_login(binary, home, leader_socket)
         models = login.get("models") or []
-        if _REQUESTED_MODEL not in models:
+        if _requested_model() not in models:
             raise GrokWrapperError(
                 "model-unavailable",
-                "{} is not selectable in the private-home login probe".format(_REQUESTED_MODEL),
+                "{} is not selectable in the private-home login probe".format(_requested_model()),
                 {"models": list(models)},
             )
         progress.safe_emit(
             "grok",
-            "probe_login: logged in, {} selectable".format(_REQUESTED_MODEL),
+            "probe_login: logged in, {} selectable".format(_requested_model()),
             data={"defaultModel": login.get("defaultModel")},
         )
         checks.append({"name": "login", "ok": True, "detail": "logged in; default {}".format(login.get("defaultModel"))})
@@ -266,7 +269,7 @@ def _advance_preflight_running(run_paths: runstate.RunPaths) -> None:
     runstate.cas_update_run_record(
         run_paths,
         rev,
-        {"requestedModel": _REQUESTED_MODEL, "status": "running"},
+        {"requestedModel": _requested_model(), "status": "running"},
     )
 
 
@@ -428,7 +431,7 @@ def _run_preflight_body(
             error_class=exc.error_class,
             message=str(exc),
             detail=exc.detail or None,
-            requestedModel=_REQUESTED_MODEL,
+            requestedModel=_requested_model(),
             progressStreamPath=str(run_paths.progress_path),
             response={"checks": checks},
             cleanup=probe_cleanup_holder[0],
@@ -460,7 +463,7 @@ def _run_preflight_body(
         run_id=run_paths.run_id,
         mode="preflight",
         status="success",
-        requestedModel=_REQUESTED_MODEL,
+        requestedModel=_requested_model(),
         progressStreamPath=str(run_paths.progress_path),
         response=response,
     )

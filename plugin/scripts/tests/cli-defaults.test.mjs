@@ -15,7 +15,10 @@ import { test } from "node:test";
 import {
   CLI_DEFAULTS_SSOT_PATH,
   defaultModel,
+  isSameModelFamily,
   loadCliDefaults,
+  noPlanDefault,
+  parseCliDefaultsDoc,
   parseReasoningEffort,
   reasoningEffortValues,
   resolveNoPlan,
@@ -96,6 +99,15 @@ test("resolveRequestedModel omits to default; blank --model fails closed", () =>
   assert.equal(resolveRequestedModel(["--model", "grok-4.5"]), "grok-4.5");
   assert.throws(() => resolveRequestedModel(["--model="]), /model|usage/i);
   assert.throws(() => resolveRequestedModel(["--model", "   "]), /model|usage/i);
+  // Argparse type-checks every occurrence; last-wins must not hide an earlier blank.
+  assert.throws(
+    () => resolveRequestedModel(["--model=", "--model", "grok-4.5"]),
+    /model|usage/i
+  );
+  assert.throws(
+    () => resolveRequestedModel(["--model", "  ", "--model", "grok-4.5"]),
+    /model|usage/i
+  );
 });
 
 test("runDirectGrok default argv requests grok-4.6, pins --no-plan, omits effort", () => {
@@ -218,6 +230,61 @@ test("runDirectGrok invalid effort fails closed as usage-error", () => {
     assert.equal(env.status, "failure");
     assert.equal(env.error.class, "usage-error");
     assert.doesNotMatch(res.envelopeText, /should-not-run/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("isSameModelFamily matches the hyphen-boundary rule (not startswith)", () => {
+  assert.equal(isSameModelFamily("grok-4.6", "grok-4.6"), true);
+  assert.equal(isSameModelFamily("grok-4.6-build", "grok-4.6"), true);
+  assert.equal(isSameModelFamily("grok-4.5", "grok-4.6"), false);
+  assert.equal(isSameModelFamily("grok-4.5-build", "grok-4.6"), false);
+  assert.equal(isSameModelFamily("grok-4.5", "grok-4"), false);
+});
+
+test("noPlanDefault is the SSOT boolean, not a hardcoded true check", () => {
+  const doc = loadCliDefaults();
+  assert.equal(typeof doc.noPlanDefault, "boolean");
+  assert.equal(noPlanDefault(), doc.noPlanDefault);
+  assert.equal(resolveNoPlan([]), doc.noPlanDefault);
+  const flipped = parseCliDefaultsDoc({ ...doc, noPlanDefault: false });
+  assert.equal(flipped.noPlanDefault, false);
+  assert.throws(
+    () => parseCliDefaultsDoc({ ...doc, noPlanDefault: "yes" }),
+    /noPlanDefault/
+  );
+  const src = fs.readFileSync(path.join(SCRIPTS_LIB, "cli-defaults.mjs"), "utf8");
+  assert.doesNotMatch(src, /noPlanDefault !== true/);
+  assert.doesNotMatch(src, /noPlanDefault must be true/);
+});
+
+test("runDirectGrok fails closed as model-unavailable when modelUsage is another family", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "grok-direct-family-"));
+  try {
+    const fakeGrok = path.join(dir, "fake-grok.sh");
+    fs.writeFileSync(
+      fakeGrok,
+      `#!/bin/sh
+printf '%s\\n' '{"result":"should-not-succeed","stopReason":"end_turn","modelUsage":{"grok-4.5":{"inputTokens":1}}}'
+`
+    );
+    fs.chmodSync(fakeGrok, 0o755);
+    const scriptsDir = path.resolve(HERE, "../../wrapper/scripts");
+    const res = runDirectGrok({
+      mode: "review",
+      args: ["--target", dir, "--task", "x"],
+      cwd: dir,
+      env: { ...process.env, GROK_AGENT_BINARY: fakeGrok },
+      scriptsDir,
+      python: "python3",
+    });
+    const env = JSON.parse(res.envelopeText);
+    assert.notEqual(res.code, 0);
+    assert.equal(env.status, "failure");
+    assert.equal(env.error.class, "model-unavailable");
+    assert.doesNotMatch(res.envelopeText, /should-not-succeed/);
+    assert.equal(env.policy.model, defaultModel());
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

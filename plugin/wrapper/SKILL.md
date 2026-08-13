@@ -112,8 +112,9 @@ python3 plugin/wrapper/scripts/grok_agent.py reason \
 ```
 
 `--input` and `--rules-file` may each be repeated. Optional flags: `--web`,
-`--schema <path>`, `--model`, `--timeout` (default 900), optional `--max-turns`
-(default: unlimited).
+`--schema <path>`, `--model`, `--reasoning-effort` / `--effort`
+(`low`/`medium`/`high`/`xhigh`), `--plan` (opt out of default `--no-plan`),
+`--timeout` (default 900), optional `--max-turns` (default: unlimited).
 
 ### `code` - mode-aware implementation (worktree or live tree)
 
@@ -152,8 +153,10 @@ python3 plugin/wrapper/scripts/grok_agent.py code \
   --task-file <path-to-spec-file>
 ```
 
-Optional flags: `--web`, `--model`, `--timeout` (default 3600), optional
-`--max-turns` (default: unlimited), optional **`--contract-file <path>`**
+Optional flags: `--web`, `--model`, `--reasoning-effort` / `--effort`
+(`low`/`medium`/`high`/`xhigh`), `--plan` (opt out of default `--no-plan`),
+`--timeout` (default 3600), optional `--max-turns` (default: unlimited),
+optional **`--contract-file <path>`**
 (operator-trusted JSON: writeScopes + requiredValidation argv arrays; trust
 model `operator-contract-trusted-no-os-sandbox` - no OS FS sandbox claim),
 `--integration direct|worktree` (wrapper-native; bare default `worktree`).
@@ -194,9 +197,11 @@ python3 plugin/wrapper/scripts/grok_agent.py verify \
   --task-file <path-to-verification-task-file>
 ```
 
-Optional flags: `--model`, `--timeout` (default 1800), optional `--max-turns`
-(default: unlimited). `verify` never accepts `--web` - independent verification
-stays hermetic by design.
+Optional flags: `--model`, `--reasoning-effort` / `--effort`
+(`low`/`medium`/`high`/`xhigh`), `--plan` (opt out of default `--no-plan`),
+`--timeout` (default 1800), optional `--max-turns` (default: unlimited).
+`verify` never accepts `--web` - independent verification stays hermetic by
+design.
 
 ### `status` - read-only inspection of a prior run
 
