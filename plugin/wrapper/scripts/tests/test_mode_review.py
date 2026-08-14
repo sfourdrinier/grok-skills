@@ -237,11 +237,12 @@ class ReviewModeTests(ModeHarness):
         self.assertIsNotNone(env.get("grok"))
 
     def test_review_requested_model_family_boundary_rejects_cross_family(self) -> None:
-        # Grok dogfood #4: requesting grok-4 must NOT accept the grok-4.5 the CLI
-        # actually ran (a raw startswith would). Fail closed as model-unavailable.
+        # Requesting grok-4.6 must NOT accept grok-4.5 the CLI actually ran.
         repo = self._repo()
         exit_code, out = self.drive(
-            ["review", "--target", "pkg", "--task", "Review", "--model", "grok-4"], repo_root=repo
+            ["review", "--target", "pkg", "--task", "Review", "--model", "grok-4.6"],
+            repo_root=repo,
+            control_extra={"effectiveModel": "grok-4.5"},
         )
         env = json.loads(out)
         self.assertEqual(exit_code, 1, out)
@@ -444,7 +445,7 @@ class ReviewModeTests(ModeHarness):
         self.assertEqual(envelope_mod.validate_envelope(envelope), [])
         self.assertIsNotNone(envelope["progressStreamPath"])
         self.assertTrue(envelope["progressStreamPath"].endswith("progress.jsonl"))
-        self.assertEqual(envelope["effectiveModel"], "grok-4.5")
+        self.assertEqual(envelope["effectiveModel"], "grok-4.6")
         self.assertEqual(envelope["sandbox"]["reportedProfile"], "grok-skills-review")
         self.assertTrue(envelope["sandbox"]["enforced"])
 

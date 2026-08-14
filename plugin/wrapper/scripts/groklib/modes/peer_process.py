@@ -13,7 +13,7 @@ import os
 import pathlib
 import stat
 import subprocess
-from typing import Any, List, Sequence, Tuple
+from typing import Any, List, Optional, Sequence, Tuple
 
 from groklib import GrokWrapperError, log_stderr
 from groklib import grokcli
@@ -34,6 +34,8 @@ def build_acp_stdio_argv(
     policy: Any,
     tools: Sequence[str],
     web_access: bool,
+    reasoning_effort: Optional[str] = None,
+    no_plan: bool = True,
 ) -> List[str]:
     """Build ``grok <C6 globals> agent [--model] stdio --leader-socket`` argv.
 
@@ -59,6 +61,9 @@ def build_acp_stdio_argv(
     argv.append("--no-memory")
     if not web_access:
         argv.append("--disable-web-search")
+    from groklib.cli_defaults import append_child_pins
+
+    append_child_pins(argv, reasoning_effort=reasoning_effort, no_plan=no_plan)
     argv.append("agent")
     if model:
         argv.extend(["--model", model])
@@ -147,6 +152,8 @@ def spawn_acp_child(
     policy: Any,
     tools: Sequence[str],
     web_access: bool = False,
+    reasoning_effort: Optional[str] = None,
+    no_plan: bool = True,
 ) -> subprocess.Popen:
     """Spawn ``grok agent stdio`` in the private home / worktree cwd.
 
@@ -169,6 +176,8 @@ def spawn_acp_child(
         policy=policy,
         tools=tools,
         web_access=web_access,
+        reasoning_effort=reasoning_effort,
+        no_plan=no_plan,
     )
     try:
         with grokcli._sigterm_blocked():

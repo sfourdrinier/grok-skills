@@ -237,7 +237,7 @@ class VerifyModeTests(WorktreeModeHarness):
         env = json.loads(out)
         self.assertEqual(exit_code, 0, out)
         self.assertEqual(envelope_mod.validate_envelope(env), [])
-        self.assertEqual(env["verifier"]["identity"], "grok-grok-4.5")
+        self.assertEqual(env["verifier"]["identity"], "grok-grok-4.6")
         self.assertEqual(env["mode"], "verify")
 
     def test_verify_does_not_enroll_adopted_worktree_for_its_own_cleanup(self) -> None:

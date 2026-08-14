@@ -18,6 +18,7 @@ from groklib import worktree_escape
 from groklib.implementation_contract import assert_target_matches, load_optional_contract_arg
 from groklib.modes import code as code_mode
 from groklib.modes import code_continue
+from groklib.cli_defaults import mode_run_cli_kwargs, requested_model_from_args
 from groklib.modes import _shared
 from groklib.modes._direct import DirectPrep, DirectStage, run_direct_mode
 from groklib.modes.direct_finalize import (
@@ -105,7 +106,7 @@ def run(args: argparse.Namespace) -> dict:
 
     return run_direct_mode(
         binary=binary,
-        requested_model=args.model,
+        requested_model=requested_model_from_args(args),
         web_access=web_access,
         timeout_seconds=args.timeout,
         max_turns=args.max_turns,
@@ -114,4 +115,5 @@ def run(args: argparse.Namespace) -> dict:
         force=force,
         prepare=_prepare,
         finalize=_finalize,
+        **mode_run_cli_kwargs(args),
     )

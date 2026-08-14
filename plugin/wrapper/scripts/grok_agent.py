@@ -24,6 +24,11 @@ from groklib.envelope import (
     failure_envelope,
     redact_secret_value_text,
 )
+from groklib import cli_defaults
+from groklib.cli_defaults import (
+    argparse_reasoning_effort,
+    argparse_requested_model,
+)
 from groklib.modes import MODES
 
 _DEFAULT_BINARY = os.path.join("~", ".grok", "bin", "grok")
@@ -145,7 +150,37 @@ def _add_run_opts(sub: argparse.ArgumentParser, *, timeout: int) -> None:
     # No default max-turns: omit the CLI flag unless the operator sets --max-turns.
     # Artificial turn caps discard review findings; Grok CLI subscription runs
     # continue until EndTurn (or explicit timeout / optional --max-turns).
-    sub.add_argument("--model", default="grok-4.5")
+    sub.add_argument(
+        "--model",
+        default=cli_defaults.DEFAULT_MODEL,
+        type=argparse_requested_model,
+        help="Model id (default: {}). grok-4.5 is deprecated but still accepted when named.".format(
+            cli_defaults.DEFAULT_MODEL
+        ),
+    )
+    sub.add_argument(
+        "--reasoning-effort",
+        "--effort",
+        dest="reasoning_effort",
+        default=None,
+        type=argparse_reasoning_effort,
+        help="Reasoning effort: {}. Omitted = CLI default.".format(
+            ", ".join(cli_defaults.REASONING_EFFORT_VALUES)
+        ),
+    )
+    sub.set_defaults(no_plan=cli_defaults.NO_PLAN_DEFAULT)
+    sub.add_argument(
+        "--plan",
+        dest="no_plan",
+        action="store_false",
+        help="Opt out of the default --no-plan child pin (allow Grok plan mode).",
+    )
+    sub.add_argument(
+        "--no-plan",
+        dest="no_plan",
+        action="store_true",
+        help="Pin --no-plan on the child (default).",
+    )
     sub.add_argument("--timeout", type=_bounded_positive_int("--timeout", _MAX_TIMEOUT_SECONDS), default=timeout)
     sub.add_argument(
         "--max-turns",
@@ -344,9 +379,18 @@ def _emit(envelope: dict, envelope_path: Optional[pathlib.Path]) -> int:
 def main(argv: Optional[List[str]] = None) -> int:
     _install_sigterm_handler()
     argv = list(sys.argv[1:] if argv is None else argv)
-    parser = _build_parser()
     try:
+        parser = _build_parser()
         args = parser.parse_args(argv)
+    except GrokWrapperError as exc:
+        env = failure_envelope(
+            run_id=runstate.new_run_id(),
+            mode=_mode_hint(argv),
+            error_class=exc.error_class,
+            message=str(exc),
+            detail=exc.detail or None,
+        )
+        return _emit(env, None)
     except _UsageError as exc:
         env = failure_envelope(
             run_id=runstate.new_run_id(),

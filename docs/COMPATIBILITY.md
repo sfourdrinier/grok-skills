@@ -2,6 +2,17 @@
 
 # Compatibility (Claude Code + Codex / ChatGPT)
 
+## Default model and CLI child pins (2.0.3+)
+
+| Surface | Behavior |
+|---------|----------|
+| **default `--model`** | Product default is **`grok-4.6`** (hardened, direct, ACP peer). SSOT: `plugin/references/grok-cli-defaults.json`. |
+| **`grok-4.5`** | Deprecated. Still accepted when named and listed by `grok models`. Preflight does **not** require it. |
+| **family check** | Requesting `grok-4.6` fails closed as `model-unavailable` if the child ran `grok-4.5` (or any other family). No silent switch. |
+| **`--reasoning-effort` / `--effort`** | `low` / `medium` / `high` / `xhigh`. Last-wins. Invalid/blank is `usage-error`. Omitted = CLI default. |
+| **`--no-plan`** | Default child pin. `--plan` opts out. Default omit-not-requested stays `--no-plan`. |
+| **CLI version** | Any working `grok --version`. `accepted-version.json` remains advisory (`enforcement: none`). |
+
 ## Wrapper lifecycle (1.3.0+)
 
 Status is strictly read-only. Failed/interrupted targets return exit 1 with a

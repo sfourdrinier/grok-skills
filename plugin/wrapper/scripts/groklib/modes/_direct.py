@@ -224,6 +224,8 @@ def run_direct_mode(
     seed_session_from_run_dir: Optional[pathlib.Path] = None,
     resume_session: bool = False,
     initial_warnings: Tuple[str, ...] = (),
+    reasoning_effort: Optional[str] = None,
+    no_plan: bool = True,
 ) -> dict:
     """Execute the hardened-direct lifecycle and return a validated C4 envelope.
 
@@ -262,6 +264,8 @@ def run_direct_mode(
             seed_session_from_run_dir=seed_session_from_run_dir,
             resume_session=resume_session,
             initial_warnings=initial_warnings,
+            reasoning_effort=reasoning_effort,
+            no_plan=no_plan,
             run_paths=run_paths,
             progress=progress,
             acc=acc,
@@ -301,6 +305,8 @@ def _run_direct_mode_body(
     seed_session_from_run_dir: Optional[pathlib.Path],
     resume_session: bool,
     initial_warnings: Tuple[str, ...],
+    reasoning_effort: Optional[str],
+    no_plan: bool,
     run_paths: runstate.RunPaths,
     progress: ProgressWriter,
     acc: WorktreeAccumulator,
@@ -442,6 +448,8 @@ def _run_direct_mode_body(
                 session_id=session_id,
                 seed_session_from_run_dir=seed_session_from_run_dir,
                 resume_session=resume_session,
+                reasoning_effort=reasoning_effort,
+                no_plan=no_plan,
             )
             result, sandbox_obj, effective_model = _execute_and_verify(
                 mode_run,

@@ -6,6 +6,48 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
+## [2.0.3] - 2026-08-13
+
+### Changed
+
+- **Product default model is `grok-4.6`.** Hardened wrapper, direct installed-CLI,
+  and ACP peer request `grok-4.6` when `--model` is omitted. `grok-4.5` is
+  deprecated: still accepted if the operator names it and `grok models` lists it.
+  Preflight no longer requires `grok-4.5` to be selectable. Requesting `grok-4.6`
+  never silently succeeds as another family (including `grok-4.5`).
+- **`--reasoning-effort` / `--effort`** (`low` / `medium` / `high` / `xhigh`) is
+  forwarded on hardened `build_argv`, direct spawn, and peer `agent stdio` from
+  one SSOT. Last-wins split/equals. Invalid or blank values fail closed
+  (`usage-error`); they are never silently dropped.
+- **`--no-plan` stays the default child pin.** Operator `--plan` is the explicit
+  opt-out that omits the pin so existing headless runs do not enter plan-approval.
+- **Present-but-blank `--model` / valued `--plan=` fail closed** on wrapper and
+  direct (no silent remap to 4.6, no Node-only `--plan=true` opt-out). Node
+  type-checks every `--model` and `--reasoning-effort` / `--effort` occurrence so
+  an earlier blank or `turbo` cannot hide behind a later valid flag.
+
+### Fixed
+
+- Default model id, effort vocabulary, and the `--no-plan` default/opt-out live
+  in `plugin/references/grok-cli-defaults.json` (Python `groklib.cli_defaults` +
+  Node `scripts/lib/cli-defaults.mjs`). Docs no longer claim
+  `grok-composer-2.5-fast` as a current selectable pair.
+- Direct path family-checks `modelUsage`: a successful CLI result keyed by
+  another family (for example `grok-4.5` when `grok-4.6` was requested) fails
+  closed as `model-unavailable`.
+- Missing or malformed CLI-defaults SSOT emits a classified `cli-failure`
+  envelope instead of an import-time traceback with empty stdout.
+- `noPlanDefault` is read from the JSON in both runtimes (shipped value stays
+  `true`).
+- Wrapper `SKILL.md` documents `--reasoning-effort` / `--plan` on `reason`,
+  `code`, and `verify`, not only `review`.
+
+### Notes
+
+- Runtime still accepts any working `grok --version` (no version allowlist). The
+  advisory `accepted-version.json` stamp stays `enforcement: none`. Last
+  maintainer-probed build remains `0.2.110`; `1.0.3` is last-seen working only.
+
 ## [2.0.2] - 2026-07-22
 
 ### Fixed (monorepo hardened-direct)

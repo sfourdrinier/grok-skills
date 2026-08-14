@@ -1,7 +1,7 @@
 ---
 name: "code"
 description: "Have Grok implement code (default: live tree; opt-in isolated worktree). Nothing is committed or pushed"
-argument-hint: "(--target <path> --base <revision> | --continue-run <runId>) (--task <text> | --task-file <path>) [--contract-file <path>] [--web] [--model <id>] [--timeout <s>] [--max-turns <n>]"
+argument-hint: "(--target <path> --base <revision> | --continue-run <runId>) (--task <text> | --task-file <path>) [--contract-file <path>] [--web] [--model <id>] [--reasoning-effort <low|medium|high|xhigh>] [--plan] [--timeout <s>] [--max-turns <n>]"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
 
@@ -244,7 +244,7 @@ GROK_TASK
   derived from the prior run (apply keyed on prior `run.json`
   target/repository). Continue-run reuses worktree lineage; product direct
   continues on hardened wrapper worktree lineage (never live direct edit).
-- `--model` / `--timeout` / `--max-turns` / `--web` remain allowed (last-valid
+- `--model` / `--reasoning-effort` / `--effort` / `--plan` / `--timeout` / `--max-turns` / `--web` remain allowed (last-valid
   companion argv SSOT: [argv-safety.md](../../references/argv-safety.md)).
 - Each continuation is a **new** run id with `continuesRunId` + `iteration` on
   `run.json` and the handoff manifest. Auto apply-on-ready (when effective) runs

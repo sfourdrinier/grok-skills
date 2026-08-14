@@ -43,6 +43,7 @@ from groklib.envelope import (
     redact_secret_material,
     redact_secret_value_text,
 )
+from groklib.cli_defaults import mode_run_cli_kwargs, requested_model_from_args
 from groklib.grokcli import check_version
 from groklib.implementation_contract import assert_target_matches, load_optional_contract_arg
 from groklib.modes import _shared
@@ -510,7 +511,8 @@ def run_peer_start(args: argparse.Namespace) -> dict:
             {"target": target, "base": base},
         )
     repo_root, target_abs, target_relative = _resolve_repo_target(target)
-    model = getattr(args, "model", None) or "grok-4.5"
+    model = requested_model_from_args(args)
+    _cli_opts = mode_run_cli_kwargs(args)
     web_access = resolve_web_access("peer", getattr(args, "web", None))
     timeout = int(getattr(args, "timeout", None) or 900)
 
@@ -604,6 +606,8 @@ def run_peer_start(args: argparse.Namespace) -> dict:
             policy=policy,
             tools=_TOOLS,
             web_access=web_access,
+            reasoning_effort=_cli_opts["reasoning_effort"],
+            no_plan=_cli_opts["no_plan"],
         )
         res.child = child
         acp = AcpClient(child, timeout_seconds=timeout)

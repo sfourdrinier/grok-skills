@@ -8,7 +8,7 @@ description: Use when the user says to use Grok, wants a Grok review, wants a se
 # Grok CLI companion agent
 
 This skill wraps the authenticated `grok` CLI in a deterministic Python
-wrapper (`scripts/grok_agent.py`) so Grok 4.5 can act as a capable companion
+wrapper (`scripts/grok_agent.py`) so Grok 4.6 can act as a capable companion
 agent for review, reasoning, implementation, and independent verification,
 under authority scoped tighter than an interactive session. The wrapper owns
 process isolation, private authentication, sandboxing, and result reporting.
@@ -85,7 +85,8 @@ Optional flags: `--base <ref>` (comparison framing only; does **not** force
 isolation), `--isolated` (opt-in: owned external worktree at HEAD with tracked
 dirty applied; setup failures fail closed as `isolation-unavailable` with no
 silent live-tree fallback), `--web`, `--schema <path>`, `--model <id>` (default
-`grok-4.5`), `--timeout <seconds>` (default 900), optional `--max-turns <n>`
+`grok-4.6`; `grok-4.5` still accepted when named), `--reasoning-effort` / `--effort`
+(`low`/`medium`/`high`/`xhigh`), `--plan` (opt out of default `--no-plan`), `--timeout <seconds>` (default 900), optional `--max-turns <n>`
 (default: **unlimited** - flag omitted unless set). `--task <text>` may replace
 `--task-file` for a short prompt; exactly one of `--task` / `--task-file` is required.
 
@@ -111,8 +112,9 @@ python3 plugin/wrapper/scripts/grok_agent.py reason \
 ```
 
 `--input` and `--rules-file` may each be repeated. Optional flags: `--web`,
-`--schema <path>`, `--model`, `--timeout` (default 900), optional `--max-turns`
-(default: unlimited).
+`--schema <path>`, `--model`, `--reasoning-effort` / `--effort`
+(`low`/`medium`/`high`/`xhigh`), `--plan` (opt out of default `--no-plan`),
+`--timeout` (default 900), optional `--max-turns` (default: unlimited).
 
 ### `code` - mode-aware implementation (worktree or live tree)
 
@@ -151,8 +153,10 @@ python3 plugin/wrapper/scripts/grok_agent.py code \
   --task-file <path-to-spec-file>
 ```
 
-Optional flags: `--web`, `--model`, `--timeout` (default 3600), optional
-`--max-turns` (default: unlimited), optional **`--contract-file <path>`**
+Optional flags: `--web`, `--model`, `--reasoning-effort` / `--effort`
+(`low`/`medium`/`high`/`xhigh`), `--plan` (opt out of default `--no-plan`),
+`--timeout` (default 3600), optional `--max-turns` (default: unlimited),
+optional **`--contract-file <path>`**
 (operator-trusted JSON: writeScopes + requiredValidation argv arrays; trust
 model `operator-contract-trusted-no-os-sandbox` - no OS FS sandbox claim),
 `--integration direct|worktree` (wrapper-native; bare default `worktree`).
@@ -193,9 +197,11 @@ python3 plugin/wrapper/scripts/grok_agent.py verify \
   --task-file <path-to-verification-task-file>
 ```
 
-Optional flags: `--model`, `--timeout` (default 1800), optional `--max-turns`
-(default: unlimited). `verify` never accepts `--web` - independent verification
-stays hermetic by design.
+Optional flags: `--model`, `--reasoning-effort` / `--effort`
+(`low`/`medium`/`high`/`xhigh`), `--plan` (opt out of default `--no-plan`),
+`--timeout` (default 1800), optional `--max-turns` (default: unlimited).
+`verify` never accepts `--web` - independent verification stays hermetic by
+design.
 
 ### `status` - read-only inspection of a prior run
 

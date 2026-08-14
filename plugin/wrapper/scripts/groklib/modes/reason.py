@@ -20,6 +20,7 @@ from typing import List, Tuple
 
 from groklib import GrokWrapperError, log_stderr
 from groklib import rules
+from groklib.cli_defaults import mode_run_cli_kwargs, requested_model_from_args
 from groklib.modes import _shared
 
 _INPUT_FILE_MODE = 0o400
@@ -201,7 +202,7 @@ def run(args: argparse.Namespace) -> dict:
     mode_run = _shared.ModeRun(
         mode="reason",
         binary=binary,
-        requested_model=args.model,
+        requested_model=requested_model_from_args(args),
         web_access=resolve_web_access("reason", getattr(args, "web", None)),
         output_schema=output_schema,
         timeout_seconds=args.timeout,
@@ -214,6 +215,7 @@ def run(args: argparse.Namespace) -> dict:
         target_workspace=None,
         detect_unexpected_edits=False,
         extra_temp_dirs=(cwd,),
+        **mode_run_cli_kwargs(args),
     )
     try:
         return _shared.run_grok_mode(mode_run)

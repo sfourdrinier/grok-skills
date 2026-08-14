@@ -1,7 +1,7 @@
 ---
 name: "implement"
 description: "One-call delegate: Grok code then auto-handoff verification (verify-only; mode-aware integrate elsewhere)"
-argument-hint: "--target <path> --base <revision> (--task <text> | --task-file <path>) [--contract-file <path>] [--web] [--model <id>] [--timeout <s>] [--max-turns <n>]"
+argument-hint: "--target <path> --base <revision> (--task <text> | --task-file <path>) [--contract-file <path>] [--web] [--model <id>] [--reasoning-effort <low|medium|high|xhigh>] [--plan] [--timeout <s>] [--max-turns <n>]"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
 

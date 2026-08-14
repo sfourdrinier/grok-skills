@@ -127,6 +127,7 @@ Canonical mode matrix (do not restate here): [plugin/references/integration-mode
 3. **DRY consolidation (post-2.0)** - [issue #6](https://github.com/sfourdrinier/grok-skills/issues/6): eliminate dual sources (peer lease constant, workspace state segment, flag-presence SSOT, runner lifecycle helpers, ACP C6 pins, dual-host agent content parity). **TDD required; no regressions; one PR.** Do not grow known dual sources while this is open.
 4. ~~**Linux sandbox profile** when a probe report exists~~ **done 2.0.1** (`probe-report-linux.md`, `PROBED_PLATFORMS` includes `linux`, `linux/landlock`, bwrap prereq)
 5. Optional apply-worktree UX; official directory listings
+6. ~~**Grok 4.6 product default + effort / optional plan pin**~~ **done 2.0.3** (`plugin/references/grok-cli-defaults.json`; any working CLI; 4.5 named-ok)
 
 ---
 

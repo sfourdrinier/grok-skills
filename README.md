@@ -374,8 +374,9 @@ At-most-once attempt only (`runs/<runId>/notified.json`); details:
 
 - Exactly one of `--task '…'` or `--task-file path` (prefer a file for long prompts).
 - `--web` only on review / reason / code when you need live docs or current APIs. Off by default. Never on verify.
-- `--model` (default `grok-4.5`), `--timeout` (mode-dependent; often 900s), optional
+- `--model` (default `grok-4.6`; `grok-4.5` is deprecated but still accepted when named and selectable), `--reasoning-effort` / `--effort` (`low` / `medium` / `high` / `xhigh`; omitted = CLI default), `--plan` (opt out of the default `--no-plan` child pin), `--timeout` (mode-dependent; often 900s), optional
   `--max-turns` (**omit for unlimited** - default). Defaults live in
+  [plugin/references/grok-cli-defaults.json](plugin/references/grok-cli-defaults.json),
   [wrapper/SKILL.md](plugin/wrapper/SKILL.md) and argparse; skills pass flags through.
   Incomplete Cancelled/turn-cap stops with real findings still return success + warning
   (see [COMPATIBILITY.md](docs/COMPATIBILITY.md)).

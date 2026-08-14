@@ -578,7 +578,8 @@ class InspectAndProbeTests(GrokCliTestBase):
         self._write_control("models-ok")
         result = grokcli_probe.probe_login(_FAKE_BINARY, self.home, self.home.grok_dir / "leader.sock")
         self.assertTrue(result["loggedIn"])
-        self.assertEqual(result["defaultModel"], "grok-4.5")
+        self.assertEqual(result["defaultModel"], "grok-4.6")
+        self.assertIn("grok-4.6", result["models"])
         self.assertIn("grok-4.5", result["models"])
 
     def test_probe_login_not_logged_in_raises_auth_missing(self) -> None:

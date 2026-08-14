@@ -45,6 +45,7 @@ from groklib import worktree_escape
 from groklib.implementation_contract import assert_target_matches, load_optional_contract_arg
 from groklib.code_handoff_finalize import code_handoff_finalize
 from groklib.projectconfig import ProjectConfig, build_gate_command, install_command, load_project_config
+from groklib.cli_defaults import mode_run_cli_kwargs, requested_model_from_args
 from groklib.modes import _shared
 from groklib.modes import code_continue
 from groklib.modes._worktree import (
@@ -822,7 +823,7 @@ def run(args: argparse.Namespace) -> dict:
     return run_worktree_mode(
         mode="code",
         binary=binary,
-        requested_model=args.model,
+        requested_model=requested_model_from_args(args),
         web_access=web_access,
         timeout_seconds=args.timeout,
         max_turns=args.max_turns,
@@ -837,4 +838,5 @@ def run(args: argparse.Namespace) -> dict:
         continues_run_id=continues_run_id,
         iteration=iteration,
         initial_warnings=initial_warnings,
+        **mode_run_cli_kwargs(args),
     )

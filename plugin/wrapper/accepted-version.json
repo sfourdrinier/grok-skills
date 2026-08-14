@@ -4,5 +4,7 @@
   "version": "grok 0.2.110 (b70e0acd09) [alpha]",
   "validatedAtUtc": "2026-07-22T19:20:00Z",
   "probeEvidence": "scripts/tests/fixtures/probe-report.md",
-  "note": "Last maintainer-validated Grok CLI build (advisory only). Runtime does NOT require this exact version - any working `grok --version` is accepted. Refreshed after green preflight on 2.0.1 Linux branch (issue #8)."
+  "lastSeenWorking": "grok 1.0.3 (1a29d5bc12d4)",
+  "lastSeenWorkingAtUtc": "2026-08-12T23:30:00Z",
+  "note": "Last maintainer-validated Grok CLI build (advisory only). Runtime does NOT require this exact version - any working `grok --version` is accepted. Refreshed after green preflight on 2.0.1 Linux branch (issue #8). 1.0.3 is last-seen working on 2026-08-12, not a full probe-suite validation."
 }

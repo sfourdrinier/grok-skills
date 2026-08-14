@@ -20,6 +20,7 @@ from typing import Optional
 from groklib import GrokWrapperError, log_stderr, runstate
 from groklib import rules
 from groklib.projectconfig import load_project_config
+from groklib.cli_defaults import mode_run_cli_kwargs, requested_model_from_args
 from groklib.modes import _shared
 from groklib.modes._envelope import terminalize_unexpected_failure
 from groklib.progress import ProgressWriter
@@ -176,7 +177,7 @@ def run(args: argparse.Namespace) -> dict:
         mode_run = _shared.ModeRun(
             mode="review",
             binary=binary,
-            requested_model=args.model,
+            requested_model=requested_model_from_args(args),
             web_access=resolve_web_access("review", getattr(args, "web", None)),
             output_schema=output_schema,
             timeout_seconds=args.timeout,
@@ -192,6 +193,7 @@ def run(args: argparse.Namespace) -> dict:
                 isolation.worktree_path if isolation is not None else None
             ),
             initial_warnings=tuple(rule_warnings),
+            **mode_run_cli_kwargs(args),
         )
         return _shared.run_grok_mode(mode_run, run_paths=pre_paths)
     except BaseException as exc:

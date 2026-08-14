@@ -1,7 +1,7 @@
 ---
 name: "review"
 description: "Run a full-context, read-only Grok code review over a workspace path"
-argument-hint: "[--target <path>] [--base <ref>] [--isolated] (--task <text> | --task-file <path>) [--web] [--schema <path>] [--model <id>] [--timeout <s>] [--max-turns <n>] [--wait|--background]"
+argument-hint: "[--target <path>] [--base <ref>] [--isolated] (--task <text> | --task-file <path>) [--web] [--schema <path>] [--model <id>] [--reasoning-effort <low|medium|high|xhigh>] [--plan] [--timeout <s>] [--max-turns <n>] [--wait|--background]"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
 
