@@ -201,6 +201,36 @@ class ReviewIsolationHelperTests(unittest.TestCase):
         for session in results:
             review_isolation.cleanup_review_isolation(session)
 
+    def test_prepare_holds_repo_lock_during_worktree_add(self) -> None:
+        from groklib.worktree_lock import repo_worktree_lock_path
+
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover
+            self.skipTest("fcntl required")
+
+        seen = {"held": False}
+        real = worktree_mod._git
+
+        def _git(repo, *args, **kwargs):
+            if args[:2] == ("worktree", "add"):
+                lock_path = repo_worktree_lock_path(repo)
+                fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    held = False
+                except BlockingIOError:
+                    held = True
+                finally:
+                    os.close(fd)
+                seen["held"] = held
+            return real(repo, *args, **kwargs)
+
+        with mock.patch.object(worktree_mod, "_git", _git):
+            session = self._session()
+            review_isolation.cleanup_review_isolation(session)
+        self.assertTrue(seen["held"], "review isolation worktree add must hold the repo lock")
+
     def test_partial_cleanup_is_best_effort(self) -> None:
         session = self._session()
         if session.worktree_path.exists():

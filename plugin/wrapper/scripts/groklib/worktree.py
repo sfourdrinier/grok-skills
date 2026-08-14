@@ -24,6 +24,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from groklib import GrokWrapperError, log_stderr
 from groklib import path_inventory, platformsupport, runstate
 from groklib.git_timeout import git_timeout_seconds  # re-export SSOT (issue #7/#8)
+from groklib.worktree_lock import repo_worktree_lock
 
 _BRANCH_PREFIX = "grok/code/"
 # Run-bound branches that cleanup may delete (code + opt-in review isolation).
@@ -392,53 +393,33 @@ def create_external_worktree(*, repo_root: pathlib.Path, base: str, run_id: str)
         )
 
     _make_secure_dir(worktree_path.parent)
-    _git(resolved_repo_root, "worktree", "add", "-b", branch, str(worktree_path), base_sha)
-    # From here the git worktree (and its branch grok/code/<run-id>) EXIST. Any
-    # failure setting them up (permission hardening, marker write) must NOT leave
-    # a half-registered worktree/branch behind that cleanup cannot safely adopt
-    # (no valid marker) -- remove BOTH before re-raising (Grok dogfood #6). Only
-    # after the marker is written is the ExternalWorktree returned.
-    try:
+    # Serialize worktree add/rollback: concurrent add on one repo races in git
+    # (.git/worktrees/*/commondir). Hold the lock through rollback too.
+    with repo_worktree_lock(resolved_repo_root):
+        _git(resolved_repo_root, "worktree", "add", "-b", branch, str(worktree_path), base_sha)
         try:
-            platformsupport.restrict_dir_permissions(worktree_path)
-        except OSError as exc:
-            # The worktree exists; hardening its mode is defense in depth. Fail
-            # closed rather than leave a wrongly-permissioned worktree registered.
-            _log("create_external_worktree", "failed to harden worktree dir {}: {}".format(worktree_path, exc))
-            raise GrokWrapperError(
-                "worktree-failure",
-                "failed to restrict worktree directory permissions: {}".format(exc),
-                {"path": str(worktree_path)},
-            ) from exc
-
-        runstate.write_owner_marker_file(marker_path, run_id)
-    except BaseException as exc:
-        _log(
-            "create_external_worktree",
-            "setup failed after worktree add; removing orphaned worktree {} and branch {}: {}".format(
-                worktree_path, branch, exc
-            ),
-        )
-        stranded = _remove_partial_worktree(resolved_repo_root, worktree_path, branch, marker_path, run_id)
-        if stranded:
-            # PR968 codex record-partial-worktree: rollback could NOT remove the
-            # just-added worktree, so it (and its grok/code/<run-id> branch) survive,
-            # marker-recorded on disk. Attach the worktree identity to the raised
-            # error so the caller records it into the run record BEFORE re-raising;
-            # otherwise run.json carries no worktree fields and a later
-            # `cleanup --run-id` removes only the run dir, stranding the worktree +
-            # branch as an unreapable orphan. The identity is run-bound (path name
-            # and branch both carry run_id), so cleanup reaps only its own.
-            _attach_stranded_worktree(
-                exc,
-                ExternalWorktree(
-                    path=worktree_path,
-                    branch=branch,
-                    base_revision=base_sha,
-                    repo_root=resolved_repo_root,
+            _harden_new_worktree(worktree_path, marker_path, run_id)
+        except BaseException as exc:
+            _log(
+                "create_external_worktree",
+                "setup failed after worktree add; removing orphaned worktree {} and branch {}: {}".format(
+                    worktree_path, branch, exc
                 ),
             )
-        raise
+            stranded = _remove_partial_worktree(
+                resolved_repo_root, worktree_path, branch, marker_path, run_id
+            )
+            if stranded:
+                _attach_stranded_worktree(
+                    exc,
+                    ExternalWorktree(
+                        path=worktree_path,
+                        branch=branch,
+                        base_revision=base_sha,
+                        repo_root=resolved_repo_root,
+                    ),
+                )
+            raise
 
     return ExternalWorktree(
         path=worktree_path,
@@ -446,6 +427,20 @@ def create_external_worktree(*, repo_root: pathlib.Path, base: str, run_id: str)
         base_revision=base_sha,
         repo_root=resolved_repo_root,
     )
+
+
+def _harden_new_worktree(worktree_path: pathlib.Path, marker_path: pathlib.Path, run_id: str) -> None:
+    """Restrict permissions and write the owner marker after ``git worktree add``."""
+    try:
+        platformsupport.restrict_dir_permissions(worktree_path)
+    except OSError as exc:
+        _log("create_external_worktree", "failed to harden worktree dir {}: {}".format(worktree_path, exc))
+        raise GrokWrapperError(
+            "worktree-failure",
+            "failed to restrict worktree directory permissions: {}".format(exc),
+            {"path": str(worktree_path)},
+        ) from exc
+    runstate.write_owner_marker_file(marker_path, run_id)
 
 
 _STRANDED_WORKTREE_ATTR = "grok_stranded_worktree"
@@ -806,13 +801,15 @@ def remove_external_worktree(wt: ExternalWorktree, *, confirmed: bool, expected_
         # git worktree registration for the vanished path so the just-created
         # branch is no longer considered checked out and can be deleted below.
         _log("remove_external_worktree", "worktree path already missing; pruning registration: {}".format(wt.path))
-        _git_query(wt.repo_root, "worktree", "prune")
+        with repo_worktree_lock(wt.repo_root):
+            _git_query(wt.repo_root, "worktree", "prune")
     else:
         # Ownership is proven (verified marker above) and removal is explicitly
         # confirmed: reap the worktree regardless of dirty state. code mode leaves
         # the worktree dirty by design, so --force is required to remove the common
         # success case (Grok dogfood-2 #8); refusing dirty would wedge cleanup.
-        _git(wt.repo_root, "worktree", "remove", "--force", str(wt.path))
+        with repo_worktree_lock(wt.repo_root):
+            _git(wt.repo_root, "worktree", "remove", "--force", str(wt.path))
 
     branch_retained = False
     branch_retain_reason = None

@@ -4,6 +4,7 @@
 # Path: {state_root}/worktrees/review/{run_id}; sibling owner marker; apply
 # tracked dirty from the live checkout; cleanup always. Fail closed with
 # isolation-unavailable - never silently fall back to the live tree.
+# git worktree add/remove/prune take repo_worktree_lock (git is not concurrent).
 
 from __future__ import annotations
 
@@ -15,6 +16,7 @@ from typing import Dict, List, Optional, Sequence
 
 from groklib import GrokWrapperError, log_stderr, platformsupport, runstate
 from groklib import worktree as worktree_mod
+from groklib.worktree_lock import repo_worktree_lock
 
 _BRANCH_PREFIX = "grok/review/"
 _FILE_MODE = 0o600
@@ -243,48 +245,54 @@ def prepare_review_isolation(
         worktree_mod._make_secure_dir(worktree_path.parent)
         # Marker BEFORE worktree so cleanup can prove ownership if we crash after add.
         runstate.write_owner_marker_file(marker_path, run_id)
-        try:
-            worktree_mod._git(
-                resolved_repo, "worktree", "add", "-b", branch, str(worktree_path), base_sha
-            )
-        except BaseException:
-            # worktree add may have created a partial path/registration. Try to
-            # reap it; only drop the owner marker when the path is gone so a
-            # later cleanup --confirm can still prove ownership if reaping failed.
+        with repo_worktree_lock(resolved_repo):
             try:
-                worktree_mod._run_git(
-                    resolved_repo, ["worktree", "remove", "--force", str(worktree_path)]
+                worktree_mod._git(
+                    resolved_repo,
+                    "worktree",
+                    "add",
+                    "-b",
+                    branch,
+                    str(worktree_path),
+                    base_sha,
                 )
-            except Exception:
-                pass
-            try:
-                if worktree_path.exists():
-                    import shutil
-
-                    shutil.rmtree(str(worktree_path), ignore_errors=True)
-            except Exception:
-                pass
-            try:
-                worktree_mod._run_git(resolved_repo, ["worktree", "prune"])
-            except Exception:
-                pass
-            try:
-                worktree_mod._run_git(resolved_repo, ["branch", "-D", branch])
-            except Exception:
-                pass
-            if not worktree_path.exists():
+            except BaseException:
+                # worktree add may have created a partial path/registration.
                 try:
-                    marker_path.unlink()
-                except OSError:
+                    worktree_mod._run_git(
+                        resolved_repo,
+                        ["worktree", "remove", "--force", str(worktree_path)],
+                    )
+                except Exception:
                     pass
-            else:
-                _log(
-                    "prepare_review_isolation",
-                    "worktree add failed and path still present at {}; retaining owner marker".format(
-                        worktree_path
-                    ),
-                )
-            raise
+                try:
+                    if worktree_path.exists():
+                        import shutil
+
+                        shutil.rmtree(str(worktree_path), ignore_errors=True)
+                except Exception:
+                    pass
+                try:
+                    worktree_mod._run_git(resolved_repo, ["worktree", "prune"])
+                except Exception:
+                    pass
+                try:
+                    worktree_mod._run_git(resolved_repo, ["branch", "-D", branch])
+                except Exception:
+                    pass
+                if not worktree_path.exists():
+                    try:
+                        marker_path.unlink()
+                    except OSError:
+                        pass
+                else:
+                    _log(
+                        "prepare_review_isolation",
+                        "worktree add failed and path still present at {}; retaining owner marker".format(
+                            worktree_path
+                        ),
+                    )
+                raise
     except GrokWrapperError as exc:
         if exc.error_class == "isolation-unavailable":
             raise
@@ -364,10 +372,11 @@ def cleanup_review_isolation(session: ReviewIsolation) -> None:
     repo = session.repo_root
     path = session.worktree_path
     try:
-        removed = worktree_mod._run_git(repo, ["worktree", "remove", "--force", str(path)])
-        if removed.returncode != 0:
-            worktree_mod._run_git(repo, ["worktree", "prune"])
-            worktree_mod._run_git(repo, ["worktree", "remove", "--force", str(path)])
+        with repo_worktree_lock(repo):
+            removed = worktree_mod._run_git(repo, ["worktree", "remove", "--force", str(path)])
+            if removed.returncode != 0:
+                worktree_mod._run_git(repo, ["worktree", "prune"])
+                worktree_mod._run_git(repo, ["worktree", "remove", "--force", str(path)])
     except GrokWrapperError as exc:
         _log("cleanup_review_isolation", "worktree remove failed: {}".format(exc))
 

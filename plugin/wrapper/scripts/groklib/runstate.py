@@ -25,16 +25,7 @@ from typing import Dict, List, Optional
 
 from groklib import GrokWrapperError, log_stderr
 from groklib import platformsupport
-
-try:
-    import fcntl  # type: ignore
-except ImportError:  # pragma: no cover - Windows
-    fcntl = None  # type: ignore
-
-try:
-    import msvcrt  # type: ignore
-except ImportError:  # pragma: no cover - non-Windows
-    msvcrt = None  # type: ignore
+from groklib.filelock import exclusive_file_lock
 
 _OWNER_STRING = "grok-skills-wrapper"
 _STATE_DIR_NAME = "grok-skills"
@@ -185,27 +176,9 @@ def write_json_atomic(path: pathlib.Path, payload: object) -> None:
 
 @contextlib.contextmanager
 def run_lock(paths: RunPaths):
-    """Exclusive lock on ``run_dir/run.lock`` (fcntl on Unix, msvcrt on Windows)."""
-    lock_path = paths.run_dir / "run.lock"
-    fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, _FILE_MODE)
-    try:
-        platformsupport.restrict_file_permissions(lock_path)
-        if fcntl is not None:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-        elif msvcrt is not None:  # pragma: no cover - Windows
-            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+    """Exclusive lock on ``run_dir/run.lock`` (shared exclusive_file_lock)."""
+    with exclusive_file_lock(paths.run_dir / "run.lock"):
         yield
-    finally:
-        try:
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-            elif msvcrt is not None:  # pragma: no cover
-                try:
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-                except OSError:
-                    pass
-        finally:
-            os.close(fd)
 
 
 def _load_run_json_unlocked(paths: RunPaths) -> dict:

@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
+## [Unreleased]
+
+### Fixed
+
+- Concurrent `git worktree add` on the same repository is serialized with a
+  per-repo lock (`.git/grok-skills-worktree.lock`). Git's worktree admin dir
+  races (`failed to read …/commondir`) made `review --isolated` and
+  `test_concurrent_isolated_runs` flake; the lock is the product fix, not a
+  test skip. Shared `exclusive_file_lock` is now the SSOT used by `run.lock`.
+
 ## [2.0.3] - 2026-08-13
 
 ### Changed
