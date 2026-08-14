@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
-## [2.0.3] - 2026-08-12
+## [2.0.3] - 2026-08-13
 
 ### Changed
 
@@ -23,8 +23,8 @@ for marketplace / package tags.
   opt-out that omits the pin so existing headless runs do not enter plan-approval.
 - **Present-but-blank `--model` / valued `--plan=` fail closed** on wrapper and
   direct (no silent remap to 4.6, no Node-only `--plan=true` opt-out). Node
-  effort parsing type-checks every occurrence so an earlier `turbo` cannot hide
-  behind a later valid `--effort`.
+  type-checks every `--model` and `--reasoning-effort` / `--effort` occurrence so
+  an earlier blank or `turbo` cannot hide behind a later valid flag.
 
 ### Fixed
 
@@ -32,18 +32,21 @@ for marketplace / package tags.
   in `plugin/references/grok-cli-defaults.json` (Python `groklib.cli_defaults` +
   Node `scripts/lib/cli-defaults.mjs`). Docs no longer claim
   `grok-composer-2.5-fast` as a current selectable pair.
-- Codex review on PR #11: direct path family-checks `modelUsage` (no silent
-  4.5 success when 4.6 was requested); Node type-checks every `--model`
-  occurrence; SSOT load failures emit a classified envelope; `noPlanDefault`
-  is read from the JSON; wrapper `SKILL.md` lists `--reasoning-effort` /
-  `--plan` on reason/code/verify; `accepted-version.json` stays on the last
-  probed 0.2.110 stamp and records 1.0.3 as last-seen only.
+- Direct path family-checks `modelUsage`: a successful CLI result keyed by
+  another family (for example `grok-4.5` when `grok-4.6` was requested) fails
+  closed as `model-unavailable`.
+- Missing or malformed CLI-defaults SSOT emits a classified `cli-failure`
+  envelope instead of an import-time traceback with empty stdout.
+- `noPlanDefault` is read from the JSON in both runtimes (shipped value stays
+  `true`).
+- Wrapper `SKILL.md` documents `--reasoning-effort` / `--plan` on `reason`,
+  `code`, and `verify`, not only `review`.
 
 ### Notes
 
 - Runtime still accepts any working `grok --version` (no version allowlist). The
-  advisory `accepted-version.json` stamp stays `enforcement: none` and is not
-  updated without a full probe suite.
+  advisory `accepted-version.json` stamp stays `enforcement: none`. Last
+  maintainer-probed build remains `0.2.110`; `1.0.3` is last-seen working only.
 
 ## [2.0.2] - 2026-07-22
 
