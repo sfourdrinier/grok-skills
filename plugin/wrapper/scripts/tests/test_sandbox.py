@@ -507,7 +507,11 @@ class VerifyEnforcementLinuxLabelTests(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        self.scratch_dir = tempfile.mkdtemp(prefix="grok-cli-sandbox-verify-linux-")
+        # Linux session-temp roots are /tmp and /var/tmp. Creating the fixture
+        # under the host TMPDIR (/var/folders on macOS) makes grok_dir look
+        # like a write grant outside those roots. Pin dir=/tmp so the mocked
+        # linux platform and the fixture path agree.
+        self.scratch_dir = tempfile.mkdtemp(prefix="grok-cli-sandbox-verify-linux-", dir="/tmp")
         self.addCleanup(shutil.rmtree, self.scratch_dir, True)
         self.home_dir = pathlib.Path(self.scratch_dir) / "grok-skills-home-fixture"
         self.grok_dir = self.home_dir / ".grok"

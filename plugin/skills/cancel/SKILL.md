@@ -34,4 +34,6 @@ node "$SKILL_BASE/run.mjs" cancel "$ARGUMENTS"
 ```
 
 Accepts a **job id** or a **runId** - the companion translates. Present the
-cancel confirmation as returned.
+cancel confirmation as returned. `cancelled` means the wrapper pid was
+observed dead. `cancel_failed` / `cancel_unconfirmed` mean it was not; do
+not tell the user the job stopped. Already-finished jobs stay as they were.

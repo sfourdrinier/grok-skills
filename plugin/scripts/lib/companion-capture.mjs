@@ -23,6 +23,7 @@ import {
 import { buildPeerIntegrationFailureEnvelope } from "./implement.mjs";
 import { shouldAttemptTerminalNotify, wrapperChildEnv } from "./notify.mjs";
 import { tryParseEnvelope } from "./render.mjs";
+import { projectTaskResult } from "./task-result.mjs";
 import { parseRunIdMarker } from "../progress-relay.mjs";
 
 /**
@@ -66,10 +67,14 @@ export function createCaptureAndTrack({
       storeJobStdout(cwd, job.id, direct.envelopeText);
       const directEnv = tryParseEnvelope(direct.envelopeText);
       const directRunId = isDirectRunId(directEnv?.runId) ? directEnv.runId : null;
+      const compact = directEnv ? projectTaskResult(directEnv) : null;
       updateJob(cwd, job.id, {
         status: direct.code === 0 ? "success" : "failure",
-        summary: direct.code === 0 ? "direct grok finished" : "direct grok failed",
+        summary:
+          (compact && compact.summary) ||
+          (direct.code === 0 ? "direct grok finished" : "direct grok failed"),
         ...(directRunId ? { runId: directRunId } : {}),
+        ...(compact ? { taskResult: compact } : {}),
       });
       process.stdout.write(direct.envelopeText);
       // Direct has no durable runs/<id> for notified.json; skip push notify.
@@ -140,10 +145,15 @@ export function createCaptureAndTrack({
         updateJob(cwd, job.id, { runId: safe });
       }
     }
+    const compact = tryParseEnvelope(emitStdout);
+    const projected = compact ? projectTaskResult(compact) : null;
     const updated = updateJob(cwd, job.id, {
       status: effectiveCode === 0 ? "success" : "failure",
-      summary: effectiveCode === 0 ? "completed" : `exit ${effectiveCode}`,
+      summary:
+        (projected && projected.summary) ||
+        (effectiveCode === 0 ? "completed" : `exit ${effectiveCode}`),
       pid: null,
+      ...(projected ? { taskResult: projected } : {}),
     });
     if (!shouldAttemptTerminalNotify({ skipNotify })) {
       return Promise.resolve(effectiveCode);

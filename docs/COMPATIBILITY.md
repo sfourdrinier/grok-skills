@@ -66,7 +66,7 @@ Constants live in `plugin/wrapper/scripts/groklib/implementation_contract.py`
 | Surface | Behavior |
 |---------|----------|
 | **integration default** | Product (companion/skills) defaults to **direct** with **no consent gate** (2.0.1+); bare `python3 …/grok_agent.py code` without `--integration` still defaults to **worktree** (fail-closed isolation for accidental bare calls). |
-| **ACP peer channel** | Default on for `grok-engineer-coder`. Always external retained worktree during the session. Opt out with `GROK_DISABLE_ACP=1` (one-shot `code` fallback). `GROK_EXPERIMENTAL_ACP` is no longer a hard enable gate (legacy opt-in ignored). |
+| **ACP peer channel** | Opt-in for `grok-engineer-coder` (default is one-shot `code`). Always external retained worktree during the session. Disable with `GROK_DISABLE_ACP=1`. `GROK_EXPERIMENTAL_ACP` is no longer a hard enable gate (legacy opt-in ignored). |
 | **runMode vs integration** | Orthogonal axes that both use the word "direct". runMode=direct = installed CLI home; integration=direct = edit-landing default name. For one-shot code, integration=direct means live-tree edits; for ACP peer it means stop-time apply of a verified ready patch (still external worktree during prompts). See integration-modes.md. |
 | **handoff vs peer** | `/grok:handoff` remains **code-mode only** and refuses peer runIds (`handoff-unavailable`). Peer integrate runs at `peer stop` via the shared auto/peer apply spine (dirty-status fail-closed + patch integrity): direct and auto both apply when ready; review retains. |
 | **peer notifications** | Peer-stop is **not** completion-notification eligible (`NOTIFY_ELIGIBLE_MODES` excludes peer modes). |
@@ -153,9 +153,10 @@ What we match:
   `hooks`, Figma-style `interface` (displayName, logos, defaultPrompt, category).
   Codex does not yet register plugin-bundled custom agents (openai/codex#18988);
   we materialize `plugin/codex-agents/*.toml` into `~/.codex/agents/` (or project
-  `.codex/agents/` when workspace prefs scope is `project`) on SessionStart
-  with absolute `GROK_AGENT_RUN` → `agents/run.mjs` (v1.2.5+; SessionStart since
-  v1.2.1). Interface category: **Development & Workflow**. See **Upstream gaps**.
+  `.codex/agents/` when workspace prefs scope is `project`) via `/grok:setup`
+  with absolute `GROK_AGENT_RUN` → `agents/run.mjs` (v1.2.5+; setup-as-installer
+  in 2.1.0; trusted SessionStart only reconciles owned files). Interface
+  category: **Development & Workflow**. See **Upstream gaps**.
 - Install sources (both hosts):
 
   | Source | Claude | Codex |

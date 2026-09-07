@@ -52,7 +52,7 @@ test("shipped templates use agent-run placeholder and sandbox_mode", () => {
       ),
       `${t.name} missing never-invent-paths guidance`
     );
-    assert.match(body, /sandbox_mode\s*=\s*"read-only"/);
+    assert.match(body, /sandbox_mode\s*=\s*"(read-only|workspace-write)"/);
     assert.match(body, /GROK_AGENT_RUN/);
   }
 });

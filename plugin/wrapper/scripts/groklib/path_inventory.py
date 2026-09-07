@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import pathlib
-from typing import List, Union
+from typing import Dict, List, Union
 
 from groklib import GrokWrapperError, log_stderr
 from groklib import worktree
@@ -265,10 +265,14 @@ def _expand_protected_leaves_under_ignored_dirs(
     return out
 
 
+LAST_AUDIT_STATS: Dict[str, object] = {}
+
+
 def list_ignored_untracked_paths(
     repo: pathlib.Path,
     *,
     error_class: str = "worktree-failure",
+    audit_profile: str = "exhaustive",
 ) -> List[str]:
     """Ignored untracked repo-relative paths (collapsed + check-ignore filtered).
 
@@ -304,4 +308,17 @@ def list_ignored_untracked_paths(
         if entry
     ]
     filtered = _filter_actually_ignored(repo, candidates, error_class=error_class)
-    return _expand_protected_leaves_under_ignored_dirs(repo, filtered)
+    profile = str(audit_profile or "exhaustive").strip().lower()
+    LAST_AUDIT_STATS.clear()
+    LAST_AUDIT_STATS.update(
+        {
+            "auditProfile": profile,
+            "collapsedEntries": len(filtered),
+            "expandedProtectedLeaves": 0,
+        }
+    )
+    if profile == "verified-host":
+        return filtered
+    expanded = _expand_protected_leaves_under_ignored_dirs(repo, filtered)
+    LAST_AUDIT_STATS["expandedProtectedLeaves"] = max(0, len(expanded) - len(filtered))
+    return expanded

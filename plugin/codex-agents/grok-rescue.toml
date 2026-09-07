@@ -1,5 +1,6 @@
 # Codex custom agent: Grok second opinion / diagnosis.
-# Auto-installed on SessionStart into ~/.codex/agents/ (also via setup).
+# Installed by /grok:setup into ~/.codex/agents/. Trusted SessionStart only
+# reconciles already-owned files.
 # Placeholder __GROK_AGENT_RUN_Q__ is rewritten to an absolute single-quoted path
 # to agents/run.mjs (self-locating; same entry family as skills/*/run.mjs).
 name = "grok-rescue"

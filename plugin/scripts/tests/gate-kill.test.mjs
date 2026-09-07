@@ -26,7 +26,7 @@ test("F1: terminateReviewTree never signals process group 0 (would hit the calle
 test("POSIX terminateReviewTree SIGTERMs the group, then SIGKILLs after a grace", () => {
   const calls = [];
   let slept = 0;
-  terminateReviewTree(4321, true, {
+  const result = terminateReviewTree(4321, true, {
     kill: (pid, signal) => calls.push([pid, signal]),
     sleep: (ms) => {
       slept = ms;
@@ -39,6 +39,8 @@ test("POSIX terminateReviewTree SIGTERMs the group, then SIGKILLs after a grace"
   assert.ok(slept > 0, "a grace pause happens between SIGTERM and SIGKILL");
   // Never signals group 0 nor a positive (single-process) pid.
   assert.ok(calls.every(([pid]) => pid < 0));
+  assert.equal(result.outcome, "stopped");
+  assert.equal(result.signaled, true);
 });
 
 test("POSIX terminateReviewTree tolerates an already-exited group (ESRCH) without throwing", () => {
@@ -77,9 +79,12 @@ test("Round4 F3: Windows terminateReviewTree surfaces a nonzero taskkill exit an
     return true;
   };
   try {
-    terminateReviewTree(888, false, {
+    const result = terminateReviewTree(888, false, {
       spawnSync: () => ({ status: 128, stderr: "ERROR: access denied for PID 888." }),
     });
+    assert.equal(result.outcome, "failed");
+    assert.equal(result.observedExit, false);
+    assert.match(String(result.error), /128|access denied/);
   } finally {
     process.stderr.write = originalWrite;
   }

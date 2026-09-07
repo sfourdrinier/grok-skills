@@ -382,3 +382,23 @@ class AssertChangesWithinTests(WorktreeTestBase):
         self.assertEqual(ctx.exception.detail.get("phase"), "post-build-gate")
         self.assertTrue(any("gate-escaped.txt" in v for v in ctx.exception.detail["violations"]))
         self.assertFalse(any("dirty.txt" in v for v in ctx.exception.detail["violations"]))
+
+
+class OwnedWorktreeAuditProfileTests(unittest.TestCase):
+    def test_owned_worktree_ignored_listing_passes_verified_host(self) -> None:
+        import inspect
+
+        from groklib import worktree_escape as we
+
+        src = inspect.getsource(we.assert_changes_within)
+        self.assertRegex(
+            src,
+            r"list_ignored_untracked_paths\(\s*wt\.path[\s\S]*?audit_profile\s*=\s*[\"']verified-host[\"']",
+            "owned-worktree inventory must pass audit_profile=verified-host",
+        )
+        orig_src = inspect.getsource(we.capture_original_checkout_baseline)
+        self.assertNotRegex(
+            orig_src,
+            r"audit_profile\s*=\s*[\"']verified-host[\"']",
+            "operator checkout baseline must stay exhaustive",
+        )

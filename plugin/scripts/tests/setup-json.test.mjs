@@ -8,10 +8,15 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
+import { installCodexAgents } from "../lib/codex-agents.mjs";
+import { cmdSetup } from "../lib/companion-setup.mjs";
 import { setNotificationConfig } from "../lib/jobs.mjs";
 import { makeFakeWrapper, runCompanion } from "./helpers/fake-wrapper.mjs";
+
+const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 const RID = "20260722T000000Z-setup1";
 
@@ -73,6 +78,12 @@ test("setup --json emits machine-readable status on stdout", () => {
     assert.equal(body.runMode, "hardened");
     assert.ok(Array.isArray(body.checks));
     assert.ok(body.notifications);
+    assert.equal(body.facts.hooksTrusted.state, "unknown");
+    assert.equal(body.facts.writeAccess.state, "unknown");
+    assert.equal(body.facts.networkAccess.state, "unknown");
+    assert.equal(body.facts.credentials.state, "unknown");
+    assert.equal(typeof body.facts.skillRunner.ok, "boolean");
+    assert.equal(typeof body.facts.cliRunnable.ok, "boolean");
   } finally {
     cleanupBin();
     cleanup();
@@ -120,5 +131,127 @@ test("setup --json redacts webhook URL path secrets", () => {
     cleanupBin();
     cleanup();
     fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("setup --json maps preflight authMaterial onto facts.credentials", () => {
+  const cwd = tempCwd();
+  const { env: fakeEnv, cleanup } = makeFakeWrapper({
+    preflight: {
+      stdout:
+        JSON.stringify({
+          schemaVersion: 1,
+          mode: "preflight",
+          status: "success",
+          runId: RID,
+          response: {
+            checks: [
+              { name: "authMaterial", ok: true, detail: "present under .grok" },
+            ],
+          },
+        }) + "\n",
+      exitCode: 0,
+    },
+  });
+  const { env, cleanupBin } = setupEnv(fakeEnv, cwd);
+  try {
+    const res = runCompanion(["setup", "--json", "--run-mode", "hardened"], { cwd, env });
+    assert.equal(res.code, 0, res.stderr || res.stdout);
+    const body = JSON.parse(
+      String(res.stdout)
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .pop()
+    );
+    assert.equal(body.facts.credentials.state, "present");
+    assert.equal(body.facts.credentials.ok, true);
+  } finally {
+    cleanupBin();
+    cleanup();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+function captureStdio(fn) {
+  const out = [];
+  const err = [];
+  const ow = process.stdout.write.bind(process.stdout);
+  const ew = process.stderr.write.bind(process.stderr);
+  process.stdout.write = (chunk) => {
+    out.push(String(chunk));
+    return true;
+  };
+  process.stderr.write = (chunk) => {
+    err.push(String(chunk));
+    return true;
+  };
+  try {
+    return { code: fn(), stdout: out.join(""), stderr: err.join("") };
+  } finally {
+    process.stdout.write = ow;
+    process.stderr.write = ew;
+  }
+}
+
+test("cmdSetup --remove-codex-agents does not claim SessionStart will reinstall", () => {
+  const cwd = tempCwd();
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-rm-"));
+  const prevHome = process.env.CODEX_HOME;
+  const prevData = process.env.CLAUDE_PLUGIN_DATA;
+  process.env.CODEX_HOME = home;
+  process.env.CLAUDE_PLUGIN_DATA = path.join(cwd, ".grok-plugin-data");
+  try {
+    installCodexAgents({ env: { CODEX_HOME: home }, pluginRoot: PLUGIN_ROOT });
+    const res = captureStdio(() =>
+      cmdSetup(cwd, ["--run-mode", "direct", "--remove-codex-agents"], {
+        python: "python3",
+        pluginRoot: PLUGIN_ROOT,
+      })
+    );
+    assert.doesNotMatch(
+      res.stdout + res.stderr,
+      /SessionStart will reinstall/i
+    );
+    assert.match(res.stdout + res.stderr, /Removed managed Codex agents/i);
+  } finally {
+    if (prevHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = prevHome;
+    if (prevData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+    else process.env.CLAUDE_PLUGIN_DATA = prevData;
+    fs.rmSync(cwd, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("cmdSetup surfaces managed-agent conflicts and requires --force", () => {
+  const cwd = tempCwd();
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-conf-"));
+  const prevHome = process.env.CODEX_HOME;
+  const prevData = process.env.CLAUDE_PLUGIN_DATA;
+  process.env.CODEX_HOME = home;
+  process.env.CLAUDE_PLUGIN_DATA = path.join(cwd, ".grok-plugin-data");
+  try {
+    installCodexAgents({ env: { CODEX_HOME: home }, pluginRoot: PLUGIN_ROOT });
+    const dest = path.join(home, "agents", "grok-engineer-coder.toml");
+    const original = fs.readFileSync(dest, "utf8");
+    fs.writeFileSync(dest, original.replace("You are grok-engineer-coder.", "USER EDIT KEEP"));
+    const res = captureStdio(() =>
+      cmdSetup(cwd, ["--run-mode", "direct", "--json"], {
+        python: "python3",
+        pluginRoot: PLUGIN_ROOT,
+      })
+    );
+    const blob = res.stdout + res.stderr;
+    assert.match(blob, /conflict/i);
+    assert.match(blob, /--force-codex-agents/);
+    assert.ok(fs.readFileSync(dest, "utf8").includes("USER EDIT KEEP"));
+  } finally {
+    if (prevHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = prevHome;
+    if (prevData === undefined) delete process.env.CLAUDE_PLUGIN_DATA;
+    else process.env.CLAUDE_PLUGIN_DATA = prevData;
+    fs.rmSync(cwd, { recursive: true, force: true });
+    fs.rmSync(home, { recursive: true, force: true });
   }
 });

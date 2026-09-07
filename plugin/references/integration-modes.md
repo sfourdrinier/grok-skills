@@ -249,9 +249,10 @@ code-style live-tree editing.
 
 ## ACP peer channel
 
-The **default** implementation path for `grok-engineer-coder` is the live
-multi-turn ACP peer (`peer start` / `prompt` / `stop`). One-shot `code` is the
-fallback (`GROK_DISABLE_ACP=1` or peer unavailable). Peer is **hardened runMode
+The **default** implementation path for `grok-engineer-coder` is one-shot
+`code` in the supplied workspace. ACP peer (`peer start` / `prompt` / `stop`)
+is **opt-in** (`/grok:peer`, or when the user asked for a multi-turn session).
+`GROK_DISABLE_ACP=1` still disables peer entirely. Peer is **hardened runMode
 only**.
 
 ### Peer isolation is always external

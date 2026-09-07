@@ -4,13 +4,17 @@
 // Mirrors the codex-plugin job idea without depending on Codex. Plugin-local
 // state only; safety still lives in the wrapper (hardened mode).
 
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
-import { resolveWorkspaceRoot } from "./gate-state.mjs";
+import {
+  atomicWritePrivate,
+  mkdirPrivate,
+  withExclusiveLockSync,
+} from "./atomic-file.mjs";
 import { resolveTargetWorkspaceRoot } from "./git-context.mjs";
+import { jobsDir, stateRoot } from "./jobs-layout.mjs";
 import {
   isNotificationMode,
   NOTIFICATION_MODES,
@@ -19,13 +23,20 @@ import {
 } from "./notification-modes.mjs";
 
 export { isNotificationMode, NOTIFICATION_MODES, parseNotificationMode, parseWebhookUrl };
+export { jobsDir };
 
-const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
-const FALLBACK = path.join(os.tmpdir(), "grok-companion");
 const MAX_JOBS = 50;
 const JOB_ID_RE = /^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$/;
-const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
+const PREFS_NAME = "prefs.json";
+const PREFS_BAK_NAME = "prefs.json.bak";
+const SCOPE_SIDECAR = "codex-agents-prefs.json";
+const ACTIVE_JOB_STATUSES = new Set([
+  "running",
+  "cancel_requested",
+  "cancel_failed",
+  "cancel_unconfirmed",
+]);
 
 /** Single source of jobs-index config defaults (design §11). */
 export const DEFAULT_JOBS_CONFIG = Object.freeze({
@@ -38,6 +49,7 @@ export const DEFAULT_JOBS_CONFIG = Object.freeze({
   integrationMode: "direct",
   // Legacy field kept in index for forward-compat reads; never gated (2.0.1+).
   integrationConsent: true,
+  codexAgentsScope: "user",
 });
 
 // Pre-2.0.1 product default. Used only when classifying legacy indexes that
@@ -138,8 +150,17 @@ function normalizeConfig(raw, opts = {}) {
     integrationMode:
       parseIntegrationMode(raw?.integrationMode) ?? DEFAULT_JOBS_CONFIG.integrationMode,
     integrationConsent: raw?.integrationConsent === true,
+    codexAgentsScope: parseCodexAgentsScope(raw?.codexAgentsScope) ?? DEFAULT_JOBS_CONFIG.codexAgentsScope,
     prefsSources,
   };
+}
+
+/** @param {unknown} value @returns {"user"|"project"|null} */
+export function parseCodexAgentsScope(value) {
+  const s = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  return s === "user" || s === "project" ? s : null;
 }
 
 function isSetupAuthored(config, key) {
@@ -176,22 +197,8 @@ export function isValidJobId(jobId) {
   return typeof jobId === "string" && JOB_ID_RE.test(jobId);
 }
 
-function mkdirPrivate(dir) {
-  fs.mkdirSync(dir, { recursive: true, mode: DIR_MODE });
-  try {
-    fs.chmodSync(dir, DIR_MODE);
-  } catch {
-    /* best-effort on platforms without chmod */
-  }
-}
-
 function writePrivate(filePath, content) {
-  fs.writeFileSync(filePath, content, { encoding: "utf8", mode: FILE_MODE });
-  try {
-    fs.chmodSync(filePath, FILE_MODE);
-  } catch {
-    /* best-effort */
-  }
+  atomicWritePrivate(filePath, content);
 }
 
 function assertJobIdSafe(jobId) {
@@ -205,188 +212,24 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-/**
- * Per-workspace state segment: `<basename-slug>-<sha256(canonical)[0:16]>`.
- * Kept identical for legacy tmp and CLAUDE_PLUGIN_DATA layouts so migration
- * and dual-path lookups share one key.
- */
-function workspaceStateSegment(cwd) {
-  const workspaceRoot = resolveWorkspaceRoot(cwd);
-  let canonical = workspaceRoot;
-  try {
-    canonical = fs.realpathSync.native(workspaceRoot);
-  } catch {
-    canonical = workspaceRoot;
-  }
-  const slug =
-    (path.basename(workspaceRoot) || "workspace")
-      .replace(/[^a-zA-Z0-9._-]+/g, "-")
-      .replace(/^-+|-+$/g, "") || "workspace";
-  const hash = createHash("sha256").update(canonical).digest("hex").slice(0, 16);
-  return `${slug}-${hash}`;
-}
-
-/**
- * Absolute CLAUDE_PLUGIN_DATA (or PLUGIN_DATA) only. Relative / empty -> null.
- * Host fact: Claude exports ~/.claude/plugins/data/<id>/ as an absolute path.
- */
-function resolvePluginDataDir(env = process.env) {
-  const raw = (env[PLUGIN_DATA_ENV] ?? env.PLUGIN_DATA ?? "").trim();
-  if (!raw || !path.isAbsolute(raw)) {
-    return null;
-  }
-  return raw;
-}
-
-/**
- * Atomic file copy via temp + rename (same filesystem). Destination path is
- * the complete-marker for migration: only written after body copy attempts.
- */
-function atomicCopyFile(src, dest) {
-  const dir = path.dirname(dest);
-  mkdirPrivate(dir);
-  const tmp = path.join(
-    dir,
-    `.${path.basename(dest)}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`
-  );
-  try {
-    fs.copyFileSync(src, tmp);
-    try {
-      fs.chmodSync(tmp, FILE_MODE);
-    } catch {
-      /* best-effort */
-    }
-    fs.renameSync(tmp, dest);
-  } catch (err) {
-    try {
-      fs.unlinkSync(tmp);
-    } catch {
-      /* best-effort cleanup */
-    }
-    throw err;
-  }
-}
-
-/**
- * Best-effort recursive copy of a job body directory (copy, never move).
- * Per-entry failures are noted on stderr; caller decides completeness.
- */
-function copyJobBodyTree(srcDir, destDir) {
-  mkdirPrivate(destDir);
-  const entries = fs.readdirSync(srcDir, { withFileTypes: true });
-  for (const entry of entries) {
-    const from = path.join(srcDir, entry.name);
-    const to = path.join(destDir, entry.name);
-    if (entry.isDirectory()) {
-      copyJobBodyTree(from, to);
-    } else if (entry.isFile()) {
-      fs.copyFileSync(from, to);
-      try {
-        fs.chmodSync(to, FILE_MODE);
-      } catch {
-        /* best-effort */
-      }
-    }
-  }
-}
-
-/**
- * Best-effort migration of jobs-index.json + jobs/<id>/ bodies from the legacy
- * tmp root into CLAUDE_PLUGIN_DATA/state. Complete only when the new
- * jobs-index.json exists (dir-exists alone is not enough - retry partials).
- * Index is written last via temp+rename so interrupted copies stay retryable.
- * Legacy is left in place as a frozen snapshot (copy, not move). Never throws.
- */
-function maybeMigrateLegacyState(legacyDir, newDir) {
-  try {
-    const newIndex = path.join(newDir, "jobs-index.json");
-    // Complete-marker: index presence. Dir-without-index is retryable.
-    if (fs.existsSync(newIndex)) {
-      return;
-    }
-    if (!fs.existsSync(legacyDir)) {
-      return;
-    }
-    const legacyIndex = path.join(legacyDir, "jobs-index.json");
-    if (!fs.existsSync(legacyIndex)) {
-      return;
-    }
-    mkdirPrivate(newDir);
-
-    // Job bodies first (best-effort per entry). Partial bodies still allow the
-    // index write; individual entry failures are noted but do not abort.
-    const legacyJobs = path.join(legacyDir, "jobs");
-    const newJobs = path.join(newDir, "jobs");
-    if (fs.existsSync(legacyJobs)) {
-      mkdirPrivate(newJobs);
-      let entries = [];
-      try {
-        entries = fs.readdirSync(legacyJobs, { withFileTypes: true });
-      } catch (err) {
-        process.stderr.write(
-          `[grok-jobs] job body migration partial (list): ${err?.message ?? err}\n`
-        );
-        entries = [];
-      }
-      for (const entry of entries) {
-        try {
-          const from = path.join(legacyJobs, entry.name);
-          const to = path.join(newJobs, entry.name);
-          if (entry.isDirectory()) {
-            copyJobBodyTree(from, to);
-          } else if (entry.isFile()) {
-            fs.copyFileSync(from, to);
-            try {
-              fs.chmodSync(to, FILE_MODE);
-            } catch {
-              /* best-effort */
-            }
-          }
-        } catch (err) {
-          try {
-            process.stderr.write(
-              `[grok-jobs] job body migration partial for ${entry.name}: ${err?.message ?? err}\n`
-            );
-          } catch {
-            /* best-effort */
-          }
-        }
-      }
-    }
-
-    // Index last = complete marker. Atomic rename keeps partials retryable.
-    atomicCopyFile(legacyIndex, newIndex);
-    process.stderr.write(
-      `[grok-jobs] migrated workspace state from ${legacyDir} to ${newDir}\n`
-    );
-  } catch (err) {
-    try {
-      process.stderr.write(
-        `[grok-jobs] state migration skipped: ${err?.message ?? err}\n`
-      );
-    } catch {
-      /* best-effort */
-    }
-  }
-}
-function stateRoot(cwd, env = process.env) {
-  const segment = workspaceStateSegment(cwd);
-  const legacyDir = path.join(FALLBACK, segment);
-  const pluginData = resolvePluginDataDir(env);
-  if (pluginData) {
-    const newDir = path.join(pluginData, "state", segment);
-    maybeMigrateLegacyState(legacyDir, newDir);
-    return newDir;
-  }
-  return legacyDir;
-}
-
-export function jobsDir(cwd, env = process.env) {
-  return path.join(stateRoot(cwd, env), "jobs");
-}
-
 function indexPath(cwd, env = process.env) {
   return path.join(stateRoot(cwd, env), "jobs-index.json");
+}
+
+function prefsPath(cwd, env = process.env) {
+  return path.join(stateRoot(cwd, env), PREFS_NAME);
+}
+
+function prefsBakPath(cwd, env = process.env) {
+  return path.join(stateRoot(cwd, env), PREFS_BAK_NAME);
+}
+
+function prefsLockPath(cwd, env = process.env) {
+  return path.join(stateRoot(cwd, env), "prefs.lock");
+}
+
+function sidecarScopePath(cwd, env = process.env) {
+  return path.join(stateRoot(cwd, env), SCOPE_SIDECAR);
 }
 
 function ensure(cwd, env = process.env) {
@@ -394,54 +237,151 @@ function ensure(cwd, env = process.env) {
   mkdirPrivate(jobsDir(cwd, env));
 }
 
+function readJsonObject(file) {
+  if (!fs.existsSync(file)) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function readSidecarScope(cwd, env) {
+  const parsed = readJsonObject(sidecarScopePath(cwd, env));
+  return parseCodexAgentsScope(parsed?.codexAgentsScope);
+}
+
+function prefsConfigUsable(config) {
+  if (!config || typeof config !== "object" || Array.isArray(config)) return false;
+  const rawMode = config.integrationMode;
+  if (rawMode != null && String(rawMode).trim() !== "" && !parseIntegrationMode(rawMode)) {
+    return false;
+  }
+  if (config.prefsSources?.integrationMode === "setup" && !parseIntegrationMode(rawMode)) {
+    return false;
+  }
+  return true;
+}
+
+function copyPrefsBak(src, dest) {
+  try {
+    fs.copyFileSync(src, dest);
+    try {
+      fs.chmodSync(dest, FILE_MODE);
+    } catch {
+      /* best-effort */
+    }
+  } catch {
+    /* bak is best-effort */
+  }
+}
+
+function persistPrefs(cwd, config, env = process.env) {
+  const file = prefsPath(cwd, env);
+  const bak = prefsBakPath(cwd, env);
+  const payload = `${JSON.stringify({ version: 2, config }, null, 2)}\n`;
+  atomicWritePrivate(file, payload);
+  if (prefsConfigUsable(config)) {
+    copyPrefsBak(file, bak);
+  }
+}
+
+function loadPrefsConfig(cwd, env = process.env) {
+  const fromPrefs = readJsonObject(prefsPath(cwd, env));
+  if (prefsConfigUsable(fromPrefs?.config)) {
+    return normalizeConfig(fromPrefs.config);
+  }
+  const fromBak = readJsonObject(prefsBakPath(cwd, env));
+  if (prefsConfigUsable(fromBak?.config)) {
+    return normalizeConfig(fromBak.config);
+  }
+  return null;
+}
+
 function emptyConfig() {
   return normalizeConfig({ ...DEFAULT_JOBS_CONFIG, prefsSources: {} });
 }
 
+function readAllJobRecords(cwd, env = process.env) {
+  const dir = jobsDir(cwd, env);
+  if (!fs.existsSync(dir)) return [];
+  const jobs = [];
+  let names = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  for (const name of names) {
+    if (!isValidJobId(name)) continue;
+    const meta = path.join(dir, name, "job.json");
+    const parsed = readJsonObject(meta);
+    if (parsed && parsed.id) jobs.push(parsed);
+  }
+  jobs.sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")));
+  return jobs;
+}
+
+function listingFromRecords(jobs) {
+  const active = jobs.filter((j) => ACTIVE_JOB_STATUSES.has(j.status));
+  const finished = jobs.filter((j) => !ACTIVE_JOB_STATUSES.has(j.status)).slice(0, MAX_JOBS);
+  return [...active, ...finished].sort((a, b) =>
+    String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? ""))
+  );
+}
+
+function migrateLegacyIndexConfig(cwd, env) {
+  const parsed = readJsonObject(indexPath(cwd, env));
+  if (!parsed || typeof parsed !== "object") return null;
+  const legacySetup =
+    parsed.config != null &&
+    (parsed.config.prefsSources === undefined || parsed.config.prefsSources === null);
+  const config = normalizeConfig(parsed.config, { legacySetup });
+  const sidecarScope = readSidecarScope(cwd, env);
+  if (sidecarScope && !isSetupAuthored(config, "codexAgentsScope")) {
+    config.codexAgentsScope = sidecarScope;
+    if (sidecarScope !== DEFAULT_JOBS_CONFIG.codexAgentsScope) {
+      config.prefsSources = { ...(config.prefsSources ?? {}), codexAgentsScope: "setup" };
+    }
+  }
+  return config;
+}
+
 function loadIndex(cwd, env = process.env) {
   ensure(cwd, env);
-  const file = indexPath(cwd, env);
-  if (!fs.existsSync(file)) {
-    return { version: 1, jobs: [], config: emptyConfig() };
+  let config = loadPrefsConfig(cwd, env);
+  if (!config) {
+    config = migrateLegacyIndexConfig(cwd, env) ?? emptyConfig();
+    persistPrefs(cwd, config, env);
   }
-  try {
-    const parsed = JSON.parse(fs.readFileSync(file, "utf8"));
-    const legacySetup =
-      parsed?.config != null &&
-      (parsed.config.prefsSources === undefined || parsed.config.prefsSources === null);
-    return {
-      version: 1,
-      jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [],
-      config: normalizeConfig(parsed.config, { legacySetup }),
-    };
-  } catch {
-    return { version: 1, jobs: [], config: emptyConfig() };
-  }
+  const jobs = listingFromRecords(readAllJobRecords(cwd, env));
+  return { version: 1, jobs, config };
 }
 
 function saveIndex(cwd, index, env = process.env) {
   ensure(cwd, env);
-  const jobs = [...(index.jobs ?? [])]
-    .sort((a, b) => String(b.updatedAt ?? "").localeCompare(String(a.updatedAt ?? "")))
-    .slice(0, MAX_JOBS);
   const config = normalizeConfig(index.config);
-  // Always persist prefsSources (possibly {}) so new indexes are not mistaken
-  // for pre-userConfig legacy files on the next load.
-  const payload = {
-    version: 1,
-    config: {
-      runMode: config.runMode,
-      notificationMode: config.notificationMode,
-      notificationWebhookUrl: config.notificationWebhookUrl,
-      lastRescueJobId: config.lastRescueJobId,
-      integrationMode: config.integrationMode,
-      integrationConsent: config.integrationConsent === true,
-      prefsSources: config.prefsSources ?? {},
-    },
-    jobs,
-  };
-  writePrivate(indexPath(cwd, env), `${JSON.stringify(payload, null, 2)}\n`);
-  return payload;
+  return withExclusiveLockSync(prefsLockPath(cwd, env), () => {
+    persistPrefs(cwd, config, env);
+    const jobs = listingFromRecords(readAllJobRecords(cwd, env));
+    const payload = {
+      version: 1,
+      config: {
+        runMode: config.runMode,
+        notificationMode: config.notificationMode,
+        notificationWebhookUrl: config.notificationWebhookUrl,
+        lastRescueJobId: config.lastRescueJobId,
+        integrationMode: config.integrationMode,
+        integrationConsent: config.integrationConsent === true,
+        codexAgentsScope: config.codexAgentsScope ?? DEFAULT_JOBS_CONFIG.codexAgentsScope,
+        prefsSources: config.prefsSources ?? {},
+      },
+      jobs,
+    };
+    writePrivate(indexPath(cwd, env), `${JSON.stringify(payload, null, 2)}\n`);
+    return payload;
+  });
 }
 
 /**
@@ -662,6 +602,8 @@ export function createJob(cwd, partial, env = process.env) {
     runMode: partial.runMode || getRunMode(cwd, env),
     pid: partial.pid ?? null,
     pgid: partial.pgid ?? null,
+    pgidKind: partial.pgidKind ?? "none",
+    startId: partial.startId ?? null,
     runId: partial.runId ?? null,
     createdAt: nowIso(),
     updatedAt: nowIso(),
@@ -689,7 +631,20 @@ export function updateJob(cwd, jobId, patch, env = process.env) {
       job = { id: jobId };
     }
   }
-  job = { ...job, ...patch, id: jobId, updatedAt: nowIso() };
+  const cancelStates = new Set([
+    "cancelled",
+    "cancel_requested",
+    "cancel_failed",
+    "cancel_unconfirmed",
+  ]);
+  const nextPatch = { ...patch };
+  if (
+    cancelStates.has(job.status) &&
+    (nextPatch.status === "success" || nextPatch.status === "failure")
+  ) {
+    delete nextPatch.status;
+  }
+  job = { ...job, ...nextPatch, id: jobId, updatedAt: nowIso() };
   mkdirPrivate(paths.dir);
   writePrivate(paths.meta, `${JSON.stringify(job, null, 2)}\n`);
   const index = loadIndex(cwd, env);
@@ -711,7 +666,25 @@ export function storeJobStdout(cwd, jobId, text, env = process.env) {
 }
 
 export function listJobs(cwd, env = process.env) {
-  return loadIndex(cwd, env).jobs;
+  ensure(cwd, env);
+  return listingFromRecords(readAllJobRecords(cwd, env));
+}
+
+export function getStoredCodexAgentsScope(cwd, env = process.env) {
+  const config = loadIndex(cwd, env).config;
+  return parseCodexAgentsScope(config.codexAgentsScope) ?? DEFAULT_JOBS_CONFIG.codexAgentsScope;
+}
+
+export function setStoredCodexAgentsScope(cwd, scope, env = process.env) {
+  const normalized = parseCodexAgentsScope(scope) || DEFAULT_JOBS_CONFIG.codexAgentsScope;
+  const index = loadIndex(cwd, env);
+  index.config.codexAgentsScope = normalized;
+  index.config.prefsSources = {
+    ...(index.config.prefsSources ?? {}),
+    codexAgentsScope: "setup",
+  };
+  saveIndex(cwd, index, env);
+  return normalized;
 }
 
 export function getJob(cwd, jobId, env = process.env) {

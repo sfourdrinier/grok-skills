@@ -102,6 +102,20 @@ class PathInventoryQuotePathTests(unittest.TestCase):
             "bulk cache non-deny leaves must stay collapsed: {}".format(paths),
         )
 
+    def test_verified_host_profile_does_not_expand_protected_leaves(self) -> None:
+        (self.repo / ".gitignore").write_text("secrets/\n", encoding="utf-8")
+        _git(self.repo, "add", ".gitignore")
+        _git(self.repo, "commit", "-q", "-m", "ignore secrets")
+        secrets = self.repo / "secrets"
+        secrets.mkdir()
+        (secrets / "id_rsa").write_text("PRIVATE KEY\n", encoding="utf-8")
+        paths = path_inventory.list_ignored_untracked_paths(
+            self.repo, audit_profile="verified-host"
+        )
+        self.assertNotIn("secrets/id_rsa", paths)
+        self.assertEqual(path_inventory.LAST_AUDIT_STATS.get("auditProfile"), "verified-host")
+        self.assertEqual(path_inventory.LAST_AUDIT_STATS.get("expandedProtectedLeaves"), 0)
+
     def test_list_ignored_drops_untracked_parent_of_nested_ignore(self) -> None:
         # --directory may emit other/ when only other/__pycache__/ is ignored;
         # check-ignore filter must drop the non-ignored parent (scope byproducts).

@@ -1,12 +1,12 @@
 {
-  "description": "Claude SessionStart: transfer stamp only (never writes ~/.codex); SessionEnd stamp; optional stop-time Grok review gate; SubagentStop handoff nudge.",
+  "description": "Codex SessionStart: transfer stamp + cheap reconcile of owned agents (setup is the installer); SessionEnd timeout 3s; optional stop-time Grok review gate; SubagentStop handoff nudge.",
   "hooks": {
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT}}/scripts/session-lifecycle-hook.mjs\" SessionStart --host claude",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT}}/scripts/session-lifecycle-hook.mjs\" SessionStart --host codex",
             "timeout": 30,
             "statusMessage": "Grok session capture"
           }
@@ -18,8 +18,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT}}/scripts/session-lifecycle-hook.mjs\" SessionEnd --host claude",
-            "timeout": 5
+            "command": "node \"${CLAUDE_PLUGIN_ROOT:-${PLUGIN_ROOT}}/scripts/session-lifecycle-hook.mjs\" SessionEnd --host codex",
+            "timeout": 3
           }
         ]
       }

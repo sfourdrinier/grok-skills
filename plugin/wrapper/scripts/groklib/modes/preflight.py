@@ -455,7 +455,12 @@ def _run_preflight_body(
     if isinstance(version_detail, str) and version_detail.strip():
         from groklib import preflight_cache
 
-        preflight_cache.write_ok(version_detail)
+        identity = None
+        try:
+            identity = preflight_cache.executable_identity(binary)
+        except OSError:
+            identity = None
+        preflight_cache.write_ok(version_detail, executable_identity=identity)
         # Do NOT rewrite accepted-version.json here (Codex PR review): that stamp
         # is maintainer evidence after a full live probe suite, not a routine
         # preflight side-effect that dirties marketplace installs / checkouts.

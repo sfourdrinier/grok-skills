@@ -102,6 +102,7 @@ def run(args: argparse.Namespace) -> dict:
             never_build_workspaces=project_config.never_build_workspaces,
             original_workspace_name=captured_workspace_name[0],
             pristine_scripts=captured_workspace_scripts[0],
+            validation_level=str(getattr(args, "validation", "full") or "full"),
         )
 
     return run_direct_mode(

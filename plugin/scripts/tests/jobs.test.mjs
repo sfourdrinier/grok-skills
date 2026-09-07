@@ -26,7 +26,11 @@ import {
 } from "../lib/jobs.mjs";
 import { readGateConfig, resolveStateDir, writeGateConfig } from "../lib/gate-state.mjs";import { runDirectGrok } from "../lib/direct-grok.mjs";
 import { renderEnvelopePretty, tryParseEnvelope } from "../lib/render.mjs";
-import { buildAdversarialTask } from "../lib/git-context.mjs";
+import {
+  buildAdversarialTask,
+  buildBranchReviewTask,
+  buildWorkingTreeReviewTask,
+} from "../lib/git-context.mjs";
 import { makeFakeWrapper, runCompanion } from "./helpers/fake-wrapper.mjs";
 
 test("job registry creates, lists, and updates", () => {
@@ -375,6 +379,16 @@ test("adversarial task framing is aggressive", () => {
   assert.match(t, /auth/);
 });
 
+test("review tasks rank confirmed defects over optional improvements", () => {
+  const branch = buildBranchReviewTask("HEAD", "auth");
+  assert.match(branch, /confirmed defects/i);
+  assert.match(branch, /zero-defect outcome is\s+valid/i);
+  assert.match(branch, /auth/);
+  const tree = buildWorkingTreeReviewTask("paths");
+  assert.match(tree, /confirmed defects/i);
+  assert.match(tree, /zero-defect outcome is\s+valid/i);
+});
+
 test("pretty render shows status and response text", () => {
   const env = tryParseEnvelope(
     JSON.stringify({
@@ -595,6 +609,10 @@ test("legacy jobs-index notificationMode off is not setup-authored after default
   }
   const indexPath = findIndex(pluginData);
   assert.ok(indexPath, "expected jobs-index.json under plugin data");
+  for (const name of ["prefs.json", "prefs.json.bak"]) {
+    const extra = path.join(path.dirname(indexPath), name);
+    if (fs.existsSync(extra)) fs.unlinkSync(extra);
+  }
   const legacy = {
     version: 1,
     config: {
@@ -637,8 +655,16 @@ test("legacy jobs-index non-default integrationMode is pinned as setup", () => {
   }
   const indexPath = findIndex(pluginData);
   assert.ok(indexPath, "expected jobs-index.json under plugin data");
+  for (const name of ["prefs.json", "prefs.json.bak"]) {
+    const extra = path.join(path.dirname(indexPath), name);
+    if (fs.existsSync(extra)) fs.unlinkSync(extra);
+  }
 
   for (const mode of ["worktree", "auto", "review"]) {
+    for (const name of ["prefs.json", "prefs.json.bak"]) {
+      const extra = path.join(path.dirname(indexPath), name);
+      if (fs.existsSync(extra)) fs.unlinkSync(extra);
+    }
     fs.writeFileSync(
       indexPath,
       JSON.stringify({
@@ -666,6 +692,10 @@ test("legacy jobs-index non-default integrationMode is pinned as setup", () => {
   }
 
   // Legacy default "direct" stays unpinned so userConfig / built-in apply.
+  for (const name of ["prefs.json", "prefs.json.bak"]) {
+    const extra = path.join(path.dirname(indexPath), name);
+    if (fs.existsSync(extra)) fs.unlinkSync(extra);
+  }
   fs.writeFileSync(
     indexPath,
     JSON.stringify({

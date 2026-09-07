@@ -44,7 +44,13 @@ from groklib import worktree as worktree_mod
 from groklib import worktree_escape
 from groklib.implementation_contract import assert_target_matches, load_optional_contract_arg
 from groklib.code_handoff_finalize import code_handoff_finalize
-from groklib.projectconfig import ProjectConfig, build_gate_command, install_command, load_project_config
+from groklib.projectconfig import (
+    ProjectConfig,
+    build_gate_command,
+    install_command,
+    load_project_config,
+    validation_plan,
+)
 from groklib.cli_defaults import mode_run_cli_kwargs, requested_model_from_args
 from groklib.modes import _shared
 from groklib.modes import code_continue
@@ -169,12 +175,13 @@ def _maybe_install_dependencies(
     package_manager: Optional[str],
     pm_binary: Optional[str],
 ) -> None:
-    """Run the offline, lockfile-frozen install ONLY when the workspace has deps but no node_modules.
+    """Run install ONLY when the workspace has a manifest but no node_modules.
 
-    No-op when no package manager was detected (a non-JS repo). Records the
+    No-op when no package manager was detected (a non-JS repo) or when
+    node_modules already exists (do not ``npm ci`` over a live tree). Records the
     command on ``stage.acc.commands`` and fails closed (validation-failure) on a
-    nonzero exit. The offline + lockfile-frozen flags guarantee the install never
-    reaches the network and never mutates the lockfile.
+    nonzero exit. See ``install_policy`` for which flags are actually offline
+    and/or lockfile-frozen.
     """
     if package_manager is None:
         return
@@ -531,6 +538,7 @@ def _run_build_gate(
     never_build_workspaces: Dict[str, Tuple[str, ...]],
     original_workspace_name: Optional[str],
     pristine_scripts: Optional[Dict[str, object]],
+    validation_level: str = "full",
 ) -> None:
     """Resolve and run the workspace FULL build gate, UNLESS Grok modified a gate script definition.
 
@@ -567,7 +575,9 @@ def _run_build_gate(
 
     postrun_name, scripts = _read_workspace_manifest(workspace_dir)
     identity_name = original_workspace_name if original_workspace_name is not None else postrun_name
-    gate_script_names = _build_gate_scripts(scripts, identity_name, never_build_workspaces)
+    full_names = _build_gate_scripts(scripts, identity_name, never_build_workspaces)
+    plan = validation_plan(validation_level, full_names)
+    gate_script_names = [str(item) for item in plan["commands"]]
 
     modified = _gate_scripts_modified(pristine_scripts, scripts, gate_script_names)
     if modified:
@@ -803,6 +813,7 @@ def run(args: argparse.Namespace) -> dict:
                 project_config.never_build_workspaces,
                 captured_workspace_name[0],
                 captured_workspace_scripts[0],
+                validation_level=str(getattr(args, "validation", "full") or "full"),
             )
 
         code_handoff_finalize(

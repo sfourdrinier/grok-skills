@@ -230,6 +230,15 @@ def assert_changes_within(
             violations.append(str(candidate))
             continue
 
+    for relative in path_inventory.list_ignored_untracked_paths(
+        wt.path, audit_profile="verified-host"
+    ):
+        candidate = (wt.path / relative).resolve()
+        if _is_ignored_artifact(wt, relative):
+            continue
+        if not worktree._within_any(candidate, resolved_roots):
+            violations.append(str(candidate))
+
     violations.extend(_collect_original_checkout_escapes(wt, resolved_roots, baseline))
 
     _raise_escape_violations(

@@ -505,6 +505,7 @@ def _run_build_gate_for_direct(
     never_build_workspaces: Dict[str, Tuple[str, ...]],
     original_workspace_name: Optional[str],
     pristine_scripts: Optional[Dict[str, object]],
+    validation_level: str = "full",
 ) -> None:
     """Reuse code._run_build_gate with a path-only worktree stand-in (cwd = repo root)."""
     path_only = types.SimpleNamespace(path=stage.repo_root)
@@ -521,6 +522,7 @@ def _run_build_gate_for_direct(
         never_build_workspaces,
         original_workspace_name,
         pristine_scripts,
+        validation_level=validation_level,
     )
 
 
@@ -534,6 +536,7 @@ def finalize_direct(
     never_build_workspaces: Dict[str, Tuple[str, ...]],
     original_workspace_name: Optional[str],
     pristine_scripts: Optional[Dict[str, object]],
+    validation_level: str = "full",
 ) -> None:
     """Ordered direct finalize. Raises classified GrokWrapperError on policy failure."""
     repo_root = stage.repo_root
@@ -568,6 +571,7 @@ def finalize_direct(
         never_build_workspaces=never_build_workspaces,
         original_workspace_name=original_workspace_name,
         pristine_scripts=pristine_scripts,
+        validation_level=validation_level,
     )
 
     stage.progress.safe_emit("validate", "direct: running requiredValidation")

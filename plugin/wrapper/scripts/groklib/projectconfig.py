@@ -201,20 +201,79 @@ def load_project_config(repo_root: pathlib.Path) -> ProjectConfig:
     )
 
 
-def install_command(package_manager: str) -> List[str]:
-    """Return the offline, lockfile-frozen dependency-install argv for ``package_manager``.
+def install_policy(package_manager: str) -> Dict[str, object]:
+    """Honest install argv plus whether it is offline and lockfile-frozen.
 
-    Best-effort convenience so the build gate has node_modules present; every
-    variant is forced OFFLINE and lockfile-frozen so the install never reaches the
-    network and never mutates the lockfile.
+    npm ci is lockfile-frozen and offline-capable; ``npm install --offline`` is
+    not frozen. Bun ``--frozen-lockfile`` is reproducibility, not offline.
+    Yarn Classic flags are assumed; Berry needs ``--immutable``.
     """
     if package_manager == "npm":
-        return ["npm", "install", "--offline", "--no-audit", "--no-fund"]
+        return {
+            "argv": ["npm", "ci", "--offline", "--no-audit", "--no-fund"],
+            "offline": True,
+            "lockfileFrozen": True,
+            "replacesNodeModules": True,
+        }
     if package_manager == "yarn":
-        return ["yarn", "install", "--offline", "--frozen-lockfile"]
+        return {
+            "argv": ["yarn", "install", "--offline", "--frozen-lockfile"],
+            "offline": True,
+            "lockfileFrozen": True,
+            "yarnGeneration": "classic-assumed",
+        }
     if package_manager == "bun":
-        return ["bun", "install", "--frozen-lockfile"]
-    return ["pnpm", "install", "--offline", "--frozen-lockfile"]
+        return {
+            "argv": ["bun", "install", "--frozen-lockfile"],
+            "offline": False,
+            "lockfileFrozen": True,
+        }
+    return {
+        "argv": ["pnpm", "install", "--offline", "--frozen-lockfile"],
+        "offline": True,
+        "lockfileFrozen": True,
+    }
+
+
+def install_command(package_manager: str) -> List[str]:
+    """Return the install argv for ``package_manager`` (see ``install_policy``)."""
+    argv = install_policy(package_manager).get("argv")
+    if not isinstance(argv, list):
+        raise GrokWrapperError(
+            "validation-failure",
+            "install policy missing argv",
+            {"packageManager": package_manager},
+        )
+    return [str(part) for part in argv]
+
+
+def validation_plan(level: str, commands: Optional[List[object]] = None) -> Dict[str, object]:
+    """Named validation plan: targeted, affected, or full.
+
+    When ``commands`` is a list of package.json script names, targeted keeps
+    ``test`` if present (else drops ``build``), affected drops ``build``, and
+    full keeps the list. Non-string entries (already-resolved argv) are kept.
+    """
+    normalized = str(level or "").strip().lower()
+    if normalized not in {"targeted", "affected", "full"}:
+        raise GrokWrapperError(
+            "validation-failure",
+            "validation level must be targeted, affected, or full",
+            {"level": level},
+        )
+    raw = list(commands or [])
+    if raw and all(isinstance(item, str) for item in raw):
+        names = [str(item) for item in raw]
+        if normalized == "targeted":
+            if "test" in names:
+                raw = ["test"]
+            else:
+                narrowed = [name for name in names if name != "build"]
+                raw = narrowed or names
+        elif normalized == "affected":
+            narrowed = [name for name in names if name != "build"]
+            raw = narrowed or names
+    return {"level": normalized, "commands": raw}
 
 
 def build_gate_command(package_manager: str, script: str) -> List[str]:
