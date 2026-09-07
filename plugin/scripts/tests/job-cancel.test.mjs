@@ -15,6 +15,7 @@ import { createJob, getJob, updateJob } from "../lib/jobs.mjs";
 import {
   cancelTrackedJob,
   isPidGone,
+  pidLiveness,
   stopOwnedWrapper,
 } from "../lib/job-cancel.mjs";
 
@@ -32,6 +33,51 @@ function alive(pid) {
     return false;
   }
 }
+
+test("pidLiveness treats a failed ps after kill(0) as unknown, not dead", () => {
+  const liveness = pidLiveness(4242, {
+    kill: () => {},
+    spawnSync: () => ({ status: 127, stdout: "", stderr: "ps: not found" }),
+  });
+  assert.equal(liveness, "unknown");
+  assert.equal(
+    isPidGone(4242, {
+      kill: () => {},
+      spawnSync: () => ({ status: 127, stdout: "", stderr: "ps: not found" }),
+    }),
+    false
+  );
+});
+
+test("unreadable start identity is failed, not signalled", () => {
+  const calls = [];
+  const result = stopOwnedWrapper({ pid: 21, startId: "21:boot" }, true, {
+    kill: (pid, signal) => calls.push([pid, signal]),
+    readIdentity: () => null,
+    waitUntilGone: () => false,
+    sleep: () => {},
+  });
+  assert.equal(result.outcome, "failed");
+  assert.equal(calls.length, 0);
+  assert.match(String(result.error), /identity|unknown|revalidate/i);
+});
+
+test("forced stop is unconfirmed when a descendant stays live after wrapper exit", () => {
+  const killed = [];
+  const result = stopOwnedWrapper({ pid: 31, startId: "31:a" }, true, {
+    kill: (pid, signal) => {
+      killed.push([pid, signal]);
+    },
+    readIdentity: () => "31:a",
+    waitUntilGone: (pid) => pid === 31,
+    listDescendants: () => [99],
+    pidLiveness: (pid) => (pid === 31 ? "dead" : "alive"),
+    sleep: () => {},
+  });
+  assert.equal(result.outcome, "unconfirmed");
+  assert.equal(result.observedExit, true);
+  assert.ok(killed.some(([pid, signal]) => pid === 99 && signal === "SIGKILL"));
+});
 
 test("isPidGone treats a zombie as observed exit", { skip: process.platform === "win32" }, () => {
   const child = spawn("python3", ["-c", "import time; time.sleep(30)"], {

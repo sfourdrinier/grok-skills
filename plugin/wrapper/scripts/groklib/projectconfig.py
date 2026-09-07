@@ -247,12 +247,18 @@ def install_command(package_manager: str) -> List[str]:
     return [str(part) for part in argv]
 
 
-def validation_plan(level: str, commands: Optional[List[object]] = None) -> Dict[str, object]:
+def validation_plan(
+    level: str,
+    commands: Optional[List[object]] = None,
+    pinned: Optional[List[object]] = None,
+) -> Dict[str, object]:
     """Named validation plan: targeted, affected, or full.
 
-    When ``commands`` is a list of package.json script names, targeted keeps
-    ``test`` if present (else drops ``build``), affected drops ``build``, and
-    full keeps the list. Non-string entries (already-resolved argv) are kept.
+    ``pinned`` commands are mandatory project/contract checks and are never
+    filtered by the optimization level. Optional inferred ``commands`` may be
+    narrowed: targeted keeps ``test`` if present (else drops ``build``),
+    affected drops ``build``, and full keeps the list. Non-string entries
+    (already-resolved argv) are kept.
     """
     normalized = str(level or "").strip().lower()
     if normalized not in {"targeted", "affected", "full"}:
@@ -261,7 +267,10 @@ def validation_plan(level: str, commands: Optional[List[object]] = None) -> Dict
             "validation level must be targeted, affected, or full",
             {"level": level},
         )
+    pinned_list = list(pinned or [])
     raw = list(commands or [])
+    if pinned_list:
+        return {"level": normalized, "commands": pinned_list, "pinned": True}
     if raw and all(isinstance(item, str) for item in raw):
         names = [str(item) for item in raw]
         if normalized == "targeted":
@@ -273,7 +282,7 @@ def validation_plan(level: str, commands: Optional[List[object]] = None) -> Dict
         elif normalized == "affected":
             narrowed = [name for name in names if name != "build"]
             raw = narrowed or names
-    return {"level": normalized, "commands": raw}
+    return {"level": normalized, "commands": raw, "pinned": False}
 
 
 def build_gate_command(package_manager: str, script: str) -> List[str]:

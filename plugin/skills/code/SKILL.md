@@ -1,7 +1,7 @@
 ---
 name: "code"
 description: "Have Grok implement code (default: live tree; opt-in isolated worktree). Nothing is committed or pushed"
-argument-hint: "(--target <path> --base <revision> | --continue-run <runId>) (--task <text> | --task-file <path>) [--contract-file <path>] [--web] [--model <id>] [--reasoning-effort <low|medium|high|xhigh>] [--plan] [--timeout <s>] [--max-turns <n>]"
+argument-hint: "(--target <path> --base <revision> | --continue-run <runId>) (--task <text> | --task-file <path>) [--contract-file <path>] [--validation <targeted|affected|full>] [--web] [--model <id>] [--reasoning-effort <low|medium|high|xhigh>] [--plan] [--timeout <s>] [--max-turns <n>]"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
 

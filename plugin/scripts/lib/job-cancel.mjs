@@ -28,6 +28,32 @@ export function processStartIdentity(pid, spawnSync = nodeSpawnSync) {
   return `${pid}:${start}`;
 }
 
+export function listDescendantPids(rootPid, spawnSync = nodeSpawnSync) {
+  if (!Number.isInteger(rootPid) || rootPid <= 0) return [];
+  const listed = spawnSync("ps", ["-ax", "-o", "pid=,ppid="], { encoding: "utf8" });
+  if (!listed || listed.status !== 0) return [];
+  const children = new Map();
+  for (const line of String(listed.stdout || "").split("\n")) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)$/);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const ppid = Number(match[2]);
+    if (!children.has(ppid)) children.set(ppid, []);
+    children.get(ppid).push(pid);
+  }
+  const out = [];
+  const stack = [...(children.get(rootPid) || [])];
+  const seen = new Set();
+  while (stack.length) {
+    const pid = stack.pop();
+    if (!Number.isInteger(pid) || pid <= 1 || seen.has(pid) || pid === rootPid) continue;
+    seen.add(pid);
+    out.push(pid);
+    for (const child of children.get(pid) || []) stack.push(child);
+  }
+  return out;
+}
+
 function defaultSleep(ms) {
   try {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -39,20 +65,26 @@ function defaultSleep(ms) {
   }
 }
 
-export function isPidGone(pid, deps = {}) {
+export function pidLiveness(pid, deps = {}) {
   const kill = deps.kill ?? process.kill.bind(process);
   const spawn = deps.spawnSync ?? nodeSpawnSync;
   try {
     kill(pid, 0);
   } catch (err) {
-    return Boolean(err && err.code === "ESRCH");
+    if (err && err.code === "ESRCH") return "dead";
+    return "unknown";
   }
   // kill(pid, 0) succeeds for zombies. The parent (live companion) still owns
   // the child, so cancel in another process must treat Z as observed exit.
   const listed = spawn("ps", ["-p", String(pid), "-o", "state="], { encoding: "utf8" });
-  if (listed.status !== 0) return true;
+  if (!listed || listed.status !== 0) return "unknown";
   const state = String(listed.stdout || "").trim().toUpperCase();
-  return !state || state.startsWith("Z");
+  if (!state || state.startsWith("Z")) return "dead";
+  return "alive";
+}
+
+export function isPidGone(pid, deps = {}) {
+  return pidLiveness(pid, deps) === "dead";
 }
 
 function defaultWaitUntilGone(pid, timeoutMs, sleep, gone) {
@@ -82,19 +114,32 @@ export function stopOwnedWrapper(handle, isPosix, deps = {}) {
   const kill = deps.kill ?? process.kill.bind(process);
   const spawn = deps.spawnSync ?? nodeSpawnSync;
   const sleep = deps.sleep ?? defaultSleep;
+  const livenessOf =
+    deps.pidLiveness ?? ((target) => pidLiveness(target, { kill, spawnSync: spawn }));
   const pidGone =
-    deps.isPidGone ?? ((target) => isPidGone(target, { kill, spawnSync: spawn }));
+    deps.isPidGone ?? ((target) => livenessOf(target) === "dead");
   const waitUntilGone =
     deps.waitUntilGone ??
     ((target, ms) => defaultWaitUntilGone(target, ms, sleep, pidGone));
   const readIdentity =
     deps.readIdentity ?? ((target) => processStartIdentity(target, spawn));
+  const descendantsOf =
+    deps.listDescendants ?? ((target) => listDescendantPids(target, spawn));
 
   if (handle.startId) {
     const current = readIdentity(pid);
-    if (current && current !== handle.startId) {
+    if (!current) {
+      return failed("could not revalidate process identity", { pid });
+    }
+    if (current !== handle.startId) {
       return failed("stale process identity (pid reused)", { pid });
     }
+  }
+  let owned = [];
+  try {
+    owned = descendantsOf(pid).filter((child) => Number.isInteger(child) && child > 1);
+  } catch {
+    owned = [];
   }
 
   if (!isPosix) {
@@ -128,31 +173,48 @@ export function stopOwnedWrapper(handle, isPosix, deps = {}) {
     return failed(`${code} ${err.message}`.trim(), { pid });
   }
 
-  if (waitUntilGone(pid, deps.termGraceMs ?? CANCEL_TERM_GRACE_MS)) {
-    return { outcome: "stopped", observedExit: true, signaled: true, pid };
-  }
-
-  try {
-    kill(pid, "SIGKILL");
-  } catch (err) {
-    if (err && err.code === "ESRCH") {
-      return { outcome: "stopped", observedExit: true, signaled: true, pid };
+  const wrapperGoneAfterTerm = waitUntilGone(pid, deps.termGraceMs ?? CANCEL_TERM_GRACE_MS);
+  let wrapperGone = wrapperGoneAfterTerm;
+  if (!wrapperGone) {
+    try {
+      kill(pid, "SIGKILL");
+    } catch (err) {
+      if (!(err && err.code === "ESRCH")) {
+        const code = err && err.code ? String(err.code) : "";
+        return failed(`${code} ${err.message}`.trim(), { pid, signaled: true });
+      }
     }
-    const code = err && err.code ? String(err.code) : "";
-    return failed(`${code} ${err.message}`.trim(), { pid, signaled: true });
+    wrapperGone = waitUntilGone(pid, deps.killGraceMs ?? CANCEL_KILL_GRACE_MS);
   }
-
-  const exited = waitUntilGone(pid, deps.killGraceMs ?? CANCEL_KILL_GRACE_MS);
-  if (exited) {
-    return { outcome: "stopped", observedExit: true, signaled: true, pid };
+  const remaining = [];
+  for (const child of owned) {
+    const state = livenessOf(child);
+    if (state === "dead") continue;
+    if (state === "unknown") {
+      remaining.push(child);
+      continue;
+    }
+    try {
+      kill(child, "SIGKILL");
+    } catch (err) {
+      if (!(err && err.code === "ESRCH")) remaining.push(child);
+      continue;
+    }
+    if (livenessOf(child) !== "dead") remaining.push(child);
   }
-  return {
-    outcome: "unconfirmed",
-    observedExit: false,
-    signaled: true,
-    pid,
-    error: "wrapper still alive after SIGTERM and SIGKILL",
-  };
+  if (!wrapperGone || remaining.length) {
+    return {
+      outcome: "unconfirmed",
+      observedExit: wrapperGone,
+      signaled: true,
+      pid,
+      remaining,
+      error: wrapperGone
+        ? "owned descendants still live after wrapper exit"
+        : "wrapper still alive after SIGTERM and SIGKILL",
+    };
+  }
+  return { outcome: "stopped", observedExit: true, signaled: true, pid };
 }
 
 export function cancelTrackedJob(cwd, job, env = process.env, deps = {}) {

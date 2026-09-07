@@ -125,6 +125,12 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertEqual(named["commands"], ["test"])
         affected = projectconfig.validation_plan("affected", ["build", "test", "lint"])
         self.assertEqual(affected["commands"], ["test", "lint"])
+        pinned = projectconfig.validation_plan(
+            "targeted",
+            ["build", "test", "lint"],
+            pinned=["typecheck", "lint", "test"],
+        )
+        self.assertEqual(pinned["commands"], ["typecheck", "lint", "test"])
         with self.assertRaises(GrokWrapperError):
             projectconfig.validation_plan("everything")
 

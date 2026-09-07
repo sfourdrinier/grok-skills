@@ -14,7 +14,12 @@ import {
   withExclusiveLockSync,
 } from "./atomic-file.mjs";
 import { resolveTargetWorkspaceRoot } from "./git-context.mjs";
-import { jobsDir, stateRoot } from "./jobs-layout.mjs";
+import {
+  DURABLE_STATE_FALLBACK,
+  jobsDir,
+  LEGACY_TMP_STATE_FALLBACK,
+  stateRoot,
+} from "./jobs-layout.mjs";
 import {
   isNotificationMode,
   NOTIFICATION_MODES,
@@ -23,7 +28,7 @@ import {
 } from "./notification-modes.mjs";
 
 export { isNotificationMode, NOTIFICATION_MODES, parseNotificationMode, parseWebhookUrl };
-export { jobsDir };
+export { jobsDir, DURABLE_STATE_FALLBACK, LEGACY_TMP_STATE_FALLBACK };
 
 const MAX_JOBS = 50;
 const JOB_ID_RE = /^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{6}$/;
@@ -254,6 +259,11 @@ function readSidecarScope(cwd, env) {
 
 function prefsConfigUsable(config) {
   if (!config || typeof config !== "object" || Array.isArray(config)) return false;
+  const hasPolicyField =
+    config.integrationMode != null ||
+    config.runMode != null ||
+    (config.prefsSources && typeof config.prefsSources === "object");
+  if (!hasPolicyField) return false;
   const rawMode = config.integrationMode;
   if (rawMode != null && String(rawMode).trim() !== "" && !parseIntegrationMode(rawMode)) {
     return false;
@@ -262,6 +272,18 @@ function prefsConfigUsable(config) {
     return false;
   }
   return true;
+}
+
+function failClosedConfig() {
+  return normalizeConfig({
+    ...DEFAULT_JOBS_CONFIG,
+    integrationMode: "review",
+    prefsSources: { integrationMode: "setup" },
+  });
+}
+
+function prefsStoreExists(cwd, env = process.env) {
+  return fs.existsSync(prefsPath(cwd, env)) || fs.existsSync(prefsBakPath(cwd, env));
 }
 
 function copyPrefsBak(src, dest) {
@@ -285,6 +307,22 @@ function persistPrefs(cwd, config, env = process.env) {
   if (prefsConfigUsable(config)) {
     copyPrefsBak(file, bak);
   }
+  const existing = readJsonObject(indexPath(cwd, env)) || { version: 1, jobs: [] };
+  const snapshot = {
+    version: 1,
+    config: {
+      runMode: config.runMode,
+      notificationMode: config.notificationMode,
+      notificationWebhookUrl: config.notificationWebhookUrl,
+      lastRescueJobId: config.lastRescueJobId,
+      integrationMode: config.integrationMode,
+      integrationConsent: config.integrationConsent === true,
+      codexAgentsScope: config.codexAgentsScope ?? DEFAULT_JOBS_CONFIG.codexAgentsScope,
+      prefsSources: config.prefsSources ?? {},
+    },
+    jobs: Array.isArray(existing.jobs) ? existing.jobs : [],
+  };
+  writePrivate(indexPath(cwd, env), `${JSON.stringify(snapshot, null, 2)}\n`);
 }
 
 function loadPrefsConfig(cwd, env = process.env) {
@@ -296,7 +334,45 @@ function loadPrefsConfig(cwd, env = process.env) {
   if (prefsConfigUsable(fromBak?.config)) {
     return normalizeConfig(fromBak.config);
   }
+  if (prefsStoreExists(cwd, env)) {
+    return failClosedConfig();
+  }
   return null;
+}
+
+function loadEffectivePrefs(cwd, env = process.env) {
+  ensure(cwd, env);
+  return loadPrefsConfig(cwd, env) ?? migrateLegacyIndexConfig(cwd, env) ?? emptyConfig();
+}
+
+function mutatePrefs(cwd, patchFn, env = process.env) {
+  ensure(cwd, env);
+  return withExclusiveLockSync(prefsLockPath(cwd, env), () => {
+    const latest = loadPrefsConfig(cwd, env) ?? migrateLegacyIndexConfig(cwd, env) ?? emptyConfig();
+    const next = patchFn({
+      ...latest,
+      prefsSources:
+        latest.prefsSources && typeof latest.prefsSources === "object"
+          ? { ...latest.prefsSources }
+          : {},
+    });
+    const normalized = normalizeConfig(next);
+    persistPrefs(cwd, normalized, env);
+    return normalized;
+  });
+}
+
+function writeJobListing(cwd, env = process.env) {
+  ensure(cwd, env);
+  const jobs = listingFromRecords(readAllJobRecords(cwd, env));
+  const existing = readJsonObject(indexPath(cwd, env)) || { version: 1 };
+  const payload = {
+    version: 1,
+    config: existing.config ?? {},
+    jobs,
+  };
+  writePrivate(indexPath(cwd, env), `${JSON.stringify(payload, null, 2)}\n`);
+  return jobs;
 }
 
 function emptyConfig() {
@@ -394,7 +470,7 @@ export function getRunMode(cwd, env = process.env) {
   if (fromEnv === "direct" || fromEnv === "hardened") {
     return fromEnv;
   }
-  const config = loadIndex(cwd, env).config;
+  const config = loadEffectivePrefs(cwd, env);
   if (isSetupAuthored(config, "runMode")) {
     return config.runMode === "direct" ? "direct" : "hardened";
   }
@@ -410,11 +486,16 @@ export function getRunMode(cwd, env = process.env) {
 }
 
 export function setRunMode(cwd, mode, env = process.env) {
-  const index = loadIndex(cwd, env);
-  index.config.runMode = mode === "direct" ? "direct" : "hardened";
-  index.config.prefsSources = { ...(index.config.prefsSources ?? {}), runMode: "setup" };
-  saveIndex(cwd, index, env);
-  return index.config.runMode;
+  const config = mutatePrefs(
+    cwd,
+    (current) => {
+      current.runMode = mode === "direct" ? "direct" : "hardened";
+      current.prefsSources.runMode = "setup";
+      return current;
+    },
+    env
+  );
+  return config.runMode;
 }
 
 /**
@@ -424,7 +505,7 @@ export function setRunMode(cwd, mode, env = process.env) {
  * @returns {"direct"|"worktree"|"auto"|"review"}
  */
 export function getIntegrationMode(cwd, env = process.env) {
-  const config = loadIndex(cwd, env).config;
+  const config = loadEffectivePrefs(cwd, env);
   if (isSetupAuthored(config, "integrationMode")) {
     return (
       parseIntegrationMode(config.integrationMode) ?? DEFAULT_JOBS_CONFIG.integrationMode
@@ -461,16 +542,17 @@ export function setIntegrationMode(cwd, mode, env = process.env) {
   if (!parsed) {
     return null;
   }
-  const index = loadIndex(cwd, env);
-  if (!index.config.prefsSources || typeof index.config.prefsSources !== "object") {
-    index.config.prefsSources = {};
-  }
-  index.config.integrationMode = parsed;
-  index.config.prefsSources.integrationMode = "setup";
-  // Legacy index field: always true when mode is set (no consent gate in 2.0.1+).
-  index.config.integrationConsent = true;
-  index.config.prefsSources.integrationConsent = "setup";
-  saveIndex(cwd, index, env);
+  mutatePrefs(
+    cwd,
+    (current) => {
+      current.integrationMode = parsed;
+      current.prefsSources.integrationMode = "setup";
+      current.integrationConsent = true;
+      current.prefsSources.integrationConsent = "setup";
+      return current;
+    },
+    env
+  );
   return parsed;
 }
 
@@ -506,7 +588,7 @@ export {
  * @returns {{ notificationMode: string, notificationWebhookUrl: string|null }}
  */
 export function getNotificationConfig(cwd, env = process.env) {
-  const config = loadIndex(cwd, env).config;
+  const config = loadEffectivePrefs(cwd, env);
 
   let notificationMode = DEFAULT_JOBS_CONFIG.notificationMode;
   if (isSetupAuthored(config, "notificationMode")) {
@@ -546,27 +628,27 @@ export function getNotificationConfig(cwd, env = process.env) {
  * @param {{ notificationMode?: string, notificationWebhookUrl?: string|null }} patch
  */
 export function setNotificationConfig(cwd, patch, env = process.env) {
-  const index = loadIndex(cwd, env);
-  if (!index.config.prefsSources || typeof index.config.prefsSources !== "object") {
-    index.config.prefsSources = {};
-  }
-  if (patch.notificationMode !== undefined) {
-    // Invalid modes leave prior prefs unchanged (never clobber auto -> off).
-    const mode = parseNotificationMode(patch.notificationMode);
-    if (mode) {
-      index.config.notificationMode = mode;
-      index.config.prefsSources.notificationMode = "setup";
-    }
-  }
-  if (patch.notificationWebhookUrl !== undefined) {
-    // Invalid non-empty URLs leave prior webhook unchanged; empty clears.
-    const parsed = parseWebhookUrl(patch.notificationWebhookUrl);
-    if (parsed.ok) {
-      index.config.notificationWebhookUrl = parsed.url;
-      index.config.prefsSources.notificationWebhookUrl = "setup";
-    }
-  }
-  saveIndex(cwd, index, env);
+  mutatePrefs(
+    cwd,
+    (current) => {
+      if (patch.notificationMode !== undefined) {
+        const mode = parseNotificationMode(patch.notificationMode);
+        if (mode) {
+          current.notificationMode = mode;
+          current.prefsSources.notificationMode = "setup";
+        }
+      }
+      if (patch.notificationWebhookUrl !== undefined) {
+        const parsed = parseWebhookUrl(patch.notificationWebhookUrl);
+        if (parsed.ok) {
+          current.notificationWebhookUrl = parsed.url;
+          current.prefsSources.notificationWebhookUrl = "setup";
+        }
+      }
+      return current;
+    },
+    env
+  );
   return getNotificationConfig(cwd, env);
 }
 
@@ -612,44 +694,44 @@ export function createJob(cwd, partial, env = process.env) {
   };
   writePrivate(paths.meta, `${JSON.stringify(job, null, 2)}\n`);
   writePrivate(paths.log, `[${job.createdAt}] start ${job.kind} mode=${job.mode}\n`);
-  const index = loadIndex(cwd, env);
-  index.jobs = [job, ...index.jobs.filter((j) => j.id !== id)];
   if (job.kind === "rescue") {
-    index.config.lastRescueJobId = id;
+    mutatePrefs(
+      cwd,
+      (current) => {
+        current.lastRescueJobId = id;
+        return current;
+      },
+      env
+    );
   }
-  saveIndex(cwd, index, env);
+  writeJobListing(cwd, env);
   return job;
 }
 
 export function updateJob(cwd, jobId, patch, env = process.env) {
   const paths = jobPaths(cwd, jobId, env);
-  let job = { id: jobId };
-  if (fs.existsSync(paths.meta)) {
-    try {
-      job = JSON.parse(fs.readFileSync(paths.meta, "utf8"));
-    } catch {
-      job = { id: jobId };
-    }
-  }
-  const cancelStates = new Set([
-    "cancelled",
-    "cancel_requested",
-    "cancel_failed",
-    "cancel_unconfirmed",
-  ]);
-  const nextPatch = { ...patch };
-  if (
-    cancelStates.has(job.status) &&
-    (nextPatch.status === "success" || nextPatch.status === "failure")
-  ) {
-    delete nextPatch.status;
-  }
-  job = { ...job, ...nextPatch, id: jobId, updatedAt: nowIso() };
   mkdirPrivate(paths.dir);
-  writePrivate(paths.meta, `${JSON.stringify(job, null, 2)}\n`);
-  const index = loadIndex(cwd, env);
-  index.jobs = [job, ...index.jobs.filter((j) => j.id !== jobId)];
-  saveIndex(cwd, index, env);
+  const job = withExclusiveLockSync(path.join(paths.dir, "job.lock"), () => {
+    let current = { id: jobId };
+    if (fs.existsSync(paths.meta)) {
+      try {
+        current = JSON.parse(fs.readFileSync(paths.meta, "utf8"));
+      } catch {
+        current = { id: jobId };
+      }
+    }
+    const nextPatch = { ...patch };
+    if (
+      current.status === "cancelled" &&
+      (nextPatch.status === "success" || nextPatch.status === "failure")
+    ) {
+      delete nextPatch.status;
+    }
+    const merged = { ...current, ...nextPatch, id: jobId, updatedAt: nowIso() };
+    writePrivate(paths.meta, `${JSON.stringify(merged, null, 2)}\n`);
+    return merged;
+  });
+  writeJobListing(cwd, env);
   return job;
 }
 
@@ -671,19 +753,21 @@ export function listJobs(cwd, env = process.env) {
 }
 
 export function getStoredCodexAgentsScope(cwd, env = process.env) {
-  const config = loadIndex(cwd, env).config;
+  const config = loadEffectivePrefs(cwd, env);
   return parseCodexAgentsScope(config.codexAgentsScope) ?? DEFAULT_JOBS_CONFIG.codexAgentsScope;
 }
 
 export function setStoredCodexAgentsScope(cwd, scope, env = process.env) {
   const normalized = parseCodexAgentsScope(scope) || DEFAULT_JOBS_CONFIG.codexAgentsScope;
-  const index = loadIndex(cwd, env);
-  index.config.codexAgentsScope = normalized;
-  index.config.prefsSources = {
-    ...(index.config.prefsSources ?? {}),
-    codexAgentsScope: "setup",
-  };
-  saveIndex(cwd, index, env);
+  mutatePrefs(
+    cwd,
+    (current) => {
+      current.codexAgentsScope = normalized;
+      current.prefsSources.codexAgentsScope = "setup";
+      return current;
+    },
+    env
+  );
   return normalized;
 }
 
@@ -741,7 +825,7 @@ export function readJobStdout(cwd, jobId, env = process.env) {
 }
 
 export function getLastRescueJobId(cwd, env = process.env) {
-  return loadIndex(cwd, env).config.lastRescueJobId ?? null;
+  return loadEffectivePrefs(cwd, env).lastRescueJobId ?? null;
 }
 
 export function formatJobsTable(jobs) {

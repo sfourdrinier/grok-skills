@@ -575,8 +575,13 @@ def _run_build_gate(
 
     postrun_name, scripts = _read_workspace_manifest(workspace_dir)
     identity_name = original_workspace_name if original_workspace_name is not None else postrun_name
+    pinned = never_build_workspaces.get(identity_name)
     full_names = _build_gate_scripts(scripts, identity_name, never_build_workspaces)
-    plan = validation_plan(validation_level, full_names)
+    plan = validation_plan(
+        validation_level,
+        full_names,
+        pinned=list(pinned) if pinned is not None else None,
+    )
     gate_script_names = [str(item) for item in plan["commands"]]
 
     modified = _gate_scripts_modified(pristine_scripts, scripts, gate_script_names)

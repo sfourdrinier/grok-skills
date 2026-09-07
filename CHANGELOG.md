@@ -25,6 +25,21 @@ for marketplace / package tags.
 
 ### Fixed
 
+- **PR #16 review:** inherit-workspace default accepts a host-linked Git
+  worktree (pointer + per-worktree git dir classified; `.git` pointer and
+  shared metadata stay protected). In-place `mode=direct` completion does not
+  require handoff. Preference mutations are locked read-modify-write and job
+  bookkeeping no longer republishes prefs. Failed cancellation can still
+  become a later observed success/failure. Forced cancel treats unknown
+  liveness as unconfirmed and SIGKILLs remaining owned descendants.
+  Project-pinned validation lists are never filtered by `--validation`.
+  Compact TaskResult recognizes `mode=direct`, resolved workspace paths, and
+  does not treat install-only/null-exit/incomplete envelopes as verified.
+  Sequential in-target dirty follow-ups are authorized. Packaging CI asserts
+  `./hooks/codex.hooks.json`. User-edited managed agents stay conflicts on
+  upgrade. Default fingerprint uses the direct-protect audit profile (deny
+  leaves under ignored dirs, no node_modules walk). Durable
+  `~/.grok-skills/state` fallback replaces OS tmp for prefs.
 - **Issue #14:** materialized Codex agent TOML now has a newline before
   `name = ...` (Codex was ignoring both roles). Codex SessionEnd timeout is 3s
   so the host does not clamp it; Claude SessionEnd stays 5s.

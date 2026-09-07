@@ -15,6 +15,7 @@ import {
   getRunMode,
   isNotificationMode,
   jobsDir,
+  DURABLE_STATE_FALLBACK,
   listJobs,
   NOTIFICATION_MODES,
   readJobStdout,
@@ -83,7 +84,7 @@ test("stateRoot prefers absolute CLAUDE_PLUGIN_DATA with same workspace keying",
   const segmentWith = path.basename(path.dirname(withData));
   const segmentLegacy = path.basename(path.dirname(legacy));
   assert.equal(segmentWith, segmentLegacy, "workspace keying must be identical");
-  assert.ok(legacy.startsWith(path.join(os.tmpdir(), "grok-companion") + path.sep));
+  assert.ok(legacy.startsWith(DURABLE_STATE_FALLBACK + path.sep));
 });
 
 test("stateRoot ignores non-absolute CLAUDE_PLUGIN_DATA (fallback unchanged)", () => {
@@ -91,8 +92,8 @@ test("stateRoot ignores non-absolute CLAUDE_PLUGIN_DATA (fallback unchanged)", (
   const env = { CLAUDE_PLUGIN_DATA: "relative-plugin-data" };
   const dir = jobsDir(cwd, env);
   assert.ok(
-    dir.startsWith(path.join(os.tmpdir(), "grok-companion") + path.sep),
-    `relative CLAUDE_PLUGIN_DATA must fall back to tmp; got ${dir}`
+    dir.startsWith(DURABLE_STATE_FALLBACK + path.sep),
+    `relative CLAUDE_PLUGIN_DATA must fall back to durable home state; got ${dir}`
   );
   assert.ok(!dir.includes("relative-plugin-data"));
 });

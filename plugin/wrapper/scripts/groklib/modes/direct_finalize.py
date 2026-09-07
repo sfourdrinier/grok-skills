@@ -427,6 +427,15 @@ def _assert_git_dir_untouched(
     )
 
 
+def _path_under_target(relative: str, target_relative: str) -> bool:
+    """True when ``relative`` is the task target or a path inside it."""
+    target = str(target_relative or ".").replace("\\", "/").strip().strip("/")
+    if not target or target == ".":
+        return True
+    rel = str(relative or "").replace("\\", "/").strip().lstrip("./")
+    return rel == target or rel.startswith(target + "/")
+
+
 def _assert_write_scopes(changed: Set[str], contract: Optional[dict]) -> None:
     """Fail closed as write-scope-violation when a changed path is outside writeScopes."""
     if not contract:
@@ -543,7 +552,9 @@ def finalize_direct(
     baseline_fp = stage.baseline_fp
     dirty_paths = set(stage.dirty_paths)
 
-    after_fp = worktree_escape.repo_change_fingerprint(repo_root)
+    after_fp = worktree_escape.repo_change_fingerprint(
+        repo_root, audit_profile="direct-protect"
+    )
     changed = _changed_paths(baseline_fp, after_fp)
     protect_snapshot = getattr(stage, "protect_snapshot", None)
 
@@ -583,7 +594,9 @@ def finalize_direct(
     )
 
     # Re-diff: build/validation may have written further paths.
-    after_fp = worktree_escape.repo_change_fingerprint(repo_root)
+    after_fp = worktree_escape.repo_change_fingerprint(
+        repo_root, audit_profile="direct-protect"
+    )
     changed = _changed_paths(baseline_fp, after_fp)
     _assert_deny_globs(changed, repo_root=repo_root, protect_snapshot=protect_snapshot)
     _assert_git_dir_untouched(
@@ -594,14 +607,18 @@ def finalize_direct(
     _assert_write_scopes(source_changed, contract)
 
     # Dirty-overlap ignores gitignored byproducts (same source filter as scope).
+    # Paths under the task target are authorized follow-up edits (R08).
     overlap = sorted(source_changed & dirty_paths)
-    if overlap and not stage.force:
-        _log("finalize_direct", "dirty-path-conflict: {}".format(overlap))
+    unauthorized = [
+        relative for relative in overlap if not _path_under_target(relative, target_relative)
+    ]
+    if unauthorized and not stage.force:
+        _log("finalize_direct", "dirty-path-conflict: {}".format(unauthorized))
         raise GrokWrapperError(
             "dirty-path-conflict",
             "Grok modified path(s) that were already dirty in the operator checkout; "
             "re-run with --force to allow",
-            {"overlappingPaths": overlap, "hint": "re-run with --force"},
+            {"overlappingPaths": unauthorized, "hint": "re-run with --force"},
         )
 
     stage.acc.changed_files = sorted(changed)
@@ -677,7 +694,9 @@ def restore_protected_on_abort(
     offenders: Set[str] = set()
     rediff_trusted = True
     try:
-        after_fp = worktree_escape.repo_change_fingerprint(repo_root)
+        after_fp = worktree_escape.repo_change_fingerprint(
+            repo_root, audit_profile="direct-protect"
+        )
         offenders |= {p for p in _changed_paths(baseline_fp, after_fp) if path_matches_deny(p)}
     except Exception as exc:
         # Full changed-set untrusted (e.g. Grok rewrote .git/HEAD). Fall back to

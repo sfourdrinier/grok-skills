@@ -203,3 +203,75 @@ test("engineer-coder default recipe is one-shot code, not peer start", () => {
   assert.match(toml, /DEFAULT - one-shot code/);
   assert.match(toml, /OPT-IN multi-turn peer/);
 });
+
+test("in-place default recipe does not require code-mode handoff", () => {
+  const md = fs.readFileSync(path.join(ROOT, "agents", "grok-engineer-coder.md"), "utf8");
+  const toml = fs.readFileSync(
+    path.join(ROOT, "codex-agents", "grok-engineer-coder.toml"),
+    "utf8"
+  );
+  assert.doesNotMatch(md, /handoff is REQUIRED/i);
+  assert.doesNotMatch(toml, /handoff is REQUIRED/i);
+  assert.match(md, /In-place code/i);
+  assert.match(toml, /In-place code/i);
+  assert.match(md, /no patch handoff/i);
+  assert.match(toml, /no patch handoff/i);
+});
+
+test("projectTaskResult treats hardened-direct as in-place with a real workspace path", () => {
+  const result = projectTaskResult({
+    schemaVersion: 1,
+    status: "success",
+    mode: "direct",
+    runId: "20260907T010203Z-direct1",
+    repository: "/tmp/host-repo",
+    targetWorkspace: "",
+    effectiveWorkingDirectory: "/tmp/host-repo",
+    worktreePath: null,
+    commands: [{ argv: ["pnpm", "test"], cwd: "pkg", exitStatus: 0, purpose: "test" }],
+    response: { text: "edited live" },
+  });
+  assert.equal(result.application, "in-place");
+  assert.equal(result.workspace.path, "/tmp/host-repo");
+  assert.equal(result.workspace.placement, "inherit");
+  assert.equal(result.verification.state, "passed");
+});
+
+test("projectTaskResult does not treat install-only or null exits as verified", () => {
+  const installOnly = projectTaskResult({
+    status: "success",
+    mode: "direct",
+    repository: "/tmp/repo",
+    commands: [{ argv: ["pnpm", "install"], cwd: ".", exitStatus: 0, purpose: "install" }],
+  });
+  assert.equal(installOnly.verification.state, "not-run");
+  const nullExit = projectTaskResult({
+    status: "success",
+    mode: "direct",
+    repository: "/tmp/repo",
+    commands: [{ argv: ["pnpm", "test"], cwd: ".", exitStatus: null, purpose: "test" }],
+  });
+  assert.equal(nullExit.verification.state, "not-run");
+});
+
+test("projectTaskResult preserves incomplete and cancelled envelopes", () => {
+  const incomplete = projectTaskResult({
+    status: "success",
+    mode: "direct",
+    repository: "/tmp/repo",
+    incompleteStop: true,
+    processExit: 1,
+    commands: [{ argv: ["pnpm", "test"], cwd: ".", exitStatus: 0, purpose: "test" }],
+    response: { text: "partial" },
+  });
+  assert.equal(incomplete.execution, "incomplete");
+  assert.notEqual(incomplete.verification.state, "passed");
+  const cancelled = projectTaskResult({
+    status: "success",
+    mode: "direct",
+    repository: "/tmp/repo",
+    stopReason: "cancelled",
+    commands: [{ argv: ["pnpm", "test"], cwd: ".", exitStatus: 0, purpose: "test" }],
+  });
+  assert.equal(cancelled.execution, "cancelled");
+});

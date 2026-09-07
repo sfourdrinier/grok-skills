@@ -33,9 +33,9 @@ class BuildGateValidationPlanTests(unittest.TestCase):
         )
         seen = []
 
-        def spy(level, commands=None):
+        def spy(level, commands=None, pinned=None):
             seen.append(level)
-            return real_plan(level, commands)
+            return real_plan(level, commands, pinned=pinned)
 
         recorded = []
 

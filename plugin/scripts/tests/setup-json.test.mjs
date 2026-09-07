@@ -42,6 +42,7 @@ function setupEnv(fakeEnv, cwd) {
       ...fakeEnv,
       GROK_AGENT_BINARY: binary,
       CLAUDE_PLUGIN_DATA: path.join(cwd, ".grok-plugin-data"),
+      CODEX_HOME: path.join(cwd, ".codex-home"),
     },
     cleanupBin: binCleanup,
   };

@@ -16,9 +16,12 @@ import { getCodexAgentsScope, setCodexAgentsScope } from "../lib/codex-agents.mj
 import {
   createJob,
   getIntegrationMode,
+  getNotificationConfig,
   jobsDir,
   listJobs,
   setIntegrationMode,
+  setNotificationConfig,
+  setStoredCodexAgentsScope,
   updateJob,
 } from "../lib/jobs.mjs";
 
@@ -132,4 +135,61 @@ test("concurrent creates in one workspace keep every job", async () => {
   await Promise.all(children);
   const listed = listJobs(cwd, { CLAUDE_PLUGIN_DATA: envDir });
   assert.equal(listed.length, n);
+});
+
+test("job bookkeeping does not republish a stale integrationMode", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-prefs-stale-"));
+  const env = { CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata") };
+  assert.equal(setIntegrationMode(cwd, "direct", env), "direct");
+  const job = createJob(cwd, { kind: "run", mode: "code" }, env);
+  assert.equal(setIntegrationMode(cwd, "review", env), "review");
+  updateJob(cwd, job.id, { status: "success", summary: "done" }, env);
+  assert.equal(getIntegrationMode(cwd, env), "review");
+});
+
+test("independent preference mutations survive a later job update", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-prefs-indep-"));
+  const env = { CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata") };
+  assert.equal(setIntegrationMode(cwd, "worktree", env), "worktree");
+  setNotificationConfig(cwd, { notificationMode: "off" }, env);
+  setStoredCodexAgentsScope(cwd, "project", env);
+  const job = createJob(cwd, { kind: "run", mode: "code" }, env);
+  updateJob(cwd, job.id, { pid: 99 }, env);
+  assert.equal(getIntegrationMode(cwd, env), "worktree");
+  assert.equal(getNotificationConfig(cwd, env).notificationMode, "off");
+  assert.equal(getCodexAgentsScope(cwd, env), "project");
+});
+
+test("unusable existing prefs plus backup do not fall back to live direct", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-prefs-loss-"));
+  const env = { CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata") };
+  assert.equal(setIntegrationMode(cwd, "review", env), "review");
+  const root = stateRootFromJobs(cwd, env);
+  fs.writeFileSync(path.join(root, "prefs.json"), "{not-json", {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  fs.writeFileSync(path.join(root, "prefs.json.bak"), JSON.stringify({ config: {} }), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  assert.notEqual(getIntegrationMode(cwd, env), "direct");
+});
+
+test("cancel_failed then observed success becomes terminal success", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-cancel-then-ok-"));
+  const env = { CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata") };
+  const job = createJob(cwd, { kind: "run", mode: "code" }, env);
+  updateJob(cwd, job.id, { status: "cancel_failed", summary: "EPERM" }, env);
+  const next = updateJob(cwd, job.id, { status: "success", summary: "finished" }, env);
+  assert.equal(next.status, "success");
+});
+
+test("confirmed cancelled ignores a delayed success callback", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-cancel-keep-"));
+  const env = { CLAUDE_PLUGIN_DATA: path.join(cwd, "pdata") };
+  const job = createJob(cwd, { kind: "run", mode: "code" }, env);
+  updateJob(cwd, job.id, { status: "cancelled", summary: "cancelled by operator" }, env);
+  const next = updateJob(cwd, job.id, { status: "success", summary: "late" }, env);
+  assert.equal(next.status, "cancelled");
 });

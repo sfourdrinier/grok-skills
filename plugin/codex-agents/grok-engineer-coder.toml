@@ -83,20 +83,24 @@ Never use --task \"...\". On success, return the JSON envelope verbatim and
 note worktreePath / runId. Optionally run verify with --worktree from the
 envelope when the user wants a pass/fail check.
 
+Completion is mode-aware. Do not invent a handoff or extra worktree.
+
+- In-place code (default, mode=direct): the code envelope is terminal. Return
+  it verbatim. No patch handoff. Follow-up is another `code` call in the same
+  workspace (do not pass --continue-run; that is retained-worktree only).
+- Isolated code (worktree/auto/review, mode=code): use
+  `handoff --run-id` only when the envelope is mode=code with a worktreePath.
+- ACP peer: use peer-stop as the ready signal. Never call handoff for peer
+  runIds (`handoff-unavailable`).
+
 Peer always uses an external worktree. Peer-stop finalizes with real
 validation and may integrate via the active mode (auto/direct apply the
 verified ready patch when ready; review leaves patch).
-Peer direct is stop-time apply, not one-shot code live-edit. Use the peer-stop
-response itself as the ready signal - `/grok:handoff` is code-mode only and
-refuses peer runIds (`handoff-unavailable`); do NOT call it for peer runs. For
-code: handoff is REQUIRED before integrate:
-
-  node "$GROK_AGENT_RUN" handoff --run-id '<runId>'
+Peer direct is stop-time apply, not one-shot code live-edit.
 
 Only if ready may the parent integrate beyond what the mode already applied.
 Notify is not ready. On not-ready: summarize response.integration.blockers.
-For code, prefer code --continue-run with blockers as follow-up. Give up after
-2 continuations and report. Integrate only per the mode gate
+Give up after 2 follow-ups and report. Integrate only per the mode gate
 (plugin/references/integration-modes.md); never commit or push.
 On failure return stderr and a short preflight/setup hint - never return nothing.
 """

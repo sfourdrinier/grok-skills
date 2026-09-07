@@ -80,7 +80,13 @@ jobs:
           load("plugin/.claude-plugin/plugin.json")
           codex = load("plugin/.codex-plugin/plugin.json")
           assert codex.get("skills") == "./skills/"
-          assert codex.get("hooks") == "./hooks/hooks.json"
+          assert codex.get("hooks") == "./hooks/codex.hooks.json"
+          hooks_doc = Path("plugin/hooks/codex.hooks.json")
+          assert hooks_doc.is_file(), "Codex hooks document missing"
+          hooks = json.loads(hooks_doc.read_text())
+          assert isinstance(hooks, dict) and hooks, "Codex hooks document empty"
+          shared_hooks = Path("plugin/hooks/hooks.json")
+          assert shared_hooks.is_file(), "shared hooks document missing"
           assert (Path("plugin") / "wrapper" / "scripts" / "grok_agent.py").is_file()
           assert (Path("plugin") / "skills" / "review" / "SKILL.md").is_file()
           assert (Path("plugin") / "agents" / "grok-engineer-coder.md").is_file()

@@ -194,9 +194,16 @@ def _filter_actually_ignored(
     ]
 
 
+_ARTIFACT_DIR_NAMES = frozenset(
+    {"node_modules", "dist", ".next", ".turbo", "coverage", "build", ".cache"}
+)
+
+
 def _expand_protected_leaves_under_ignored_dirs(
     repo: pathlib.Path,
     candidates: List[str],
+    *,
+    skip_artifact_trees: bool = False,
 ) -> List[str]:
     """Add deny-scoped leaves under collapsed ignored directories.
 
@@ -220,8 +227,11 @@ def _expand_protected_leaves_under_ignored_dirs(
         if not entry.endswith("/"):
             seen.add(entry + "/")
 
+    artifact_trees = skip_artifact_trees and _ARTIFACT_DIR_NAMES
     for entry in candidates:
         rel_dir = entry.rstrip("/")
+        if artifact_trees and pathlib.PurePath(rel_dir).name in _ARTIFACT_DIR_NAMES:
+            continue
         abs_dir = root / rel_dir
         try:
             if not abs_dir.is_dir() or abs_dir.is_symlink():
@@ -238,7 +248,9 @@ def _expand_protected_leaves_under_ignored_dirs(
                 dirnames[:] = [
                     d
                     for d in dirnames
-                    if d != ".git" and not (pathlib.Path(dirpath) / d).is_symlink()
+                    if d != ".git"
+                    and not (skip_artifact_trees and d in _ARTIFACT_DIR_NAMES)
+                    and not (pathlib.Path(dirpath) / d).is_symlink()
                 ]
                 for name in filenames:
                     abs_file = pathlib.Path(dirpath) / name
@@ -319,6 +331,10 @@ def list_ignored_untracked_paths(
     )
     if profile == "verified-host":
         return filtered
-    expanded = _expand_protected_leaves_under_ignored_dirs(repo, filtered)
+    expanded = _expand_protected_leaves_under_ignored_dirs(
+        repo,
+        filtered,
+        skip_artifact_trees=profile == "direct-protect",
+    )
     LAST_AUDIT_STATS["expandedProtectedLeaves"] = max(0, len(expanded) - len(filtered))
     return expanded

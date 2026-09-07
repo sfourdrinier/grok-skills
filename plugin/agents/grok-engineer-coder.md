@@ -172,31 +172,25 @@ GROK_TASK
 Return envelopes **verbatim**. Do not commit, push, or chain other modes beyond
 the chosen integration mode's gate.
 
-## After a peer or code run: ready before integrate
+## After a peer or code run: mode-aware completion
 
-1. Read `runId` from the start/code envelope (success or failure with retained worktree).
+1. Read `runId` and `mode` from the envelope.
 2. Optionally `/grok:status --run-id <runId>` for progress.
-3. **Peer:** always external worktree; `peer stop` finalizes and may integrate
-   via the active mode (auto/direct apply verified ready patch; review leaves
-   patch - not live-edit). Use the peer-stop response itself as the ready
-   signal - `/grok:handoff` is code-mode only and refuses peer runIds; do NOT
-   call it for peer runs.
-4. **Code:** **Required before integrate:** `GROK_RUN handoff --run-id '<runId>'`.
-5. Integrate only when ready (handoff or peer-stop response) and the mode allows.
-6. Completion **notify** is not ready - always verify the ready signal.
-7. On not-ready **or incomplete stop** (`incompleteStop: true`, non-zero exit
-   with kept findings, or `stopReason` Cancelled mid-work): summarize what
-   landed and what remains. For code, prefer
-   `code --continue-run '<hardened-runId>'` with the blockers as the follow-up
-   task. **Never** pass a synthetic `direct-*` id to `--continue-run` (not
-   stored). Prefer hardened runMode for lineages that need continue. For peer,
-   start a new session or use code continuation on a code lineage.
-8. Integrate only per the chosen mode and channel
-   (`plugin/references/integration-modes.md`): one-shot code direct lands live;
-   code auto may apply a verified ready patch; review never auto-applies. ACP
-   peer always uses an external worktree; at ready peer-stop, direct/auto apply
-   and review retains - peer direct is not live-edit.
-   Never commit or push from this agent.
+3. **In-place code** (`mode=direct`): the code envelope is terminal. Return it
+   verbatim. No patch handoff. Follow-up is another `GROK_RUN code` in the same
+   workspace. Do not call `handoff` or `code --continue-run` (continue-run is
+   retained-worktree only; handoff refuses `mode=direct`).
+4. **Isolated code** (`mode=code` with `worktreePath`):
+   `GROK_RUN handoff --run-id '<runId>'` before integrate.
+5. **Peer:** always external worktree; `peer stop` is the ready signal. Do NOT
+   call handoff for peer runIds (`handoff-unavailable`).
+6. Integrate only when ready and the mode allows. Completion **notify** is not
+   ready.
+7. On not-ready or incomplete stop (`incompleteStop: true`, non-zero exit with
+   kept findings, or `stopReason` Cancelled): summarize what landed and what
+   remains. Give up after 2 follow-ups.
+8. Integrate only per the chosen mode
+   (`plugin/references/integration-modes.md`). Never commit or push.
 9. Prefer deriving a contract by default; pass `--contract-file` on every
    non-exploratory **fresh** peer start or code run.
 

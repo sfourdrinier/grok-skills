@@ -211,16 +211,25 @@ export function materializeAgentBody(sourceBody, agentRunAbs, companionAbs = nul
     `# installed by setup; SessionStart reconciles owned files only`,
   ].filter((line) => line != null);
   const withoutOldInstallComments = rewritten.replace(/^(?:#.*\n)*?(?=name\s*=)/m, "");
-  return `${headerLines.join("\n")}\n${withoutOldInstallComments}`;
+  const withoutDigest = `${headerLines.join("\n")}\n${withoutOldInstallComments}`;
+  const installedSha = crypto.createHash("sha256").update(withoutDigest, "utf8").digest("hex").slice(0, 16);
+  return `# installed-sha256: ${installedSha}\n${withoutDigest}`;
+}
+
+export function installedBodyDigest(body) {
+  const text = String(body || "").replace(/^#\s*installed-sha256:\s*\S+\n/m, "");
+  return crypto.createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
 }
 
 function parseManagedMeta(body) {
   const text = String(body || "");
   const templateShaMatch = text.match(/#\s*template-sha256:\s*(\S+)/);
   const agentRunMatch = text.match(/#\s*agent-run:\s*(.+)/);
+  const installedShaMatch = text.match(/#\s*installed-sha256:\s*(\S+)/);
   return {
     templateSha: templateShaMatch ? templateShaMatch[1].trim() : null,
     agentRun: agentRunMatch ? agentRunMatch[1].trim() : null,
+    installedSha: installedShaMatch ? installedShaMatch[1].trim() : null,
   };
 }
 
@@ -512,11 +521,18 @@ export function installCodexAgents({
       }
       if (managed && !force) {
         const meta = parseManagedMeta(existing);
+        const digest = installedBodyDigest(existing);
+        const userEdited = Boolean(meta.installedSha && meta.installedSha !== digest);
+        const legacyEdited = !meta.installedSha && existing !== body;
+        if (userEdited || legacyEdited) {
+          conflicts.push(t.name);
+          continue;
+        }
         const ourSha = templateSha(sourceBody);
         const templateChanged = Boolean(meta.templateSha && meta.templateSha !== ourSha);
         const pathChanged = Boolean(meta.agentRun && meta.agentRun !== agentRun);
         if (!templateChanged && !pathChanged) {
-          conflicts.push(t.name);
+          skipped.push(t.name);
           continue;
         }
         if (!updateManaged) {

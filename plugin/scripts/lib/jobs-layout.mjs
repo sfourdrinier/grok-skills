@@ -12,7 +12,10 @@ import { FILE_MODE, mkdirPrivate } from "./atomic-file.mjs";
 import { resolveWorkspaceRoot } from "./gate-state.mjs";
 
 const PLUGIN_DATA_ENV = "CLAUDE_PLUGIN_DATA";
-const FALLBACK = path.join(os.tmpdir(), "grok-companion");
+export const DURABLE_STATE_FALLBACK = path.join(os.homedir(), ".grok-skills", "state");
+export const LEGACY_TMP_STATE_FALLBACK = path.join(os.tmpdir(), "grok-companion");
+const FALLBACK = DURABLE_STATE_FALLBACK;
+const LEGACY_TMP_FALLBACK = LEGACY_TMP_STATE_FALLBACK;
 
 function workspaceStateSegment(cwd) {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
@@ -92,7 +95,8 @@ function maybeMigrateLegacyState(legacyDir, newDir) {
       return;
     }
     const legacyIndex = path.join(legacyDir, "jobs-index.json");
-    if (!fs.existsSync(legacyIndex)) {
+    const legacyPrefs = path.join(legacyDir, "prefs.json");
+    if (!fs.existsSync(legacyIndex) && !fs.existsSync(legacyPrefs)) {
       return;
     }
     mkdirPrivate(newDir);
@@ -136,7 +140,16 @@ function maybeMigrateLegacyState(legacyDir, newDir) {
       }
     }
 
-    atomicCopyFile(legacyIndex, newIndex);
+    if (fs.existsSync(legacyIndex)) {
+      atomicCopyFile(legacyIndex, newIndex);
+    }
+    if (fs.existsSync(legacyPrefs)) {
+      atomicCopyFile(legacyPrefs, path.join(newDir, "prefs.json"));
+    }
+    const legacyBak = path.join(legacyDir, "prefs.json.bak");
+    if (fs.existsSync(legacyBak)) {
+      atomicCopyFile(legacyBak, path.join(newDir, "prefs.json.bak"));
+    }
     process.stderr.write(
       `[grok-jobs] migrated workspace state from ${legacyDir} to ${newDir}\n`
     );
@@ -153,14 +166,17 @@ function maybeMigrateLegacyState(legacyDir, newDir) {
 
 export function stateRoot(cwd, env = process.env) {
   const segment = workspaceStateSegment(cwd);
-  const legacyDir = path.join(FALLBACK, segment);
+  const legacyTmpDir = path.join(LEGACY_TMP_FALLBACK, segment);
+  const durableDir = path.join(FALLBACK, segment);
   const pluginData = resolvePluginDataDir(env);
   if (pluginData) {
     const newDir = path.join(pluginData, "state", segment);
-    maybeMigrateLegacyState(legacyDir, newDir);
+    maybeMigrateLegacyState(legacyTmpDir, newDir);
+    maybeMigrateLegacyState(durableDir, newDir);
     return newDir;
   }
-  return legacyDir;
+  maybeMigrateLegacyState(legacyTmpDir, durableDir);
+  return durableDir;
 }
 
 export function jobsDir(cwd, env = process.env) {
