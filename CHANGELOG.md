@@ -43,6 +43,9 @@ for marketplace / package tags.
 - **Issue #14:** materialized Codex agent TOML now has a newline before
   `name = ...` (Codex was ignoring both roles). Codex SessionEnd timeout is 3s
   so the host does not clamp it; Claude SessionEnd stays 5s.
+- **Issue #15:** `status --run-id` with the announced `[grok-job]` id rewrites
+  to the stored wrapper runId instead of querying the wrapper with the outer
+  job id.
 - **Claude SessionStart never writes `~/.codex`.** Codex SessionStart only
   reconciles owned agents and hints `/grok:setup` when they are missing.
   `/grok:setup` is the installer; `--remove-codex-agents` does not claim

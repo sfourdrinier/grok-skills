@@ -330,6 +330,60 @@ function resolveJobArg(cwd, args) {
   if (!job) job = resolveJobByIdOrRunId(cwd, jobId);
   return { jobId, job };
 }
+
+function replaceFlaggedRunId(args, nextId) {
+  const out = [...args];
+  for (let i = 0; i < out.length; i += 1) {
+    if (out[i] === "--run-id" && i + 1 < out.length) {
+      out[i + 1] = nextId;
+      i += 1;
+      continue;
+    }
+    if (typeof out[i] === "string" && out[i].startsWith("--run-id=")) {
+      out[i] = `--run-id=${nextId}`;
+    }
+  }
+  return out;
+}
+
+function resolveStatusRunIdArgs(cwd, wrapperArgs) {
+  const flagged = parseRunIdArg(wrapperArgs);
+  if (flagged) {
+    const knownJob = getJob(cwd, flagged);
+    if (!knownJob) return { args: wrapperArgs };
+    const recorded = sanitizeRunId(knownJob.runId);
+    if (!recorded) return { args: wrapperArgs, missingJobId: knownJob.id };
+    return { args: replaceFlaggedRunId(wrapperArgs, recorded) };
+  }
+  const bareIdx = wrapperArgs.findIndex(
+    (a, i) => i > 0 && typeof a === "string" && !a.startsWith("-") && RUN_ID_RE.test(a)
+  );
+  if (bareIdx < 0) return { args: wrapperArgs };
+  const id = wrapperArgs[bareIdx];
+  const knownJob = getJob(cwd, id);
+  if (knownJob) {
+    const recorded = sanitizeRunId(knownJob.runId);
+    if (!recorded) return { args: wrapperArgs, missingJobId: knownJob.id };
+    return {
+      args: [
+        wrapperArgs[0],
+        "--run-id",
+        recorded,
+        ...wrapperArgs.slice(1, bareIdx),
+        ...wrapperArgs.slice(bareIdx + 1),
+      ],
+    };
+  }
+  return {
+    args: [
+      wrapperArgs[0],
+      "--run-id",
+      id,
+      ...wrapperArgs.slice(1, bareIdx),
+      ...wrapperArgs.slice(bareIdx + 1),
+    ],
+  };
+}
 function cmdResult(cwd, args, pretty) {
   const { job } = resolveJobArg(cwd, args);
   if (!job) {
@@ -690,46 +744,22 @@ async function dispatch({
   if (isDirectHandoffRequest(wrapperMode, wrapperArgs)) {
     return finishCleanups(writeDirectNoHandoffRefuse());
   }
-  // status <bare-token>: job id and runId share RUN_ID_RE shape. Prefer the
-  // workspace job index: known job with recorded runId -> rewrite to THAT
-  // runId; known job with no runId -> jobs-table hint and exit 1 (never
-  // forward a job id to the wrapper as a run id); unknown token -> --run-id.
-  if (wrapperMode === "status" && !parseRunIdArg(wrapperArgs)) {
-    const bareIdx = wrapperArgs.findIndex(
-      (a, i) => i > 0 && typeof a === "string" && !a.startsWith("-") && RUN_ID_RE.test(a)
-    );
-    if (bareIdx >= 0) {
-      const id = wrapperArgs[bareIdx];
-      const knownJob = getJob(cwd, id);
-      if (knownJob) {
-        const recorded = sanitizeRunId(knownJob.runId);
-        if (!recorded) {
-          process.stdout.write(formatJobsTable(listJobs(cwd)));
-          process.stdout.write(
-            "\nTip: /grok:status --run-id <id> for wrapper envelope; /grok:result [job-id] for stored output.\n"
-          );
-          process.stderr.write(
-            `[grok-companion] job ${id} has no recorded runId yet; cannot query wrapper status.\n`
-          );
-          return finishCleanups(1);
-        }
-        wrapperArgs = [
-          wrapperArgs[0],
-          "--run-id",
-          recorded,
-          ...wrapperArgs.slice(1, bareIdx),
-          ...wrapperArgs.slice(bareIdx + 1),
-        ];
-      } else {
-        wrapperArgs = [
-          wrapperArgs[0],
-          "--run-id",
-          id,
-          ...wrapperArgs.slice(1, bareIdx),
-          ...wrapperArgs.slice(bareIdx + 1),
-        ];
-      }
+  // status --run-id <token> or status <bare-token>: job id and wrapper runId
+  // share RUN_ID_RE shape. If the token is a known job, query the stored
+  // inner runId (issue #15). Never forward a job id to the wrapper.
+  if (wrapperMode === "status") {
+    const resolved = resolveStatusRunIdArgs(cwd, wrapperArgs);
+    if (resolved.missingJobId) {
+      process.stdout.write(formatJobsTable(listJobs(cwd)));
+      process.stdout.write(
+        "\nTip: /grok:status --run-id <id> for wrapper envelope; /grok:result [job-id] for stored output.\n"
+      );
+      process.stderr.write(
+        `[grok-companion] job ${resolved.missingJobId} has no recorded runId yet; cannot query wrapper status.\n`
+      );
+      return finishCleanups(1);
     }
+    wrapperArgs = resolved.args;
   }
   // status without --run-id: show jobs table first, then wrapper if id present
   if (wrapperMode === "status" && !parseRunIdArg(wrapperArgs)) {
