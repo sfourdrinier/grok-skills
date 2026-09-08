@@ -66,8 +66,10 @@ import {
   runImplementCombo,
 } from "./lib/implement.mjs";
 import { flagValue, hasFlagOrEquals, stripFlags } from "./lib/companion-args.mjs";
+import { applyExecutionPolicyToArgs } from "./lib/execution-policy.mjs";
 import { renderEnvelopePretty, tryParseEnvelope } from "./lib/render.mjs";
-import { terminateReviewTree } from "./lib/gate-kill.mjs";
+import { cancelTrackedJob, processStartIdentity } from "./lib/job-cancel.mjs";
+import { projectTaskResult } from "./lib/task-result.mjs";
 import {
   ACP_SPEC_POINTER,
   isPeerMode,
@@ -191,9 +193,13 @@ function runWithLiveRelay(wrapper, args, track) {
         if (stdoutBuf) {
           storeJobStdout(cwd, job.id, stdoutBuf);
         }
+        const envelope = tryParseEnvelope(stdoutBuf);
+        const compact = envelope ? projectTaskResult(envelope) : null;
         jobAfter = updateJob(cwd, job.id, {
           status: code === 0 ? "success" : "failure",
-          summary: code === 0 ? "completed" : `exit ${code}`,
+          summary:
+            (compact && compact.summary) || (code === 0 ? "completed" : `exit ${code}`),
+          ...(compact ? { taskResult: compact } : {}),
         });
       }
       // captureStdout: implement/auto need the code envelope buffer + the jobId
@@ -226,7 +232,12 @@ function runWithLiveRelay(wrapper, args, track) {
         env: wrapperChildEnv(process.env),
       });
       if (job && child.pid) {
-        updateJob(cwd, job.id, { pid: child.pid, pgid: process.pid });
+        updateJob(cwd, job.id, {
+          pid: child.pid,
+          pgid: null,
+          pgidKind: "none",
+          startId: processStartIdentity(child.pid),
+        });
       }
     } catch (err) {
       process.stderr.write(spawnFailedMessage(wrapper, err.message));
@@ -345,36 +356,9 @@ function cmdCancel(cwd, args) {
     process.stderr.write("[grok-companion] no job to cancel.\n");
     return 1;
   }
-  if (job.status !== "running") {
-    process.stdout.write(`Job ${job.id} is already ${job.status}.\n`);
-    return 0;
-  }
-  // Prefer the child pid; pgid was historically the companion pid without setsid.
-  const pid = job.pid || job.pgid;
-  if (!pid) {
-    updateJob(cwd, job.id, {
-      status: "failure",
-      summary: "cancel failed: no pid recorded; process may still be running",
-    });
-    process.stdout.write(
-      `Job ${job.id}: no live pid recorded; not marked cancelled (process may still be running).\n`
-    );
-    return 1;
-  }
-  const isPosix = process.platform !== "win32";
-  try {
-    terminateReviewTree(pid, isPosix);
-  } catch (err) {
-    updateJob(cwd, job.id, {
-      status: "running",
-      summary: `cancel signal failed: ${err.message}`,
-    });
-    process.stdout.write(`Job ${job.id}: failed to signal tree ${pid}: ${err.message}\n`);
-    return 1;
-  }
-  updateJob(cwd, job.id, { status: "cancelled", summary: "cancelled by operator" });
-  process.stdout.write(`Cancelled job ${job.id} (signal tree ${pid}).\n`);
-  return 0;
+  const out = cancelTrackedJob(cwd, job);
+  process.stdout.write(out.message.endsWith("\n") ? out.message : `${out.message}\n`);
+  return out.code;
 }
 function cmdSetup(cwd, args) {
   return setupCmd(cwd, args, { python: PYTHON, pluginRoot: PLUGIN_ROOT });
@@ -504,6 +488,15 @@ async function dispatch({
     if (gated.continueRun && gated.targetWorkspace) {
       continueRunTargetWorkspace = gated.targetWorkspace;
     }
+  }
+  {
+    const applied = applyExecutionPolicyToArgs({
+      skill: mode,
+      args: rest,
+      integrationMode: integrationEffective || "direct",
+      continueRunId: flagValue(rest, "--continue-run"),
+    });
+    rest = applied.args;
   }
   if (mode === "debate") {
     const wrapper = resolveWrapperPath(process.env);

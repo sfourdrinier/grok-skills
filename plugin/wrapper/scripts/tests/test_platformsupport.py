@@ -302,7 +302,8 @@ class XdgRuntimeDirSafetyTests(unittest.TestCase):
             platformsupport._is_safe_xdg_runtime_dir("/run/user/{}/grok".format(uid))
         )
         self.assertTrue(
-            platformsupport._is_safe_xdg_runtime_dir("/var/run/user/{}".format(uid))
+            platformsupport._is_safe_xdg_runtime_dir("/var/run/user/{}".format(uid)),
+            "macOS resolve() maps /var/run -> /private/var/run; prefixes must resolve too",
         )
         # resolve() collapses ../ so this becomes another uid path under /run/user
         # - reject foreign uids.

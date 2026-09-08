@@ -524,19 +524,80 @@ class DirectPolicyAndCliTests(DirectModeHarness):
         with mock.patch("groklib.runstate.state_root", return_value=outside):
             _direct._assert_state_root_outside_repo(repo)  # must not raise
 
-    def test_linked_worktree_refused_for_direct(self) -> None:
+    def test_linked_worktree_is_classified_not_refused(self) -> None:
         from groklib.modes import _direct
+
+        primary = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(primary), ignore_errors=True)
+        (primary / ".git").mkdir()
+        layout = _direct.classify_direct_git_layout(primary)
+        self.assertEqual(layout.kind, "primary")
 
         linked = pathlib.Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, str(linked), ignore_errors=True)
-        (linked / ".git").write_text("gitdir: /common/.git/worktrees/x\n")  # .git is a FILE
+        git_dir = primary / ".git" / "worktrees" / "feature"
+        git_dir.mkdir(parents=True)
+        (git_dir / "commondir").write_text("../..\n")
+        (linked / ".git").write_text("gitdir: {}\n".format(git_dir))
+        linked_layout = _direct.classify_direct_git_layout(linked)
+        self.assertEqual(linked_layout.kind, "linked-worktree")
+        _direct.assert_direct_git_layout_supported(linked_layout)
+
+        bogus = pathlib.Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, str(bogus), ignore_errors=True)
+        (bogus / ".git").write_text("not-a-gitdir-pointer\n")
         with self.assertRaises(GrokWrapperError) as ctx:
-            _direct._assert_not_linked_worktree(linked)
+            _direct.assert_direct_git_layout_supported(
+                _direct.classify_direct_git_layout(bogus)
+            )
         self.assertEqual(ctx.exception.error_class, "sandbox-failure")
-        primary = pathlib.Path(tempfile.mkdtemp())
-        self.addCleanup(shutil.rmtree, str(primary), ignore_errors=True)
-        (primary / ".git").mkdir()  # primary worktree: .git is a dir
-        _direct._assert_not_linked_worktree(primary)  # must not raise
+
+    def test_public_direct_runner_uses_host_linked_worktree(self) -> None:
+        repo = self.make_code_repo()
+        linked = pathlib.Path(self.tmp_root) / "linked wt"
+        self._git(repo, "worktree", "add", str(linked), "HEAD")
+        git_pointer = (linked / ".git").read_text()
+        main_head = (repo / ".git" / "HEAD").read_text()
+        before_main = (repo / "pkg" / "package.json").read_text(encoding="utf-8")
+        before_mod = (repo / "pkg" / "mod.txt").read_text(encoding="utf-8")
+
+        def _plant(repo_root: pathlib.Path, _run_id: str) -> None:
+            (repo_root / "pkg" / "mod.txt").write_text("from-linked\n", encoding="utf-8")
+
+        extra_worktrees_before = {
+            p.name for p in pathlib.Path(self.state_home).rglob("*") if "worktree" in p.name.lower()
+        }
+        exit_code, out = self.drive_direct(
+            self._direct_argv(),
+            repo_root=linked,
+            plant=_plant,
+        )
+        env = json.loads(out)
+        self.assertEqual(exit_code, 0, out)
+        self.assertEqual(env["status"], "success")
+        self.assertIsNone(env.get("worktreePath"))
+        self.assertEqual((linked / "pkg" / "mod.txt").read_text(encoding="utf-8"), "from-linked\n")
+        self.assertEqual((repo / "pkg" / "package.json").read_text(encoding="utf-8"), before_main)
+        self.assertEqual((repo / "pkg" / "mod.txt").read_text(encoding="utf-8"), before_mod)
+        self.assertEqual((linked / ".git").read_text(), git_pointer)
+        self.assertEqual((repo / ".git" / "HEAD").read_text(), main_head)
+        extra_worktrees_after = {
+            p.name for p in pathlib.Path(self.state_home).rglob("*") if "worktree" in p.name.lower()
+        }
+        self.assertEqual(extra_worktrees_after, extra_worktrees_before)
+
+    def test_authorized_dirty_target_file_allows_follow_up(self) -> None:
+        repo = self.make_code_repo()
+        (repo / "pkg" / "mod.txt").write_text("operator v1\n", encoding="utf-8")
+
+        def _plant(repo_root: pathlib.Path, _run_id: str) -> None:
+            (repo_root / "pkg" / "mod.txt").write_text("grok v2\n", encoding="utf-8")
+
+        exit_code, out = self.drive_direct(self._direct_argv(), repo_root=repo, plant=_plant)
+        env = json.loads(out)
+        self.assertEqual(exit_code, 0, out)
+        self.assertEqual(env["status"], "success")
+        self.assertEqual((repo / "pkg" / "mod.txt").read_text(encoding="utf-8"), "grok v2\n")
 
     def test_integration_worktree_routes_to_run_worktree_mode(self) -> None:
         repo = self.make_code_repo()

@@ -90,8 +90,9 @@ the tree consistent).
 
 ### Codex custom agents
 
-SessionStart installs managed TOML with absolute **`GROK_AGENT_RUN=…/agents/run.mjs`**
-(not a guessed cache path). Agents run:
+`/grok:setup` installs managed TOML with absolute **`GROK_AGENT_RUN=.../agents/run.mjs`**
+(not a guessed cache path). Trusted Codex SessionStart only reconciles owned
+files. Agents run:
 
 ```bash
 node "$GROK_AGENT_RUN" code ...

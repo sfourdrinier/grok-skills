@@ -86,16 +86,32 @@ export function terminateReviewTree(pid, isPosix, deps = {}) {
       process.stderr.write(
         `[grok-stop-gate] taskkill could not be spawned for review tree pid ${pid}: ${killed.error.message}\n`
       );
-    } else if (killed && typeof killed.status === "number" && killed.status !== 0) {
+      return {
+        outcome: "failed",
+        observedExit: false,
+        signaled: false,
+        error: killed.error.message,
+        pid,
+      };
+    }
+    if (killed && typeof killed.status === "number" && killed.status !== 0) {
       const detail = (killed.stderr || "").toString().trim() || `exit status ${killed.status}`;
       process.stderr.write(
         `[grok-stop-gate] taskkill FAILED to kill review tree pid ${pid} (exit ${killed.status}): ${detail}\n`
       );
+      return {
+        outcome: "failed",
+        observedExit: false,
+        signaled: true,
+        error: detail,
+        pid,
+      };
     }
-    return;
+    return { outcome: "stopped", observedExit: true, signaled: true, pid };
   }
 
   signalGroup(kill, pid, "SIGTERM");
   sleep(GROUP_TERM_GRACE_MS);
   signalGroup(kill, pid, "SIGKILL");
+  return { outcome: "stopped", observedExit: true, signaled: true, pid };
 }

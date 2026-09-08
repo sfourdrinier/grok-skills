@@ -4,8 +4,8 @@
 // into ~/.codex/agents/ (or project .codex/agents when scope=project).
 //
 // Codex does not yet register plugin-bundled agents (openai/codex#18988), so we
-// materialize them into the agents dir. Prefer ensureCodexAgents() from
-// SessionStart so install is zero-step for the user. Templates use
+// materialize them into the agents dir. /grok:setup is the installer;
+// trusted SessionStart only reconciles already-owned files. Templates use
 // __GROK_AGENT_RUN_Q__; install rewrites an absolute path to agents/run.mjs.
 //
 // Project-scope agent discovery (.codex/agents/) per Codex docs July 2026:
@@ -18,7 +18,13 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { getRunMode, jobsDir } from "./jobs.mjs";
+import {
+  getRunMode,
+  getStoredCodexAgentsScope,
+  jobsDir,
+  parseCodexAgentsScope,
+  setStoredCodexAgentsScope,
+} from "./jobs.mjs";
 
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
@@ -48,19 +54,7 @@ export function codexAgentsDir(env = process.env) {
   return path.join(codexHome(env), "agents");
 }
 
-/**
- * @param {unknown} value
- * @returns {"user"|"project"|null}
- */
-export function parseCodexAgentsScope(value) {
-  const s = String(value ?? "")
-    .trim()
-    .toLowerCase();
-  if (s === "user" || s === "project") {
-    return s;
-  }
-  return null;
-}
+export { parseCodexAgentsScope };
 
 function stateRootFromJobs(cwd, env) {
   // jobsDir -> <stateRoot>/jobs; ensure() side effect via getRunMode load path.
@@ -113,7 +107,7 @@ function readScopeFromSidecar(cwd, env) {
  * @returns {"user"|"project"}
  */
 export function getCodexAgentsScope(cwd, env = process.env) {
-  return readScopeFromIndex(cwd, env) || readScopeFromSidecar(cwd, env) || "user";
+  return getStoredCodexAgentsScope(cwd, env) || readScopeFromSidecar(cwd, env) || "user";
 }
 
 /**
@@ -126,50 +120,7 @@ export function getCodexAgentsScope(cwd, env = process.env) {
  * @returns {"user"|"project"}
  */
 export function setCodexAgentsScope(cwd, scope, env = process.env) {
-  const normalized = parseCodexAgentsScope(scope) || "user";
-  const root = stateRootFromJobs(cwd, env);
-  fs.mkdirSync(root, { recursive: true, mode: DIR_MODE });
-
-  const indexFile = path.join(root, "jobs-index.json");
-  let payload = { version: 1, jobs: [], config: {} };
-  if (fs.existsSync(indexFile)) {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(indexFile, "utf8"));
-      if (parsed && typeof parsed === "object") {
-        payload = parsed;
-      }
-    } catch {
-      /* start fresh structure but keep going */
-    }
-  }
-  if (!payload.config || typeof payload.config !== "object") {
-    payload.config = {};
-  }
-  payload.config[CODEX_AGENTS_SCOPE_KEY] = normalized;
-  if (!payload.config.prefsSources || typeof payload.config.prefsSources !== "object") {
-    payload.config.prefsSources = {};
-  }
-  payload.config.prefsSources[CODEX_AGENTS_SCOPE_KEY] = "setup";
-  if (!Array.isArray(payload.jobs)) {
-    payload.jobs = [];
-  }
-  if (payload.version == null) {
-    payload.version = 1;
-  }
-  fs.writeFileSync(indexFile, `${JSON.stringify(payload, null, 2)}\n`, {
-    encoding: "utf8",
-    mode: FILE_MODE,
-  });
-
-  // Sidecar: jobs.mjs saveIndex only re-emits known config keys and would drop
-  // codexAgentsScope; keep a same-state-root copy so SessionStart still honors
-  // project scope after unrelated prefs/job writes.
-  fs.writeFileSync(
-    path.join(root, SCOPE_SIDECAR),
-    `${JSON.stringify({ codexAgentsScope: normalized }, null, 2)}\n`,
-    { encoding: "utf8", mode: FILE_MODE }
-  );
-  return normalized;
+  return setStoredCodexAgentsScope(cwd, scope, env);
 }
 
 /**
@@ -252,18 +203,34 @@ export function materializeAgentBody(sourceBody, agentRunAbs, companionAbs = nul
     );
   }
   const sha = templateSha(sourceBody);
-  const header = [
+  const headerLines = [
     `# managed-by: ${MANAGED_BY}`,
     `# agent-run: ${agentRunAbs}`,
     companionAbs ? `# companion: ${companionAbs}` : null,
     `# template-sha256: ${sha}`,
-    `# auto-installed by SessionStart / setup - re-runs update managed agents only`,
-    "",
-  ]
-    .filter(Boolean)
-    .join("\n");
+    `# installed by setup; SessionStart reconciles owned files only`,
+  ].filter((line) => line != null);
   const withoutOldInstallComments = rewritten.replace(/^(?:#.*\n)*?(?=name\s*=)/m, "");
-  return header + withoutOldInstallComments;
+  const withoutDigest = `${headerLines.join("\n")}\n${withoutOldInstallComments}`;
+  const installedSha = crypto.createHash("sha256").update(withoutDigest, "utf8").digest("hex").slice(0, 16);
+  return `# installed-sha256: ${installedSha}\n${withoutDigest}`;
+}
+
+export function installedBodyDigest(body) {
+  const text = String(body || "").replace(/^#\s*installed-sha256:\s*\S+\n/m, "");
+  return crypto.createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
+}
+
+function parseManagedMeta(body) {
+  const text = String(body || "");
+  const templateShaMatch = text.match(/#\s*template-sha256:\s*(\S+)/);
+  const agentRunMatch = text.match(/#\s*agent-run:\s*(.+)/);
+  const installedShaMatch = text.match(/#\s*installed-sha256:\s*(\S+)/);
+  return {
+    templateSha: templateShaMatch ? templateShaMatch[1].trim() : null,
+    agentRun: agentRunMatch ? agentRunMatch[1].trim() : null,
+    installedSha: installedShaMatch ? installedShaMatch[1].trim() : null,
+  };
 }
 
 function mkdirPrivate(dir) {
@@ -417,6 +384,7 @@ export function installCodexAgents({
   backup = true,
   cwd = null,
   scope = null,
+  reconcile = false,
 } = {}) {
   const root =
     (pluginRoot && String(pluginRoot).trim()) ||
@@ -435,6 +403,8 @@ export function installCodexAgents({
   const updated = [];
   const skipped = [];
   const skippedUser = [];
+  const conflicts = [];
+  const missing = [];
   const backedUp = [];
   const errors = [];
   const templates = listTemplateAgents(templatesDir);
@@ -482,6 +452,24 @@ export function installCodexAgents({
     };
   }
 
+  if (reconcile && !fs.existsSync(dest)) {
+    const names = templates.map((t) => t.name);
+    return {
+      ok: true,
+      destDir: dest,
+      companion,
+      agentRun,
+      installed,
+      updated,
+      skipped: [],
+      skippedUser,
+      conflicts,
+      missing: names,
+      backedUp,
+      errors,
+    };
+  }
+
   try {
     mkdirPrivate(dest);
   } catch (err) {
@@ -494,6 +482,7 @@ export function installCodexAgents({
       updated,
       skipped,
       skippedUser,
+      conflicts,
       backedUp,
       errors: [`cannot create ${dest}: ${err.message}`],
     };
@@ -510,6 +499,10 @@ export function installCodexAgents({
       const body = materializeAgentBody(sourceBody, agentRun, companion);
 
       if (!fs.existsSync(target)) {
+        if (reconcile) {
+          missing.push(t.name);
+          continue;
+        }
         writePrivate(target, body);
         installed.push(t.name);
         continue;
@@ -522,14 +515,30 @@ export function installCodexAgents({
       }
 
       const managed = isManagedAgentBody(existing);
-      const shouldWrite = (managed && updateManaged) || force;
-      if (!shouldWrite) {
-        if (managed && !updateManaged) {
-          skipped.push(t.name);
-        } else {
-          skippedUser.push(t.name);
-        }
+      if (!managed && !force) {
+        skippedUser.push(t.name);
         continue;
+      }
+      if (managed && !force) {
+        const meta = parseManagedMeta(existing);
+        const digest = installedBodyDigest(existing);
+        const userEdited = Boolean(meta.installedSha && meta.installedSha !== digest);
+        const legacyEdited = !meta.installedSha && existing !== body;
+        if (userEdited || legacyEdited) {
+          conflicts.push(t.name);
+          continue;
+        }
+        const ourSha = templateSha(sourceBody);
+        const templateChanged = Boolean(meta.templateSha && meta.templateSha !== ourSha);
+        const pathChanged = Boolean(meta.agentRun && meta.agentRun !== agentRun);
+        if (!templateChanged && !pathChanged) {
+          skipped.push(t.name);
+          continue;
+        }
+        if (!updateManaged) {
+          skipped.push(t.name);
+          continue;
+        }
       }
 
       if (backup) {
@@ -554,6 +563,8 @@ export function installCodexAgents({
     updated,
     skipped,
     skippedUser,
+    conflicts,
+    missing,
     backedUp,
     errors,
   };
@@ -656,6 +667,7 @@ export function ensureCodexAgents(opts = {}) {
       updateManaged: true,
       force: false,
       backup: true,
+      reconcile: false,
       ...opts,
     });
   } catch (err) {
@@ -671,6 +683,8 @@ export function ensureCodexAgents(opts = {}) {
       updated: [],
       skipped: [],
       skippedUser: [],
+      conflicts: [],
+      missing: [],
       backedUp: [],
       errors: [err.message || String(err)],
     };

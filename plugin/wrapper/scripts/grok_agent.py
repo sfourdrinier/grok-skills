@@ -270,6 +270,13 @@ def _build_parser() -> _Parser:
         help="direct mode only: allow Grok to modify paths that were already dirty "
         "in the operator checkout at run start",
     )
+    code.add_argument(
+        "--validation",
+        choices=("targeted", "affected", "full"),
+        default="full",
+        help="build-gate breadth: targeted (tests when present), affected (skip full "
+        "build when other scripts exist), or full (default)",
+    )
 
     verify = _sub("verify")
     verify.add_argument("--worktree", required=True)

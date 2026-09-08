@@ -63,7 +63,11 @@ def _is_ignored_artifact(wt: "ExternalWorktree", relative: str) -> bool:
     return completed.returncode == 0
 
 
-def repo_change_fingerprint(repo_root: pathlib.Path) -> FrozenSet[Tuple[str, str]]:
+def repo_change_fingerprint(
+    repo_root: pathlib.Path,
+    *,
+    audit_profile: str = "exhaustive",
+) -> FrozenSet[Tuple[str, str]]:
     """Snapshot every changed repo-relative path AND a fingerprint of each (content+mode).
 
     Defense-in-depth for read-only modes (review): captured before and after the run, the
@@ -86,7 +90,9 @@ def repo_change_fingerprint(repo_root: pathlib.Path) -> FrozenSet[Tuple[str, str
     # Grok r5 #4: the scan above is blind to gitignored paths, so add the ignored set
     # (content+mode for protected deny paths; bounded stat for bulk caches) -- a
     # planted/rewritten/chmod'd ignored file is then a NEW (path, signature) pair.
-    for relative in path_inventory.list_ignored_untracked_paths(resolved_repo_root):
+    for relative in path_inventory.list_ignored_untracked_paths(
+        resolved_repo_root, audit_profile=audit_profile
+    ):
         pairs.add((relative, _ignored_path_signature(resolved_repo_root, relative)))
     return frozenset(pairs)
 
@@ -229,6 +235,15 @@ def assert_changes_within(
         if not worktree._within_any(candidate, resolved_roots):
             violations.append(str(candidate))
             continue
+
+    for relative in path_inventory.list_ignored_untracked_paths(
+        wt.path, audit_profile="verified-host"
+    ):
+        candidate = (wt.path / relative).resolve()
+        if _is_ignored_artifact(wt, relative):
+            continue
+        if not worktree._within_any(candidate, resolved_roots):
+            violations.append(str(candidate))
 
     violations.extend(_collect_original_checkout_escapes(wt, resolved_roots, baseline))
 

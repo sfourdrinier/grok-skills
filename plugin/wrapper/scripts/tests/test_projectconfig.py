@@ -109,8 +109,30 @@ class ProjectConfigTests(unittest.TestCase):
         self.assertEqual(projectconfig.install_command("yarn"), ["yarn", "install", "--offline", "--frozen-lockfile"])
         self.assertEqual(projectconfig.install_command("bun"), ["bun", "install", "--frozen-lockfile"])
         self.assertEqual(
-            projectconfig.install_command("npm"), ["npm", "install", "--offline", "--no-audit", "--no-fund"]
+            projectconfig.install_command("npm"),
+            ["npm", "ci", "--offline", "--no-audit", "--no-fund"],
         )
+        npm = projectconfig.install_policy("npm")
+        self.assertEqual(npm["offline"], True)
+        self.assertEqual(npm["lockfileFrozen"], True)
+        bun = projectconfig.install_policy("bun")
+        self.assertEqual(bun["offline"], False)
+        self.assertEqual(bun["lockfileFrozen"], True)
+        plan = projectconfig.validation_plan("targeted", [["node", "--test"]])
+        self.assertEqual(plan["level"], "targeted")
+        self.assertEqual(plan["commands"], [["node", "--test"]])
+        named = projectconfig.validation_plan("targeted", ["build", "test", "lint"])
+        self.assertEqual(named["commands"], ["test"])
+        affected = projectconfig.validation_plan("affected", ["build", "test", "lint"])
+        self.assertEqual(affected["commands"], ["test", "lint"])
+        pinned = projectconfig.validation_plan(
+            "targeted",
+            ["build", "test", "lint"],
+            pinned=["typecheck", "lint", "test"],
+        )
+        self.assertEqual(pinned["commands"], ["typecheck", "lint", "test"])
+        with self.assertRaises(GrokWrapperError):
+            projectconfig.validation_plan("everything")
 
 
 if __name__ == "__main__":

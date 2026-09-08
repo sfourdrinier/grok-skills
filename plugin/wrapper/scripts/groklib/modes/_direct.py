@@ -61,35 +61,129 @@ def _log(function: str, message: str) -> None:
     log_stderr("modes._direct", function, message)
 
 
-def _assert_not_linked_worktree(repo_root: pathlib.Path) -> None:
-    """Refuse direct mode from a LINKED git worktree (or submodule), where ``.git``
-    is a FILE pointing at the common git dir.
+@dataclasses.dataclass(frozen=True)
+class DirectGitLayout:
+    """Working tree vs per-worktree git dir vs shared common git dir."""
 
-    Direct mode's protected snapshot/restore watches ``<repo>/.git`` on disk; in a
-    linked worktree the real config/refs/hooks live in the common dir, so a
-    ``.git`` write there could be detected but NOT rolled back. Fail closed and
-    point the operator at ``--integration worktree`` rather than risk a
-    non-restorable ``.git`` mutation.
-    """
-    git_path = repo_root / ".git"
+    working_dir: pathlib.Path
+    git_path: pathlib.Path
+    git_dir: pathlib.Path
+    common_dir: pathlib.Path
+    kind: str
+
+
+def _parse_gitfile_gitdir(git_path: pathlib.Path) -> pathlib.Path:
+    try:
+        text = git_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise GrokWrapperError(
+            "sandbox-failure",
+            "could not read .git gitfile: {}".format(exc),
+            {"gitPath": str(git_path)},
+        ) from exc
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.lower().startswith("gitdir:"):
+            raw = stripped.split(":", 1)[1].strip()
+            if not raw:
+                break
+            candidate = pathlib.Path(raw)
+            if not candidate.is_absolute():
+                candidate = git_path.parent / candidate
+            try:
+                return candidate.resolve()
+            except OSError as exc:
+                raise GrokWrapperError(
+                    "sandbox-failure",
+                    "could not resolve gitdir from gitfile: {}".format(exc),
+                    {"gitPath": str(git_path), "gitdir": raw},
+                ) from exc
+    raise GrokWrapperError(
+        "sandbox-failure",
+        "direct mode cannot parse .git gitfile (expected 'gitdir: <path>')",
+        {"gitPath": str(git_path)},
+    )
+
+
+def classify_direct_git_layout(repo_root: pathlib.Path) -> DirectGitLayout:
+    """Classify the checkout's Git layout without granting extra write rights."""
+    root = pathlib.Path(repo_root)
+    git_path = root / ".git"
     try:
         is_file = git_path.is_file()
+        is_dir = git_path.is_dir()
     except OSError as exc:
-        # Fail CLOSED (parity with _assert_state_root_outside_repo): if we cannot
-        # even stat .git, we cannot vouch for .git rollback safety.
         raise GrokWrapperError(
             "sandbox-failure",
             "could not classify .git for direct mode: {}".format(exc),
-            {"repository": str(repo_root)},
+            {"repository": str(root)},
         ) from exc
-    if is_file:
+    if is_dir and not git_path.is_symlink():
+        resolved = git_path.resolve()
+        return DirectGitLayout(
+            working_dir=root,
+            git_path=git_path,
+            git_dir=resolved,
+            common_dir=resolved,
+            kind="primary",
+        )
+    if not is_file:
         raise GrokWrapperError(
             "sandbox-failure",
-            "direct mode is not supported from a linked git worktree / submodule "
-            "(.git is a file, so protected .git rollback is not reliable); re-run "
-            "with --integration worktree",
-            {"repository": str(repo_root)},
+            "direct mode requires a git checkout (.git missing)",
+            {"repository": str(root)},
         )
+    git_dir = _parse_gitfile_gitdir(git_path)
+    common_dir = git_dir
+    commondir_file = git_dir / "commondir"
+    try:
+        if commondir_file.is_file():
+            raw = commondir_file.read_text(encoding="utf-8").strip()
+            candidate = pathlib.Path(raw)
+            if not candidate.is_absolute():
+                candidate = git_dir / candidate
+            common_dir = candidate.resolve()
+    except OSError as exc:
+        raise GrokWrapperError(
+            "sandbox-failure",
+            "could not resolve git commondir: {}".format(exc),
+            {"gitDir": str(git_dir)},
+        ) from exc
+    posix_git_dir = str(git_dir).replace("\\", "/")
+    if "/worktrees/" in posix_git_dir or commondir_file.is_file():
+        kind = "linked-worktree"
+    elif "/modules/" in posix_git_dir:
+        kind = "submodule"
+    else:
+        kind = "gitfile"
+    return DirectGitLayout(
+        working_dir=root,
+        git_path=git_path,
+        git_dir=git_dir,
+        common_dir=common_dir,
+        kind=kind,
+    )
+
+
+def assert_direct_git_layout_supported(layout: DirectGitLayout) -> None:
+    """Allow primary checkouts and host-linked worktrees; refuse unknown gitfiles."""
+    if layout.kind in {"primary", "linked-worktree"}:
+        return
+    raise GrokWrapperError(
+        "sandbox-failure",
+        "direct mode is not supported from this git layout ({}); re-run "
+        "with --integration worktree".format(layout.kind),
+        {
+            "repository": str(layout.working_dir),
+            "gitPath": str(layout.git_path),
+            "kind": layout.kind,
+        },
+    )
+
+
+def _assert_not_linked_worktree(repo_root: pathlib.Path) -> None:
+    """Compatibility wrapper: classify then refuse unsupported gitfiles."""
+    assert_direct_git_layout_supported(classify_direct_git_layout(repo_root))
 
 
 def _assert_state_root_outside_repo(repo_root: pathlib.Path) -> None:
@@ -246,7 +340,9 @@ def run_direct_mode(
         # the checkout would show up as Grok changes or leak prompt text into
         # commit-able state (mirrors the external-worktree nested-root guard).
         _assert_state_root_outside_repo(pathlib.Path(repository))
-        _assert_not_linked_worktree(pathlib.Path(repository))
+        assert_direct_git_layout_supported(
+            classify_direct_git_layout(pathlib.Path(repository))
+        )
         run_paths = runstate.create_run(mode)
         progress = ProgressWriter(run_paths.run_id, run_paths.progress_path)
         return _run_direct_mode_body(

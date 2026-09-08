@@ -67,7 +67,9 @@ def run(args: argparse.Namespace) -> dict:
     )
 
     def _prepare(stage: DirectStage) -> DirectPrep:
-        baseline_fp = worktree_escape.repo_change_fingerprint(repo_root)
+        baseline_fp = worktree_escape.repo_change_fingerprint(
+            repo_root, audit_profile="direct-protect"
+        )
         dirty_paths = frozenset(relative for relative, _fp in baseline_fp)
         baseline_git_fp = capture_git_dir_guard(repo_root)
 
@@ -102,6 +104,7 @@ def run(args: argparse.Namespace) -> dict:
             never_build_workspaces=project_config.never_build_workspaces,
             original_workspace_name=captured_workspace_name[0],
             pristine_scripts=captured_workspace_scripts[0],
+            validation_level=str(getattr(args, "validation", "full") or "full"),
         )
 
     return run_direct_mode(

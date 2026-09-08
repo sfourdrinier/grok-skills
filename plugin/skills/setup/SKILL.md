@@ -1,6 +1,6 @@
 ---
 name: "setup"
-description: "Check Grok readiness and optionally toggle stop gate / run mode / Codex agents scope (Codex agents auto-install on SessionStart)"
+description: "Check Grok readiness and install/refresh Codex agents; optionally toggle stop gate / run mode / agents scope. Use after plugin install and when agents are missing."
 argument-hint: "[--enable-review-gate | --disable-review-gate] [--run-mode hardened|direct] [--integration direct|worktree|auto|review] [--target <path>] [--notification-mode off|auto|native|webhook] [--notification-webhook-url <url>] [--json] [--codex-agents-scope user|project] [--force-codex-agents] [--skip-codex-agents] [--remove-codex-agents]"
 allowed-tools: "Bash(node:*)"
 ---
@@ -29,19 +29,18 @@ use `--task-file -` with a single-quoted heredoc.
 
 <!-- plugin/skills/setup/SKILL.md -->
 
-`/grok:setup` (or Codex skill `setup`) is **optional**. It reports readiness and can
-toggle the stop gate / run mode / Codex agents install scope.
+`/grok:setup` (or Codex skill `setup`) reports readiness, persists prefs, and
+**installs Codex custom agents**. Skills work without trusting plugin hooks.
 
-**Codex agents install automatically** on `SessionStart` (hook writes managed
-TOML with absolute `GROK_AGENT_RUN` → `agents/run.mjs`). Default dest is personal
-`~/.codex/agents/`; `setup --codex-agents-scope project` persists workspace prefs
-and installs into `<cwd>/.codex/agents/` instead (SessionStart honors the same
-prefs). You should not need a manual setup step after installing the plugin.
+**Codex agents** are written here (absolute `GROK_AGENT_RUN` → `agents/run.mjs`).
+Default dest is personal `~/.codex/agents/`; `setup --codex-agents-scope project`
+persists workspace prefs and installs into `<cwd>/.codex/agents/`. Trusted
+SessionStart only reconciles already-owned files; Claude SessionStart never
+writes `~/.codex`.
 
 **Codex trust honesty:** on Codex, plugin hooks (the optional stop-review gate
 **and** the SubagentStop handoff nudge) stay **dormant until you trust them** via
-`/hooks`. That is the honest default posture - install alone does not enable those
-hooks. Skills and SessionStart agent materialization still work without hook trust.
+`/hooks`. Skills work without that trust step.
 
 **Product default is live-tree `integration=direct` with no consent gate**
 (2.0.1+). Optional: `setup --integration direct|auto|review` to persist prefs,
@@ -106,29 +105,24 @@ node "$SKILL_BASE/run.mjs" setup --json
 - **Codex agents** ensure result (dest from scope, absolute `agents/run.mjs`)
 - Hardened preflight checks when wrapper is available
 
-## Agents (zero post-install)
+## Agents
 
 | Agent | Host | Role |
 |-------|------|------|
-| `grok-engineer-coder` (nickname **Grok Coder**) | Claude (`plugin/agents/`) + Codex (`~/.codex/agents/` or project `.codex/agents/`) | Grok implements via ACP peer (default) or code; edits land per [integration-modes.md](../../references/integration-modes.md); host orchestrates |
+| `grok-engineer-coder` (nickname **Grok Coder**) | Claude (`plugin/agents/`) + Codex (`~/.codex/agents/` or project `.codex/agents/`) | Grok implements via one-shot code in the supplied workspace (ACP peer opt-in); edits land per [integration-modes.md](../../references/integration-modes.md); host dispatches |
 | `grok-rescue` (nickname **Grok Rescue**) | Claude + Codex | Diagnosis / second opinion via Grok `reason` (or `code` if target+base given) |
 
 - **Claude Code:** loads `plugin/agents/` from the install automatically.
-- **Codex:** SessionStart auto-installs managed agents (Codex cannot register plugin
+- **Codex:** this skill installs managed agents (Codex cannot register plugin
   agents natively yet - [openai/codex#18988](https://github.com/openai/codex/issues/18988)).
   Scope defaults to personal `~/.codex/agents/`; `--codex-agents-scope project`
-  installs into `<cwd>/.codex/agents/` (prefs honored on SessionStart; see
+  installs into `<cwd>/.codex/agents/` (see
   [Codex subagents](https://developers.openai.com/codex/subagents)).
-  Managed files refresh when the plugin cache path or templates change (managed
-  `*.bak*` capped at 3 newest). User-edited files without the
-  `managed-by: grok-skills` header are left alone unless `--force-codex-agents`.
+  User-edited managed files are a conflict unless `--force-codex-agents`.
 - **Codex hooks dormant until trusted:** stop-review gate and SubagentStop handoff
-  nudge stay off until you approve them via `/hooks`. Agent materialization does
-  not require that step.
-- **Uninstall managed Codex agents:** disable/uninstall the plugin first (or they
-  reappear on SessionStart), then
-  `setup --remove-codex-agents` (or delete managed `grok-*.toml` under the active
-  scope dir). See `plugin/references/plugin-root.md`.
+  nudge stay off until you approve them via `/hooks`. Agent install is this skill.
+- **Uninstall managed Codex agents:** `setup --remove-codex-agents`
+  (Claude SessionStart will not put them back). See `plugin/references/plugin-root.md`.
 
 ## Gate behavior (if enabled)
 

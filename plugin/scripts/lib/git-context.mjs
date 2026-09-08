@@ -96,8 +96,10 @@ export function buildBranchReviewTask(base, userTask) {
   const head = [
     "Review the git branch changes relative to base revision:",
     `  base: ${base}`,
-    "Use git history and diffs against that base. Focus on correctness bugs,",
-    "security issues, regressions, and incomplete work introduced since the base.",
+    "Use git history and diffs against that base. Rank confirmed defects,",
+    "then credible risks, then optional improvements. A zero-defect outcome is",
+    "valid. Focus on correctness bugs, security issues, regressions, and",
+    "incomplete work introduced since the base.",
   ].join("\n");
   if (!focus) {
     return head;
@@ -109,8 +111,9 @@ export function buildWorkingTreeReviewTask(userTask) {
   const focus = (userTask ?? "").trim();
   const head = [
     "Review the current uncommitted working tree (staged and unstaged changes,",
-    "plus relevant untracked files). Focus on correctness bugs, security issues,",
-    "regressions, and incomplete work.",
+    "plus relevant untracked files). Rank confirmed defects, then credible",
+    "risks, then optional improvements. A zero-defect outcome is valid. Focus",
+    "on correctness bugs, security issues, regressions, and incomplete work.",
   ].join("\n");
   if (!focus) {
     return head;

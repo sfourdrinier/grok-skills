@@ -154,6 +154,7 @@ test("setup --integration direct sets mode without a consent gate", () => {
     ...fakeEnv,
     GROK_AGENT_BINARY: fakeGrok,
     CLAUDE_PLUGIN_DATA: path.join(cwd, ".grok-plugin-data"),
+    CODEX_HOME: path.join(cwd, ".codex-home"),
   };
   try {
     setRunMode(cwd, "direct", env);

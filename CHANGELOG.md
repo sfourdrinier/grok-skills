@@ -6,10 +6,74 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 for marketplace / package tags.
 
-## [Unreleased]
+## [2.1.0] - unreleased
+
+### Added
+
+- **2.1.0 packaging target.** Dual-host manifests `2.1.0`. One-shot `code` in the
+  supplied workspace is the engineer-coder default; ACP peer is opt-in.
+  Companion `applyExecutionPolicyToArgs` injects `--validation` from the
+  execution policy (inherit `code` is targeted; `implement` is full; an
+  explicit `--validation` wins). Compact TaskResult is projected from the
+  existing envelope onto the job record; stdout remains one envelope.
+  `grok-engineer-coder` markdown recipe is one-shot `code` first (ACP peer
+  opt-in), matching the Codex TOML. Preflight cache writes include executable
+  identity. `validation_plan` is the SSOT for targeted/affected/full script
+  selection.
+- **Issue #13 decision:** third-host Grok Build `grok plugin install` is **not**
+  in 2.1.0 (deferred; see `docs/roadmap.md`).
 
 ### Fixed
 
+- **PR #16 review:** inherit-workspace default accepts a host-linked Git
+  worktree (pointer + per-worktree git dir classified; `.git` pointer and
+  shared metadata stay protected). In-place `mode=direct` completion does not
+  require handoff. Preference mutations are locked read-modify-write and job
+  bookkeeping no longer republishes prefs. Failed cancellation can still
+  become a later observed success/failure. Forced cancel treats unknown
+  liveness as unconfirmed and SIGKILLs remaining owned descendants.
+  Project-pinned validation lists are never filtered by `--validation`.
+  Compact TaskResult recognizes `mode=direct`, resolved workspace paths, and
+  does not treat install-only/null-exit/incomplete envelopes as verified.
+  Sequential in-target dirty follow-ups are authorized. Packaging CI asserts
+  `./hooks/codex.hooks.json`. User-edited managed agents stay conflicts on
+  upgrade. Default fingerprint uses the direct-protect audit profile (deny
+  leaves under ignored dirs, no node_modules walk). Durable
+  `~/.grok-skills/state` fallback replaces OS tmp for prefs.
+- **Issue #14:** materialized Codex agent TOML now has a newline before
+  `name = ...` (Codex was ignoring both roles). Codex SessionEnd timeout is 3s
+  so the host does not clamp it; Claude SessionEnd stays 5s.
+- **Claude SessionStart never writes `~/.codex`.** Codex SessionStart only
+  reconciles owned agents and hints `/grok:setup` when they are missing.
+  `/grok:setup` is the installer; `--remove-codex-agents` does not claim
+  SessionStart will put them back. User-edited managed TOML is a setup
+  conflict that requires `--force-codex-agents`. Writer agent is
+  `workspace-write`.
+- XDG runtime-dir allowlist compares resolved prefixes, so macOS
+  ``/var/run/user/<uid>`` (``/private/var/run/...``) is accepted without
+  widening to ``/home``.
+- Isolated worktree ignored-path inventory uses the verified-host audit
+  profile (no recursive protected-leaf walk of `node_modules`); the operator
+  checkout scan stays exhaustive. Code `--validation targeted|affected|full`
+  is applied by the real build gate via `validation_plan`, including the
+  inherit-workspace (`--integration direct`) finalize path.
+- **Job cancel observes process death.** `/grok:cancel` signals the Python
+  wrapper pid (not a guessed process group), waits until the process is gone
+  (zombie counts), and only then marks the job `cancelled`. Signal/permission
+  failure is `cancel_failed`; a still-live wrapper is `cancel_unconfirmed`.
+  Already-finished jobs are not relabeled. Stop-review-gate still tears down
+  its own process group and now returns a structured stop result. Windows
+  `taskkill` nonzero status is failure, not cancelled.
+- **Workspace prefs are not the jobs array.** Settings live in `prefs.json`
+  (with a last-known-good bak); each run stays in `jobs/<id>/job.json`;
+  `jobs-index.json` is a derived listing. A corrupt index cannot reset
+  `integrationMode` to live `direct`. Garbage setup-authored
+  `integrationMode` in `prefs.json` restores bak instead of collapsing to
+  live `direct`, and persist never copies an unusable prefs file onto bak.
+  The 50-job cap no longer evicts an active handle. `codexAgentsScope` is a
+  canonical prefs key (sidecar is no longer required after a job write).
+  Concurrent creates keep every record. `updateJob` cannot relabel a
+  cancelled job as success.
 - Concurrent `git worktree add` on the same repository is serialized with a
   per-repo lock (`.git/grok-skills-worktree.lock`). Git's worktree admin dir
   races (`failed to read …/commondir`) made `review --isolated` and

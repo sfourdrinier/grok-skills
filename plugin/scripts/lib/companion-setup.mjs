@@ -39,6 +39,18 @@ import { wrapperChildEnv } from "./notify.mjs";
 import { renderSetupReport, tryParseEnvelope } from "./render.mjs";
 import { resolveWrapperPath } from "./wrapper.mjs";
 
+function credentialsFact(rows) {
+  const auth = (rows || []).find((row) => /auth/i.test(String(row?.name || "")));
+  if (!auth) {
+    return { state: "unknown" };
+  }
+  return {
+    state: auth.ok ? "present" : "missing",
+    ok: Boolean(auth.ok),
+    detail: auth.detail || "",
+  };
+}
+
 /**
  * @param {string} cwd
  * @param {string[]} args
@@ -309,7 +321,7 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
     agentsOk = agentsResult.ok;
     if (agentsResult.removed.length) {
       hints.push(
-        "Removed managed Codex agents (backups as *.toml.bak). SessionStart will reinstall while the plugin is enabled."
+        "Removed managed Codex agents (backups as *.toml.bak). SessionStart will not reinstall them; run setup to install again."
       );
     }
   } else if (!skipCodexAgents) {
@@ -330,6 +342,9 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
       agentsResult.skippedUser?.length
         ? `user-owned=[${agentsResult.skippedUser.join(", ")}]`
         : null,
+      agentsResult.conflicts?.length
+        ? `conflicts=[${agentsResult.conflicts.join(", ")}]`
+        : null,
       agentsResult.backedUp?.length ? `backups=[${agentsResult.backedUp.join(", ")}]` : null,
       `→ ${agentsResult.destDir}`,
     ].filter(Boolean);
@@ -342,9 +357,14 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
       detail,
     });
     agentsOk = agentsResult.ok;
-    if (agentsResult.installed.length || agentsResult.updated.length) {
+    if (agentsResult.conflicts?.length) {
       hints.push(
-        "Codex agents ready (absolute GROK_AGENT_RUN → agents/run.mjs): grok-engineer-coder, grok-rescue. Also auto-installed on SessionStart."
+        `Managed Codex agents were edited locally (${agentsResult.conflicts.join(", ")}). Re-run setup --force-codex-agents to overwrite (creates .bak).`
+      );
+      agentsOk = false;
+    } else if (agentsResult.installed.length || agentsResult.updated.length) {
+      hints.push(
+        "Codex agents ready (absolute GROK_AGENT_RUN → agents/run.mjs): grok-engineer-coder, grok-rescue. Setup is the installer; SessionStart only reconciles owned files."
       );
     } else if (agentsResult.skippedUser?.length) {
       hints.push(
@@ -352,7 +372,7 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
       );
     } else if (agentsResult.skipped.length && !agentsResult.installed.length) {
       hints.push(
-        `Codex agents already up to date under ${agentsResult.destDir} (SessionStart keeps managed agents in sync).`
+        `Codex agents already up to date under ${agentsResult.destDir}. Re-run setup after a plugin upgrade.`
       );
     }
   }
@@ -416,6 +436,18 @@ export function cmdSetup(cwd, args, { python = "python3", pluginRoot }) {
         },
         stopReviewGate: Boolean(gate.stopReviewGate),
         codexAgentsScope,
+        facts: {
+          skillRunner: { ok: Boolean(wrapper), detail: wrapper || "not found" },
+          cliRunnable: { ok: binary.ok, detail: binary.ok ? binary.version : binary.detail || "missing" },
+          credentials: credentialsFact(rows),
+          agentTemplates: {
+            ok: agentsOk,
+            installed: Boolean(agentsResult && (agentsResult.installed?.length || agentsResult.skipped?.length || agentsResult.updated?.length)),
+          },
+          hooksTrusted: { state: "unknown" },
+          writeAccess: { state: "unknown" },
+          networkAccess: { state: "unknown" },
+        },
         checks: rows.map((r) => ({
           name: r.name,
           ok: Boolean(r.ok),

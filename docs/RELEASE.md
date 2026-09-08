@@ -105,8 +105,8 @@ gh release create "vX.Y.Z" \
 
 ## Upgrade
 Claude: marketplace update / reinstall grok@grok-skills, reload plugins.
-Codex: refresh marketplace, reinstall if needed, new session (SessionStart
-syncs managed agents under ~/.codex/agents/).
+Codex: refresh marketplace, reinstall if needed, run `/grok:setup` (installer).
+Trusted SessionStart only reconciles owned agents.
 EOF
 ```
 
@@ -117,10 +117,11 @@ Paste CHANGELOG bullets if easier; keep upgrade steps for both hosts.
 - [ ] Release page exists: `https://github.com/sfourdrinier/grok-skills/releases/tag/vX.Y.Z`
 - [ ] Refresh Claude and/or Codex marketplace; confirm installed plugin version
       is `X.Y.Z`
-- [ ] Codex: new session → `~/.codex/agents/grok-*.toml` present with
+- [ ] Codex: `/grok:setup` → `~/.codex/agents/grok-*.toml` present with
       `# managed-by: grok-skills`, `# agent-run:`, and `GROK_AGENT_RUN` under the
-      **new** cache path (`…/agents/run.mjs`)
-- [ ] Optional: `/grok:preflight` or setup skill once
+      **new** cache path (`…/agents/run.mjs`). Trusted SessionStart does not
+      install missing agents.
+- [ ] Optional: `/grok:preflight` once
 - [ ] Confirm skills/agents still say never invent cache paths
   ([plugin/references/plugin-root.md](../plugin/references/plugin-root.md))
 - [ ] Confirm docs do **not** claim a hard Grok CLI version pin (any working CLI)
@@ -132,8 +133,8 @@ Paste CHANGELOG bullets if easier; keep upgrade steps for both hosts.
 - Do not reintroduce exact-match fail-closed on `accepted-version.json`.
   Optional stamp updates after a probe suite are fine (`enforcement: none`).
 - Do not delete or rewrite published tags to “fix” a bad release; cut `X.Y.Z+1`.
-- Do not require a manual `/grok:setup` for Codex agents in release notes as if
-  it were mandatory (SessionStart auto-installs; setup is optional).
+- Do not claim Codex SessionStart auto-installs agents. `/grok:setup` is the
+  installer; trusted SessionStart only reconciles owned files.
 
 ## Quick copy-paste (after versions + CHANGELOG + tests)
 

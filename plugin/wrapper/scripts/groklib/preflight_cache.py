@@ -54,7 +54,23 @@ def load_cache() -> Optional[Dict[str, object]]:
         return None
     if not isinstance(ok, bool):
         return None
-    return {"version": version, "checkedAtMs": checked, "ok": ok}
+    identity = data.get("executableIdentity")
+    if identity is not None and not isinstance(identity, str):
+        return None
+    return {
+        "version": version,
+        "checkedAtMs": checked,
+        "ok": ok,
+        "executableIdentity": identity,
+    }
+
+
+def executable_identity(binary: pathlib.Path) -> str:
+    """Canonical executable identity: resolved path + mtime ns + size."""
+    path = pathlib.Path(binary)
+    resolved = path.resolve()
+    st = resolved.stat()
+    return "{}:{}:{}".format(resolved, st.st_mtime_ns, st.st_size)
 
 
 def is_valid(
@@ -62,6 +78,7 @@ def is_valid(
     *,
     now_ms: Optional[int] = None,
     ttl_ms: int = DEFAULT_TTL_MS,
+    executable_identity: Optional[str] = None,
 ) -> bool:
     """True only when cache exists, ok=true, version matches, and within TTL."""
     if not isinstance(version, str) or not version.strip():
@@ -73,6 +90,10 @@ def is_valid(
         return False
     if data["version"] != version:
         return False
+    if executable_identity:
+        cached_id = data.get("executableIdentity")
+        if cached_id != executable_identity:
+            return False
     clock = _now_ms() if now_ms is None else now_ms
     age = clock - int(data["checkedAtMs"])
     if age < 0 or age > ttl_ms:
@@ -80,7 +101,12 @@ def is_valid(
     return True
 
 
-def write_ok(version: str, *, checked_at_ms: Optional[int] = None) -> None:
+def write_ok(
+    version: str,
+    *,
+    checked_at_ms: Optional[int] = None,
+    executable_identity: Optional[str] = None,
+) -> None:
     """Persist a positive preflight result for ``version`` (best-effort)."""
     if not isinstance(version, str) or not version.strip():
         raise GrokWrapperError(
@@ -93,6 +119,8 @@ def write_ok(version: str, *, checked_at_ms: Optional[int] = None) -> None:
         "checkedAtMs": _now_ms() if checked_at_ms is None else int(checked_at_ms),
         "ok": True,
     }
+    if executable_identity:
+        payload["executableIdentity"] = executable_identity
     path = cache_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -143,7 +171,15 @@ def ensure_ready(binary: pathlib.Path, *, force: bool = False) -> str:
     """
     from groklib import grokcli
 
-    version = grokcli.check_version(binary)
+    identity = None
+    try:
+        identity = executable_identity(binary)
+    except OSError:
+        identity = None
+    cached = load_cache()
+    cached_version = ""
+    if cached and isinstance(cached.get("version"), str):
+        cached_version = str(cached["version"])
     auth_ok, missing = _auth_present()
     if not auth_ok:
         invalidate()
@@ -154,10 +190,19 @@ def ensure_ready(binary: pathlib.Path, *, force: bool = False) -> str:
             ),
             {"missingAuthFileNames": missing},
         )
-    if not force and is_valid(version):
-        _log("ensure_ready", "preflight cache hit for version {}".format(version))
-        return version
+    if (
+        not force
+        and identity
+        and cached_version
+        and is_valid(cached_version, executable_identity=identity)
+    ):
+        _log(
+            "ensure_ready",
+            "preflight cache hit for identity {}".format(identity or cached_version),
+        )
+        return cached_version
+    version = grokcli.check_version(binary)
 
-    write_ok(version)
+    write_ok(version, executable_identity=identity)
     _log("ensure_ready", "preflight cache refreshed for version {}".format(version))
     return version

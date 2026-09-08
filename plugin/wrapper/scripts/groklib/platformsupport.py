@@ -588,10 +588,12 @@ def _is_safe_xdg_runtime_dir(raw: str) -> bool:
     uid = os.getuid() if hasattr(os, "getuid") else None
     if uid is None:
         return False
-    allowed_prefixes = (
-        "/run/user/{}".format(uid),
-        "/var/run/user/{}".format(uid),
-    )
+    allowed_prefixes = []
+    for prefix in ("/run/user/{}".format(uid), "/var/run/user/{}".format(uid)):
+        try:
+            allowed_prefixes.append(str(pathlib.Path(prefix).resolve()))
+        except (OSError, RuntimeError):
+            allowed_prefixes.append(prefix)
     for prefix in allowed_prefixes:
         if text == prefix or text.startswith(prefix + "/"):
             return True

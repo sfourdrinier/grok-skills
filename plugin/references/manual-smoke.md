@@ -41,7 +41,8 @@ Preferred:
 
 1. `codex plugin marketplace add sfourdrinier/grok-skills`
 2. `codex plugin add grok@grok-skills` (or install from the app plugin directory)
-3. Start a **new session** (SessionStart auto-installs agents - no setup skill required).
+3. Run `/grok:setup` so managed agents install. A new session's trusted
+   SessionStart only reconciles already-owned files (missing files hint setup).
 4. Confirm `~/.codex/agents/grok-engineer-coder.toml` and `grok-rescue.toml` exist,
    each with `# managed-by: grok-skills`, `# agent-run:`, and
    `GROK_AGENT_RUN=…/agents/run.mjs` under the current plugin cache
@@ -156,14 +157,14 @@ not the run dir.
       notifications `auto` → `runs/<runId>/notified.json` may appear as `completed`
       (native may fail headless; marker still completes)
 - [ ] `/grok:cleanup --run-id <id>` dry-run, then `--confirm`
-- [ ] `grok-engineer-coder` prefers ACP peer (`peer start/prompt/stop`) with
-      one-shot `code` fallback (`GROK_DISABLE_ACP=1`); one shell call path; no
-      unrestricted Bash
+- [ ] `grok-engineer-coder` prefers one-shot `code` in the supplied workspace;
+      ACP peer is opt-in (`/grok:peer`); one shell call path; no unrestricted Bash
 - [ ] Peer-stop blocked apply (dirty/integrity) yields failure envelope
       on stdout + `/grok:result` (not raw wrapper success); no peer toast
 - [ ] `grok-rescue` routes diagnosis to `reason` (not pure implement); one Bash(node) call
-- [ ] Codex: after SessionStart, `~/.codex/agents/grok-*.toml` present with
-      `# managed-by: grok-skills`, `# agent-run:`, and `GROK_AGENT_RUN=…/agents/run.mjs`
+- [ ] Codex: after `/grok:setup`, `~/.codex/agents/grok-*.toml` present with
+      `# managed-by: grok-skills`, `# agent-run:`, and `GROK_AGENT_RUN=…/agents/run.mjs`.
+      Trusted SessionStart reconciles owned files only.
 - [ ] Model does not invent `~/.claude/plugins/cache/...` paths (uses Skill base +
       `run.mjs`, or host env / managed `GROK_AGENT_RUN`)
 - [ ] Optional: `setup --remove-codex-agents` removes managed agents only

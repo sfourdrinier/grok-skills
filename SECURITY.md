@@ -70,8 +70,9 @@ over. It is **not** a complete sandbox against an adversarial model.
   produces no handoff artifacts by design - the artifacts' value is the
   isolation evidence that runMode direct cannot attest; use runMode hardened for
   verified handoff and for ACP peer.
-- **ACP peer channel (default; opt out with `GROK_DISABLE_ACP=1`):** the default
-  multi-turn peer path. Peer **always** runs in an external retained worktree
+- **ACP peer channel (opt-in; disable with `GROK_DISABLE_ACP=1`):** multi-turn
+  peer path. `grok-engineer-coder` defaults to one-shot `code`. Peer **always**
+  runs in an external retained worktree
   (private home + sandbox-to-worktree); prompt-time edits never live-edit the
   operator checkout. Peer-stop runs the contract's `requiredValidation` as
   **real commands** and sets `integration.ready` only from authoritative,

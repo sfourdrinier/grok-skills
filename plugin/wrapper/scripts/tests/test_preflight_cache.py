@@ -49,6 +49,48 @@ class PreflightCacheTests(unittest.TestCase):
         )
         self.assertFalse(preflight_cache.is_valid("1", now_ms=1))
 
+    def test_ensure_ready_skips_cache_when_identity_cannot_be_stated(self) -> None:
+        preflight_cache.write_ok(
+            "1.2.3", checked_at_ms=1_000_000, executable_identity="bin:1:1"
+        )
+        fake_bin = pathlib.Path(self._tmpdir.name) / "missing-grok"
+        with mock.patch.object(
+            preflight_cache, "_auth_present", return_value=(True, [])
+        ), mock.patch(
+            "groklib.grokcli.check_version", return_value="9.9.9"
+        ) as check:
+            version = preflight_cache.ensure_ready(fake_bin)
+        self.assertEqual(version, "9.9.9")
+        self.assertEqual(check.call_count, 1)
+
+    def test_identity_mismatch_fails_closed(self) -> None:
+        preflight_cache.write_ok(
+            "1.2.3", checked_at_ms=1_000_000, executable_identity="bin:1:1"
+        )
+        self.assertFalse(
+            preflight_cache.is_valid(
+                "1.2.3", now_ms=1_000_000 + 1_000, executable_identity="bin:2:2"
+            )
+        )
+        self.assertTrue(
+            preflight_cache.is_valid(
+                "1.2.3", now_ms=1_000_000 + 1_000, executable_identity="bin:1:1"
+            )
+        )
+
+    def test_preflight_mode_write_ok_passes_executable_identity(self) -> None:
+        import inspect
+
+        from groklib.modes import preflight as preflight_mod
+
+        src = inspect.getsource(preflight_mod._run_preflight_body)
+        self.assertIn(
+            "executable_identity",
+            src,
+            "preflight cache write must key executable identity, not version only",
+        )
+        self.assertIn("write_ok(version_detail, executable_identity=identity)", src)
+
     def test_invalidate_removes_file(self) -> None:
         preflight_cache.write_ok("1.0.0")
         self.assertTrue((self.state_root / preflight_cache.CACHE_FILENAME).is_file())

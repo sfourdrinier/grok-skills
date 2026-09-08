@@ -66,7 +66,7 @@ trust marketing; direct is one flag away for people who already live in Grok.
 |------|-------|--------|
 | Rescue resume | `--resume` / `--fresh` last rescue thread | **shipped** (agent template) |
 | Transfer | Claude transcript → Grok task pack | **shipped** |
-| SessionStart hook | stash transcript path for transfer + auto-ensure Codex agents | **shipped** (1.2.1) |
+| SessionStart hook | stash transcript path for transfer; Codex SessionStart reconciles owned agents only (setup installs) | **shipped** (1.2.1; 2.1.0 reconcile-only) |
 
 ### D. Setup (parity)
 
@@ -74,7 +74,7 @@ trust marketing; direct is one flag away for people who already live in Grok.
 |------|-------|--------|
 | Rich setup report | CLI present (any working build), auth, mode | **shipped** |
 | Install guidance | Grok CLI + **git marketplace install** (no silent binary install) | **shipped** |
-| Zero post-install Codex agents | SessionStart materializes `~/.codex/agents` with absolute `agents/run.mjs` (`GROK_AGENT_RUN`) | **shipped** (1.2.1; runner path 1.2.5+) |
+| Zero post-install Codex agents | `/grok:setup` materializes `~/.codex/agents` with absolute `agents/run.mjs` (`GROK_AGENT_RUN`); SessionStart reconciles owned files | **shipped** (1.2.1; runner path 1.2.5+; 2.1.0 setup-as-installer) |
 | Toggle run mode | hardened vs direct persisted per workspace | **shipped** |
 | Preflight cache | installed-version-keyed short-circuit (`preflight-cache.json`; not a hard pin) | **shipped** |
 | No hard CLI version lock | any working `grok --version`; stamp advisory only | **shipped** (1.2.8) |
@@ -114,7 +114,7 @@ Phase 7 locks product defaults (not a silent flip):
 
 - **integration=direct** (product default name) = for one-shot **code** and **peer-stop** landing, live-tree / stop-time apply (**no consent gate** as of 2.0.1); **implement always forces worktree + verify-only** and never live lands
 - **auto / review** = for one-shot code, opt-in isolated worktrees (apply-on-ready vs parent apply); for ACP peer, same stop-time land/retain choice after always-external isolation
-- **ACP** = default multi-turn peer channel for `grok-engineer-coder` (opt out with `GROK_DISABLE_ACP=1`); one-shot `code` is fallback; peer is never live-edit of the operator tree during prompts
+- **ACP** = opt-in multi-turn peer channel (`GROK_DISABLE_ACP=1` still disables it). `grok-engineer-coder` defaults to one-shot `code` in the supplied workspace; peer is never live-edit of the operator tree during prompts
 - **runMode direct** remains a **separate** installed-home security posture (orthogonal to integration; peer is hardened-only)
 - **Shared auto/peer apply spine** (exclusive apply lock + durable marker + header-union dirty set + fail-closed no automatic reclaim) + peer-stop final-envelope / durable-terminal / single-flight lifecycle honesty; peer-stop **not** completion-notification eligible (see CHANGELOG Phase 7 final-review Fixed)
 
@@ -128,6 +128,8 @@ Canonical mode matrix (do not restate here): [plugin/references/integration-mode
 4. ~~**Linux sandbox profile** when a probe report exists~~ **done 2.0.1** (`probe-report-linux.md`, `PROBED_PLATFORMS` includes `linux`, `linux/landlock`, bwrap prereq)
 5. Optional apply-worktree UX; official directory listings
 6. ~~**Grok 4.6 product default + effort / optional plan pin**~~ **done 2.0.3** (`plugin/references/grok-cli-defaults.json`; any working CLI; 4.5 named-ok)
+7. **Issue #13 third host (Grok Build `grok plugin install`)** - **deferred, not in 2.1.0.** Wrapping Grok inside Grok is the wrong product default. Dual-host Claude + Codex stays the install unit. A thin Grok-Build marketplace subset is a later written decision, not this release.
+8. **2.1.0 modernization (this branch)** - F01-F12: observed cancel, prefs vs jobs, host-specific hooks, inherit-workspace one-shot default, verified-host audit, honest install/validation, executable-identity preflight cache. Live Codex/Claude smoke remains merge evidence.
 
 ---
 
@@ -136,5 +138,6 @@ Canonical mode matrix (do not restate here): [plugin/references/integration-mode
 - Auto-installing the Grok binary without user consent  
 - Claiming network/read sandbox beyond what the current Grok CLI + platform probe evidence enforce  
 - Full multi-agent supervisor (Wave 3 autonomy)  
+- Third-host `grok plugin install` (issue #13; deferred)
 
 Those remain backlog, not silent promises.

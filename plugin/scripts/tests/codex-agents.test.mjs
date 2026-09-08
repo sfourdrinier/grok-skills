@@ -52,7 +52,7 @@ test("shipped templates use agent-run placeholder and sandbox_mode", () => {
       ),
       `${t.name} missing never-invent-paths guidance`
     );
-    assert.match(body, /sandbox_mode\s*=\s*"read-only"/);
+    assert.match(body, /sandbox_mode\s*=\s*"(read-only|workspace-write)"/);
     assert.match(body, /GROK_AGENT_RUN/);
   }
 });
@@ -125,6 +125,33 @@ test("installCodexAgents backs up before updating managed agents", () => {
   assert.ok(
     fs.existsSync(path.join(home, "agents", "grok-engineer-coder.toml.bak"))
   );
+});
+
+test("installCodexAgents keeps a user-edited managed agent across template upgrades", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "codex-home-edit-"));
+  const env = { CODEX_HOME: home };
+  installCodexAgents({ templatesDir: TEMPLATES, env, pluginRoot: PLUGIN_ROOT });
+  const dest = path.join(home, "agents", "grok-engineer-coder.toml");
+  const original = fs.readFileSync(dest, "utf8");
+  fs.writeFileSync(dest, `${original}\n# operator note\n`);
+
+  const fakeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "plugin-root-edit-"));
+  const scriptsDir = path.join(fakeRoot, "scripts");
+  const agentsDir = path.join(fakeRoot, "agents");
+  fs.mkdirSync(scriptsDir, { recursive: true });
+  fs.mkdirSync(agentsDir, { recursive: true });
+  fs.writeFileSync(path.join(scriptsDir, "grok-companion.mjs"), "// stub\n");
+  fs.writeFileSync(path.join(agentsDir, "run.mjs"), "// stub agent run\n");
+
+  const result = installCodexAgents({
+    templatesDir: TEMPLATES,
+    env,
+    pluginRoot: fakeRoot,
+    updateManaged: true,
+    force: false,
+  });
+  assert.ok(result.conflicts.includes("grok-engineer-coder"));
+  assert.equal(fs.readFileSync(dest, "utf8"), `${original}\n# operator note\n`);
 });
 
 test("installCodexAgents does not overwrite unmanaged user agents without force", () => {

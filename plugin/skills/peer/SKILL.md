@@ -1,15 +1,16 @@
 ---
 name: "peer"
-description: "ACP multi-turn peer channel (start/prompt/stop). Default peer path; opt out with GROK_DISABLE_ACP=1"
+description: "ACP multi-turn peer channel (start/prompt/stop). Opt-in; engineer-coder default is one-shot code. Disable with GROK_DISABLE_ACP=1"
 argument-hint: "start --target <path> --base <rev> [--contract-file <path>] [--model] [--reasoning-effort <low|medium|high|xhigh>] [--plan] | prompt --run-id <id> (--task|--task-file) | stop --run-id <id>"
 allowed-tools: "Bash(node:*), Bash(git:*), AskUserQuestion"
 ---
 
-## Default peer channel
+## Opt-in peer channel
 
-This skill drives the live multi-turn ACP peer (`peer start|prompt|stop`). It is
-the **default** implementation path for `grok-engineer-coder`. One-shot `code`
-is the fallback when ACP is disabled or unavailable.
+This skill drives the live multi-turn ACP peer (`peer start|prompt|stop`).
+`grok-engineer-coder` defaults to one-shot `code` in the supplied workspace;
+use this skill when the user asked for a multi-turn session. One-shot `code`
+remains available when ACP is disabled.
 
 Opt out of ACP (force one-shot only):
 

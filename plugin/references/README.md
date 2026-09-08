@@ -10,12 +10,11 @@ Product default model, reasoning-effort vocabulary, and the `--no-plan` child
 pin live in [grok-cli-defaults.json](grok-cli-defaults.json) (2.0.3+). Default
 model is `grok-4.6`; `grok-4.5` remains named-ok when selectable.
 
-**Agents:** `grok-engineer-coder` (implement via ACP peer default or code;
-edits land per [integration-modes.md](integration-modes.md); host orchestrates)
+**Agents:** `grok-engineer-coder` (implement via one-shot code in the supplied
+workspace; ACP peer is opt-in; edits land per [integration-modes.md](integration-modes.md))
 and `grok-rescue` (diagnosis / second opinion). Claude loads `plugin/agents/`
-automatically. Codex agents auto-install on **SessionStart** into
-`~/.codex/agents/` (absolute `agents/run.mjs`); optional **setup** can force or
-remove managed agents.
+automatically. Codex agents install via **setup** into `~/.codex/agents/`
+(absolute `agents/run.mjs`); trusted SessionStart only reconciles owned files.
 
 **Invocation:** Claude uses `/grok:…` skills; Codex uses the skill picker /
 `$name` for the same skill names. Prefer each skill’s `$SKILL_BASE/run.mjs`.
@@ -171,8 +170,12 @@ per-workspace state dir:
   cannot fully collapse that. Explicit `/grok:setup` re-runs re-establish
   prefs on the root the current process resolves.
 
-`jobs-index.json` holds `config` (run mode, notification prefs, last rescue id)
-and a short jobs list. Per-job artifacts sit under `jobs/<jobId>/`.
+`prefs.json` is the canonical settings store (run mode, integration, notifications,
+last rescue id, `codexAgentsScope`) with `prefs.json.bak` as last-known-good.
+Per-job artifacts sit under `jobs/<jobId>/` (`job.json` is the run record).
+`jobs-index.json` is a derived listing only. A corrupt index must not restore
+live-tree `direct`. Active jobs stay listed even when finished history is capped
+at 50.
 
 ## userConfig defaults (Claude Code)
 
@@ -185,7 +188,7 @@ commands, so no hooks.json substitution is used).
 
 Effective prefs precedence (per field):
 
-1. Explicit workspace prefs from `/grok:setup` (stored in `jobs-index.json`)
+1. Explicit workspace prefs from `/grok:setup` (stored in `prefs.json`)
 2. `CLAUDE_PLUGIN_OPTION_*` env (invalid values ignored with a stderr note)
 3. Built-in defaults (`hardened` / notification `auto` / no webhook)
 
