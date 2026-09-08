@@ -453,6 +453,78 @@ test("result <runId> returns stored stdout via companion", () => {
   }
 });
 
+test("status --run-id <job-id> forwards the stored wrapper runId (issue #15)", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-status-jobid-"));
+  const pluginData = path.join(cwd, "pdata");
+  const envBase = { CLAUDE_PLUGIN_DATA: pluginData };
+  const innerRunId = "20260831T113830Z-899e47";
+  const job = createJob(cwd, { kind: "preflight", mode: "preflight", runMode: "hardened" }, envBase);
+  updateJob(cwd, job.id, { runId: innerRunId, status: "success" }, envBase);
+  const envelope = JSON.stringify({
+    status: "success",
+    mode: "status",
+    runId: "{{RUN_ID}}",
+  });
+  const { env, cleanup } = makeFakeWrapper({
+    status: { stdout: envelope, exitCode: 0 },
+  });
+  try {
+    const res = runCompanion(["status", "--run-id", job.id], {
+      cwd,
+      env: { ...env, CLAUDE_PLUGIN_DATA: pluginData },
+    });
+    assert.equal(res.code, 0, `stderr: ${res.stderr}`);
+    assert.match(res.stdout, new RegExp(innerRunId));
+    assert.doesNotMatch(res.stdout, new RegExp(job.id));
+  } finally {
+    cleanup();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("preflight announced job id resolves via status --run-id (issue #15)", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-status-preflight-"));
+  const pluginData = path.join(cwd, "pdata");
+  const innerRunId = "20260831T113830Z-899e47";
+  const { env, cleanup } = makeFakeWrapper({
+    preflight: {
+      stdout: JSON.stringify({
+        schemaVersion: 1,
+        status: "success",
+        mode: "preflight",
+        runId: innerRunId,
+        response: { checks: [{ name: "grokVersion", ok: true }] },
+      }),
+      stderr: `[grok-run-id] ${innerRunId}\n`,
+      exitCode: 0,
+    },
+    status: {
+      stdout: JSON.stringify({ status: "success", mode: "status", runId: "{{RUN_ID}}" }),
+      exitCode: 0,
+    },
+  });
+  try {
+    const started = runCompanion(["preflight"], {
+      cwd,
+      env: { ...env, CLAUDE_PLUGIN_DATA: pluginData },
+    });
+    assert.equal(started.code, 0, started.stderr);
+    const announced = String(started.stderr).match(/\[grok-job\] (\S+) started/);
+    assert.ok(announced, `missing grok-job announcement: ${started.stderr}`);
+    const jobId = announced[1];
+    assert.notEqual(jobId, innerRunId);
+    const res = runCompanion(["status", "--run-id", jobId], {
+      cwd,
+      env: { ...env, CLAUDE_PLUGIN_DATA: pluginData },
+    });
+    assert.equal(res.code, 0, res.stderr);
+    assert.match(res.stdout, new RegExp(innerRunId));
+  } finally {
+    cleanup();
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("status bare runId positional rewrites to --run-id before wrapper", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "grok-status-bare-"));
   const runId = "20260716T000000Z-abc123";
